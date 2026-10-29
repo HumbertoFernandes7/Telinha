@@ -15,6 +15,7 @@
 //   ⚠ <capture warning>                     black image / frozen window (clears itself)
 //   [ Parar transmissão ]
 //   ◉ Ana está transmitindo · Assistir      someone else streams (1 → opens it, 2+ → list)
+//   Autorize o Telinha no Discord…  Autorizar ×   Discord identity not authorized (only with a Client ID)
 //   ⚠ <last error>  ×                       core reported an error
 
 import ErrorBoundary from "@components/ErrorBoundary";
@@ -24,8 +25,9 @@ import type { QualityReason } from "@plugins/telinha/types";
 import { SelectedChannelStore, Tooltip, useStateFromStores } from "@webpack/common";
 import type { ReactNode } from "react";
 
-import { cl, displayName, findPeer, identityAlertText, peerName, runAction, watchersLabel } from "./common";
+import { cl, displayName, findPeer, identityAlertBlocksAll, identityAlertText, peerName, runAction, watchersLabel } from "./common";
 import { BroadcastIcon, CloseIcon, EyeIcon, StopIcon, WarningIcon } from "./icons";
+import { IdentityBadge, IdentityBanner } from "./IdentityUI";
 import { openSourcePicker } from "./SourcePickerModal";
 import { openStreamersModal } from "./StreamersModal";
 import { approveWithToast, declineWithToast, openViewersModal } from "./ViewersModal";
@@ -89,9 +91,11 @@ function VoiceBarInner() {
 
             {local?.pendingViewers?.map(p => {
                 const name = displayName(p.discordUserId, p.username);
+                const unverified = p.identity === "unverified" ? " Não verificado: não provou ser essa conta do Discord." : "";
                 return (
-                    <div key={p.peerId} className={cl("bar-request")} role="alert" title={`${name} quer assistir sua transmissão (recusado sozinho em 60 s)`}>
+                    <div key={p.peerId} className={cl("bar-request")} role="alert" title={`${name} quer assistir sua transmissão (recusado sozinho em 60 s).${unverified}`}>
                         <span className={cl("bar-row-text")}>{name} quer assistir</span>
+                        <IdentityBadge identity={p.identity} compact />
                         <button className={cl("bar-request-btn", "bar-request-allow")} onClick={() => approveWithToast(p.peerId, name)}>Permitir</button>
                         <button className={cl("bar-request-btn")} onClick={() => declineWithToast(p.peerId, name)}>Recusar</button>
                     </div>
@@ -99,10 +103,10 @@ function VoiceBarInner() {
             })}
 
             {state.identityAlerts?.map(a => {
-                const text = `${identityAlertText(a)}${local && !a.self ? ". Nenhuma recebe sua transmissão." : ""}`;
+                const text = `${identityAlertText(a)}${local && identityAlertBlocksAll(a) ? ". Nenhuma recebe sua transmissão." : ""}`;
                 return (
                     <button
-                        key={a.discordUserId + (a.self ? ":self" : "")}
+                        key={a.discordUserId + (a.self ? ":self" : a.kind ? `:${a.kind}` : "")}
                         className={cl("bar-row", "bar-error", "bar-wrap")}
                         role="alert"
                         title={text}
@@ -148,6 +152,8 @@ function VoiceBarInner() {
                 )}
 
             {streamersRow}
+
+            <IdentityBanner />
 
             {state.lastError && (
                 <div className={cl("bar-error")} title={state.lastError}>

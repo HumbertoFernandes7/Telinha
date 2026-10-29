@@ -114,8 +114,20 @@ export const DENIED_TITLE: Record<ViewDeniedReason, string> = {
 export function identityAlertText(alert: IdentityAlert): string {
     if (alert.self) return "Uma conexão na call diz ser você — alguém pode estar se passando por você";
     const name = displayName(alert.discordUserId, alert.username);
-    const count = alert.peerIds.length === 2 ? "Duas conexões" : `${alert.peerIds.length} conexões`;
+    const n = alert.peerIds.length;
+    if (alert.kind === "fake") {
+        return `${n === 1 ? "Uma conexão apresentou" : `${n} conexões apresentaram`} uma prova de identidade falsa de ${name} — ${n === 1 ? "ignorada" : "ignoradas"}`;
+    }
+    if (alert.kind === "impostor") {
+        return `${n === 1 ? "Uma conexão não verificada diz" : `${n} conexões não verificadas dizem`} ser ${name}, que já provou a identidade — só ${n === 1 ? "ela fica bloqueada" : "elas ficam bloqueadas"}`;
+    }
+    const count = n === 2 ? "Duas conexões" : `${n} conexões`;
     return `${count} dizem ser ${name} — uma pode ser falsa`;
+}
+
+/** Complemento do aviso quando voce transmite: so no conflito sem ninguem verificado as duas conexoes ficam sem a transmissao. */
+export function identityAlertBlocksAll(alert: IdentityAlert): boolean {
+    return !alert.self && (alert.kind ?? "duplicate") === "duplicate";
 }
 
 export function streamSummary(info: StreamInfo | undefined): string {

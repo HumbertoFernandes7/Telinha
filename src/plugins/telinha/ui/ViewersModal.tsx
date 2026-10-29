@@ -15,14 +15,15 @@ import ErrorBoundary from "@components/ErrorBoundary";
 import { Paragraph } from "@components/Paragraph";
 import { approveViewer, declineViewer, getConnectionInfo, kickViewer, unblockViewer } from "@plugins/telinha/actions";
 import { useTelinhaState } from "@plugins/telinha/store";
-import type { PeerId, PendingViewer, RemotePeer } from "@plugins/telinha/types";
+import type { PeerId, PeerIdentityStatus, PendingViewer, RemotePeer } from "@plugins/telinha/types";
 import { RenderModalProps } from "@vencord/discord-types";
 import { Modal, openModal, showToast, useEffect, UserStore, useState } from "@webpack/common";
 import type { ReactNode } from "react";
 
 import { Avatar } from "./Avatar";
-import { cl, displayName, findPeer, identityAlertText, peerName, runAction, watchersLabel } from "./common";
+import { cl, displayName, findPeer, identityAlertBlocksAll, identityAlertText, peerName, runAction, watchersLabel } from "./common";
 import { WarningIcon } from "./icons";
+import { IdentityBadge } from "./IdentityUI";
 import { openSourcePicker } from "./SourcePickerModal";
 
 const CONNECTION_REFRESH_MS = 3000;
@@ -91,12 +92,15 @@ export function declineWithToast(peerId: PeerId, name: string) {
     });
 }
 
-function Row({ userId, name, meta, warning, actions }: { userId: string | undefined; name: string; meta: ReactNode; warning?: string | null; actions?: ReactNode; }) {
+function Row({ userId, name, identity, meta, warning, actions }: { userId: string | undefined; name: string; identity?: PeerIdentityStatus; meta: ReactNode; warning?: string | null; actions?: ReactNode; }) {
     return (
         <div className={cl("streamer")}>
             <Avatar userId={userId} />
             <div className={cl("streamer-info")}>
-                <span className={cl("streamer-name")}>{name}</span>
+                <span className={cl("streamer-name-row")}>
+                    <span className={cl("streamer-name")}>{name}</span>
+                    <IdentityBadge identity={identity} />
+                </span>
                 <span className={cl("streamer-meta")}>{meta}</span>
                 {warning && (
                     <span className={cl("viewer-warning")} title={warning}>
@@ -121,11 +125,13 @@ function Section({ title, children }: { title: string; children: ReactNode; }) {
 function PendingRow({ pending, now }: { pending: PendingViewer; now: number; }) {
     const name = displayName(pending.discordUserId, pending.username);
     const secs = Math.max(0, Math.ceil((pending.expiresAt - now) / 1000));
+    const unverified = pending.identity === "unverified" ? "não provou ser essa conta do Discord · " : "";
     return (
         <Row
             userId={pending.discordUserId}
             name={name}
-            meta={`Quer assistir · recusado sozinho em ${secs} s`}
+            identity={pending.identity}
+            meta={`Quer assistir · ${unverified}recusado sozinho em ${secs} s`}
             actions={<>
                 <Button size="small" variant="positive" onClick={() => approveWithToast(pending.peerId, name)}>Permitir</Button>
                 <Button size="small" variant="secondary" onClick={() => declineWithToast(pending.peerId, name)}>Recusar</Button>
@@ -160,6 +166,7 @@ function ViewersModal({ modalProps }: { modalProps: RenderModalProps; }) {
                 key={peerId}
                 userId={peer?.discordUserId}
                 name={name}
+                identity={peer?.identity}
                 meta={meta.join(" · ")}
                 warning={alert ? identityAlertText(alert) : null}
                 actions={<Button size="small" variant="dangerPrimary" onClick={() => kickWithToast(peerId, name)}>Expulsar</Button>}
@@ -189,14 +196,17 @@ function ViewersModal({ modalProps }: { modalProps: RenderModalProps; }) {
         >
             <div className={cl("streamers")}>
                 {alerts.map(a => (
-                    <div key={a.discordUserId + (a.self ? ":self" : "")} className={cl("viewer-alert")} role="status">
+                    <div key={a.discordUserId + (a.self ? ":self" : a.kind ? `:${a.kind}` : "")} className={cl("viewer-alert")} role="status">
                         <WarningIcon size={16} />
                         <span>
                             {identityAlertText(a)}.{" "}
-                            {a.self
+                            {a.self || a.kind === "fake"
                                 ? "Essa conexão nunca vê sua presença nem recebe sua transmissão."
-                                : "Nenhuma delas recebe sua transmissão enquanto isso durar; quando uma sair, a outra precisa pedir de novo."}
+                                : identityAlertBlocksAll(a)
+                                    ? "Nenhuma delas recebe sua transmissão enquanto isso durar; quando uma sair, a outra precisa pedir de novo."
+                                    : "A conexão verificada continua normal."}
                         </span>
+                        {a.kind === "fake" && <IdentityBadge identity="invalid" />}
                     </div>
                 ))}
 
@@ -224,6 +234,7 @@ function ViewersModal({ modalProps }: { modalProps: RenderModalProps; }) {
                                     key={p.peerId}
                                     userId={p.discordUserId}
                                     name={name}
+                                    identity={p.identity}
                                     meta={[p.inVoice ? "Na sua call de voz" : "Fora da sua call de voz", connection[p.peerId] ?? "Conexão: verificando…"].join(" · ")}
                                     warning={alert ? identityAlertText(alert) : "Outra conexão diz ser essa pessoa — uma pode ser falsa"}
                                     actions={<Button size="small" variant="dangerPrimary" onClick={() => kickWithToast(p.peerId, name)}>Expulsar</Button>}

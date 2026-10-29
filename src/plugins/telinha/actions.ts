@@ -8,6 +8,8 @@
 
 import { getScreenAudioStatus as fetchScreenAudioStatus } from "./core/audio/screenAudio";
 import { publish, rt, setLastError } from "./core/context";
+import { authorizeIdentity, forgetIdentity, getLocalIdentityState, type LocalIdentityState, subscribeLocalIdentity } from "./core/identity";
+import { isIdentityConfigured } from "./core/identity/config";
 import { errorText, log } from "./core/log";
 import { getNative } from "./core/nativeApi";
 import * as session from "./core/session";
@@ -104,8 +106,10 @@ export function getConnectionInfo(peerId: PeerId): Promise<string | null> {
     return streaming.connectionInfo(peerId).catch(() => null);
 }
 
+/** A conexao de quem tem esse discordUserId; havendo mais de uma, a que provou a identidade (se houver). */
 export function findPeerByDiscordId(id: string): RemotePeer | undefined {
-    return getState().peers.find(p => p.discordUserId === id);
+    const peers = getState().peers.filter(p => p.discordUserId === id);
+    return peers.find(p => p.identity === "verified") ?? peers[0];
 }
 
 /** Stream da captura local (previa da sua propria transmissao), ou null se voce nao esta transmitindo. Toque sempre mudo. */
@@ -119,3 +123,34 @@ export function clearLastError(): void {
     rt.lastError = null;
     publish();
 }
+
+// #region prova de identidade do Discord (docs/identity.md)
+
+export type { LocalIdentityState };
+
+/** O recurso esta ligado (ha um Client ID do Discord no build)? Desligado = tudo como na v0.1.0, sem UI de identidade. */
+export function identityEnabled(): boolean {
+    return isIdentityConfigured();
+}
+
+/** Estado local: autorizado ("ready"), nao autorizado, vencido, autorizando, erro... */
+export function getLocalIdentity(): LocalIdentityState {
+    return getLocalIdentityState();
+}
+
+export function subscribeLocalIdentityState(listener: () => void): () => void {
+    const off = subscribeLocalIdentity(() => listener());
+    return () => void off();
+}
+
+/** Abre o modal "Autorizar" do proprio Discord. true = pronto; false = cancelado/falhou (o estado explica). */
+export function authorizeTelinhaIdentity(): Promise<boolean> {
+    return authorizeIdentity();
+}
+
+/** "Desvincular": esquece o token desta conta neste PC (quem ja conferiu continua ate reconectar). */
+export function unlinkTelinhaIdentity(): Promise<void> {
+    return forgetIdentity();
+}
+
+// #endregion

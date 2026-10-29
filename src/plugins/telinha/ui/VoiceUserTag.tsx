@@ -15,6 +15,7 @@ import type { MouseEvent } from "react";
 
 import { cl, currentUserId, watchersLabel } from "./common";
 import { BroadcastIcon } from "./icons";
+import { identityHint } from "./IdentityUI";
 import { openViewer } from "./viewerWindows";
 
 // #region Diagnostics: is the voice row patch running, and did we ever draw a tag?
@@ -95,13 +96,18 @@ function VoiceUserTagInner({ userId, collapsed }: { userId: string; collapsed?: 
         return <Pill tooltip={`Você está transmitindo pelo Telinha — ${watchersLabel(state.local.viewers.length)}`} />;
     }
 
-    const peer = state.peers.find(p => p.discordUserId === userId);
+    // more than one connection with this id: the one that proved the Discord identity wins (never a fake: those
+    // aren't in state.peers)
+    const peers = state.peers.filter(p => p.discordUserId === userId);
+    const peer = peers.find(p => p.identity === "verified" && p.streaming) ?? peers[0];
     if (!peer?.streaming) return null;
 
     noteTagRender(false);
+    const hint = identityHint(peer.identity);
+    const what = `Transmitindo pelo Telinha${hint ? ` (${hint})` : ""}`;
     return (
         <Pill
-            tooltip={state.viewing[peer.peerId] ? "Transmitindo pelo Telinha — clique para abrir a janela" : "Transmitindo pelo Telinha — clique para assistir"}
+            tooltip={state.viewing[peer.peerId] ? `${what} — clique para abrir a janela` : `${what} — clique para assistir`}
             onClick={() => openViewer(peer.peerId)}
         />
     );

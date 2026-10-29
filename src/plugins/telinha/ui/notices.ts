@@ -13,7 +13,7 @@
 import { showNotification } from "@api/Notifications";
 import { getState, subscribe } from "@plugins/telinha/store";
 
-import { avatarUrl, displayName, identityAlertText, logger } from "./common";
+import { avatarUrl, displayName, identityAlertBlocksAll, identityAlertText, logger } from "./common";
 import { openViewersModal } from "./ViewersModal";
 
 let unsubscribe: (() => void) | null = null;
@@ -32,16 +32,17 @@ function onState() {
         if (seenPending.has(p.peerId)) continue;
         seenPending.add(p.peerId);
         const name = displayName(p.discordUserId, p.username);
-        notify("Telinha: pedido para assistir", `${name} quer assistir sua transmissão. Permita ou recuse na barra do Telinha (recusado sozinho em 60 s).`, avatarUrl(p.discordUserId, 64));
+        const unverified = p.identity === "unverified" ? " (não verificado: não provou ser essa conta do Discord)" : "";
+        notify("Telinha: pedido para assistir", `${name}${unverified} quer assistir sua transmissão. Permita ou recuse na barra do Telinha (recusado sozinho em 60 s).`, avatarUrl(p.discordUserId, 64));
     }
     for (const id of [...seenPending]) if (!pending.some(p => p.peerId === id)) seenPending.delete(id);
 
     const alerts = state.identityAlerts ?? [];
-    const keys = alerts.map(a => `${a.self ? "self" : "dup"}:${a.discordUserId}`);
+    const keys = alerts.map(a => `${a.self ? "self" : a.kind ?? "dup"}:${a.discordUserId}`);
     alerts.forEach((a, i) => {
         if (seenAlerts.has(keys[i])) return;
         seenAlerts.add(keys[i]);
-        notify("Telinha: identidade suspeita", `${identityAlertText(a)}.${a.self ? "" : " Nenhuma delas recebe a sua transmissão enquanto isso durar."}`, avatarUrl(a.discordUserId, 64));
+        notify("Telinha: identidade suspeita", `${identityAlertText(a)}.${identityAlertBlocksAll(a) ? " Nenhuma delas recebe a sua transmissão enquanto isso durar." : ""}`, avatarUrl(a.discordUserId, 64));
     });
     for (const k of [...seenAlerts]) if (!keys.includes(k)) seenAlerts.delete(k);
 }

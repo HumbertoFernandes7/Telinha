@@ -111,6 +111,7 @@ let finds;
     check("intl finds canonicalised by Vencord (no #{intl::} left)", queued.every(q => !q.find.includes("#{intl::")) && finds.account && finds.voiceUser, queued.map(q => q.find));
     check("settings UI source (Object.values(plugins)) lists it, with a settings cog", $(`Object.values(Vencord.Plugins.plugins).some(p => p.name === "Telinha") && Vencord.Plugins.hasAnyVisibleSettings(${P})`));
     check("settings defaults", $(`JSON.stringify([Vencord.Settings.plugins.Telinha.enabled, Vencord.Settings.plugins.Telinha.codec, Vencord.Settings.plugins.Telinha.rejectOutsiders, Vencord.Settings.plugins.Telinha.groupPassword])`) === '[true,"auto",true,""]');
+    check("identity setting 'Exigir identidade verificada' defaults to on", $(`${P}.settings.store.requireVerifiedIdentity`) === true);
 
     $(SPIES);
     runScript(p.context, fakeWebpack(finds), "https://discord.com/assets/web.fake0001.js");

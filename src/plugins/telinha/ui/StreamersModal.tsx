@@ -16,6 +16,7 @@ import { Modal, openModal } from "@webpack/common";
 import { Avatar } from "./Avatar";
 import { cl, currentUserId, displayName, identityAlertText, inVoiceChannel, peerName, runAction, streamSummary, watchersLabel } from "./common";
 import { WarningIcon } from "./icons";
+import { IdentityBadge } from "./IdentityUI";
 import { openSourcePicker } from "./SourcePickerModal";
 import { openViewersModal } from "./ViewersModal";
 import { openViewer } from "./viewerWindows";
@@ -25,7 +26,10 @@ function StreamerRow({ peer, alert, watching, onWatch }: { peer: RemotePeer; ale
         <div className={cl("streamer")}>
             <Avatar userId={peer.discordUserId} />
             <div className={cl("streamer-info")}>
-                <span className={cl("streamer-name")}>{peerName(peer)}</span>
+                <span className={cl("streamer-name-row")}>
+                    <span className={cl("streamer-name")}>{peerName(peer)}</span>
+                    <IdentityBadge identity={peer.identity} />
+                </span>
                 <span className={cl("streamer-meta")}>
                     {streamSummary(peer.stream)}
                     {!peer.admitted && " · fora do seu canal de voz"}
@@ -66,9 +70,10 @@ function StreamersModal({ modalProps }: { modalProps: RenderModalProps; }) {
         >
             <div className={cl("streamers")}>
                 {alerts.map(a => (
-                    <div key={a.discordUserId + (a.self ? ":self" : "")} className={cl("viewer-alert")} role="status">
+                    <div key={a.discordUserId + (a.self ? ":self" : a.kind ? `:${a.kind}` : "")} className={cl("viewer-alert")} role="status">
                         <WarningIcon size={16} />
                         <span>{identityAlertText(a)}.</span>
+                        {a.kind === "fake" && <IdentityBadge identity="invalid" />}
                     </div>
                 ))}
                 {state.local && (

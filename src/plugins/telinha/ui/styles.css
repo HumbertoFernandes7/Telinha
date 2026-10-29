@@ -196,6 +196,67 @@
     background: #08716b;
 }
 
+/* "Autorize o Telinha no Discord para provar que é você": informative, not a warning */
+.vc-telinha-bar-identity {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    min-width: 0;
+    min-height: 28px;
+    padding: 2px 2px 2px 8px;
+    border-radius: 6px;
+    background: var(--background-modifier-hover, rgb(78 80 88 / 30%));
+    color: var(--interactive-normal, var(--text-muted));
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.vc-telinha-bar-identity-text {
+    white-space: normal;
+    line-height: 1.25;
+}
+
+/* #endregion */
+
+/* #region identity badges (verificado / não verificado / identidade falsa) */
+
+.vc-telinha-id-badge {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    height: 16px;
+    padding: 0 5px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 16px;
+    white-space: nowrap;
+}
+
+.vc-telinha-id-badge-verified {
+    background: rgb(35 165 90 / 18%);
+    color: var(--status-positive, #23a55a);
+}
+
+.vc-telinha-id-badge-unverified,
+.vc-telinha-id-badge-pending {
+    background: var(--background-modifier-hover, rgb(78 80 88 / 30%));
+    color: var(--text-muted);
+}
+
+.vc-telinha-id-badge-invalid {
+    background: rgb(218 55 60 / 18%);
+    color: var(--status-danger, #da373c);
+}
+
+.vc-telinha-streamer-name-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
 /* #endregion */
 
 /* #region voice user tag */
@@ -562,7 +623,7 @@
 
 /* #endregion */
 
-/* #region updates (settings page + notice) */
+/* #region updates and identity (settings page + notice) */
 
 .vc-telinha-update {
     display: flex;
@@ -574,8 +635,26 @@
     border-top: 1px solid var(--border-subtle, var(--background-modifier-accent));
 }
 
-.vc-telinha-update-status {
+.vc-telinha-update-status,
+.vc-telinha-identity-status {
     color: var(--text-muted);
+}
+
+/* settings page: identity (Autorizar o Telinha no Discord / Desvincular) */
+.vc-telinha-identity {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+    margin-top: 8px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border-subtle, var(--background-modifier-accent));
+}
+
+.vc-telinha-identity-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
 }
 
 .vc-telinha-update-buttons,

@@ -13,11 +13,14 @@ import definePlugin from "@utils/types";
 import { showToast } from "@webpack/common";
 
 import { startSession, stopSession } from "./actions";
+import { localIdentityDiagnostics } from "./core/identity";
+import { peerIdentityDiagnostics } from "./core/session";
 import { refreshUpdateStatus, startUpdateChecks, stopUpdateChecks, updateDiagnostics } from "./core/update";
 import { settings } from "./settings";
 import { formatDiagnostics } from "./store";
 import { callViewPatches, renderCallTileStream, stopCallView } from "./ui/callView";
 import { runAction } from "./ui/common";
+import { IdentitySection } from "./ui/IdentityUI";
 import { panelJsx, voiceUserIconsJsx } from "./ui/jsxShims";
 import { renderToolboxActions, userContextMenuPatch } from "./ui/menus";
 import { startNotices, stopNotices } from "./ui/notices";
@@ -26,11 +29,20 @@ import { UpdateSection } from "./ui/UpdateSection";
 import { closeAllViewers } from "./ui/viewerWindows";
 import { formatVoiceTagDiagnostics } from "./ui/VoiceUserTag";
 
+/** Identity state for the diagnostics (configured, authorized, per-peer verdicts and recent failures). Never tokens or IPs. */
+function identityDiagnostics(): string {
+    try {
+        return [localIdentityDiagnostics(), peerIdentityDiagnostics()].filter(Boolean).join("\n");
+    } catch (e) {
+        return `identidade: diagnóstico indisponível (${e instanceof Error ? e.message : String(e)})`;
+    }
+}
+
 function copyDiagnostics() {
     // fresh version/update status first (asks the main process), then the copy
     refreshUpdateStatus()
         .catch(() => null)
-        .then(() => copyToClipboard(`${formatDiagnostics()}\n${updateDiagnostics()}\n\n${formatVoiceTagDiagnostics()}`))
+        .then(() => copyToClipboard(`${formatDiagnostics()}\n${updateDiagnostics()}\n${identityDiagnostics()}\n\n${formatVoiceTagDiagnostics()}`))
         .then(
             () => showToast({ text: "Diagnóstico do Telinha copiado", variant: "success" }),
             () => showToast({ text: "Não consegui copiar o diagnóstico", variant: "critical" })
@@ -48,6 +60,7 @@ function SettingsAbout() {
             <Button size="small" variant="secondary" onClick={copyDiagnostics}>
                 Copiar diagnóstico
             </Button>
+            <IdentitySection />
             <UpdateSection />
         </div>
     );
