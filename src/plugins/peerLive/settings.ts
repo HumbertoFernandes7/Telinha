@@ -6,6 +6,7 @@
 
 import { definePluginSettings } from "@api/Settings";
 import { onAdmissionSettingChanged, onPasswordChanged } from "@plugins/peerLive/core/session";
+import { onAutoQualitySettingChanged } from "@plugins/peerLive/core/streaming";
 import { OptionType } from "@utils/types";
 
 export type CodecSetting = "auto" | "h264" | "vp8" | "vp9" | "av1";
@@ -32,6 +33,12 @@ export const settings = definePluginSettings({
             { label: "720p 60 fps (≈ 5 Mbps)", value: "720p60" },
             { label: "1080p 30 fps (≈ 5 Mbps)", value: "1080p30" }
         ]
+    },
+    autoQuality: {
+        type: OptionType.BOOLEAN,
+        description: "Qualidade automática (recomendado): a qualidade escolhida vira o máximo, e o PeerLive reduz resolução/fps de quem assiste quando o seu processador, o seu upload ou a conexão do amigo não dão conta (cada espectador é mais uma codificação). Em jogos, mantém 60 fps sempre que possível e volta a subir sozinho quando estabiliza.",
+        default: true,
+        onChange: () => onAutoQualitySettingChanged()
     },
     shareAudioByDefault: {
         type: OptionType.BOOLEAN,

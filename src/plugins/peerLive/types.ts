@@ -52,12 +52,38 @@ export interface ViewerSession {
     stats?: { width: number; height: number; fps: number; kbps: number; };
 }
 
+/** Degrau da qualidade automatica. A qualidade escolhida e o teto; 720p30 so existe como degrau automatico. */
+export type QualityLevel = Quality | "720p30";
+
+/** Por que a qualidade automatica desceu: processador, upload do streamer ou conexao de um espectador. */
+export type QualityReason = "cpu" | "upload" | "bandwidth";
+
+export interface AutoQualityViewer {
+    level: QualityLevel;
+    /** null = recebendo o teto */
+    reason: QualityReason | null;
+}
+
+export interface AutoQualityState {
+    /** pior nivel entre os espectadores agora (o teto, se ninguem assiste) */
+    current: QualityLevel;
+    /** motivo de `current` estar abaixo da qualidade escolhida; null = no teto */
+    reason: QualityReason | null;
+    /** frase pronta em pt-BR para a UI (ex.: "720p 60 fps — o processador não dá conta de 3 espectadores"); null = no teto */
+    reasonText: string | null;
+    viewers: Record<PeerId, AutoQualityViewer>;
+}
+
 export interface LocalStream {
     source: CaptureSource;
     quality: Quality;
     hasAudio: boolean;
     startedAt: number;
     viewers: PeerId[];
+    /** Qualidade automatica (configuracao autoQuality). Ausente/null = desligada. */
+    autoQuality?: AutoQualityState | null;
+    /** Aviso sobre a captura em pt-BR (imagem preta / janela congelada). Ausente/null = captura ok. */
+    captureWarning?: string | null;
 }
 
 export interface PeerLiveState {

@@ -6,7 +6,7 @@
 
 import type { HelloMessage, PresenceMessage, WatchMessage } from "@plugins/peerLive/protocol";
 import { setState } from "@plugins/peerLive/store";
-import type { CaptureSource, PeerId, PeerLiveState, Quality, RemotePeer, StreamInfo, ViewerSession, ViewerStatus } from "@plugins/peerLive/types";
+import type { AutoQualityState, CaptureSource, PeerId, PeerLiveState, Quality, RemotePeer, StreamInfo, ViewerSession, ViewerStatus } from "@plugins/peerLive/types";
 import type { MessageAction, Room } from "trystero";
 
 import { shortId } from "./log";
@@ -35,6 +35,10 @@ export interface LocalCapture {
     info: StreamInfo;
     startedAt: number;
     viewers: Set<PeerId>;
+    /** qualidade automatica (core/quality/controller.ts): snapshot imutavel; null = desligada */
+    autoQuality?: AutoQualityState | null;
+    /** aviso da captura (core/quality/captureMonitor.ts); null = ok */
+    captureWarning?: string | null;
 }
 
 export interface ViewerEntry {
@@ -123,7 +127,15 @@ function buildSnapshot(): PeerLiveState {
         channelId: rt.channelId,
         peers,
         local: local
-            ? { source: local.source, quality: local.quality, hasAudio: local.info.hasAudio, startedAt: local.startedAt, viewers: [...local.viewers] }
+            ? {
+                source: local.source,
+                quality: local.quality,
+                hasAudio: local.info.hasAudio,
+                startedAt: local.startedAt,
+                viewers: [...local.viewers],
+                autoQuality: local.autoQuality ?? null,
+                captureWarning: local.captureWarning ?? null
+            }
             : null,
         viewing,
         lastError: rt.lastError

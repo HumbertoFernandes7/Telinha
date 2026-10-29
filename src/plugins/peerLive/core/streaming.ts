@@ -8,7 +8,7 @@
 
 import { STREAM_KIND_SCREEN } from "@plugins/peerLive/protocol";
 import { type CodecSetting, settings } from "@plugins/peerLive/settings";
-import type { CaptureSource, PeerId, Quality, StreamInfo, StreamOptions } from "@plugins/peerLive/types";
+import type { CaptureSource, PeerId, Quality, QualityLevel, StreamInfo, StreamOptions } from "@plugins/peerLive/types";
 
 import { chooseCodec, type CodecDecision, getLocalCaps } from "./codec";
 import { getPc, type LocalCapture, peerLabel, publish, rt, setLastError } from "./context";
@@ -16,6 +16,9 @@ import { errorText, log, logThrottled } from "./log";
 import { getNative } from "./nativeApi";
 import type { SendPlan } from "./peerConnection";
 import { sendPresence } from "./presence";
+import { CaptureMonitor } from "./quality/captureMonitor";
+import { QualityController } from "./quality/controller";
+import { encodingFor, LEVELS, levelText } from "./quality/levels";
 
 export interface QualityProfile {
     width: number;
@@ -40,10 +43,27 @@ interface ViewerSend {
     decision: CodecDecision;
     /** codec que o encoder realmente usa (lido das estatisticas), para logar uma vez */
     reportedCodec?: string;
+    /** parametros de envio ja aplicados uma vez (as mudancas seguintes sao logadas pela qualidade automatica) */
+    applied?: boolean;
+    /** o Chromium recusou degradationPreference neste sender: nao tenta de novo */
+    noDegradation?: boolean;
+}
+
+/** Qualidade automatica (core/quality/controller.ts) e monitor de imagem preta/congelada da captura atual. */
+interface CaptureExtras {
+    local: LocalCapture;
+    quality: QualityController;
+    monitor: CaptureMonitor | null;
 }
 
 const sends = new Map<PeerId, ViewerSend>();
 let starting = false;
+let extras: CaptureExtras | null = null;
+let tickCount = 0;
+
+function qualityOf(local: LocalCapture): QualityController | null {
+    return extras?.local === local ? extras.quality : null;
+}
 
 /** Plano de envio consultado pela RTCPeerConnection na negociacao (peerConnection.ts). */
 export function sendPlanFor(peerId: PeerId | null): SendPlan | null {
@@ -51,9 +71,13 @@ export function sendPlanFor(peerId: PeerId | null): SendPlan | null {
     if (!peerId || !local || !local.viewers.has(peerId)) return null;
     const send = sends.get(peerId);
     const q = QUALITY[local.quality];
+    // o x-google-max-bitrate fica no teto (a qualidade automatica pode subir depois sem renegociar);
+    // a banda inicial acompanha o degrau atual
+    const level = qualityOf(local)?.levelFor(peerId) ?? local.quality;
+    const startKbps = level === local.quality ? q.startKbps : Math.min(q.startKbps, Math.round(LEVELS[level].maxKbps * 0.6));
     return {
         codec: send?.decision.codec ?? null,
-        bitrate: { startKbps: q.startKbps, maxKbps: q.maxKbps },
+        bitrate: { startKbps, maxKbps: q.maxKbps },
         label: peerLabel(peerId)
     };
 }
@@ -149,6 +173,7 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
         const local: LocalCapture = { stream, source: { ...source }, quality: opts.quality, info, startedAt: Date.now(), viewers: new Set() };
         rt.local = local;
         rt.lastError = null;
+        startExtras(local, video);
 
         video.addEventListener("ended", () => {
             if (rt.local !== local) return;
@@ -171,8 +196,57 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
     }
 }
 
+/** Qualidade automatica + monitor de imagem preta/congelada para a captura que acabou de comecar. */
+function startExtras(local: LocalCapture, video: MediaStreamTrack) {
+    const quality = new QualityController({
+        ceiling: local.quality,
+        enabled: () => settings.store.autoQuality !== false,
+        sender: peerId => videoSender(peerId, local),
+        apply: (peerId, level) => applySenderParams(peerId, local, level),
+        label: peerLabel,
+        captureSize: () => {
+            const s = video.getSettings();
+            return { width: s.width ?? local.info.width, height: s.height ?? local.info.height };
+        },
+        motion: () => (extras?.local === local ? extras.monitor?.motion() ?? null : null),
+        sourceFrames: (key, frames) => {
+            if (extras?.local === local) extras.monitor?.noteSourceFrames(key, frames);
+        },
+        changed: () => {
+            if (rt.local !== local) return;
+            local.autoQuality = quality.state;
+            publish();
+        }
+    });
+    const monitor = new CaptureMonitor({
+        track: video,
+        kind: local.info.kind,
+        onWarning: message => {
+            if (rt.local !== local) return;
+            local.captureWarning = message;
+            publish();
+        }
+    });
+    local.autoQuality = quality.state;
+    local.captureWarning = null;
+    extras = { local, quality, monitor: monitor.start() ? monitor : null };
+}
+
+function stopExtras(local: LocalCapture) {
+    if (extras?.local !== local) return;
+    extras.quality.dispose();
+    extras.monitor?.stop();
+    extras = null;
+}
+
+/** A configuracao autoQuality mudou (settings.ts). */
+export function onAutoQualitySettingChanged() {
+    if (rt.local) qualityOf(rt.local)?.settingChanged();
+}
+
 /** Remove o stream de todos os espectadores e para a captura (sem mexer na presenca). */
 function stopCapture(local: LocalCapture, reason: string) {
+    stopExtras(local);
     const viewers = [...local.viewers];
     local.viewers.clear();
     for (const v of viewers) sends.delete(v);
@@ -210,6 +284,7 @@ function sendTo(peerId: PeerId) {
     const decision = chooseCodec(entry.presence?.caps, settings.store.codec as CodecSetting, getLocalCaps());
     sends.set(peerId, { decision });
     local.viewers.add(peerId);
+    qualityOf(local)?.addViewer(peerId);
     log.info(`Enviando para ${peerLabel(peerId)}: codec ${decision.codec.toUpperCase()} (${decision.reason})`);
     if (decision.codec === "h264" && entry.presence?.caps.h264HwDecode !== true)
         log.warn(`${peerLabel(peerId)} não decodifica H.264 por hardware: o início pode travar por 15+ s`);
@@ -217,12 +292,16 @@ function sendTo(peerId: PeerId) {
 
     Promise.all(room.addStream(local.stream, { target: peerId, metadata: { kind: STREAM_KIND_SCREEN } }))
         .then(() => {
-            if (rt.local === local && local.viewers.has(peerId)) void applySenderParams(peerId, local, true);
+            if (rt.local !== local || !local.viewers.has(peerId)) return;
+            const quality = qualityOf(local);
+            if (quality) quality.markReady(peerId);
+            else void applySenderParams(peerId, local, local.quality);
         })
         .catch(e => {
             log.error(`Falha ao enviar o stream para ${peerLabel(peerId)}: ${errorText(e)}`);
             if (local.viewers.delete(peerId)) {
                 sends.delete(peerId);
+                qualityOf(local)?.removeViewer(peerId);
                 publish();
             }
         });
@@ -232,6 +311,7 @@ function removeFrom(peerId: PeerId, reason: string) {
     const { local } = rt;
     sends.delete(peerId);
     if (!local?.viewers.delete(peerId)) return;
+    qualityOf(local)?.removeViewer(peerId);
     try {
         rt.room?.removeStream(local.stream, { target: peerId });
     } catch (e) {
@@ -241,50 +321,55 @@ function removeFrom(peerId: PeerId, reason: string) {
     publish();
 }
 
-/**
- * Parametros do sender de video para um espectador: teto de bitrate/fps da qualidade, prioridade alta
- * e degradationPreference "maintain-framerate" (cai resolucao antes de fps). Tenta de novo uma vez.
- */
-async function applySenderParams(peerId: PeerId, local: LocalCapture, retry: boolean) {
-    const pc = getPc(peerId);
+function videoSender(peerId: PeerId, local: LocalCapture): RTCRtpSender | null {
     const tracks = local.stream.getVideoTracks();
-    const sender = pc?.getSenders().find(s => s.track && tracks.includes(s.track));
+    return getPc(peerId)?.getSenders().find(s => s.track && tracks.includes(s.track)) ?? null;
+}
+
+/**
+ * Parametros do sender de video para um espectador no degrau `level` (qualidade automatica; sem ela,
+ * a qualidade escolhida): resolucao (scaleResolutionDownBy), fps e bitrate maximos, prioridade alta e
+ * degradationPreference "maintain-framerate" (cai resolucao antes de fps). Sem renegociar.
+ * Devolve false se nao aplicou (a qualidade automatica tenta de novo na proxima avaliacao).
+ */
+async function applySenderParams(peerId: PeerId, local: LocalCapture, level: QualityLevel): Promise<boolean> {
+    const sender = videoSender(peerId, local);
     if (!sender) {
-        log.warn(`Sem RTCRtpSender de vídeo para ${peerLabel(peerId)}; parâmetros de envio não aplicados`);
-        return;
+        logThrottled(`no-sender:${peerId}`, "warn", `Sem RTCRtpSender de vídeo para ${peerLabel(peerId)}; parâmetros de envio não aplicados`);
+        return false;
     }
 
-    const q = QUALITY[local.quality];
+    const send = sends.get(peerId);
+    const height = local.stream.getVideoTracks()[0]?.getSettings().height ?? local.info.height;
+    const target = encodingFor(level, height);
     const build = (withDegradation: boolean) => {
         const params = sender.getParameters();
         if (!params.encodings?.length) params.encodings = [{}];
-        Object.assign(params.encodings[0], {
-            maxBitrate: q.maxKbps * 1000,
-            maxFramerate: q.fps,
-            priority: "high",
-            networkPriority: "high"
-        });
+        Object.assign(params.encodings[0], { ...target, priority: "high", networkPriority: "high" });
         if (withDegradation) (params as any).degradationPreference = "maintain-framerate";
         return params;
     };
+    const desc = `${levelText(level)}, até ${Math.round(target.maxBitrate / 1000)} kbps${target.scaleResolutionDownBy > 1 ? ` (captura ÷${target.scaleResolutionDownBy})` : ""}`;
 
     try {
-        await sender.setParameters(build(true));
-        log.info(`Envio para ${peerLabel(peerId)}: até ${q.maxKbps} kbps @ ${q.fps} fps, prioriza fps`);
+        await sender.setParameters(build(!send?.noDegradation));
+        if (!send?.applied) log.info(`Envio para ${peerLabel(peerId)}: ${desc}, prioriza fps`);
     } catch (e) {
+        if (send?.noDegradation) {
+            logThrottled(`set-params:${peerId}`, "warn", `setParameters falhou para ${peerLabel(peerId)}: ${errorText(e)}`);
+            return false;
+        }
         try {
             await sender.setParameters(build(false));
-            log.warn(`Envio para ${peerLabel(peerId)}: degradationPreference recusado (${errorText(e)}); teto ${q.maxKbps} kbps @ ${q.fps} fps aplicado`);
+            if (send) send.noDegradation = true;
+            log.warn(`Envio para ${peerLabel(peerId)}: degradationPreference recusado (${errorText(e)}); ${desc} aplicado`);
         } catch (e2) {
-            if (retry) {
-                setTimeout(() => {
-                    if (rt.local === local && local.viewers.has(peerId)) void applySenderParams(peerId, local, false);
-                }, 1500);
-            } else {
-                log.error(`setParameters falhou para ${peerLabel(peerId)}: ${errorText(e2)}`);
-            }
+            logThrottled(`set-params:${peerId}`, "warn", `setParameters falhou para ${peerLabel(peerId)}: ${errorText(e2)}`);
+            return false;
         }
     }
+    if (send) send.applied = true;
+    return true;
 }
 
 // #region eventos vindos da sessao
@@ -304,7 +389,10 @@ export function onWatchRequest(peerId: PeerId, op: "start" | "stop") {
 
 export function onPeerGone(peerId: PeerId) {
     sends.delete(peerId);
-    if (rt.local?.viewers.delete(peerId)) publish();
+    const { local } = rt;
+    if (!local?.viewers.delete(peerId)) return;
+    qualityOf(local)?.removeViewer(peerId);
+    publish();
 }
 
 /** O peer deixou de ser admitido (saiu do canal de voz): para de mandar a transmissao para ele. */
@@ -318,16 +406,18 @@ export function onRoomClosing(reason: string) {
     stopStreaming(reason);
 }
 
-/** Uma vez por segundo: loga o codec que o encoder realmente usa por espectador (uma vez). */
+/**
+ * Uma vez por segundo: loga o codec que o encoder realmente usa por espectador (uma vez) e, a cada
+ * 2 s, roda a qualidade automatica.
+ */
 export function tick() {
     const { local } = rt;
     if (!local) return;
+    if (++tickCount % 2 === 0) void qualityOf(local)?.evaluate();
     for (const peerId of local.viewers) {
         const send = sends.get(peerId);
         if (!send || send.reportedCodec) continue;
-        const pc = getPc(peerId);
-        const tracks = local.stream.getVideoTracks();
-        const sender = pc?.getSenders().find(s => s.track && tracks.includes(s.track));
+        const sender = videoSender(peerId, local);
         if (!sender) continue;
         sender.getStats().then(report => {
             let codecId: string | undefined;
