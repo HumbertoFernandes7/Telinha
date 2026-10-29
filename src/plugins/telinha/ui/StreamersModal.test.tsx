@@ -86,6 +86,13 @@ describe("StreamersModal (so com o estado do Telinha)", () => {
             screen.getByText(/Ninguém está transmitindo/);
         });
 
+        test("estado sem a lista de alertas de identidade (campo opcional ausente): desenha normalmente", () => {
+            act(() => setState({ ...EMPTY, identityAlerts: undefined }));
+            openInHost(openStreamersModal);
+            screen.getByText("Ninguém está transmitindo pelo Telinha nesta call agora.");
+            assert.equal(screen.queryByRole("status"), null);
+        });
+
         test("Fechar fecha o modal", () => {
             show({});
             const modal = openInHost(openStreamersModal);

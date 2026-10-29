@@ -151,6 +151,13 @@ describe("ViewersModal (so com o estado do Telinha)", () => {
         });
     });
 
+    test("estado sem as listas opcionais (alertas, removidos, pedidos): desenha so o que ha", async () => {
+        act(() => setState({ ...EMPTY, local: mine(), identityAlerts: undefined, blocked: undefined }));
+        await openViewers();
+        assert.deepEqual(sections().map(sectionTitle), ["Assistindo agora"]);
+        assert.deepEqual(alerts(), []);
+    });
+
     describe("Trocar tela ou janela", () => {
         test("fecha este modal e abre o seletor de fonte em modo Trocar", async () => {
             show({ local: mine() });

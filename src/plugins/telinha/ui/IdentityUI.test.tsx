@@ -16,16 +16,14 @@ import assert from "node:assert/strict";
 import { after, afterEach, before, beforeEach, describe, test } from "node:test";
 
 import { getLocalIdentity, unlinkTelinhaIdentity } from "@plugins/telinha/actions";
-import { eventually } from "@test/fakes/clock";
+import { prepareIdentity } from "@plugins/telinha/core/identity";
 import { act, fireEvent, render, screen, settle } from "@test/fakes/render";
-import { caughtErrors, dataStoreImpl, modals, resetVencordFakes, toasts } from "@test/fakes/vencord";
+import { caughtErrors, dataStoreData, dataStoreImpl, ME_ID, modals, resetVencordFakes, toasts } from "@test/fakes/vencord";
 import { installWebRtc, type WebRtcEnv } from "@test/fakes/webrtc";
 import { authorize, authorizeModalProps, type DiscordEnv, installDiscord } from "@test/helpers/wpf-identity";
+import { until } from "@test/helpers/wpf-modal";
 
 import { IdentityBadge, IdentityBanner, identityHint,IdentitySection } from "./IdentityUI";
-
-/** Lets the core's async work run inside act() until `check` holds (the state changes land in React). */
-const until = (check: () => unknown) => act(async () => void await eventually(check));
 
 const authorizeButton = () => screen.getByRole("button", { name: "Autorizar o Telinha no Discord" }) as HTMLButtonElement;
 const statusLine = () => screen.getByText(/Identidade no Discord:/).textContent;
@@ -244,7 +242,24 @@ describe("autorizar o Telinha no Discord (nucleo de verdade)", () => {
         assert.equal(authorizeButton().disabled, false);
     });
 
-    test("\"Agora não\" esconde o aviso da barra ate o Discord reiniciar (mesmo abrindo a barra de novo)", () => {
+    test("autorizacao guardada de outro certificado: o nucleo a trata como vencida; a barra nao insiste, as configuracoes deixam autorizar", async () => {
+        const stored = { idToken: "x.y.z", expiresAt: Date.now() + 3_600_000, fingerprint: "sha-256:" + "00".repeat(32) };
+        dataStoreData.set("telinha-identity-tokens-v1", { [ME_ID]: stored });
+        await prepareIdentity();
+        assert.equal(getLocalIdentity().status, "expired");
+
+        const banner = render(<IdentityBanner />);
+        assert.equal(banner.container.innerHTML, "", "ela se renova sozinha ao entrar numa call: sem aviso na barra");
+        banner.unmount();
+
+        render(<IdentitySection />);
+        assert.equal(statusLine(), "Identidade no Discord: autorização vencida");
+        screen.getByText("Ela se renova sozinha quando você entrar numa call. Se preferir, autorize de novo agora.");
+        assert.equal(authorizeButton().disabled, false);
+    });
+
+    test("\"Agora não\" esconde o aviso da barra ate o Discord reiniciar (mesmo abrindo a barra de novo)", async () => {
+        await unlinkTelinhaIdentity(); // volta a "nao autorizado"
         const first = render(<IdentityBanner />);
         fireEvent.click(screen.getByRole("button", { name: "Agora não" }));
         assert.equal(first.container.innerHTML, "");
