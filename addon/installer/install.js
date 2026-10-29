@@ -265,7 +265,7 @@ function uninstall(args) {
         restored.push({ app: name, from, sha256: sha256(bytes), sameAsVencordInstallerOutput: Buffer.compare(bytes, regenerated) === 0 });
     }
     const home = homeOf(args);
-    for (const p of ["addon", "addon.new", "addon.old", "backup", "install.json", ...(args.purge ? ["logs"] : [])])
+    for (const p of ["addon", "addon.new", "addon.old", "addon.prev", "update", "backup", "install.json", ...(args.purge ? ["logs"] : [])])
         fs.rmSync(path.join(home, p), { recursive: true, force: true });
     if (args.purge && fs.existsSync(home) && !fs.readdirSync(home).length) fs.rmdirSync(home);
     return { restored };

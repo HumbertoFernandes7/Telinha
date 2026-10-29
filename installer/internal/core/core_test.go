@@ -20,6 +20,7 @@ import (
 
 	"github.com/HumbertoFernandes7/Telinha/installer/internal/asar"
 	"github.com/HumbertoFernandes7/Telinha/installer/internal/discord"
+	"github.com/HumbertoFernandes7/Telinha/installer/internal/fsutil"
 	"github.com/HumbertoFernandes7/Telinha/installer/internal/payload"
 	"github.com/HumbertoFernandes7/Telinha/installer/internal/testutil"
 	"github.com/HumbertoFernandes7/Telinha/installer/internal/winproc"
@@ -503,5 +504,68 @@ func TestStageFromGitHub(t *testing.T) {
 	}
 	if _, err := os.Stat(e2.cfg.AddonDir()); err == nil {
 		t.Fatal("addon created from a bad download")
+	}
+}
+
+// TestAfterAutomaticUpdate: the add-on's own updater (addon/loader/updater.js, PAYLOAD.md section 8) swapped in
+// 0.1.1 at a Discord start: addon\ = 0.1.1, addon.prev = 0.1.0, update\ holds its state, install.json rewritten by
+// Node (2-space JSON, an extra field). The installer must read all of it and its Atualizar/Desinstalar keep working.
+func TestAfterAutomaticUpdate(t *testing.T) {
+	e := newEnv(t)
+	e.install("0.1.0")
+	home := e.cfg.Home()
+	if err := os.Rename(e.cfg.AddonDir(), filepath.Join(home, payload.PrevDir)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsutil.CopyTree(e.payload("0.1.1"), e.cfg.AddonDir()); err != nil {
+		t.Fatal(err)
+	}
+	testutil.Write(t, filepath.Join(home, "update", "state.json"), []byte(`{"format":1,"bad":{},"trial":{"version":"0.1.1","commit":"abcdef12","armed":true}}`))
+	testutil.Write(t, filepath.Join(home, "update", "run", "4242"), []byte("{}"))
+
+	var rec map[string]any
+	if err := json.Unmarshal(testutil.Read(t, e.cfg.RecordPath()), &rec); err != nil {
+		t.Fatal(err)
+	}
+	rec["version"], rec["commit"], rec["installedAt"], rec["updatedBy"] = "0.1.1", "abcdef12", "2026-11-01T10:00:00Z", "telinha-auto-update"
+	rec["source"] = map[string]any{"kind": "github", "release": "v0.1.1", "asset": "Telinha-addon-abcdef12.zip", "sha256": strings.Repeat("c", 64)}
+	b, _ := json.MarshalIndent(rec, "", "  ")
+	testutil.Write(t, e.cfg.RecordPath(), append(b, '\n'))
+
+	s := e.cfg.Status()
+	if s.Payload == nil || s.Payload.Version != "0.1.1" || s.PayloadError != "" || !s.PreviousReady || !s.Installed() {
+		t.Fatalf("status after the automatic update: %+v", s)
+	}
+	if s.Record == nil || s.Record.Version != "0.1.1" || len(s.Record.Targets) != 1 || s.Record.Source == nil || s.Record.Source.Release != "v0.1.1" {
+		t.Fatalf("install.json as read by the installer: %+v", s.Record)
+	}
+
+	// Atualizar / Reparar with the files already there, then a real update, then --rollback
+	ready, err := e.cfg.Preflight()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.cfg.Apply(nil, ready); err != nil {
+		t.Fatalf("repair after an automatic update: %v", err)
+	}
+	if r, _ := e.cfg.ReadRecord(); r.Version != "0.1.1" || len(r.Targets) != 1 || r.Source.Release != "v0.1.1" {
+		t.Fatalf("install.json after repair: %+v", r)
+	}
+	e.install("0.2.0")
+	if m, _ := payload.ReadInstalled(filepath.Join(home, payload.PrevDir)); m == nil || m.Version != "0.1.1" {
+		t.Fatalf("addon.prev after the installer's update: %+v", m)
+	}
+	if m, err := e.cfg.Rollback(); err != nil || m.Version != "0.1.1" {
+		t.Fatalf("--rollback: %v %v", m, err)
+	}
+
+	// Desinstalar removes the updater's folder too
+	if _, err := e.cfg.Uninstall(); err != nil {
+		t.Fatal(err)
+	}
+	for _, gone := range []string{"addon", "addon.prev", "update", "install.json"} {
+		if _, err := os.Stat(filepath.Join(home, gone)); err == nil {
+			t.Fatalf("%s left behind", gone)
+		}
 	}
 }

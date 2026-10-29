@@ -18,7 +18,7 @@
         "lint-styles": "stylelint \"src/**/*.css\"",
         "test": "pnpm test:identity && pnpm test:addon",
         "test:identity": "tsx --test src/plugins/telinha/core/identity/identity.test.ts",
-        "test:addon": "node addon/test/run-main-test.mjs && node addon/test/run-renderer-test.mjs",
+        "test:addon": "node addon/test/run-main-test.mjs && node addon/test/run-renderer-test.mjs && node addon/test/run-update-test.mjs",
         "build:helper": "native-audio\\build.cmd --copy-to-dist",
         "build:addon": "node addon/build/build-addon.mjs",
         "build:installer": "installer\\build.cmd",

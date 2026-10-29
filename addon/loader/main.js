@@ -13,6 +13,10 @@
  * Required by our resources/app.asar stub, BEFORE the official Vencord patcher.js. Everything here only prepares
  * hooks; Vencord and Discord then load exactly as with Vencord's own stub:
  *
+ *   0. Updates (updater.js, PAYLOAD.md section 8), before anything else: a staged update (addon.new) is swapped in,
+ *      or a version that never confirmed a good start is rolled back; then the boot is handed to the loader now in
+ *      this folder. The stub is fixed on users' PCs and only ever requires addon\main.js, so this is the one place
+ *      where future versions can be activated.
  *   1. ipcMain.on wrapper (removed once both hooks fired):
  *      - "VencordPreloadGetRendererJs"  -> Vencord's renderer (+ PluginMeta entry) + our renderer appended
  *      - "VencordGetPluginIpcMethodMap" -> Vencord's map + our natives, so the plugin's unchanged
@@ -33,12 +37,25 @@ const path = require("path");
 
 const { buildRendererPayload, wrapAddonRenderer, addCspSources } = require("./payload");
 
+// A broken updater.js must not cost the user Telinha: the loader then runs without updates (and an older loader that
+// would hand the boot to this version sees updaterLoadError and keeps its own version instead).
+let updaterModule = null;
+let updaterLoadError = null;
+try {
+    updaterModule = require("./updater");
+} catch (err) {
+    updaterLoadError = err;
+}
+
 // Vencord internals we key on (src/shared/IpcEvents.ts:47,55; registered in src/main/ipcPlugins.ts:40 and
 // src/main/ipcMain.ts:178). Both are synchronous ipcMain.on + event.returnValue.
 const CH_RENDERER_JS = "VencordPreloadGetRendererJs";
 const CH_PLUGIN_IPC_MAP = "VencordGetPluginIpcMethodMap";
 // Ours, used only by the fallback preload.
 const CH_PRELOAD_INFO = "TelinhaAddonPreloadInfo";
+// The loader's own natives (updates, boot confirmation): VencordNative.pluginHelpers.TelinhaAddon.<method>, next to
+// (not inside) the plugin's natives, so they work even when telinha.main.js failed to load.
+const ADDON_HELPERS = "TelinhaAddon";
 const TAG = "[Telinha]";
 
 const state = {
@@ -56,12 +73,18 @@ const state = {
     vencordBundlesPlugin: false,
     nativesLoaded: false,
     nativeChannels: [],
+    addonChannels: [],
     helperDir: null,
     cspMode: null, // "chained" (inside Vencord's listener) | "standalone" (our own listener) | null
     cspApplied: 0,
     preloadFallback: false,
+    update: null, // what startup() changed in this start: { kind: "swapped" | "rolledBack", from, to }
+    bootConfirmed: false,
     errors: []
 };
+
+/** updater.js instance for this loader (null with --vanilla, or if updater.js itself failed to load). */
+let updater = null;
 
 // Discord's main-process stdout goes nowhere on Windows, so also keep a small log file: %APPDATA%\Telinha\logs\main.log
 const LOG_FILE = path.join(__dirname, "..", "logs", "main.log");
@@ -135,7 +158,23 @@ function afterSyncReply(listener, transform) {
 
 let restoreIpcOn = () => { };
 
-function installIpcHooks(manifest, methodMap) {
+/** Vencord's plugin IPC map + our plugin's natives + the loader's own natives. */
+function extendIpcMap(map, manifest, methodMap, addonMap) {
+    let out = map;
+    if (map && Object.prototype.hasOwnProperty.call(map, manifest.pluginName)) {
+        // This Vencord build already bundles the plugin (e.g. the Telinha fork): its natives win, ours stay idle.
+        if (!state.vencordBundlesPlugin) log(`Vencord already bundles ${manifest.pluginName}; the add-on stays passive`);
+        state.vencordBundlesPlugin = true;
+    } else if (Object.keys(methodMap).length) {
+        // No natives loaded: leave the plugin's entry out, so its own "native part not loaded" message shows
+        // instead of calls on an empty object.
+        out = { ...out, [manifest.pluginName]: methodMap };
+    }
+    if (Object.keys(addonMap).length) out = { ...out, [ADDON_HELPERS]: addonMap };
+    return out;
+}
+
+function installIpcHooks(manifest, methodMap, addonMap) {
     const { ipcMain } = require("electron");
     const ownOn = Object.getOwnPropertyDescriptor(ipcMain, "on");
     const ownAdd = Object.getOwnPropertyDescriptor(ipcMain, "addListener");
@@ -151,25 +190,17 @@ function installIpcHooks(manifest, methodMap) {
                 state.rendererServed++;
                 state.metaPatched = payload.metaPatched;
                 state.metaReason = payload.metaReason;
-                if (state.rendererServed === 1) log("renderer served", { metaPatched: payload.metaPatched, metaReason: payload.metaReason });
+                if (state.rendererServed === 1) {
+                    log("renderer served", { metaPatched: payload.metaPatched, metaReason: payload.metaReason });
+                    updater?.markServed();
+                }
                 return payload.code;
             });
         }
 
         if (channel === CH_PLUGIN_IPC_MAP) {
             state.ipcMapHooked = true;
-            return afterSyncReply(listener, map => {
-                if (map && Object.prototype.hasOwnProperty.call(map, manifest.pluginName)) {
-                    // This Vencord build already bundles the plugin (e.g. the Telinha fork): its natives win, ours stay idle.
-                    if (!state.vencordBundlesPlugin) log(`Vencord already bundles ${manifest.pluginName}; the add-on stays passive`);
-                    state.vencordBundlesPlugin = true;
-                    return map;
-                }
-                // No natives loaded: leave the plugin's entry out, so its own "native part not loaded" message shows
-                // instead of calls on an empty object.
-                if (!Object.keys(methodMap).length) return map;
-                return { ...map, [manifest.pluginName]: methodMap };
-            });
+            return afterSyncReply(listener, map => extendIpcMap(map, manifest, methodMap, addonMap));
         }
 
         return listener;
@@ -194,10 +225,14 @@ function installIpcHooks(manifest, methodMap) {
         let rendererJs = "";
         try {
             rendererJs = wrapAddonRenderer(readAddonRenderer(manifest), { via: "preload-fallback", metaPatched: false, metaReason: "renderer hook not active" });
+            if (rendererJs) updater?.markServed();
         } catch (err) {
             fail("preload info", err);
         }
-        event.returnValue = { pluginName: manifest.pluginName, methods: methodMap, ipcMapHooked: state.ipcMapHooked, rendererJs };
+        event.returnValue = {
+            pluginName: manifest.pluginName, methods: methodMap, ipcMapHooked: state.ipcMapHooked, rendererJs,
+            addonHelpers: ADDON_HELPERS, addonMethods: addonMap
+        };
     });
 }
 
@@ -208,15 +243,45 @@ function assertDiscordSender(event) {
         throw new Error(`Telinha add-on: refused IPC from ${url || "unknown frame"}`);
 }
 
-function registerNatives(natives, methodMap) {
+function registerNatives(natives, methodMap, channels = state.nativeChannels) {
     const { ipcMain } = require("electron");
     for (const [method, channel] of Object.entries(methodMap)) {
         ipcMain.handle(channel, (event, ...args) => {
             assertDiscordSender(event);
             return natives[method](event, ...args);
         });
-        state.nativeChannels.push(channel);
+        channels.push(channel);
     }
+}
+
+/** Problems that make this start a bad one for the boot marker (the renderer side reports its own). */
+function bootProblems() {
+    const problems = [];
+    if (!state.vencordLoaded) problems.push("Vencord not loaded");
+    if (!state.nativesLoaded) problems.push("plugin natives not loaded");
+    if (state.errors.length) problems.push(...state.errors.map(e => e.split("\n")[0]));
+    return problems;
+}
+
+/** The loader's own natives (VencordNative.pluginHelpers.TelinhaAddon.*), for the plugin's update UI and boot report. */
+function addonNatives() {
+    if (!updater) return {};
+    const opts = o => (o && typeof o === "object" ? { autoDownload: o.autoDownload === true, manual: o.manual === true } : {});
+    return {
+        updateStatus: () => updater.status(),
+        updateCheck: (_event, o) => updater.check(opts(o)),
+        updateDownload: () => updater.download(),
+        bootOk: (_event, info) => {
+            const problems = bootProblems();
+            const result = updater.confirmBoot({
+                healthy: !problems.length,
+                problems,
+                info: info && typeof info === "object" ? { enabled: !!info.enabled, started: !!info.started, via: String(info.via ?? "") } : null
+            });
+            state.bootConfirmed = result.confirmed;
+            return result;
+        }
+    };
 }
 
 function installCspChain(manifest) {
@@ -328,19 +393,160 @@ function prepare() {
     const methodMap = Object.fromEntries(
         Object.keys(natives).filter(k => typeof natives[k] === "function").map(k => [k, channelFor(manifest.pluginName, k)])
     );
+    const ownNatives = addonNatives();
+    const addonMap = Object.fromEntries(Object.keys(ownNatives).map(k => [k, channelFor(ADDON_HELPERS, k)]));
 
-    step("ipc hooks", () => installIpcHooks(manifest, methodMap));
+    step("ipc hooks", () => installIpcHooks(manifest, methodMap, addonMap));
     step("natives ipc", () => registerNatives(natives, methodMap));
+    step("addon ipc", () => registerNatives(ownNatives, addonMap, state.addonChannels));
     step("csp", () => installCspChain(manifest));
     if (manifest.preloadFallback !== false) step("preload fallback", installPreloadFallback);
 }
 
-function boot({ vencordPatcher, vanilla }) {
+// ------------------------------------------------------------------------------------------- updates (PAYLOAD.md 8)
+
+/** Electron's net.fetch (Chromium's network stack: system proxy, redirects to GitHub's asset CDN), else Node's fetch. */
+function mainFetch(url, init) {
+    let fetchImpl = null;
+    try {
+        const { net } = require("electron");
+        if (typeof net?.fetch === "function") fetchImpl = net.fetch.bind(net);
+    } catch { }
+    fetchImpl ??= typeof globalThis.fetch === "function" ? globalThis.fetch.bind(globalThis) : null;
+    if (!fetchImpl) return Promise.reject(new Error("no fetch in this process"));
+    return fetchImpl(url, init);
+}
+
+function initUpdater() {
+    if (updaterLoadError) {
+        fail("updater", updaterLoadError);
+        return;
+    }
+    try {
+        updater = updaterModule.createUpdater({
+            addonDir: __dirname,
+            log: (msg, data) => (data === undefined ? log(msg) : log(msg, data)),
+            fetch: mainFetch,
+            // offline tests only: updater.js ignores anything but a loopback http:// base
+            apiBase: process.env.TELINHA_UPDATE_API || undefined
+        });
+    } catch (err) {
+        updater = null;
+        fail("updater", err);
+    }
+}
+
+/** Forgets every module loaded from this folder, so the next require reads the version now on disk. */
+function clearAddonModules() {
+    const dir = (__dirname + path.sep).toLowerCase();
+    for (const key of Object.keys(require.cache)) if (key.toLowerCase().startsWith(dir)) delete require.cache[key];
+}
+
+/** The loader now in this folder (another version than the code running here). Throws if it is not usable. */
+function requireFreshLoader() {
+    clearAddonModules();
+    const next = require(path.join(__dirname, "main.js"));
+    if (typeof next?.boot !== "function") throw new Error("main.js has no boot()");
+    if (next.updaterLoadError) throw new Error(`its updater.js does not load: ${next.updaterLoadError?.message ?? next.updaterLoadError}`);
+    return next;
+}
+
+const firstLine = err => String(err?.message ?? err).split("\n")[0].slice(0, 200);
+
+/** Plain Vencord (no add-on this session), or vanilla Discord if Vencord fails too. */
+function startPlain({ vencordPatcher, vanilla }) {
+    const stubFilename = require.main.filename;
+    try {
+        require(vencordPatcher);
+        state.vencordLoaded = true;
+    } catch (err) {
+        if (require.main.filename !== stubFilename) throw err; // Discord itself threw: not ours to hide
+        fail("vencord", err);
+        state.vanillaFallback = true;
+        log("Vencord failed to load, starting Discord without mods");
+        vanilla();
+    }
+}
+
+/**
+ * startup() changed addon\: run the loader that is there now, in this same start. If it cannot run, a swapped-in
+ * version is rolled back on the spot (and marked bad) and this loader, whose files are back, boots instead.
+ */
+function handOff(opts, action) {
+    const stubFilename = require.main.filename;
+    let next = null;
+    try {
+        next = requireFreshLoader();
+    } catch (err) {
+        fail(`${action.kind} loader`, err);
+    }
+    if (next) {
+        log(`update: handing the boot to Telinha ${action.to}`);
+        try {
+            return next.boot(opts);
+        } catch (err) {
+            if (require.main.filename !== stubFilename) throw err; // Discord itself threw: not ours to hide
+            globalThis.__TelinhaAddon = state;
+            fail(`${action.kind} loader boot`, err);
+            if (action.kind === "swapped") updater?.rollbackNow(`Telinha ${action.to}: its loader threw during boot (${firstLine(err)})`);
+            log("update: starting Vencord without the add-on this time");
+            return startPlain(opts); // its hooks may be half installed
+        }
+    }
+    globalThis.__TelinhaAddon = state;
+    if (action.kind === "swapped") {
+        const back = updater?.rollbackNow(`Telinha ${action.to}: its loader failed to load (${firstLine(state.errors.at(-1))})`);
+        clearAddonModules();
+        if (back) {
+            state.update = { ...back, immediate: true };
+            log(`update: rolled back to ${back.to} right away; starting it`);
+            return run(opts); // this code is that version, and its files are back in this folder
+        }
+    }
+    log("update: starting Vencord without the add-on this time");
+    return startPlain(opts);
+}
+
+/** Activates a staged update or rolls back a failed one (before any hook), then hands the boot over if addon\ changed. */
+function updateStartup(opts) {
+    initUpdater();
+    if (!updater) return null;
+    const depth = Number(opts?.telinhaHandoff) || 0;
+    let action = null;
+    try {
+        action = updater.startup({ actions: depth < 2 });
+    } catch (err) {
+        fail("update startup", err);
+        return null;
+    }
+    if (!action) return null;
+    state.update = action;
+    return () => handOff({ ...opts, telinhaHandoff: depth + 1, telinhaUpdate: action }, action);
+}
+
+// ------------------------------------------------------------------------------------------- boot
+
+function boot(opts) {
+    const vanillaFlag = process.argv.includes("--vanilla"); // with --vanilla Vencord itself stays out of the way
     try {
         globalThis.__TelinhaAddon = state;
         state.bootedAt = Date.now();
-        log("boot", { vencordPatcher, execPath: process.execPath, argv: process.argv.slice(1) });
-        if (!process.argv.includes("--vanilla")) prepare(); // with --vanilla Vencord itself stays out of the way
+        if (opts?.telinhaUpdate) state.update = opts.telinhaUpdate;
+        log("boot", { vencordPatcher: opts?.vencordPatcher, execPath: process.execPath, argv: process.argv.slice(1), handoff: opts?.telinhaHandoff ?? 0 });
+    } catch (err) {
+        fail("boot", err);
+    }
+    if (!vanillaFlag) {
+        const handoff = updateStartup(opts);
+        if (handoff) return handoff();
+    }
+    return run(opts, vanillaFlag);
+}
+
+function run({ vencordPatcher, vanilla }, vanillaFlag = false) {
+    try {
+        globalThis.__TelinhaAddon = state;
+        if (!vanillaFlag) prepare();
     } catch (err) {
         fail("boot", err);
     }
@@ -370,8 +576,10 @@ function boot({ vencordPatcher, vanilla }) {
         ipcMapHooked: state.ipcMapHooked,
         natives: state.nativeChannels.length,
         helperDir: state.helperDir,
+        update: state.update,
         errors: state.errors.length
     });
 }
 
-module.exports = { boot, state, CH_RENDERER_JS, CH_PLUGIN_IPC_MAP, CH_PRELOAD_INFO };
+// updaterLoadError: an older loader handing the boot to this one refuses it (and rolls back) when it is set.
+module.exports = { boot, state, updaterLoadError, CH_RENDERER_JS, CH_PLUGIN_IPC_MAP, CH_PRELOAD_INFO };

@@ -97,12 +97,37 @@
         return result;
     }
 
+    // Boot marker (addon/PAYLOAD.md section 8): tell the loader this start went well, i.e. the plugin is registered and,
+    // when enabled, Vencord started it. A freshly updated version that never gets here is rolled back by the loader at
+    // the next Discord start. The loader's own natives live in pluginHelpers.TelinhaAddon (not the plugin's).
+    const BOOT_REPORT_TIMEOUT_MS = 5 * 60_000;
+    function reportBoot(p, result) {
+        const api = globalThis.VencordNative?.pluginHelpers?.TelinhaAddon;
+        if (typeof api?.bootOk !== "function" || result.error) return;
+        const send = info => Promise.resolve(api.bootOk(info)).catch(err => console.warn(TAG, "addon: boot report failed", err));
+        if (!result.enabled) return void send({ enabled: false, started: false, via: result.duplicate ? "duplicate" : "register" });
+        const deadline = Date.now() + BOOT_REPORT_TIMEOUT_MS;
+        const poll = () => {
+            if (p.started) return void send({ enabled: true, started: true, via: "register" });
+            if (Date.now() > deadline) return void console.warn(TAG, `addon: ${p.name} did not start; this start is not confirmed`);
+            setTimeout(poll, 1000);
+        };
+        poll();
+    }
+
     globalThis.__TelinhaAddonRegister = p => {
+        let result;
         try {
-            return registerLatePlugin(p);
+            result = registerLatePlugin(p);
         } catch (err) {
             console.error(TAG, `addon: registration of ${p?.name} failed`, err);
             return { enabled: false, error: String(err) };
         }
+        try {
+            reportBoot(p, result);
+        } catch (err) {
+            console.warn(TAG, "addon: boot report failed", err);
+        }
+        return result;
     };
 })();

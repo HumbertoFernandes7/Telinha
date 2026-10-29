@@ -33,7 +33,7 @@ const ADDON_VERSION = "0.1.0";
 const PLUGIN_DIR = "src/plugins/telinha";
 const PLUGIN_NAME = "Telinha";
 const HELPER = "telinha-audio.exe";
-const LOADER_FILES = ["main.js", "payload.js", "preload.js", "register.js", "stub-template.js"];
+const LOADER_FILES = ["main.js", "payload.js", "preload.js", "register.js", "stub-template.js", "updater.js"];
 // Vencord's JSX inject (VencordCreateElement -> Vencord.Webpack.Common.React.createElement), used from the pinned checkout
 const REACT_INJECT = ".vencord/scripts/build/inject/react.mjs";
 
@@ -354,6 +354,15 @@ if (process.platform === "win32" && natives.screenAudioStatus) {
 }
 rmSync(emptyHelperDir, { recursive: true, force: true });
 delete process.env.TELINHA_HELPER_DIR;
+// Auto-update: what an installed loader does with this zip once it is published (updater.js, PAYLOAD.md section 8)
+try {
+    const upd = require("../loader/updater.js");
+    const fromZip = upd.readPayloadZip(zip);
+    const onDisk = upd.verifyDir(payloadDir);
+    check(`updater accepts this zip and payload (${fromZip.files.size} files, version ${fromZip.manifest.version})`, fromZip.manifest.commit === commit && onDisk.commit === commit && !fromZip.ignored.length && upd.compareSemver(ADDON_VERSION, "0.0.0") === 1);
+} catch (e) {
+    check("updater accepts this zip and payload", false, String(e));
+}
 check(`${HELPER} in the payload is a PE executable`, readFileSync(join(payloadDir, HELPER)).subarray(0, 2).toString() === "MZ" && statSync(join(payloadDir, HELPER)).size > 4096);
 
 console.log(failures ? `\nBUILD SMOKE FAILED (${failures})` : "\nBUILD SMOKE PASSED");

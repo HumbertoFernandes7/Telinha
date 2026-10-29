@@ -153,7 +153,8 @@ module.exports = {
     webContents: { getAllWebContents: () => [webContents], fromId: () => webContents, getFocusedWebContents: () => webContents },
     Menu: { buildFromTemplate: template => ({ template }), setApplicationMenu() { }, getApplicationMenu: () => null },
     protocol: { handle(scheme, fn) { protocolHandlers[scheme] = fn; }, registerSchemesAsPrivileged() { }, registerFileProtocol() { }, handlers: protocolHandlers },
-    net: { fetch: async () => new Response("") },
+    // the updater's requests to the offline tests' fake GitHub (127.0.0.1) go out for real; anything else stays offline
+    net: { fetch: async (url, init) => (/^http:\/\/127\.0\.0\.1:\d+\//.test(String(url)) ? globalThis.fetch(url, init) : new Response("")) },
     nativeTheme: Object.assign(new EventEmitter(), { shouldUseDarkColors: true, themeSource: "system" }),
     shell: { openExternal: async () => { }, openPath: async () => "", showItemInFolder() { } },
     systemPreferences: { getAccentColor: () => "5865f2ff", getColor: () => "#000000", on() { } },

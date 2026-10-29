@@ -21,15 +21,18 @@ if (location.protocol !== "data:") {
     }
 }
 
-const api = {};
-for (const [method, channel] of Object.entries(info?.methods ?? {}))
-    api[method] = (...args) => ipcRenderer.invoke(channel, ...args);
+const invokers = methods => Object.fromEntries(Object.entries(methods ?? {}).map(([method, channel]) => [method, (...args) => ipcRenderer.invoke(channel, ...args)]));
+const api = invokers(info?.methods);
+// the loader's own natives (updates, boot confirmation): pluginHelpers.TelinhaAddon
+const addonApi = invokers(info?.addonMethods);
 
-if (info && !info.ipcMapHooked && Object.keys(api).length) {
+if (info && !info.ipcMapHooked && (Object.keys(api).length || Object.keys(addonApi).length)) {
     const expose = contextBridge.exposeInMainWorld;
     contextBridge.exposeInMainWorld = function (key, value) {
-        if (key === "VencordNative" && value?.pluginHelpers && !value.pluginHelpers[info.pluginName])
-            value.pluginHelpers[info.pluginName] = api;
+        if (key === "VencordNative" && value?.pluginHelpers) {
+            if (Object.keys(api).length && !value.pluginHelpers[info.pluginName]) value.pluginHelpers[info.pluginName] = api;
+            if (Object.keys(addonApi).length && info.addonHelpers && !value.pluginHelpers[info.addonHelpers]) value.pluginHelpers[info.addonHelpers] = addonApi;
+        }
         return expose.call(this, key, value);
     };
 }

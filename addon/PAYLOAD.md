@@ -1,7 +1,8 @@
 # Telinha add-on payload: install layout and installer contract
 
 Status: **format 1**. Producer: `pnpm build:addon` (`addon/build/build-addon.mjs`). Consumers: the Go installer
-(`installer/`) and the Node dev installer (`addon/installer/install.js`, tests and the real-Discord test only).
+(`installer/`), the add-on's own automatic updater (`addon/loader/updater.js`, section 8) and the Node dev installer
+(`addon/installer/install.js`, tests and the real-Discord test only).
 
 The user keeps the **official Vencord** untouched (and self-updating). Telinha is added by replacing only Vencord's
 one-line stub `resources\app.asar` with our own stub, which chains:
@@ -36,6 +37,7 @@ dist/addon/
 | `payload.js` | pure helpers for `main.js` (PluginMeta patch, renderer wrapper, CSP merge) | `main.js` |
 | `preload.js` | dormant fallback preload (only if Vencord renames its IPC channels) | `main.js` |
 | `register.js` | renderer-side late plugin registration, prepended to the renderer bundle at serve time | `main.js` |
+| `updater.js` | automatic updates: GitHub check, download, verification, staging; swap/rollback at startup (section 8) | `main.js` |
 | `addon.json` | runtime manifest (below) | `main.js` |
 | `telinha.renderer.js` | the Telinha plugin, renderer side (built from `src/plugins/telinha`, CSS inlined; **no `telinha.css`**) | `main.js` |
 | `telinha.main.js` | the Telinha plugin natives (`native.ts`), CommonJS | `main.js` |
@@ -102,8 +104,11 @@ must not rename files: `main.js` resolves its siblings by these names.
 %APPDATA%\Vencord\settings\settings.json          <- Vencord's settings; Telinha's settings live here (plugins.Telinha)
 %APPDATA%\Telinha\
     addon\          <- the payload (section 1), replaced as a whole on install/update
+    addon.new\      <- a verified payload waiting to be activated (installer staging; automatic update, section 8)
+    addon.prev\     <- the version before the last update (installer --rollback; automatic rollback, section 8)
     backup\<FlavorDir>\<app-ver>.app.asar          <- Vencord's stub exactly as found, before we replaced it
-    install.json    <- what the installer did (section 4.7)
+    install.json    <- what the installer did (section 4.7); kept in step by automatic updates (section 8.5)
+    update\         <- automatic-update state (section 8): state.json, run\<pid>, swap.lock, staging-* (transient)
     logs\main.log   <- loader log (main-process stdout is invisible on Windows); rotates to main.log.1 at 256 KiB
 ```
 
@@ -194,9 +199,10 @@ Vencord's installer (Repair) first.
    the folder Discord runs and the one Vencord's installer patches. Older `app-*` folders are left alone.
 3. Classify `resources\app.asar` (3.3). Proceed only for `vencord-stub` or `telinha-stub`, with `_app.asar` present and
    the patcher file present.
-4. **Payload**: extract the zip to `%APPDATA%\Telinha\addon.new\`, verify `version.json.files` (size + SHA-256), then
-   swap: rename `addon` → `addon.old` (if present), `addon.new` → `addon`, delete `addon.old`. On any failure delete
-   `addon.new` and keep the previous `addon`.
+4. **Payload**: extract the zip to `%APPDATA%\Telinha\addon.new\` (removing any `addon.new` left there, e.g. one staged
+   by the automatic updater), verify `version.json.files` (size + SHA-256), then swap: rename `addon` → `addon.old` (if
+   present), `addon.new` → `addon`, then `addon.old` → `addon.prev` (replacing an older one; it is what `--rollback`
+   restores). On any failure delete `addon.new` and keep the previous `addon`.
 5. **Backup** (only when the kind was `vencord-stub`): copy `app.asar` to
    `%APPDATA%\Telinha\backup\<FlavorDir>\<app-ver>.app.asar`, overwriting an older backup for the same folder.
    Never back up a `telinha-stub` (we would lose the real Vencord stub).
@@ -226,8 +232,8 @@ installer's Repair/Install replaced our stub with its own (kind `vencord-stub` a
      path + `)`. That is exactly what Vencord's installer writes, so the result is the same bytes either way (the
      dev installer's `status` command checks this per folder: `vencordStubCanonical: true`).
    - atomic write as in 4.6, then re-classify: must be `vencord-stub` with the same patcher.
-3. Delete `%APPDATA%\Telinha\addon\`, `backup\` and `install.json`. Keep `logs\` (small, useful for support) unless
-   the user asked for a full removal.
+3. Delete `%APPDATA%\Telinha\addon\`, `addon.new\`, `addon.old\`, `addon.prev\`, `update\`, `backup\` and `install.json`.
+   Keep `logs\` (small, useful for support) unless the user asked for a full removal.
 4. Leave Vencord and `%APPDATA%\Vencord\settings\settings.json` alone (it keeps a harmless `plugins.Telinha` entry).
 
 ---
@@ -247,7 +253,10 @@ installer's Repair/Install replaced our stub with its own (kind `vencord-stub` a
 | Vencord renamed its IPC channels | dormant fallback preload takes over (logged `preload fallback`) |
 | Vencord's `PluginMeta` literal not found | logged `metaPatched:false`; plugin works, only its settings modal / `/vencord-plugins` may error |
 | `%APPDATA%\Vencord\dist` is a Vencord build that already contains Telinha (our fork) | addon stays passive: the bundled Telinha wins, ours refuses the duplicate (logged) |
-| `--vanilla` command-line flag | handed to Vencord unchanged |
+| `--vanilla` command-line flag | handed to Vencord unchanged; no update swap or rollback either |
+| `addon.new` holds a newer, verified version | swapped in before anything of ours runs, then the new loader boots (section 8.3) |
+| the version swapped in at the previous start never confirmed a good start | rolled back to `addon.prev` and marked bad (section 8.4) |
+| the swapped-in loader throws while loading | rolled back in that same start; the previous version boots (section 8.4) |
 
 The loader sets `process.env.TELINHA_HELPER_DIR` to its own folder before loading `telinha.main.js`; the plugin's
 native code looks for `telinha-audio.exe` there (and next to its own bundle when the variable is absent, which is
@@ -263,3 +272,97 @@ the fork build's case: next to `patcher.js`).
   install (repair).
 - **Vencord installer Uninstall**: restores Discord's original `app.asar` → both off. Our install then refuses
   (`discord-original`) until Vencord is back. Our uninstall finds no `telinha-stub` and only deletes our folder.
+
+---
+
+## 8. Automatic updates (`updater.js`, driven by the plugin)
+
+No code-signing key: integrity is the SHA-256 GitHub publishes for the zip (same rules as the installer) plus the
+payload's own `version.json`. Discord and Vencord must always start, whatever an update does.
+
+### 8.1 Check and download (main process, never touches `addon\`)
+
+- The plugin asks for a check ~15 s after it starts and every 6 h, through the loader's own IPC natives
+  `VencordNative.pluginHelpers.TelinhaAddon.{updateStatus, updateCheck({ autoDownload, manual }), updateDownload,
+  bootOk}` (next to the plugin's natives, so they work even when `telinha.main.js` failed to load). The requests run
+  in the main process with Electron `net.fetch` (Chromium's network stack: system proxy, redirects to GitHub's asset
+  CDN; the renderer's CSP is not involved).
+- `GET https://api.github.com/repos/HumbertoFernandes7/Telinha/releases/latest` (normal releases only, never drafts or
+  pre-releases), with `If-None-Match` from the previous answer (a 304 does not count against GitHub's 60 requests/h).
+  The tag (`v0.1.1`) is the version. Newer than the installed `version.json.version` (semver) and not marked bad: with
+  "Atualizar automaticamente" (`plugins.Telinha.autoUpdate`, default on) it is downloaded right away; off, the status is
+  `available` and the plugin shows a notice with "Atualizar".
+- Asset: `Telinha-addon-*.zip` (the greatest name if several), only from
+  `https://github.com/HumbertoFernandes7/Telinha/releases/download/`. Expected SHA-256 values: the asset's GitHub
+  `digest`, `<zip>.sha256`, a `version.json` release asset (manifest: same files; or a small JSON with the hash) and the
+  release notes, exactly as `installer/internal/payload/github.go`. The download must match **all** of them, and at
+  least one must exist (unlike the installer, an unattended update never relies on HTTPS alone).
+- The zip is checked in memory before anything is written: every entry a flat, safe file name (a path, `..`, a drive
+  or a device name refuses the whole zip: Zip Slip), no duplicates, `version.json` valid (section 1, plus `main.js` and
+  `addon.json` present), every listed file with its size, CRC and SHA-256, `version.json.version` equal to the tag and
+  newer than the installed version (never a downgrade). Unlisted safe entries are ignored, like the installer does.
+- Staging: the files go to `update\staging-<pid>-<ms>\`, are verified again from disk, then that folder is renamed to
+  `addon.new` (replacing an older staged one). `telinha-audio.exe` may be running from `addon\`: it is never touched.
+- Network errors, offline, GitHub's rate limit (403/429: no automatic request until `x-ratelimit-reset`), 5xx and a
+  missing release are quiet: logged in `main.log`, shown only on the settings page's status line, retried at the next
+  check. No error ever becomes a toast or a notice.
+
+### 8.2 Notices (renderer)
+
+`Telinha X.Y.Z pronto` (Reiniciar agora / Depois) once a version is staged; `Telinha X.Y.Z disponível` (Atualizar /
+Depois) when automatic updates are off. Never while the user is streaming or watching a stream (shown after it ends),
+only while Discord has focus, once per version per session. "Reiniciar agora" is Vencord's own relaunch
+(`DiscordNative.app.relaunch()`, as in Vencord's `src/utils/native.ts`).
+
+### 8.3 Swap at the next Discord start
+
+The stub on users' PCs is fixed (section 3) and always requires `addon\main.js`, so the swap is done by the loader that
+is running, first thing in `boot()`, before any hook, native or plugin code of the add-on (`updater.js startup()`):
+
+1. Not with `--vanilla`, not while another live process uses the add-on (`update\run\<pid>` markers, refreshed every
+   5 min, removed at exit: a second `Discord.exe` boots our stub before Discord's single-instance check makes it quit,
+   and other flavors share `addon\`), not while the running version's own trial is unconfirmed (8.4).
+2. `addon.new` fully verified again (every file), newer, not bad; otherwise it is deleted.
+3. Under `update\swap.lock`: `addon` → `addon.old`, `addon.new` → `addon` (if this fails, `addon.old` goes back), then
+   `addon.old` → `addon.prev`. Each rename retries briefly (antivirus, a process that just exited); a locked folder
+   means "next start". These are the installer's own moves (4.4).
+4. `update\state.json` gets the trial (`version`, `commit`, `previous`, boot marker `armed: false`) and `install.json`
+   is updated (8.5).
+5. The running loader forgets every module loaded from `addon\` and requires the new `addon\main.js`, then calls its
+   `boot()` with the same options plus `telinhaHandoff` (a depth counter: a loader that was handed the boot twice does
+   not move folders again) and `telinhaUpdate`. Contract for every future `main.js`: export `boot(opts)` and
+   `updaterLoadError` (set when its `updater.js` does not load), and keep this section's behaviour.
+
+### 8.4 Boot marker and automatic rollback
+
+- When the renderer is first served in a start, the trial's boot marker is set (`armed: true`). `register.js` reports a
+  good start (`bootOk`) once the plugin is registered and, if enabled, Vencord started it; the main side confirms only
+  if Vencord and the plugin natives loaded with no loader errors. A confirmed trial is removed (and the version, if it
+  was marked bad, is no longer skipped).
+- **Next start with the marker still set**: rollback before anything runs. `addon` → `addon.old` (deleted),
+  `addon.prev` → `addon` (verified first), the failed version recorded in `state.json.bad` (never downloaded again),
+  `install.json` restored, `ROLLED BACK` in `main.log`; then the restored loader boots (8.3 step 5).
+- **The new loader cannot even start** (its `main.js` throws while loading, has no `boot()`, its `updater.js` does not
+  load, or its `boot()` throws before Discord): the old loader rolls back in that same start, then boots itself (its
+  files are back), or plain Vencord if the new loader had already started installing hooks.
+- A trial whose renderer never loaded in 5 starts is dropped (the version is kept). A trial for a version that is no
+  longer in `addon\` (the installer replaced it) is dropped.
+
+### 8.5 `update\state.json` and `install.json`
+
+`state.json` (owned by `updater.js`; installers only delete it on uninstall): `format`, `bad`
+(`{ "<version>": { commit, at, reason } }`), `trial`, `staged` (`{ version, commit, tag, asset, sha256, at }` for
+`addon.new`), `lastCheck` (`{ at, etag, release }`), `lastRollback`.
+
+`install.json` is only updated when it exists (never created): on a swap `version`, `commit`, `installedAt` (RFC 3339,
+seconds) and `source` = `{ "kind": "github", "release": "<tag>", "asset": "<zip>", "sha256": "<hex>" }`, plus
+`updatedBy: "telinha-auto-update"`; on a rollback the previous values come back (`updatedBy: "telinha-auto-rollback"`).
+`targets` and `installerVersion` are kept, so the installer's status, Atualizar, Desinstalar and `--rollback` keep
+working (`installer/internal/core` `TestAfterAutomaticUpdate`).
+
+### 8.6 What a release must look like
+
+A normal (not pre-release) GitHub release tagged `vX.Y.Z`, with `Telinha-addon-<commit>.zip` whose `version.json` says
+`"version": "X.Y.Z"` (`ADDON_VERSION` in `build-addon.mjs`) and `Telinha-addon-<commit>.zip.sha256` (GitHub adds the
+asset `digest` itself). The installer's default is the same release (`releases/latest`); `--prerelease` lets it take a
+pre-release for testing, which installed copies never update to on their own.

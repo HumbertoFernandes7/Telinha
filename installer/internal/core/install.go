@@ -360,7 +360,8 @@ func (c *Config) Uninstall() (*UninstallResult, error) {
 		// keep our files: the stub still works (and falls back to plain Vencord without them)
 		return res, problem(CodeFailed, "Não foi possível devolver o Discord ao Vencord original. Feche o Discord completamente e tente de novo.", errors.Join(errs...))
 	}
-	for _, name := range []string{payload.AddonDir, payload.NewDir, payload.OldDir, payload.PrevDir, "backup", "install.json", "download.zip.tmp"} {
+	// "update": the add-on's own automatic-update state (addon/PAYLOAD.md section 8)
+	for _, name := range []string{payload.AddonDir, payload.NewDir, payload.OldDir, payload.PrevDir, "update", "backup", "install.json", "download.zip.tmp"} {
 		p := filepath.Join(c.Home(), name)
 		if !fsutil.Exists(p) {
 			continue

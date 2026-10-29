@@ -75,7 +75,8 @@ async function run(entry) {
                 hasAddonRenderer: all.includes("__TelinhaAddonBoot"),
                 addonAfterVencord: all.indexOf("__TelinhaAddonBoot") > all.indexOf("var Vencord="),
                 pluginMetaEntry: all.includes('"Telinha":{"folderName":"telinha-addon","userPlugin":true}'),
-                sawVencordUpdate: all.includes("FAKE_VENCORD_UPDATE_MARKER")
+                sawVencordUpdate: all.includes("FAKE_VENCORD_UPDATE_MARKER"),
+                addonHelpers: Object.keys(helpers.TelinhaAddon ?? {})
             };
             if (process.env.FAKE_SERVED_OUT) fs.writeFileSync(process.env.FAKE_SERVED_OUT, all);
 
@@ -100,6 +101,22 @@ async function run(entry) {
                 }
             } else if (typeof api?.listSources === "function") {
                 report.natives = { listSources: await api.listSources(320, 180) };
+            }
+
+            // --- the loader's own natives (updates, boot marker), as the plugin / register.js call them
+            if (process.env.FAKE_ADDON_CALLS) {
+                const addonApi = helpers.TelinhaAddon ?? {};
+                report.addonCalls = {};
+                for (const call of process.env.FAKE_ADDON_CALLS.split(",")) {
+                    try {
+                        if (call === "bootOk") report.addonCalls.bootOk = await addonApi.bootOk({ enabled: true, started: true, via: "test" });
+                        else if (call === "check") report.addonCalls.check = await addonApi.updateCheck({ autoDownload: true, manual: false });
+                        else if (call === "checkOnly") report.addonCalls.checkOnly = await addonApi.updateCheck({ autoDownload: false, manual: false });
+                        else if (call === "status") report.addonCalls.status = await addonApi.updateStatus();
+                    } catch (err) {
+                        report.addonCalls[call] = { error: String(err?.message ?? err) };
+                    }
+                }
             }
         }
 
@@ -137,6 +154,7 @@ async function run(entry) {
         }
 
         report.addon = addon();
+        report.loaderMarker = globalThis.__TelinhaTestLoader ?? null;
     } catch (err) {
         report.error = String(err?.stack ?? err);
     }
