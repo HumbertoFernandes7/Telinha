@@ -24,6 +24,7 @@ import { IdentitySection } from "./ui/IdentityUI";
 import { panelJsx, voiceUserIconsJsx } from "./ui/jsxShims";
 import { renderToolboxActions, userContextMenuPatch } from "./ui/menus";
 import { startNotices, stopNotices } from "./ui/notices";
+import { startSounds, stopSounds } from "./ui/sounds";
 import { startUpdateNotices, stopUpdateNotices } from "./ui/updateNotice";
 import { UpdateSection } from "./ui/UpdateSection";
 import { closeAllViewers } from "./ui/viewerWindows";
@@ -114,6 +115,7 @@ export default definePlugin({
         // v0.1.0 → v0.2.0: "Aprovar quem vai assistir" vira "Quem pode assistir (padrão)"
         migrateAccessSettings();
         startNotices();
+        startSounds();
         startUpdateNotices();
         startUpdateChecks();
         runAction("startSession", () => startSession(), () => { });
@@ -123,6 +125,7 @@ export default definePlugin({
         stopUpdateChecks();
         stopUpdateNotices();
         stopNotices();
+        stopSounds();
         closeAllViewers();
         stopCallView();
         runAction("stopSession", () => stopSession(), () => { });

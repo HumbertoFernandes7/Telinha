@@ -76,6 +76,12 @@ export const settings = definePluginSettings({
         description: "Compartilhar o som por padrão ao transmitir. Janela: só o som do aplicativo dessa janela. Tela inteira: todo o som do PC, menos o do Discord (Windows 10 versão 2004 ou superior; sem o ajudante de áudio a tela vai só com imagem).",
         default: true
     },
+    playSounds: {
+        type: OptionType.BOOLEAN,
+        displayName: "Sons de entrar e sair",
+        description: "Toca um som quando alguém começa ou para de assistir a sua transmissão, e quando alguém da call começa ou para de transmitir pelo Telinha.",
+        default: true
+    },
     codec: {
         type: OptionType.SELECT,
         displayName: "Formato de vídeo (codec)",
