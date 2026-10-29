@@ -1,0 +1,189 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# CI: the same gates a release is cut with, on a clean Windows runner.
+#   - pnpm bootstrap: the official Vencord pinned in vencord.json, fetched and built into .vencord/
+#   - pnpm build:helper: native-audio\telinha-audio.exe (MSVC), which build:addon packs into the payload
+#   - pnpm check: typecheck, lint, stylelint, unit tests, build:addon + smoke, test:addon (fake Discord/GitHub trees)
+#   - pnpm test:coverage (when the script exists): coverage of every *.test.ts(x), uploaded as the "coverage" artifact
+#   - installer/: go vet, go test -cover, installer\build.cmd, then the update test's group G against that build
+# Nothing here touches a real Discord: every test runs on fake trees under %TEMP%.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check:
+    name: pnpm check + installer (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # package.json "engines" only says node >=22 (no .nvmrc): use the current LTS.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      # pnpm version from package.json "packageManager".
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: installer/go.mod
+          cache-dependency-path: installer/go.sum
+
+      # ------------------------------------------------------------------ caches
+      # The pnpm store holds both lockfiles' packages: ours and the pinned Vencord's (bootstrap installs .vencord/ too).
+      - name: Locate the pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the pnpm store
+        id: pnpm-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'vencord.json') }}
+          restore-keys: pnpm-store-${{ runner.os }}-
+
+      # .vencord/ is cached WITHOUT its node_modules (pnpm's junctions do not survive the cache's tar on Windows;
+      # they are re-linked from the store above). With the checkout and dist/ stamps in place, bootstrap skips the
+      # fetch and the Vencord build and only installs Vencord's dependencies.
+      - name: Restore .vencord (sources and official build)
+        id: vencord-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/vencord-src
+          key: vencord-${{ runner.os }}-${{ hashFiles('vencord.json', 'scripts/bootstrap.mjs', 'scripts/vencord.mjs') }}
+
+      - name: Put the cached .vencord in place
+        if: steps.vencord-cache.outputs.cache-hit == 'true'
+        shell: pwsh
+        run: |
+          robocopy "$env:RUNNER_TEMP\vencord-src" .vencord /E /NFL /NDL /NJH /NJS /NP
+          if ($LASTEXITCODE -ge 8) { exit $LASTEXITCODE }
+          exit 0
+
+      # ------------------------------------------------------------------ setup
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Bootstrap the pinned official Vencord
+        run: pnpm bootstrap
+
+      - name: Save the pnpm store
+        if: steps.pnpm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ steps.pnpm-cache.outputs.cache-primary-key }}
+
+      - name: Stage .vencord for the cache (without node_modules)
+        if: steps.vencord-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          robocopy .vencord "$env:RUNNER_TEMP\vencord-src" /E /XD node_modules /NFL /NDL /NJH /NJS /NP
+          if ($LASTEXITCODE -ge 8) { exit $LASTEXITCODE }
+          exit 0
+
+      - name: Save .vencord
+        if: steps.vencord-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/vencord-src
+          key: ${{ steps.vencord-cache.outputs.cache-primary-key }}
+
+      # native-audio\build.cmd finds MSVC itself (vswhere + vcvars64), which the Windows runner image ships.
+      - name: Build the audio helper (MSVC)
+        run: pnpm build:helper
+
+      # ------------------------------------------------------------------ gates
+      - name: pnpm check
+        run: pnpm check
+
+      - name: Coverage (pnpm test:coverage)
+        run: pnpm run --if-present test:coverage 2>&1 | tee "$RUNNER_TEMP/js-coverage.txt"
+
+      - name: go vet
+        working-directory: installer
+        run: go vet ./...
+
+      - name: go test -cover
+        working-directory: installer
+        run: go test -cover ./... 2>&1 | tee "$RUNNER_TEMP/go-test.txt"
+
+      - name: Build the installer
+        shell: cmd
+        run: installer\build.cmd 0.0.0-ci fast
+
+      # pnpm check skipped group G (no installer yet): re-run the update test against the build above.
+      - name: Update test with the built installer (group G)
+        run: |
+          node addon/test/run-update-test.mjs --installer dist/installer/TelinhaInstaller-cli.exe 2>&1 | tee "$RUNNER_TEMP/update-test.txt"
+          grep -q '^G the installer' "$RUNNER_TEMP/update-test.txt" || { echo "::error::run-update-test.mjs skipped group G"; exit 1; }
+
+      # ------------------------------------------------------------------ reports
+      - name: Coverage summary
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo "## Coverage"
+            echo
+            echo "### TypeScript (pnpm test:coverage)"
+            echo
+            if [ -f coverage/coverage-summary.json ]; then
+              node -e '
+                const t = require("./coverage/coverage-summary.json").total;
+                console.log("| | % | covered / total |\n|---|---:|---:|");
+                for (const k of ["lines", "statements", "functions", "branches"])
+                  if (t[k]) console.log(`| ${k} | ${t[k].pct}% | ${t[k].covered} / ${t[k].total} |`);
+              '
+              echo
+            fi
+            if [ -s "$RUNNER_TEMP/js-coverage.txt" ]; then
+              echo "<details><summary>pnpm test:coverage output</summary>"
+              echo
+              echo '```text'
+              sed 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/js-coverage.txt" | tail -n 500
+              echo '```'
+              echo "</details>"
+            else
+              echo "_No \`test:coverage\` script yet, or it did not run._"
+            fi
+            echo
+            echo "### Go installer (go test -cover)"
+            echo
+            if [ -s "$RUNNER_TEMP/go-test.txt" ]; then
+              echo '```text'
+              grep -E 'coverage:|no test files|^FAIL' "$RUNNER_TEMP/go-test.txt" || true
+              echo '```'
+            else
+              echo "_go test did not run._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage/
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage/
+          if-no-files-found: ignore

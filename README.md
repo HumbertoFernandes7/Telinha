@@ -1,5 +1,7 @@
 <p align="center"><img src="assets/telinha-icon-256.png" alt="Telinha" width="256" height="256"></p>
 
+<p align="center"><a href="https://github.com/HumbertoFernandes7/Telinha/actions/workflows/ci.yml"><img src="https://github.com/HumbertoFernandes7/Telinha/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a></p>
+
 # Telinha
 
 **Transmita sua tela para os amigos do canal de voz e assistam uns aos outros dentro do Discord, direto de PC para PC, de graça e sem servidor nosso no meio.**
