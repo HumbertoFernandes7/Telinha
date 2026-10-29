@@ -4,7 +4,7 @@
 
 *(antigo nome: PeerLive)*
 
-> **Status: em teste.** O Telinha ainda não é uma versão final. Já funciona em testes reais, mas há partes em andamento (veja [Status](#status)). Quer testar? Vá para [Como instalar](#como-instalar).
+> **Status: primeira versão (0.1.0).** O Telinha já funciona e esta é uma versão oficial, mas ainda está em evolução (veja [Status](#status)). Quer usar? Vá para [Como instalar](#como-instalar).
 
 ---
 
@@ -44,7 +44,7 @@ Os amigos precisam se achar uns aos outros e, depois disso, o vídeo segue por c
 
 ## Status
 
-Em teste. O que já foi **verificado**:
+Primeira versão (0.1.0). O que já foi **verificado**:
 
 - [x] Captura de tela e de janela dentro do Discord oficial, no Windows.
 - [x] Áudio da janela.
@@ -52,10 +52,16 @@ Em teste. O que já foi **verificado**:
 - [x] Assistir em uma janela separada do Discord.
 - [x] **Instalador + add-on sobre o Vencord oficial**, verificados em um PC real: instalação pelo `TelinhaInstaller.exe` e transmissão com o **áudio da tela inteira** funcionando (todo o som do PC, menos o do Discord; veja as [Limitações](#limitações)).
 
-Em andamento / planejado:
+Já está disponível, mas **ainda não foi testado entre dois PCs reais**:
 
-- [ ] **Em andamento:** assistir dentro da própria tela da call (hoje a transmissão abre numa janela própria).
-- [ ] **Em teste:** a distribuição final (Vencord oficial + o instalador próprio do Telinha, sem build modificado) já funciona numa versão de teste. Falta mais teste em outros PCs, e o instalador ainda não é assinado digitalmente (por isso o aviso do SmartScreen).
+- Assistir **dentro da tela da call**: um botão **Assistir** no quadradinho da pessoa, na grade da call do Discord, toca a transmissão ali mesmo. Ela também pode ser aberta em uma janela separada.
+- Lista **"Quem está assistindo"**, que abre ao clicar em **"Ao vivo · N assistindo"** na barra do Telinha, com **Expulsar** e **Liberar**.
+- Aviso quando **duas conexões dizem ser a mesma conta do Discord**: nesse caso, nenhuma das duas recebe a transmissão.
+- Opção **"Aprovar quem vai assistir"** (desligada por padrão): cada pedido espera a sua resposta, com **Permitir** ou **Recusar**.
+
+Ainda falta:
+
+- [ ] O instalador ainda não é assinado digitalmente (por isso o aviso do SmartScreen).
 
 ## Requisitos
 
@@ -95,18 +101,25 @@ Instalou uma das versões de teste antigas (o ZIP com `instalar.cmd`)? Veja a [n
 
 **Assistir** (qualquer uma destas formas)
 
+- Clique em **Assistir** no quadradinho da pessoa, na tela da call. A transmissão toca ali mesmo.
 - Clique na etiqueta **TELINHA** ao lado do nome da pessoa na lista do canal de voz.
 - Clique em **Assistir** na barra do Telinha.
 - Menu da caixa de ferramentas do Vencord (topo do Discord) > **Quem está transmitindo**.
 
-Por enquanto, a transmissão abre em uma janela própria, com tela cheia, volume e "Parar de assistir".
+A transmissão também pode abrir em uma **janela separada** (no quadradinho da call, use **Abrir em janela**; pelas outras formas ela já abre assim), com tela cheia, volume e "Parar de assistir".
+
+**Quem está assistindo**
+
+Quem transmite clica em **"Ao vivo · N assistindo"**, na barra do Telinha, e vê quem está recebendo a transmissão. Dali dá para **Expulsar** alguém (para de enviar na hora) e, depois, **Liberar** a pessoa de novo. Se duas conexões disserem ser a mesma conta do Discord, o Telinha avisa e nenhuma das duas recebe a transmissão.
 
 **Jogos:** use o modo **borderless / sem bordas**. Em tela cheia exclusiva a imagem pode aparecer preta.
 
 ## Privacidade
 
 - **Conexão direta significa que quem está na call pode ver o IP das outras pessoas.** Use só com quem você confia.
-- Por padrão, **só são aceitas pessoas que estão no mesmo canal de voz** (configuração "Rejeitar quem não está na call").
+- Por padrão, **só são aceitas pessoas que estão no mesmo canal de voz** (configuração **"Recusar quem não está na call"**).
+- Opcional: a configuração **"Aprovar quem vai assistir"** (desligada por padrão) pede a sua aprovação antes de alguém começar a assistir. Cada pedido aparece com **Permitir** e **Recusar**.
+- Você pode **expulsar** quem está assistindo a qualquer momento (**Expulsar**, na lista "Quem está assistindo").
 - Opcional: nas configurações do plugin você pode definir uma **senha do grupo** (todos precisam usar a mesma).
 - Os relays do Nostr só servem para as pessoas se encontrarem; eles não recebem seu vídeo.
 - Os **logs do plugin nunca contêm endereços IP**.
@@ -120,7 +133,6 @@ Por enquanto, a transmissão abre em uma janela própria, com tela cheia, volume
 - Como só usamos STUN (sem servidor de retransmissão), em redes muito restritivas a conexão direta pode não se estabelecer.
 - O Telinha **não injeta DLLs em jogos** (de propósito, por segurança com sistemas anti-cheat).
 - O áudio da tela inteira usa um pequeno programa auxiliar que vem no pacote, o `telinha-audio.exe` (Windows 10 versão 2004 ou superior). Ele **ainda não é assinado digitalmente**, então o antivírus ou o Controle Inteligente de Aplicativos (Smart App Control) do Windows pode marcá-lo ou bloqueá-lo. Se for bloqueado, a tela é transmitida **sem som** (o seletor mostra o motivo); transmitir uma janela com som não depende dele.
-- A visualização dentro da tela da call ainda está em desenvolvimento.
 
 ## Perguntas frequentes
 
@@ -204,10 +216,11 @@ As primeiras versões de teste (`teste-1` e `teste-2`) eram um fork do Vencord 1
 
 **Telinha** lets friends in the same Discord voice channel stream their screen or a window to each other and watch **inside Discord**, directly between their PCs (peer-to-peer, WebRTC). It is free and there is no server of ours: public Nostr relays (through the Trystero library) are used only so peers can find each other, and the video goes straight PC to PC (STUN only). It supports up to 1080p at 60 fps, and captures audio: the sound of a single window, or, for whole-screen streams, all PC sound except Discord's (Windows 10 2004+; done by a small unsigned helper, `telinha-audio.exe`, which antivirus or Smart App Control may block, in which case the screen streams without sound).
 
-It is a plugin for [Vencord](https://github.com/Vendicated/Vencord) (a Discord client mod), and it is currently **in testing**. You keep the **official Vencord**: install Telinha with [**`TelinhaInstaller.exe`**](https://github.com/HumbertoFernandes7/Telinha/releases/latest/download/TelinhaInstaller.exe) (direct download of the latest release; notes on the [latest release page](https://github.com/HumbertoFernandes7/Telinha/releases/latest)). SmartScreen will warn because it is not code-signed yet: "More info" > "Run anyway". Click Install and reopen Discord; Telinha comes enabled. It does not modify Vencord's files; running the installer again and choosing Uninstall puts Vencord back exactly as before. If you use the Vencord installer's "Repair", run the Telinha installer again. It needs official Vencord to be installed first.
+It is a plugin for [Vencord](https://github.com/Vendicated/Vencord) (a Discord client mod), and this is its first version, **0.1.0**: early, but an official release. You keep the **official Vencord**: install Telinha with [**`TelinhaInstaller.exe`**](https://github.com/HumbertoFernandes7/Telinha/releases/latest/download/TelinhaInstaller.exe) (direct download of the latest release; notes on the [latest release page](https://github.com/HumbertoFernandes7/Telinha/releases/latest)). SmartScreen will warn because it is not code-signed yet: "More info" > "Run anyway". Click Install and reopen Discord; Telinha comes enabled. It does not modify Vencord's files; running the installer again and choosing Uninstall puts Vencord back exactly as before. If you use the Vencord installer's "Repair", run the Telinha installer again. It needs official Vencord to be installed first.
 
 - **Requirements:** Windows 10 2004+/11, Discord desktop with official Vencord. Everyone who streams or watches needs Telinha.
-- **Verified so far:** screen/window capture in stock Discord on Windows, window audio, a direct connection between two homes (720p, ~57 fps, 0% loss), viewing in a separate Discord window, and the installer + add-on on top of the official Vencord on a real PC (streaming with whole-screen audio working). Watching inside the call view is in progress.
+- **Verified so far:** screen/window capture in stock Discord on Windows, window audio, a direct connection between two homes (720p, ~57 fps, 0% loss), viewing in a separate Discord window, and the installer + add-on on top of the official Vencord on a real PC (streaming with whole-screen audio working).
+- **Available, not yet tested between two real PCs:** watching right inside the call view (an "Assistir" button on the person's tile, which can still pop out into a separate window) and the viewer controls: a "Quem está assistindo" (who is watching) list with Expulsar (kick) and Liberar (unblock), a warning when two connections claim the same Discord account (neither gets the stream), and the optional "Aprovar quem vai assistir" setting (off by default) with Permitir/Recusar per request.
 - **Privacy:** a direct connection means people in the call can see each other's IP. Only people in the same voice channel are accepted by default, there is an optional group password, and logs never contain IP addresses.
 - **Limitations:** each viewer gets a separate copy from the streamer (2-4 viewers recommended); exclusive-fullscreen games may show black (use borderless); no DLL injection into games.
 - **Support:** use "Copy diagnostics" in the plugin settings and send it to the author; GitHub Issues are not used in this repository.
