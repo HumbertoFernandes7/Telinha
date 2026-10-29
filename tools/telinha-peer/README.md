@@ -11,8 +11,11 @@ As constantes do protocolo (app id `telinha-v1`, derivação da sala, relays, IC
 duplicadas em `telinha-peer.js` e em `src/plugins/telinha/protocol.ts` — **mantenha as
 duas em sincronia**.
 
-Arquivos: `index.html` + `telinha-peer.js` (sem build; o Trystero vem do jsDelivr, versão
-fixa `trystero@0.26.0`).
+Arquivos: `index.html` + `telinha-peer.js` + `password-proof.js` (sem build; o Trystero vem do
+jsDelivr, versão fixa `trystero@0.26.0`). `password-proof.js` é a cópia da prova de senha de
+`src/plugins/telinha/core/access.ts`, com o **mesmo vetor de teste**: `pnpm test:access` confere as
+duas sem navegador, e a página roda o vetor ao carregar ("Prova de senha: vetor de teste
+compartilhado com o plugin OK" em Eventos).
 
 ## Como servir
 
@@ -36,9 +39,10 @@ Abra `http://localhost:8788`. (`localhost` conta como contexto seguro, então
 | channelId | ID do canal de voz. A sala é `SHA-256("telinha-v1\|" + (guildId ou "dm") + "\|" + channelId)` em hex minúsculo. |
 | Senha do grupo | Vira o `password` do Trystero; precisa ser igual à do plugin (vazio = sem senha). |
 | IDs "no canal de voz" | Opcional: simula a admissão. Peers fora da lista aparecem marcados "FORA DO CANAL" (ou são recusados, se marcar a caixa). Vazio = não verifica. |
+| Senha da minha transmissão | Opcional: com texto, a transmissão desta página é "Com senha" (`stream.access: "password"` na presença; desafio-resposta igual ao do plugin, 5 erros bloqueiam até parar de transmitir). Vazio = "Todos da call". Mudar no meio da transmissão vale para os próximos pedidos. Nunca é lembrada. |
 | Anunciar `caps.h264HwDecode` | Pré-marcado com o resultado de `navigator.mediaCapabilities.decodingInfo` (WebRTC H.264 1080p60 8 Mbps → `powerEfficient`; `false` em erro). Desmarque/marque para **sobrescrever** e testar a escolha de codec do plugin; "usar o detectado" volta ao valor real. Mudar a caixa reenvia a presença. |
 
-Atalhos por URL (todos opcionais): `?guild=...&channel=...&name=...&user=...&password=...&members=...`.
+Atalhos por URL (todos opcionais): `?guild=...&channel=...&name=...&user=...&password=...&members=...&streamPassword=...`.
 Também valem `autojoin=1` (entra na sala sozinho, exige `channel`) e `autostream=1`
 (já transmite o padrão de teste). Cuidado: a senha na URL fica no histórico do navegador —
 use só senhas de teste. O ID falso e a senha não são lembrados entre janelas; guild, canal e
@@ -96,7 +100,7 @@ expulsa. O plugin responde na própria ação `watch` com `{ op: "pending" }` (e
 aprovação) ou `{ op: "denied", reason }`; a página trata as duas (a validação é a mesma de
 `parseWatchReply` em `src/plugins/telinha/protocol.ts`; motivo desconhecido vira "recusou").
 
-1. No plugin Telinha, ligue **Aprovar quem vai assistir** e comece a transmitir no Discord.
+1. No Discord, comece a transmitir com **Quem pode assistir: Só quem eu aprovar** (ou deixe "Todos da call" com "Exigir identidade verificada" ligada: o amigo virtual é sempre "não verificado").
 2. Aqui, entre na sala com o ID de uma conta que está na call (veja "Campos") e clique
    **Assistir** no peer do plugin.
 3. O card de "Assistindo" mostra **Aguardando o transmissor aprovar…** (o plugin espera até
@@ -118,6 +122,27 @@ aprovação) ou `{ op: "denied", reason }`; a página trata as duas (a validaç�
 Sem aprovação ligada o plugin não manda `pending`: o card fica em **Conectando…** até o
 vídeo chegar (ou 30 s sem resposta); expulsar e duplicata continuam valendo.
 
+## Fluxo 4 — "Quem pode assistir" (senha, só amigos, aprovação)
+
+Em "Peers na sala", a linha de quem transmite mostra **quem pode assistir** (o `stream.access` da
+presença): "todos da call", "🔒 com senha", "👥 só amigos" ou "✋ com aprovação" (sem o campo =
+v0.1.0).
+
+- **Com senha** (o Discord transmite com "Com senha"): **Assistir** → o card mostra
+  **Transmissão com senha: digite a senha** e um campo. **Enviar senha** calcula a prova
+  (`HMAC-SHA256`, a senha nunca trafega) e manda `{ op: "start", proof }`. Senha errada: **Senha
+  incorreta (restam N tentativas)**; na 5ª: **Senha errada 5 vezes: bloqueado até a transmissão
+  acabar** (o plugin mostra a pessoa em "Removidos", com **Liberar**). A senha certa fica lembrada
+  enquanto aquela transmissão durar: **Parar** e **Assistir** de novo não pergunta outra vez.
+  No console: `telinha.submitPassword(peerId, "senha")`.
+- **Só meus amigos do Discord**: o amigo virtual não tem token do Discord, então é sempre "não
+  verificado" e recebe **Não verificado…** (`notVerified`), mesmo usando o ID de um amigo de verdade.
+  É o resultado esperado.
+- **Só quem eu aprovar**: igual ao Fluxo 3 (`pending` → Permitir/Recusar).
+- **A página transmite com senha** (campo "Senha da minha transmissão"): o Discord, ao clicar em
+  Assistir, mostra o pedido de senha; os erros e o bloqueio aparecem em Eventos. Serve para testar o
+  lado espectador do plugin com um PC só.
+
 ## Teste com duas janelas (sem Discord)
 
 Abra a página em duas janelas **lado a lado** (de preferência não em abas: aba em segundo
@@ -134,4 +159,5 @@ duas). Em ~1 s cada uma vê a outra; uma transmite, a outra assiste.
 - Peers que não falam v1 (handshake inválido ou `v` diferente) são recusados e o motivo
   vai para o log.
 - Para automação/console: `window.telinha` (`state()`, `join({...})`, `leave()`,
-  `startTestStream()`, `stopStream()`, `watch(peerId)`, `stopWatching(peerId)`, `log()`).
+  `startTestStream()`, `stopStream()`, `watch(peerId)`, `stopWatching(peerId)`,
+  `submitPassword(peerId, senha)`, `log()`).

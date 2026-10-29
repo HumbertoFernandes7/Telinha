@@ -222,7 +222,16 @@
         /* pedido negado pelo transmissor: so o motivo e o botao, sem video/stats vazios */
         .watch-card.denied video,
         .watch-card.denied .sound-row,
-        .watch-card.denied [data-stats] {
+        .watch-card.denied [data-stats],
+        .watch-card.denied .pw-row {
+            display: none;
+        }
+
+        .pw-row {
+            margin: 6px 0;
+        }
+
+        .pw-row[hidden] {
             display: none;
         }
 
@@ -252,6 +261,7 @@
             <div><label for="channelId">channelId do canal de voz</label><input id="channelId" autocomplete="off"></div>
             <div><label for="password">Senha do grupo (vazio = sem senha)</label><input id="password" type="password" autocomplete="off"></div>
             <div><label for="members">IDs "no canal de voz" (simula a admissão; vazio = não verifica)</label><input id="members" autocomplete="off"></div>
+            <div><label for="streamPassword">Senha da minha transmissão (vazio = "Todos da call")</label><input id="streamPassword" autocomplete="off"></div>
         </div>
         <div class="row" style="margin-bottom:8px">
             <label class="check"><input id="enforce" type="checkbox"> Rejeitar de verdade quem não está na lista</label>

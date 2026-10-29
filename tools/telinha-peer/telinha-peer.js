@@ -12,6 +12,11 @@
 
 import { getRelaySockets, joinRoom, selfId } from "https://cdn.jsdelivr.net/npm/trystero@0.26.0/+esm";
 
+import {
+    computePasswordProof, isValidPassword, MAX_PASSWORD_ATTEMPTS, newPasswordNonce, normalizePassword, PASSWORD_NONCE_RE, PASSWORD_NONCE_TTL_MS,
+    PASSWORD_PROOF_RE, selfTest as passwordSelfTest, verifyPasswordProof
+} from "./password-proof.js";
+
 // ============================================================================
 // PROTOCOLO v1 — COPIA de src/plugins/telinha/protocol.ts.
 // AS DUAS COPIAS PRECISAM FICAR EM SINCRONIA (app id, derivacao da sala, relays, ICE,
@@ -23,8 +28,13 @@ import { getRelaySockets, joinRoom, selfId } from "https://cdn.jsdelivr.net/npm/
 //   "watch"    { op: "start" | "stop" }   (espectador -> transmissor)
 //   "watch"    { op: "pending" }          (transmissor -> espectador) o pedido espera a aprovacao
 //              { op: "denied", reason }   (transmissor -> espectador) reason = "kicked" | "declined" |
-//                                         "timeout" | "duplicate"; desconhecido vira "declined"
+//                                         "timeout" | "duplicate" | "friendsOnly" | "notVerified" |
+//                                         "tooManyAttempts"; desconhecido vira "declined"
 //              (ver o passo 5 e parseWatchReply em protocol.ts)
+//   "Quem pode assistir" (passo 7): presenca com stream.access = "all" | "friends" | "approval" | "password";
+//   com senha, desafio-resposta na acao "watch" (a senha nunca trafega; prova em ./password-proof.js):
+//              { op: "password", nonce, attemptsLeft?, wrong? }   (transmissor -> espectador)
+//              { op: "start", proof }                             (espectador -> transmissor)
 //   stream     room.addStream(stream, { target, metadata: { kind: "telinha-screen" } })
 //              (API do Trystero 0.26: o alvo e o metadado vao num objeto de opcoes)
 // ============================================================================
@@ -61,8 +71,15 @@ const WATCH_DENIED_TEXT = {
     kicked: "O transmissor te expulsou",
     declined: "O transmissor recusou",
     timeout: "O pedido expirou (pode pedir de novo)",
-    duplicate: "Outra conexão diz ser a mesma conta do Discord"
+    duplicate: "Outra conexão diz ser a mesma conta do Discord",
+    friendsOnly: "Esta transmissão é só para amigos do transmissor no Discord",
+    // o amigo virtual nao tem token do Discord: e sempre "nao verificado", entao "Só meus amigos" sempre da isto
+    notVerified: "Não verificado: a transmissão é só para amigos com a identidade do Discord verificada (o amigo virtual não tem token, então nunca passa)",
+    tooManyAttempts: `Senha errada ${MAX_PASSWORD_ATTEMPTS} vezes: bloqueado até a transmissão acabar`
 };
+// "Quem pode assistir" anunciado na presenca (stream.access)
+const ACCESS_TEXT = { all: "todos da call", friends: "👥 só amigos", approval: "✋ com aprovação", password: "🔒 com senha" };
+const ACCESS_MODES = Object.keys(ACCESS_TEXT);
 const WATCH_PENDING_TEXT = "Aguardando o transmissor aprovar…";
 const WATCH_CONNECTING_TEXT = "Conectando…";
 
@@ -74,13 +91,25 @@ async function deriveRoomId(guildId, voiceChannelId) {
 const isHelloMessage = d => !!d && typeof d === "object" && d.type === HELLO_TYPE && typeof d.discordUserId === "string";
 const isPresenceMessage = d => !!d && typeof d === "object" && d.v === PROTOCOL_VERSION && typeof d.discordUserId === "string" && typeof d.streaming === "boolean";
 const isWatchMessage = d => !!d && typeof d === "object" && (d.op === "start" || d.op === "stop");
+// COPIA de parseWatchRequest: prova so no formato exato (43 caracteres base64url); fora dele, start simples
+const watchProof = d => (typeof d?.proof === "string" && PASSWORD_PROOF_RE.test(d.proof) ? d.proof : null);
 // Resposta do transmissor na acao "watch" (WatchReplyMessage). COPIA de parseWatchReply em protocol.ts:
 // "pending" e "denied" validam igual; motivo desconhecido (versao futura) vira "declined".
 const isObject = d => !!d && typeof d === "object" && !Array.isArray(d);
-const WATCH_DENIED_REASONS = ["kicked", "declined", "timeout", "duplicate"];
+const WATCH_DENIED_REASONS = ["kicked", "declined", "timeout", "duplicate", "friendsOnly", "notVerified", "tooManyAttempts"];
 function parseWatchReply(data) {
     if (!isObject(data)) return null;
     if (data.op === "pending") return { op: "pending" };
+    if (data.op === "password") {
+        if (typeof data.nonce !== "string" || !PASSWORD_NONCE_RE.test(data.nonce)) return null;
+        const left = data.attemptsLeft;
+        return {
+            op: "password",
+            nonce: data.nonce,
+            ...(Number.isInteger(left) && left >= 0 && left <= 99 ? { attemptsLeft: left } : {}),
+            ...(data.wrong === true ? { wrong: true } : {})
+        };
+    }
     if (data.op !== "denied") return null;
     const reason = WATCH_DENIED_REASONS.find(r => r === data.reason) ?? "declined";
     return { op: "denied", reason };
@@ -539,9 +568,12 @@ function selfPresence() {
         streaming: !!source,
         caps: { h264HwDecode: identity.h264 }
     };
-    if (source) msg.stream = { ...source.info };
+    if (source) msg.stream = { ...source.info, access: streamAccess() };
     return msg;
 }
+// a pagina so sabe dois modos como transmissora: "Todos da call" ou "Com senha" (campo "Senha da transmissao")
+const streamPassword = () => normalizePassword(identity.streamPassword ?? "");
+const streamAccess = () => (streamPassword() ? "password" : "all");
 // Envia a presenca atual para todos (mudanca) ou so para um peer (peer novo).
 function sendPresence(target) {
     const action = presenceAction;
@@ -682,6 +714,8 @@ function onPeerLeave(peerId) {
     helloByPeer.delete(peerId);
     viewers.delete(peerId);
     outSamplers.delete(peerId);
+    pwChallenges.delete(peerId);
+    rememberedPw.delete(peerId);
     delete outbound[peerId];
     const w = watches.get(peerId);
     if (w && !w.ended) endWatch(w, "o peer saiu da sala");
@@ -709,6 +743,7 @@ function onPresence(data, { peerId }) {
     } else if (prev.caps?.h264HwDecode !== data.caps?.h264HwDecode) {
         logEvent("info", "presenca", `${data.username}: H.264 HW mudou para ${yesNo(data.caps?.h264HwDecode)}`);
     }
+    if (!data.streaming) rememberedPw.delete(peerId); // a transmissao acabou: a senha dela nao vale para a proxima
     const w = watches.get(peerId);
     if (!data.streaming && w && !w.ended) endWatch(w, "a transmissão foi encerrada pelo peer");
     render();
@@ -716,7 +751,8 @@ function onPresence(data, { peerId }) {
 
 function describeStream(s) {
     if (!s) return "—";
-    return `${s.kind} “${s.title}” ${s.width}x${s.height}@${s.fps} · áudio ${yesNo(s.hasAudio)}`;
+    const access = ACCESS_MODES.includes(s.access) ? ACCESS_TEXT[s.access] : s.access === undefined ? "todos da call (sem stream.access: v0.1.0)" : `desconhecido (${String(s.access).slice(0, 20)})`;
+    return `${s.kind} “${s.title}” ${s.width}x${s.height}@${s.fps} · áudio ${yesNo(s.hasAudio)} · quem pode assistir: ${access}`;
 }
 
 // ---- acao "watch": pedidos start/stop (lado transmissor) e respostas pending/denied (lado espectador)
@@ -740,14 +776,13 @@ function onWatch(data, { peerId }) {
             logEvent("warn", "midia", `${peerName(peerId)} pediu para assistir de novo; já estou enviando (ignorado)`);
             return;
         }
-        viewers.add(peerId);
-        outSamplers.set(peerId, new StatsSampler());
-        logEvent("info", "midia", `Enviando “${source.info.title}” para ${peerName(peerId)}`);
-        const { stream } = source;
-        Promise.all([].concat(r.addStream(stream, { target: peerId, metadata: { kind: STREAM_METADATA_KIND } })))
-            .then(() => applySenderParams(peerId, stream))
-            .catch(e => logEvent("error", "midia", `Falha ao adicionar stream para ${peerName(peerId)}: ${e}`));
+        if (streamPassword()) {
+            onPasswordStart(peerId, watchProof(data)).catch(e => logEvent("error", "senha", `Erro ao conferir a senha de ${peerName(peerId)}: ${e}`));
+            return;
+        }
+        sendStreamTo(peerId);
     } else {
+        pwChallenges.delete(peerId);
         if (viewers.delete(peerId) && source) {
             try { r.removeStream(source.stream, { target: peerId }); } catch (e) { logEvent("error", "midia", "Falha ao remover stream: " + e); }
         }
@@ -756,6 +791,74 @@ function onWatch(data, { peerId }) {
         logEvent("info", "midia", `${peerName(peerId)} parou de assistir`);
     }
     render();
+}
+
+// ---- lado transmissor "Com senha" (mesmas regras de core/access.ts: nonce de uso unico ~2 min, 5 erros bloqueiam)
+const pwChallenges = new Map(); // peerId -> { nonce, expiresAt }
+const pwWrong = new Map(); // discordUserId -> erros nesta transmissao
+const pwBlocked = new Set(); // peerIds e discordUserIds bloqueados ate a transmissao acabar
+
+function resetPasswordGuards() {
+    pwChallenges.clear();
+    pwWrong.clear();
+    pwBlocked.clear();
+}
+
+const helloIdOf = peerId => peers.get(peerId)?.hello?.discordUserId ?? helloByPeer.get(peerId)?.discordUserId ?? "";
+
+function askPassword(peerId, wrong) {
+    const viewerId = helloIdOf(peerId);
+    const attemptsLeft = Math.max(0, MAX_PASSWORD_ATTEMPTS - (pwWrong.get(viewerId) ?? 0));
+    const nonce = newPasswordNonce();
+    pwChallenges.set(peerId, { nonce, expiresAt: Date.now() + PASSWORD_NONCE_TTL_MS });
+    logEvent(wrong ? "warn" : "info", "senha", wrong
+        ? `${peerName(peerId)} errou a senha (restam ${attemptsLeft})`
+        : `${peerName(peerId)} pediu para assistir: pedindo a senha (restam ${attemptsLeft} tentativas)`);
+    watchAction?.send({ op: "password", nonce, attemptsLeft, ...(wrong ? { wrong: true } : {}) }, { target: peerId })
+        .catch(e => logEvent("error", "senha", "Falha ao pedir a senha: " + e));
+}
+
+async function onPasswordStart(peerId, proof) {
+    const viewerId = helloIdOf(peerId);
+    if (pwBlocked.has(peerId) || (viewerId && pwBlocked.has(viewerId))) {
+        logEvent("warn", "senha", `${peerName(peerId)} está bloqueado (errou a senha ${MAX_PASSWORD_ATTEMPTS} vezes)`);
+        watchAction?.send({ op: "denied", reason: "tooManyAttempts" }, { target: peerId }).catch(() => { });
+        return;
+    }
+    const ch = pwChallenges.get(peerId);
+    pwChallenges.delete(peerId); // uso unico
+    const password = streamPassword();
+    if (!proof || !ch || Date.now() >= ch.expiresAt || !password) return askPassword(peerId, false); // sem prova / desafio vencido: nao conta
+    const ok = await verifyPasswordProof({ password, nonce: ch.nonce, streamerId: identity.id, viewerId, proof });
+    if (!source || streamPassword() !== password) return askPassword(peerId, false); // a senha mudou no meio da conta
+    if (ok) {
+        logEvent("info", "senha", `${peerName(peerId)} acertou a senha`);
+        sendStreamTo(peerId);
+        render();
+        return;
+    }
+    const n = (pwWrong.get(viewerId) ?? 0) + 1;
+    pwWrong.set(viewerId, n);
+    if (n >= MAX_PASSWORD_ATTEMPTS) {
+        pwBlocked.add(peerId);
+        if (viewerId) pwBlocked.add(viewerId);
+        logEvent("warn", "senha", `${peerName(peerId)} errou a senha ${n} vezes: bloqueado até a transmissão acabar`);
+        watchAction?.send({ op: "denied", reason: "tooManyAttempts" }, { target: peerId }).catch(() => { });
+        return;
+    }
+    askPassword(peerId, true);
+}
+
+function sendStreamTo(peerId) {
+    const r = room;
+    if (!r || !source || viewers.has(peerId)) return;
+    viewers.add(peerId);
+    outSamplers.set(peerId, new StatsSampler());
+    logEvent("info", "midia", `Enviando “${source.info.title}” para ${peerName(peerId)}`);
+    const { stream } = source;
+    Promise.all([].concat(r.addStream(stream, { target: peerId, metadata: { kind: STREAM_METADATA_KIND } })))
+        .then(() => applySenderParams(peerId, stream))
+        .catch(e => logEvent("error", "midia", `Falha ao adicionar stream para ${peerName(peerId)}: ${e}`));
 }
 
 /**
@@ -833,6 +936,7 @@ function stopStreaming(reason) {
     }
     viewers.clear();
     outSamplers.clear();
+    resetPasswordGuards();
     for (const k of Object.keys(outbound)) delete outbound[k];
     s.stop();
     $("#preview").replaceChildren();
@@ -850,6 +954,12 @@ function onPeerStream(stream, peerId, metadata) {
     }
     if (metadata?.kind !== STREAM_METADATA_KIND) logEvent("warn", "midia", `Stream de ${peerName(peerId)} com metadado inesperado: ${JSON.stringify(metadata)}`);
     if (w.pending) logEvent("info", "midia", `${peerName(peerId)} aprovou o pedido (${Math.round((performance.now() - w.pendingAt) / 1000)} s depois do “aguardando”)`);
+    if (w.pwSent) {
+        rememberedPw.set(peerId, w.pwSent); // senha certa: lembrada so para esta transmissao
+        logEvent("info", "senha", `${peerName(peerId)} aceitou a senha`);
+    }
+    w.pwAsk = null;
+    w.pwSent = null;
     w.pending = false;
     w.timedOut = false;
     w.stream = stream;
@@ -915,6 +1025,7 @@ function onWatchReply(reply, peerId) {
         return;
     }
     if (reply.op === "denied") return denyWatch(w, reply.reason);
+    if (reply.op === "password") return onPasswordRequest(w, reply);
     // "pending": o transmissor espera a aprovacao dele. Depois que o stream chegou, nao significa mais nada.
     if (w.stream) {
         logEvent("warn", "midia", `“pending” de ${peerName(peerId)} ignorado (o stream já chegou)`);
@@ -931,12 +1042,83 @@ function onWatchReply(reply, peerId) {
     render();
 }
 
+// Senha aceita por transmissor, so enquanto a transmissao dele durar (igual ao plugin: assistir de novo nao pergunta).
+const rememberedPw = new Map(); // peerId -> senha normalizada
+
+// { op: "password" }: a transmissao e com senha. Usa a lembrada; senao mostra o campo no card.
+function onPasswordRequest(w, reply) {
+    if (w.stream) {
+        logEvent("warn", "senha", `Pedido de senha de ${peerName(w.peerId)} ignorado (o stream já chegou)`);
+        return;
+    }
+    w.pending = false;
+    stopFirstFramePoll(w); // enquanto a pessoa digita, sem prazo
+    if (reply.wrong && w.pwFromMemory) rememberedPw.delete(w.peerId);
+    if (!reply.wrong && w.pwSent && !w.pwStaleRetried) {
+        // desafio novo sem "errada": a prova chegou com o desafio vencido; manda a mesma senha uma vez
+        w.pwStaleRetried = true;
+        sendPasswordProof(w, reply.nonce, w.pwSent, w.pwFromMemory);
+        return;
+    }
+    const mem = rememberedPw.get(w.peerId);
+    if (!reply.wrong && !w.pwSent && mem) {
+        logEvent("info", "senha", `${peerName(w.peerId)}: transmissão com senha; usando a senha lembrada`);
+        sendPasswordProof(w, reply.nonce, mem, true);
+        return;
+    }
+    w.pwSent = null;
+    w.pwFromMemory = false;
+    w.pwStaleRetried = false;
+    w.pwAsk = { nonce: reply.nonce, wrong: !!reply.wrong, attemptsLeft: reply.attemptsLeft ?? null };
+    w.timedOut = false;
+    logEvent(reply.wrong ? "warn" : "info", "senha", reply.wrong
+        ? `${peerName(w.peerId)}: senha incorreta${reply.attemptsLeft != null ? ` (restam ${reply.attemptsLeft})` : ""}`
+        : `${peerName(w.peerId)} pediu a senha da transmissão`);
+    render();
+    w.card.pwInput.focus();
+}
+
+// Calcula a prova (HMAC) e manda { op: "start", proof }; a senha nunca sai da pagina.
+function sendPasswordProof(w, nonce, password, fromMemory) {
+    const streamerId = peers.get(w.peerId)?.presence?.discordUserId ?? helloIdOf(w.peerId);
+    w.pwAsk = null;
+    w.pwSent = password;
+    w.pwFromMemory = fromMemory;
+    // volta a esperar o quadro, com o prazo normal contado a partir de agora
+    w.timeoutMs = performance.now() - w.requestedAt + WATCH_TIMEOUT_MS;
+    w.timedOut = false;
+    startFirstFramePoll(w);
+    computePasswordProof({ password, nonce, streamerId, viewerId: identity.id })
+        .then(proof => {
+            if (watches.get(w.peerId) !== w || w.ended || w.pwSent !== password) return;
+            logEvent("info", "senha", `Prova da senha enviada para ${peerName(w.peerId)}${fromMemory ? " (senha lembrada)" : ""}`);
+            return watchAction?.send({ op: "start", proof }, { target: w.peerId });
+        })
+        .catch(e => logEvent("error", "senha", "Falha ao enviar a prova da senha: " + e));
+    render();
+}
+
+function submitPassword(w) {
+    const password = normalizePassword(w.card.pwInput.value);
+    if (!w.pwAsk) return;
+    if (!isValidPassword(password)) {
+        w.card.pwNote.textContent = password ? "Senha longa demais (máx. 64)" : "Digite a senha";
+        return;
+    }
+    w.card.pwInput.value = "";
+    w.pwStaleRetried = false;
+    sendPasswordProof(w, w.pwAsk.nonce, password, false);
+}
+
 // "denied": o transmissor nao manda (ou parou de mandar) o stream. Para de esperar, mostra o motivo, solta o
 // video e a espera; o card fica ate "Parar" e o botao "Assistir" volta (pode pedir de novo). Nao manda "stop":
 // o transmissor ja sabe.
 function denyWatch(w, reason) {
     const text = WATCH_DENIED_TEXT[reason];
     logEvent("warn", "midia", `${peerName(w.peerId)} negou o pedido para assistir (${reason}): ${text}`);
+    if (reason === "tooManyAttempts" || w.pwFromMemory) rememberedPw.delete(w.peerId);
+    w.pwAsk = null;
+    w.pwSent = null;
     w.pending = false;
     w.timedOut = false;
     w.denied = reason;
@@ -958,6 +1140,11 @@ function releaseWatch(w) {
 function watchStatus(w) {
     if (w.denied) return { cls: "err", text: WATCH_DENIED_TEXT[w.denied] };
     if (w.stream || w.ended) return { cls: "", text: "" };
+    if (w.pwAsk) {
+        const left = w.pwAsk.attemptsLeft == null ? "" : ` (restam ${w.pwAsk.attemptsLeft} tentativas)`;
+        return { cls: w.pwAsk.wrong ? "err" : "warn", text: w.pwAsk.wrong ? `Senha incorreta${left}` : `Transmissão com senha: digite a senha${left}` };
+    }
+    if (w.pwSent && !w.timedOut) return { cls: "muted", text: "Conferindo a senha…" };
     if (w.timedOut) return { cls: "err", text: `Sem resposta do transmissor em ${w.timeoutMs / 1000} s${w.pending ? " (ele não aprovou nem recusou)" : ""}` };
     if (w.pending) return { cls: "warn", text: WATCH_PENDING_TEXT };
     return { cls: "muted", text: WATCH_CONNECTING_TEXT };
@@ -985,18 +1172,25 @@ const SOUND_NO_AUDIO_LABEL = "Sem áudio nesta transmissão";
 function makeCard(w) {
     const el = document.createElement("div");
     el.className = "watch-card";
-    el.innerHTML = `<h3 data-title></h3><div class="watch-status muted" data-status role="status"></div><video autoplay playsinline muted controls></video>
+    el.innerHTML = `<h3 data-title></h3><div class="watch-status muted" data-status role="status"></div>
+        <form class="row pw-row" data-pw hidden><input data-pw-input type="password" autocomplete="off" placeholder="Senha da transmissão" aria-label="Senha da transmissão"> <button class="positive" type="submit">Enviar senha</button> <span class="muted" data-pw-note></span></form>
+        <video autoplay playsinline muted controls></video>
         <div class="row sound-row"><button class="secondary" type="button" data-sound aria-pressed="false"></button> <span class="muted" data-sound-note></span></div>
         <div data-stats></div>
         <div><button class="secondary" data-stop>Parar</button></div>`;
     const video = el.querySelector("video");
     video.muted = true; // o atributo so vale como valor inicial; garante tambem pela propriedade
     el.querySelector("[data-stop]").addEventListener("click", () => stopWatching(w.peerId));
+    el.querySelector("[data-pw]").addEventListener("submit", e => {
+        e.preventDefault();
+        submitPassword(w);
+    });
     el.querySelector("[data-sound]").addEventListener("click", () => { video.muted = !video.muted; });
     $("#watches").append(el);
     w.card = {
         el, video, title: el.querySelector("[data-title]"), status: el.querySelector("[data-status]"), stats: el.querySelector("[data-stats]"),
-        sound: el.querySelector("[data-sound]"), soundNote: el.querySelector("[data-sound-note]")
+        sound: el.querySelector("[data-sound]"), soundNote: el.querySelector("[data-sound-note]"),
+        pw: el.querySelector("[data-pw]"), pwInput: el.querySelector("[data-pw-input]"), pwNote: el.querySelector("[data-pw-note]")
     };
     w.soundOn = false;
     // volumechange dispara tanto pelo botao quanto pelos controles nativos do video
@@ -1239,6 +1433,8 @@ function renderNow() {
         w.card.status.textContent = st.text;
         w.card.status.hidden = !st.text;
         w.card.el.classList.toggle("denied", !!w.denied);
+        w.card.pw.hidden = !w.pwAsk || !!w.ended;
+        if (w.card.pw.hidden) w.card.pwNote.textContent = "";
         w.card.stats.innerHTML = grid([
             ["Resolução", s.width ? `${s.width}x${s.height}` : "—"],
             ["FPS recebido", val(s.fps)],
@@ -1291,7 +1487,8 @@ const FIELDS = {
     guildId: ["guild", "guildId"],
     channelId: ["channel", "channelId"],
     password: ["password", "pass"],
-    members: ["members"]
+    members: ["members"],
+    streamPassword: ["streamPassword"]
 };
 const STORE_KEY = "telinha-peer-v1";
 
@@ -1303,6 +1500,7 @@ function readForm() {
         guildId: f.guildId,
         channelId: f.channelId,
         password: f.password,
+        streamPassword: f.streamPassword,
         members: f.members.split(/[\s,;]+/).map(s => s.trim()).filter(Boolean),
         enforce: $("#enforce").checked,
         h264: $("#h264").checked
@@ -1318,11 +1516,11 @@ function initForm(params) {
     let sessionId = null;
     try { sessionId = sessionStorage.getItem(STORE_KEY); } catch { }
     const randomId = String(Math.floor(1e17 + Math.random() * 9e17));
-    const defaults = { userId: sessionId || randomId, username: "Amigo virtual", guildId: "", channelId: "", password: "", members: "" };
+    const defaults = { userId: sessionId || randomId, username: "Amigo virtual", guildId: "", channelId: "", password: "", members: "", streamPassword: "" };
     for (const [k, names] of Object.entries(FIELDS)) {
         const fromUrl = names.map(n => params.get(n)).find(v => v != null);
         // o ID falso nao vem do "ultimo usado": duas janelas = dois usuarios distintos
-        const fromSaved = k === "userId" || k === "password" ? undefined : saved[k];
+        const fromSaved = k === "userId" || k === "password" || k === "streamPassword" ? undefined : saved[k];
         $("#" + k).value = fromUrl ?? fromSaved ?? defaults[k];
     }
 }
@@ -1357,6 +1555,14 @@ $("#h264").addEventListener("change", () => {
     logEvent("info", "caps", `caps.h264HwDecode anunciado: ${yesNo(identity.h264)}${capsInfo && identity.h264 !== capsInfo.value ? " (sobrescrito; o detectado é " + yesNo(capsInfo.value) + ")" : ""}`);
     broadcastPresence();
 });
+$("#streamPassword").addEventListener("change", () => {
+    const before = streamAccess();
+    readForm();
+    resetPasswordGuards(); // senha nova: desafios e erros da anterior nao valem (quem ja assiste continua)
+    logEvent("info", "senha", `Quem pode assistir: ${ACCESS_TEXT[streamAccess()]}${before === streamAccess() && streamAccess() === "password" ? " (senha trocada)" : ""}`);
+    if (source) broadcastPresence();
+    render();
+});
 $("#h264-reset").addEventListener("click", () => {
     if (!capsInfo) return;
     $("#h264").checked = capsInfo.value;
@@ -1376,6 +1582,9 @@ readForm();
 newLog({ app: "browser", page: "tools/telinha-peer", trystero: TRYSTERO_VERSION, userAgent: navigator.userAgent, discordUserId: identity.id, username: identity.username });
 logEvent("info", "pagina", `Protocolo v${PROTOCOL_VERSION} · appId ${APP_ID} · Trystero ${TRYSTERO_VERSION} carregado do CDN · selfId ${selfId}`);
 tickTimer = setInterval(tick, 1000);
+passwordSelfTest()
+    .then(ok => logEvent(ok ? "info" : "error", "senha", ok ? "Prova de senha: vetor de teste compartilhado com o plugin OK" : "Prova de senha: vetor de teste NÃO confere com o plugin"))
+    .catch(e => logEvent("error", "senha", "Prova de senha: autoteste falhou: " + e));
 
 capsReady = detectH264HwDecode().then(info => {
     setCapsUi(info);
@@ -1397,7 +1606,8 @@ window.telinha = {
         roomId,
         firstPeerMs,
         selfId,
-        identity: { ...identity, password: undefined },
+        identity: { ...identity, password: undefined, streamPassword: undefined },
+        access: streamAccess(),
         peers: [...peers.values()],
         relays: { ...relays },
         streaming: source ? { type: source.type, ...source.info } : null,
@@ -1405,6 +1615,7 @@ window.telinha = {
         outbound: { ...outbound },
         watching: [...watches.values()].map(w => ({
             peerId: w.peerId, ended: w.ended, pending: w.pending, denied: w.denied, timedOut: w.timedOut, hasStream: !!w.stream, last: w.last,
+            passwordAsked: w.pwAsk ? { wrong: w.pwAsk.wrong, attemptsLeft: w.pwAsk.attemptsLeft } : null, passwordSent: !!w.pwSent,
             streamMs: w.streamMs, firstFrameMs: w.firstFrameMs, renderedMs: w.renderedMs,
             video: { width: w.card.video.videoWidth, height: w.card.video.videoHeight, paused: w.card.video.paused, muted: w.card.video.muted }
         }))
@@ -1421,5 +1632,13 @@ window.telinha = {
     startDisplayStream,
     stopStream: () => stopStreaming("console"),
     watch,
-    stopWatching
+    stopWatching,
+    // responde ao pedido de senha do card desse peer (o mesmo que digitar e clicar "Enviar senha")
+    submitPassword: (peerId, password) => {
+        const w = watches.get(peerId);
+        if (!w) return false;
+        w.card.pwInput.value = password;
+        submitPassword(w);
+        return true;
+    }
 };
