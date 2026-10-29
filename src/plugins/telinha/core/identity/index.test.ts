@@ -469,6 +469,20 @@ describe("identidade local (index.ts)", () => {
         });
     });
 
+    test("desvincular com o DataStore falhando: rejeita e nada muda (continua pronta, o token continua indo no hello)", async t => {
+        const before = getLocalIdentityState();
+        assert.equal(before.status, "ready");
+        const token = getLocalIdToken();
+        assert.ok(token);
+        t.mock.method(dataStoreImpl, "update", async () => {
+            throw new Error("IndexedDB travado");
+        });
+        await assert.rejects(forgetIdentity(), /IndexedDB travado/);
+        assert.equal(getLocalIdentityState(), before);
+        assert.equal(getLocalIdToken(), token);
+        assert.equal(stored()?.idToken, token);
+    });
+
     test("forgetIdentity: esquece o token desta conta (o certificado fica)", async () => {
         const mark = logMark();
         await forgetIdentity();

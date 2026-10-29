@@ -325,9 +325,11 @@ export async function renewIdentity({ interactive = false }: { interactive?: boo
 /** Esquece o token desta conta ("Desvincular"; o certificado continua). Quem ja verificou continua ate reconectar. */
 export async function forgetIdentity(): Promise<void> {
     const userId = myId();
+    // grava primeiro: se o DataStore falhar, nada muda (a UI avisa "não deu para desvincular" e continua coerente:
+    // autorizada, com o token ainda indo no hello)
+    if (userId) await saveStored(userId, null);
     token = null;
     lastInteractiveRenew = lastRefreshFailure = -Infinity;
-    if (userId) await saveStored(userId, null);
     setState(isIdentityConfigured() ? { status: "unauthorized" } : { status: "disabled" });
     log.info("Identidade: Telinha desvinculado desta conta neste PC");
 }
