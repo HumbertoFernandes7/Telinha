@@ -19,6 +19,7 @@ import { callViewPatches, renderCallTileStream, stopCallView } from "./ui/callVi
 import { runAction } from "./ui/common";
 import { panelJsx, voiceUserIconsJsx } from "./ui/jsxShims";
 import { renderToolboxActions, userContextMenuPatch } from "./ui/menus";
+import { startNotices, stopNotices } from "./ui/notices";
 import { closeAllViewers } from "./ui/viewerWindows";
 import { formatVoiceTagDiagnostics } from "./ui/VoiceUserTag";
 
@@ -89,10 +90,12 @@ export default definePlugin({
     toolboxActions: renderToolboxActions,
 
     start() {
+        startNotices();
         runAction("startSession", () => startSession(), () => { });
     },
 
     stop() {
+        stopNotices();
         closeAllViewers();
         stopCallView();
         runAction("stopSession", () => stopSession(), () => { });

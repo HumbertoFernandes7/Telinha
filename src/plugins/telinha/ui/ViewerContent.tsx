@@ -13,7 +13,7 @@ import type { PeerId, ViewerSession } from "@plugins/telinha/types";
 import { useEffect, useLayoutEffect, useRef, useState } from "@webpack/common";
 import type { CSSProperties, ReactNode, RefObject } from "react";
 
-import { ACCENT, errorText, findPeer, logger, peerName } from "./common";
+import { ACCENT, DENIED_TITLE, errorText, findPeer, logger, peerName } from "./common";
 import { CloseIcon, FullscreenIcon, StopIcon, VolumeIcon } from "./icons";
 
 export type ViewerMode = "popout" | "floating";
@@ -131,7 +131,9 @@ function getOverlay(session: ViewerSession | undefined, hadSession: boolean): Ov
 
     switch (session.status) {
         case "connecting":
-            return { title: "Conectando…", spinner: true };
+            return session.awaitingApproval
+                ? { title: "Aguardando o transmissor aprovar…", detail: "Ele recebeu o seu pedido para assistir.", spinner: true }
+                : { title: "Conectando…", spinner: true };
         case "waiting-first-frame":
             return { title: "Aguardando a primeira imagem…", spinner: true };
         case "playing":
@@ -139,7 +141,9 @@ function getOverlay(session: ViewerSession | undefined, hadSession: boolean): Ov
         case "ended":
             return { title: "A transmissão terminou", closable: true };
         case "error":
-            return { title: "Não foi possível assistir a esta transmissão", detail: session.error, closable: true };
+            return session.denied
+                ? { title: DENIED_TITLE[session.denied], detail: session.error, closable: true }
+                : { title: "Não foi possível assistir a esta transmissão", detail: session.error, closable: true };
         default:
             return null;
     }

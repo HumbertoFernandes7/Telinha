@@ -9,23 +9,18 @@ import ErrorBoundary from "@components/ErrorBoundary";
 import { Paragraph } from "@components/Paragraph";
 import { stopStreaming } from "@plugins/telinha/actions";
 import { useTelinhaState } from "@plugins/telinha/store";
-import type { RemotePeer } from "@plugins/telinha/types";
+import type { IdentityAlert, RemotePeer } from "@plugins/telinha/types";
 import { RenderModalProps } from "@vencord/discord-types";
 import { Modal, openModal } from "@webpack/common";
 
-import { avatarUrl, cl, currentUserId, displayName, inVoiceChannel, peerName, runAction, streamSummary, watchersLabel } from "./common";
-import { BroadcastIcon } from "./icons";
+import { Avatar } from "./Avatar";
+import { cl, currentUserId, displayName, identityAlertText, inVoiceChannel, peerName, runAction, streamSummary, watchersLabel } from "./common";
+import { WarningIcon } from "./icons";
 import { openSourcePicker } from "./SourcePickerModal";
+import { openViewersModal } from "./ViewersModal";
 import { openViewer } from "./viewerWindows";
 
-function Avatar({ userId }: { userId: string | undefined; }) {
-    const url = avatarUrl(userId, 64);
-    return url
-        ? <img className={cl("avatar")} src={url} alt="" />
-        : <span className={cl("avatar", "avatar-empty")}><BroadcastIcon size={18} /></span>;
-}
-
-function StreamerRow({ peer, watching, onWatch }: { peer: RemotePeer; watching: boolean; onWatch(): void; }) {
+function StreamerRow({ peer, alert, watching, onWatch }: { peer: RemotePeer; alert: IdentityAlert | undefined; watching: boolean; onWatch(): void; }) {
     return (
         <div className={cl("streamer")}>
             <Avatar userId={peer.discordUserId} />
@@ -35,6 +30,11 @@ function StreamerRow({ peer, watching, onWatch }: { peer: RemotePeer; watching: 
                     {streamSummary(peer.stream)}
                     {!peer.admitted && " · fora do seu canal de voz"}
                 </span>
+                {peer.duplicateIdentity && (
+                    <span className={cl("viewer-warning")}>
+                        <WarningIcon size={12} /> {alert ? identityAlertText(alert) : "Outra conexão diz ser essa pessoa — uma pode ser falsa"}
+                    </span>
+                )}
             </div>
             <Button size="small" variant={watching ? "secondary" : "primary"} onClick={onWatch}>
                 {watching ? "Abrir janela" : "Assistir"}
@@ -46,6 +46,7 @@ function StreamerRow({ peer, watching, onWatch }: { peer: RemotePeer; watching: 
 function StreamersModal({ modalProps }: { modalProps: RenderModalProps; }) {
     const state = useTelinhaState();
     const streamers = state.peers.filter(p => p.streaming);
+    const alerts = state.identityAlerts ?? [];
     const me = currentUserId();
 
     let empty: string | null = null;
@@ -64,6 +65,12 @@ function StreamersModal({ modalProps }: { modalProps: RenderModalProps; }) {
             actions={[{ text: "Fechar", variant: "secondary", onClick: modalProps.onClose }]}
         >
             <div className={cl("streamers")}>
+                {alerts.map(a => (
+                    <div key={a.discordUserId + (a.self ? ":self" : "")} className={cl("viewer-alert")} role="status">
+                        <WarningIcon size={16} />
+                        <span>{identityAlertText(a)}.</span>
+                    </div>
+                ))}
                 {state.local && (
                     <div className={cl("streamer")}>
                         <Avatar userId={me} />
@@ -74,6 +81,16 @@ function StreamersModal({ modalProps }: { modalProps: RenderModalProps; }) {
                             </span>
                         </div>
                         <div className={cl("streamer-actions")}>
+                            <Button
+                                size="small"
+                                variant="secondary"
+                                onClick={() => {
+                                    modalProps.onClose();
+                                    openViewersModal();
+                                }}
+                            >
+                                Quem assiste
+                            </Button>
                             <Button
                                 size="small"
                                 variant="secondary"
@@ -94,6 +111,7 @@ function StreamersModal({ modalProps }: { modalProps: RenderModalProps; }) {
                     <StreamerRow
                         key={peer.peerId}
                         peer={peer}
+                        alert={alerts.find(a => !a.self && a.peerIds.includes(peer.peerId))}
                         watching={!!state.viewing[peer.peerId]}
                         onWatch={() => {
                             openViewer(peer.peerId);

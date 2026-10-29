@@ -5,14 +5,22 @@
  */
 
 // Transmitir: captura (handler de display media do native.ts) + envio do stream so para quem pediu.
+//
+// Quem pode receber (refusalFor), nesta ordem:
+//   1. admitido (rejectOutsiders: no seu canal de voz) — quem esta fora nao recebe nem resposta;
+//   2. nao expulso/recusado (rt.blocked, pelo discordUserId anunciado OU pela conexao);
+//   3. sem identidade duplicada (outra conexao viva diz ter o mesmo discordUserId);
+//   4. com approveViewers ligado: aprovado nesta transmissao (senao vira um pedido pendente).
+// Recusas 2-4 respondem { op: "denied" } na acao "watch" (protocol.ts, passo 5).
 
-import { STREAM_KIND_SCREEN } from "@plugins/telinha/protocol";
+import { STREAM_KIND_SCREEN, type WatchDeniedReason, type WatchReplyMessage } from "@plugins/telinha/protocol";
 import { type CodecSetting, settings } from "@plugins/telinha/settings";
-import type { CaptureSource, PeerId, Quality, QualityLevel, StreamInfo, StreamOptions } from "@plugins/telinha/types";
+import type { BlockReason, CaptureSource, PeerId, Quality, QualityLevel, StreamInfo, StreamOptions } from "@plugins/telinha/types";
+import type { Room } from "trystero";
 
 import { startScreenAudioCapture } from "./audio/screenAudio";
 import { chooseCodec, type CodecDecision, getLocalCaps } from "./codec";
-import { getPc, type LocalCapture, peerLabel, publish, rt, setLastError } from "./context";
+import { blockOf, getPc, type LocalCapture, peerLabel, publish, rt, setLastError } from "./context";
 import { errorText, log, logThrottled } from "./log";
 import { getNative } from "./nativeApi";
 import type { SendPlan } from "./peerConnection";
@@ -39,6 +47,9 @@ export const QUALITY: Record<Quality, QualityProfile> = {
 };
 
 const SOURCE_ID_RE = /^(screen|window):-?\d{1,20}:-?\d{1,10}$/;
+
+/** Pedido de aprovacao (approveViewers) sem resposta: recusado sozinho depois disto. */
+export const APPROVAL_TIMEOUT_MS = 60_000;
 
 interface ViewerSend {
     decision: CodecDecision;
@@ -279,8 +290,200 @@ export function stopStreaming(reason = "parada pelo usuário") {
     const { local } = rt;
     if (!local) return;
     stopCapture(local, reason);
+    endOfStreamGuards();
     sendPresence();
     publish();
+}
+
+// #region quem pode receber
+
+type Refusal = "outsider" | BlockReason | "duplicate";
+
+const REFUSAL_TEXT: Record<Exclude<Refusal, "outsider">, string> = {
+    kicked: "foi expulso por você",
+    declined: "foi recusado por você nesta transmissão",
+    duplicate: "outra conexão diz ser a mesma pessoa (identidade duplicada)"
+};
+
+/** Por que esta conexao nao pode receber a transmissao agora; null = pode. A admissao (rejectOutsiders) vem primeiro. */
+function refusalFor(peerId: PeerId): Refusal | null {
+    const entry = rt.peers.get(peerId);
+    if (!entry?.hello || entry.incompatible || !entry.admitted) return "outsider";
+    const block = blockOf(peerId, entry.hello.discordUserId);
+    if (block) return block.reason;
+    if (entry.duplicate) return "duplicate";
+    return null;
+}
+
+/** Resposta ao espectador na acao "watch" (so para peers admitidos: quem esta fora nao recebe nada). */
+function reply(peerId: PeerId, message: WatchReplyMessage) {
+    if (!rt.peers.get(peerId)?.admitted) return;
+    rt.watchAction?.send(message, { target: peerId })
+        .catch(e => logThrottled(`watch-reply:${peerId}`, "warn", `Falha ao responder ${peerLabel(peerId)}: ${errorText(e)}`));
+}
+
+function deny(peerId: PeerId, reason: WatchDeniedReason) {
+    reply(peerId, { op: "denied", reason });
+}
+
+function nameOf(peerId: PeerId) {
+    const p = rt.peers.get(peerId);
+    return p?.presence?.username ?? p?.hello?.username ?? "?";
+}
+
+function cancelPending(peerId: PeerId, denyWith: WatchDeniedReason | null) {
+    const p = rt.pending.get(peerId);
+    if (!p) return false;
+    clearTimeout(p.timer);
+    rt.pending.delete(peerId);
+    if (denyWith) deny(peerId, denyWith);
+    publish();
+    return true;
+}
+
+/** Pedido com approveViewers ligado: fica pendente ate Permitir/Recusar ou 60 s. */
+function requestApproval(peerId: PeerId) {
+    const entry = rt.peers.get(peerId);
+    if (!entry?.hello) return;
+    if (rt.pending.has(peerId)) {
+        reply(peerId, { op: "pending" });
+        return;
+    }
+    const timer = setTimeout(() => {
+        if (!rt.pending.has(peerId)) return;
+        log.warn(`Pedido de ${peerLabel(peerId)} para assistir não foi respondido em ${APPROVAL_TIMEOUT_MS / 1000} s: recusado (pode pedir de novo)`);
+        cancelPending(peerId, "timeout");
+    }, APPROVAL_TIMEOUT_MS);
+    rt.pending.set(peerId, {
+        peerId,
+        discordUserId: entry.hello.discordUserId,
+        username: nameOf(peerId),
+        expiresAt: Date.now() + APPROVAL_TIMEOUT_MS,
+        timer
+    });
+    log.info(`${peerLabel(peerId)} (discord ${entry.hello.discordUserId}) pediu para assistir: esperando a sua aprovação`);
+    reply(peerId, { op: "pending" });
+    publish();
+}
+
+/** Fim da transmissao: aprovacoes, pedidos pendentes e recusas valem so para ela (expulsoes continuam). */
+function endOfStreamGuards() {
+    for (const p of rt.pending.values()) clearTimeout(p.timer);
+    rt.pending.clear();
+    rt.approved.clear();
+    for (const [id, b] of rt.blocked) if (b.reason === "declined") rt.blocked.delete(id);
+}
+
+/** Expulsa (ate sair da call) ou recusa (ate a transmissao acabar) a conexao e o discordUserId que ela anuncia. */
+function block(peerId: PeerId, reason: BlockReason): boolean {
+    const entry = rt.peers.get(peerId);
+    const id = entry?.hello?.discordUserId;
+    if (!entry || !id) return false;
+
+    const b = rt.blocked.get(id) ?? { discordUserId: id, username: nameOf(peerId), peerIds: new Set<PeerId>(), reason };
+    b.peerIds.add(peerId);
+    if (reason === "kicked") b.reason = "kicked";
+    rt.blocked.set(id, b);
+
+    const why = reason === "kicked" ? "expulso por você" : "recusado por você";
+    for (const p of rt.peers.values()) {
+        if (p.peerId !== peerId && p.hello?.discordUserId !== id) continue;
+        rt.approved.delete(p.peerId);
+        if (cancelPending(p.peerId, reason)) continue;
+        if (rt.local?.viewers.has(p.peerId)) {
+            deny(p.peerId, reason);
+            removeFrom(p.peerId, why);
+        }
+    }
+    log.warn(`${peerLabel(peerId)} (discord ${id}) foi ${why}: não recebe a sua transmissão ${reason === "kicked" ? "até você sair da call" : "até esta transmissão acabar"}`);
+    publish();
+    return true;
+}
+
+/** "Expulsar": para de mandar agora e ignora novos pedidos dessa conexao e desse discordUserId ate sair da call. */
+export function kickViewer(peerId: PeerId): boolean {
+    return block(peerId, "kicked");
+}
+
+/** "Permitir" num pedido pendente: vale ate a transmissao acabar. */
+export function approveViewer(peerId: PeerId): boolean {
+    if (!rt.pending.has(peerId)) return false;
+    cancelPending(peerId, null);
+    rt.approved.add(peerId);
+    log.info(`Você permitiu ${peerLabel(peerId)} assistir`);
+    if (rt.local) sendTo(peerId);
+    publish();
+    return true;
+}
+
+/** "Recusar" num pedido pendente: igual a expulsar, mas so ate esta transmissao acabar. */
+export function declineViewer(peerId: PeerId): boolean {
+    if (!rt.pending.has(peerId)) return false;
+    return block(peerId, "declined");
+}
+
+/** Libera de novo quem foi expulso/recusado (a pessoa precisa pedir para assistir outra vez). */
+export function unblockViewer(discordUserId: string): boolean {
+    const b = rt.blocked.get(discordUserId);
+    if (!b) return false;
+    rt.blocked.delete(discordUserId);
+    log.info(`Você liberou de novo ${b.username} (discord ${discordUserId}) para pedir para assistir`);
+    publish();
+    return true;
+}
+
+/** A opcao approveViewers mudou: ligada → quem ja assiste fica aprovado; desligada → pedidos pendentes sao atendidos. */
+export function onApproveViewersSettingChanged() {
+    if (settings.store.approveViewers) {
+        for (const peerId of rt.local?.viewers ?? []) rt.approved.add(peerId);
+        return;
+    }
+    for (const peerId of [...rt.pending.keys()]) approveViewer(peerId);
+}
+
+/** Conexoes que passaram a ter identidade duplicada (session.ts): param de receber agora, sem voltar sozinhas. */
+export function onIdentityConflict(peerIds: PeerId[]) {
+    for (const peerId of peerIds) {
+        rt.approved.delete(peerId);
+        if (cancelPending(peerId, "duplicate")) continue;
+        if (rt.local?.viewers.has(peerId)) {
+            deny(peerId, "duplicate");
+            removeFrom(peerId, "identidade duplicada: outra conexão diz ser a mesma pessoa");
+        }
+    }
+}
+
+/** Tipo da conexao com o peer (para a lista de quem assiste), sem IPs. null = sem conexao. */
+export async function connectionInfo(peerId: PeerId): Promise<string | null> {
+    const pc = getPc(peerId);
+    if (!pc) return null;
+    const report = await pc.getStats();
+    let pair: any = null;
+    report.forEach((s: any) => {
+        if (s.type === "transport" && s.selectedCandidatePairId) pair = report.get(s.selectedCandidatePairId) ?? pair;
+    });
+    if (!pair) report.forEach((s: any) => {
+        if (!pair && s.type === "candidate-pair" && s.nominated && s.state === "succeeded") pair = s;
+    });
+    if (!pair) return "Conectando…";
+    const types = [report.get(pair.localCandidateId)?.candidateType, report.get(pair.remoteCandidateId)?.candidateType];
+    const kind = types.includes("relay") ? "por servidor intermediário (TURN)"
+        : types.every(t => t === "host") ? "direta, na mesma rede"
+            : "direta pela internet (P2P)";
+    const rtt = typeof pair.currentRoundTripTime === "number" ? ` · ${Math.round(pair.currentRoundTripTime * 1000)} ms` : "";
+    return `Conexão ${kind}${rtt}`;
+}
+
+// #endregion
+
+/** Tira o stream de um peer cujo addStream terminou depois de ele ter deixado de ser espectador. */
+function retract(room: Room, local: LocalCapture, peerId: PeerId) {
+    try {
+        room.removeStream(local.stream, { target: peerId });
+    } catch (e) {
+        log.warn("Falha ao remover o stream: " + errorText(e));
+    }
+    log.info(`Envio para ${peerLabel(peerId)} desfeito (ele deixou de ser espectador enquanto a mídia era preparada)`);
 }
 
 /** Comeca a mandar a captura atual para um espectador. */
@@ -288,14 +491,21 @@ function sendTo(peerId: PeerId) {
     const { local, room } = rt;
     const entry = rt.peers.get(peerId);
     if (!local || !room || !entry) return;
-    if (!entry.admitted) {
+    const refusal = refusalFor(peerId);
+    if (refusal === "outsider") {
         logThrottled(`watch-refused:${peerId}`, "warn", `${peerLabel(peerId)} pediu para assistir, mas não está no seu canal de voz: recusado`);
+        return;
+    }
+    if (refusal) {
+        logThrottled(`watch-blocked:${peerId}`, "warn", `${peerLabel(peerId)} pediu para assistir, mas ${REFUSAL_TEXT[refusal]}: recusado`);
+        deny(peerId, refusal);
         return;
     }
     if (local.viewers.has(peerId)) return;
 
     const decision = chooseCodec(entry.presence?.caps, settings.store.codec as CodecSetting, getLocalCaps());
-    sends.set(peerId, { decision });
+    const send: ViewerSend = { decision };
+    sends.set(peerId, send);
     local.viewers.add(peerId);
     qualityOf(local)?.addViewer(peerId);
     log.info(`Enviando para ${peerLabel(peerId)}: codec ${decision.codec.toUpperCase()} (${decision.reason})`);
@@ -303,16 +513,26 @@ function sendTo(peerId: PeerId) {
         log.warn(`${peerLabel(peerId)} não decodifica H.264 por hardware: o início pode travar por 15+ s`);
     publish();
 
+    // o addStream e assincrono: se o peer for expulso/parar no meio, o removeStream de removeFrom chega antes
+    // das faixas; ao terminar, confere de novo e tira o que chegou atrasado
     Promise.all(room.addStream(local.stream, { target: peerId, metadata: { kind: STREAM_KIND_SCREEN } }))
         .then(() => {
-            if (rt.local !== local || !local.viewers.has(peerId)) return;
+            if (rt.local !== local || !local.viewers.has(peerId)) {
+                retract(room, local, peerId);
+                return;
+            }
+            if (sends.get(peerId) !== send) return;
             const quality = qualityOf(local);
             if (quality) quality.markReady(peerId);
             else void applySenderParams(peerId, local, local.quality);
         })
         .catch(e => {
             log.error(`Falha ao enviar o stream para ${peerLabel(peerId)}: ${errorText(e)}`);
-            if (local.viewers.delete(peerId)) {
+            if (rt.local !== local || !local.viewers.has(peerId)) {
+                retract(room, local, peerId);
+                return;
+            }
+            if (sends.get(peerId) === send && local.viewers.delete(peerId)) {
                 sends.delete(peerId);
                 qualityOf(local)?.removeViewer(peerId);
                 publish();
@@ -389,7 +609,13 @@ async function applySenderParams(peerId: PeerId, local: LocalCapture, level: Qua
 
 export function onWatchRequest(peerId: PeerId, op: "start" | "stop") {
     if (op === "stop") {
+        if (cancelPending(peerId, null)) log.info(`${peerLabel(peerId)} desistiu do pedido para assistir`);
         removeFrom(peerId, "parou de assistir");
+        return;
+    }
+    // rejectOutsiders primeiro: quem esta fora do canal de voz nao recebe nem resposta
+    if (!rt.peers.get(peerId)?.admitted) {
+        logThrottled(`watch-refused:${peerId}`, "warn", `${peerLabel(peerId)} pediu para assistir, mas não está no seu canal de voz: recusado`);
         return;
     }
     if (!rt.local) {
@@ -397,11 +623,19 @@ export function onWatchRequest(peerId: PeerId, op: "start" | "stop") {
         sendPresence(peerId);
         return;
     }
+    if (rt.local.viewers.has(peerId)) return;
+    const refusal = refusalFor(peerId);
+    if (!refusal && settings.store.approveViewers && !rt.approved.has(peerId)) {
+        requestApproval(peerId);
+        return;
+    }
     sendTo(peerId);
 }
 
 export function onPeerGone(peerId: PeerId) {
     sends.delete(peerId);
+    rt.approved.delete(peerId);
+    cancelPending(peerId, null);
     const { local } = rt;
     if (!local?.viewers.delete(peerId)) return;
     qualityOf(local)?.removeViewer(peerId);
@@ -410,22 +644,31 @@ export function onPeerGone(peerId: PeerId) {
 
 /** O peer deixou de ser admitido (saiu do canal de voz): para de mandar a transmissao para ele. */
 export function onAdmissionLost(peerId: PeerId) {
+    cancelPending(peerId, null);
     removeFrom(peerId, "saiu do seu canal de voz");
 }
 
-/** A sala vai ser fechada: encerra a transmissao antes (a captura nao sobrevive a troca de canal). */
+/** A sala vai ser fechada: encerra a transmissao antes (a captura nao sobrevive a troca de canal) e esquece as expulsoes. */
 export function onRoomClosing(reason: string) {
-    if (!rt.local) return;
-    stopStreaming(reason);
+    if (rt.local) stopStreaming(reason);
+    endOfStreamGuards();
+    rt.blocked.clear();
 }
 
 /**
- * Uma vez por segundo: loga o codec que o encoder realmente usa por espectador (uma vez) e, a cada
- * 2 s, roda a qualidade automatica.
+ * Uma vez por segundo: confere que todo espectador ainda pode receber (defesa extra: expulso, recusado,
+ * identidade duplicada ou fora da call nunca fica recebendo), loga o codec que o encoder realmente usa
+ * por espectador (uma vez) e, a cada 2 s, roda a qualidade automatica.
  */
 export function tick() {
     const { local } = rt;
     if (!local) return;
+    for (const peerId of [...local.viewers]) {
+        const refusal = refusalFor(peerId);
+        if (!refusal) continue;
+        if (refusal !== "outsider") deny(peerId, refusal);
+        removeFrom(peerId, refusal === "outsider" ? "não está mais admitido" : REFUSAL_TEXT[refusal]);
+    }
     if (++tickCount % 2 === 0) void qualityOf(local)?.evaluate();
     for (const peerId of local.viewers) {
         const send = sends.get(peerId);

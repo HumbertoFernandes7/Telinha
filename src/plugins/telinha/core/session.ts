@@ -9,7 +9,7 @@
 
 import {
     ACTION_PRESENCE, ACTION_WATCH, APP_ID, deriveRoomId, HELLO_TYPE, type HelloMessage, ICE_SERVERS, isHelloMessage, isPresenceMessage,
-    isWatchMessage, type PresenceMessage, PROTOCOL_VERSION, RELAY_URLS, sanitizePresence, truncateName, type WatchMessage
+    isWatchMessage, parseWatchReply, type PresenceMessage, PROTOCOL_VERSION, RELAY_URLS, sanitizePresence, truncateName, type WatchActionMessage
 } from "@plugins/telinha/protocol";
 import { settings } from "@plugins/telinha/settings";
 import { resetState } from "@plugins/telinha/store";
@@ -18,7 +18,7 @@ import { ChannelStore, FluxDispatcher, SelectedChannelStore, UserStore, VoiceSta
 import { getRelaySockets, type HandshakeReceiver, type HandshakeSender, joinRoom, type JsonValue } from "trystero";
 
 import { probeLocalCaps } from "./codec";
-import { type PeerEntry, peerLabel, publish, rt, setLastError } from "./context";
+import { getPc, type PeerEntry, peerLabel, publish, rt, setLastError } from "./context";
 import { errorText, log, logThrottled, shortId } from "./log";
 import { getNativeOrNull } from "./nativeApi";
 import { getPeerConnectionClass, setPcHooks } from "./peerConnection";
@@ -42,6 +42,8 @@ let relayTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** hello recebido no handshake, guardado ate o onPeerJoin (null = incompativel) */
 const helloByPeer = new Map<PeerId, HelloMessage | null>();
+/** peers cujo handshake anunciou o SEU discordUserId (o hello fica guardado so para o alerta) */
+const selfClaims = new Set<PeerId>();
 const pcPeerIds = new WeakMap<RTCPeerConnection, PeerId>();
 
 // #region admissao
@@ -77,6 +79,58 @@ function reevaluateAdmission() {
 
 export function onAdmissionSettingChanged() {
     if (active) reevaluateAdmission();
+}
+
+// #endregion
+
+// #region identidade duplicada
+
+/**
+ * Conexao viva para a checagem de identidade: a que caiu (ex.: o amigo reabriu o Discord e a conexao velha
+ * ainda nao saiu da sala) nao conta, senao toda reconexao pareceria uma identidade duplicada.
+ */
+function isLive(peerId: PeerId) {
+    const state = getPc(peerId)?.connectionState;
+    return state !== "disconnected" && state !== "failed" && state !== "closed";
+}
+
+/**
+ * Duas conexoes vivas dizendo ter o mesmo discordUserId: uma pode ser falsa (a identidade e so anunciada).
+ * Marca as duas; quem esta recebendo a transmissao para de receber (streaming.onIdentityConflict) e nada
+ * volta sozinho quando o conflito some: a pessoa precisa pedir para assistir de novo.
+ * Chamado na entrada/saida de peers e a cada segundo (o estado das conexoes muda sem evento da sala).
+ */
+function checkIdentities() {
+    const byUser = new Map<string, PeerEntry[]>();
+    for (const p of rt.peers.values()) {
+        if (p.incompatible || !p.hello || !isLive(p.peerId)) continue;
+        const list = byUser.get(p.hello.discordUserId);
+        if (list) list.push(p);
+        else byUser.set(p.hello.discordUserId, [p]);
+    }
+
+    const started: PeerEntry[] = [];
+    const resolved = new Set<string>();
+    for (const p of rt.peers.values()) {
+        const id = p.hello?.discordUserId;
+        const dup = !!id && !p.incompatible && (byUser.get(id)?.length ?? 0) > 1 && isLive(p.peerId);
+        if (dup === p.duplicate) continue;
+        p.duplicate = dup;
+        if (dup) started.push(p);
+        else if (id) resolved.add(id);
+    }
+    if (!started.length && !resolved.size) return;
+
+    for (const id of new Set(started.map(p => p.hello!.discordUserId))) {
+        const list = byUser.get(id) ?? [];
+        log.warn(`Duas conexões dizem ser ${list[0]?.hello?.username ?? "?"} (discord ${id}): ${list.map(p => shortId(p.peerId)).join(", ")} — uma pode ser falsa. Nenhuma recebe a sua transmissão enquanto isso durar.`);
+    }
+    for (const id of resolved) {
+        if (byUser.get(id)?.some(p => p.duplicate)) continue;
+        log.info(`Conflito de identidade do discord ${id} acabou (uma das conexões saiu). Quem quiser assistir precisa pedir de novo.`);
+    }
+    if (started.length) streaming.onIdentityConflict(started.map(p => p.peerId));
+    publish();
 }
 
 // #endregion
@@ -154,7 +208,7 @@ function joinNow(roomId: string, reason: string) {
 
     rt.room = room;
     rt.presenceAction = room.makeAction<PresenceMessage>(ACTION_PRESENCE);
-    rt.watchAction = room.makeAction<WatchMessage>(ACTION_WATCH);
+    rt.watchAction = room.makeAction<WatchActionMessage>(ACTION_WATCH);
     rt.presenceAction.onMessage = onPresence;
     rt.watchAction.onMessage = onWatch;
     room.onPeerJoin = onPeerJoin;
@@ -177,6 +231,7 @@ function leaveRoom(reason: string) {
     rt.presenceAction = rt.watchAction = null;
     rt.peers.clear();
     helloByPeer.clear();
+    selfClaims.clear();
     if (relayTimer) clearTimeout(relayTimer);
     relayTimer = null;
     log.info(`Saindo da sala (${reason})`);
@@ -216,27 +271,39 @@ async function handshake(peerId: string, send: HandshakeSender, receive: Handsha
         logThrottled(`hs-bad:${peerId}`, "warn", `Peer ${shortId(peerId)} usa outra versão do Telinha${v}; ignorado`, 60_000);
         return;
     }
+    const hello: HelloMessage = { type: HELLO_TYPE, v: data.v, discordUserId: data.discordUserId, username: truncateName(data.username) };
     if (data.discordUserId === me().id) {
-        helloByPeer.set(peerId, null);
-        logThrottled(`hs-self:${peerId}`, "warn", `Peer ${shortId(peerId)} diz ser você (${data.discordUserId}); ignorado`, 60_000);
+        // guardado so para o alerta "uma conexão diz ser você"; o peer fica incompativel (nunca e aceito)
+        selfClaims.add(peerId);
+        helloByPeer.set(peerId, hello);
+        logThrottled(`hs-self:${peerId}`, "warn", `Peer ${shortId(peerId)} diz ser você (discord ${data.discordUserId}): pode ser alguém tentando se passar por você; ignorado`, 60_000);
         return;
     }
-    helloByPeer.set(peerId, { type: HELLO_TYPE, v: data.v, discordUserId: data.discordUserId, username: truncateName(data.username) });
+    helloByPeer.set(peerId, hello);
 }
 
 function onPeerJoin(peerId: PeerId) {
     const hello = helloByPeer.get(peerId) ?? null;
+    const claimsSelf = selfClaims.has(peerId);
     const entry: PeerEntry = {
         peerId,
         hello,
         presence: null,
-        inVoice: hello ? isInMyVoiceChannel(hello.discordUserId) : false,
-        incompatible: !hello,
-        admitted: false
+        inVoice: hello && !claimsSelf ? isInMyVoiceChannel(hello.discordUserId) : false,
+        incompatible: !hello || claimsSelf,
+        admitted: false,
+        duplicate: false,
+        claimsSelf
     };
     entry.admitted = computeAdmitted(entry);
     rt.peers.set(peerId, entry);
+    if (claimsSelf) {
+        logThrottled("self-claim-join", "warn", `Uma conexão (${shortId(peerId)}) diz ser você: ela não vê sua presença nem recebe sua transmissão`, 60_000);
+        publish();
+        return;
+    }
     if (!hello) return;
+    checkIdentities();
 
     if (entry.admitted) {
         log.info(`${peerLabel(peerId)} entrou na sala${entry.inVoice ? "" : " (fora do seu canal de voz, aceito porque a recusa está desligada)"}`);
@@ -254,6 +321,8 @@ function onPeerLeave(peerId: PeerId) {
     viewing.onPeerGone(peerId);
     rt.peers.delete(peerId);
     helloByPeer.delete(peerId);
+    selfClaims.delete(peerId);
+    checkIdentities();
     publish();
 }
 
@@ -283,11 +352,16 @@ function onPresence(data: PresenceMessage, { peerId }: { peerId: string; }) {
     publish();
 }
 
-function onWatch(data: WatchMessage, { peerId }: { peerId: string; }) {
-    if (!isWatchMessage(data)) return;
+function onWatch(data: WatchActionMessage, { peerId }: { peerId: string; }) {
     const entry = rt.peers.get(peerId);
     if (!entry?.hello || entry.incompatible) return;
-    streaming.onWatchRequest(peerId, data.op);
+    if (isWatchMessage(data)) {
+        streaming.onWatchRequest(peerId, data.op);
+        return;
+    }
+    // resposta do transmissor a um pedido nosso (pending/denied); so mexe na sessao que assiste esse peer
+    const reply = parseWatchReply(data);
+    if (reply) viewing.onWatchReply(peerId, reply);
 }
 
 function onPeerStream(stream: MediaStream, peerId: string, metadata?: JsonValue) {
@@ -327,6 +401,7 @@ function onCspViolation(e: SecurityPolicyViolationEvent) {
 
 function tick() {
     tickCount++;
+    if (rt.room) checkIdentities();
     streaming.tick();
     if (tickCount % 2 === 0) viewing.sampleStats();
 }
@@ -393,6 +468,7 @@ export function stopSession() {
     rt.channelId = rt.guildId = rt.lastError = null;
     rt.peers.clear();
     helloByPeer.clear();
+    selfClaims.clear();
     log.info("Sessão encerrada");
     resetState();
 }

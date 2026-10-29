@@ -26,6 +26,20 @@
 //    metadata: { kind: STREAM_KIND_SCREEN } }) so para esse peer; { op: "stop" } →
 //    room.removeStream(stream, { target: peerId }). Ao parar de transmitir: presenca com
 //    streaming:false e removeStream para todos. O espectador recebe em onPeerStream.
+// 5. Resposta do transmissor (opcional, adicionada sem mudar PROTOCOL_VERSION), na MESMA acao
+//    "watch", transmissor → espectador (WatchReplyMessage):
+//      { op: "pending" }            o pedido espera a aprovacao do transmissor (opcao "aprovar
+//                                   quem vai assistir"); o espectador estende o prazo de resposta
+//                                   (ate ~60 s + folga) e mostra "aguardando aprovacao".
+//      { op: "denied", reason }     o transmissor nao vai mandar (ou parou de mandar) o stream:
+//                                   reason = "kicked" (expulso), "declined" (recusado),
+//                                   "timeout" (pedido de aprovacao expirou; pode pedir de novo) ou
+//                                   "duplicate" (outra conexao na sala diz ter o mesmo discordUserId).
+//                                   O espectador para de esperar e mostra o motivo.
+//    So e enviado a peers admitidos (quem esta fora do canal de voz continua sem resposta).
+//    Compatibilidade: isWatchMessage so aceita "start"/"stop", entao versoes antigas (e o amigo
+//    virtual em tools/telinha-peer/, que ainda nao trata a resposta) ignoram essas mensagens;
+//    o lado novo ignora "reason" desconhecido tratando como "declined".
 // ============================================================================
 
 /** Versao do protocolo; vai no handshake (`v`) e na presenca (`v`). */
@@ -109,6 +123,17 @@ export type WatchMessage = {
     op: "start" | "stop";
 };
 
+/** Motivo de uma recusa do transmissor (WatchReplyMessage "denied"). */
+export type WatchDeniedReason = "kicked" | "declined" | "timeout" | "duplicate";
+
+/** Resposta do transmissor para o espectador, na mesma acao "watch" (ver o passo 5 no topo). */
+export type WatchReplyMessage =
+    | { op: "pending"; }
+    | { op: "denied"; reason: WatchDeniedReason; };
+
+/** Tudo o que trafega na acao "watch". */
+export type WatchActionMessage = WatchMessage | WatchReplyMessage;
+
 const SNOWFLAKE_RE = /^\d{1,25}$/;
 const MAX_NAME = 64;
 const MAX_TITLE = 200;
@@ -173,6 +198,17 @@ export function sanitizePresence(data: PresenceMessage): PresenceMessage {
 
 export function isWatchMessage(data: unknown): data is WatchMessage {
     return isObject(data) && (data.op === "start" || data.op === "stop");
+}
+
+const DENIED_REASONS: readonly WatchDeniedReason[] = ["kicked", "declined", "timeout", "duplicate"];
+
+/** Valida a resposta do transmissor; motivo desconhecido (versao futura) vira "declined". */
+export function parseWatchReply(data: unknown): WatchReplyMessage | null {
+    if (!isObject(data)) return null;
+    if (data.op === "pending") return { op: "pending" };
+    if (data.op !== "denied") return null;
+    const reason = DENIED_REASONS.find(r => r === data.reason) ?? "declined";
+    return { op: "denied", reason };
 }
 
 export function truncateName(name: string) {

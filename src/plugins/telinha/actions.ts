@@ -76,6 +76,34 @@ export function unwatch(peerId: PeerId): void {
     viewing.unwatch(peerId);
 }
 
+/**
+ * Expulsa um espectador: para de mandar a transmissao agora e ignora novos pedidos dessa conexao e de quem
+ * diz ter o mesmo discordUserId ate voce sair da call. Devolve false se o peer nao existe mais.
+ */
+export function kickViewer(peerId: PeerId): boolean {
+    return streaming.kickViewer(peerId);
+}
+
+/** "Permitir" num pedido pendente (opcao approveViewers): vale ate a transmissao acabar. */
+export function approveViewer(peerId: PeerId): boolean {
+    return streaming.approveViewer(peerId);
+}
+
+/** "Recusar" num pedido pendente: igual a expulsar, mas so ate esta transmissao acabar. */
+export function declineViewer(peerId: PeerId): boolean {
+    return streaming.declineViewer(peerId);
+}
+
+/** Libera de novo quem foi expulso/recusado (ve getState().blocked). A pessoa precisa pedir para assistir outra vez. */
+export function unblockViewer(discordUserId: string): boolean {
+    return streaming.unblockViewer(discordUserId);
+}
+
+/** Tipo da conexao com o peer em pt-BR (ex.: "Conexão direta pela internet (P2P) · 35 ms"), sem IPs; null = sem conexao. */
+export function getConnectionInfo(peerId: PeerId): Promise<string | null> {
+    return streaming.connectionInfo(peerId).catch(() => null);
+}
+
 export function findPeerByDiscordId(id: string): RemotePeer | undefined {
     return getState().peers.find(p => p.discordUserId === id);
 }

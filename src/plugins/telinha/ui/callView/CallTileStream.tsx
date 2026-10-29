@@ -15,7 +15,7 @@ import ErrorBoundary from "@components/ErrorBoundary";
 import { getLocalPreviewStream } from "@plugins/telinha/actions";
 import { useTelinhaState } from "@plugins/telinha/store";
 import type { PeerId, RemotePeer, ViewerSession } from "@plugins/telinha/types";
-import { ACCENT, currentUserId, errorText, logger, peerName, watchersLabel } from "@plugins/telinha/ui/common";
+import { ACCENT, currentUserId, DENIED_TITLE, errorText, logger, peerName, watchersLabel } from "@plugins/telinha/ui/common";
 import { BroadcastIcon, CloseIcon, FullscreenIcon, StopIcon, VolumeIcon } from "@plugins/telinha/ui/icons";
 import { isViewerOpen, openViewer } from "@plugins/telinha/ui/viewerWindows";
 import { PopoutWindowStore, useEffect, useRef, useState } from "@webpack/common";
@@ -333,7 +333,9 @@ interface StatusInfo {
 function getStatus(session: ViewerSession): StatusInfo | null {
     switch (session.status) {
         case "connecting":
-            return { title: "Conectando…", spinner: true };
+            return session.awaitingApproval
+                ? { title: "Aguardando o transmissor aprovar…", spinner: true }
+                : { title: "Conectando…", spinner: true };
         case "waiting-first-frame":
             return { title: "Aguardando a primeira imagem…", spinner: true };
         case "playing":
@@ -341,7 +343,7 @@ function getStatus(session: ViewerSession): StatusInfo | null {
         case "ended":
             return { title: "A transmissão terminou", finished: true };
         case "error":
-            return { title: "Não foi possível assistir", detail: session.error, finished: true };
+            return { title: session.denied ? DENIED_TITLE[session.denied] : "Não foi possível assistir", detail: session.error, finished: true };
         default:
             return null;
     }

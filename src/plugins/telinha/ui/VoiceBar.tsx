@@ -8,7 +8,9 @@
 // screen-share buttons are) and above the account panel. Only shown while in a voice channel or streaming.
 //
 //   [ Transmitir com Telinha ]             idle
-//   ● Ao vivo · 2 assistindo                streaming (click: list / switch source)
+//   ● Ao vivo · 2 assistindo                streaming (click: who is watching → kick / switch source)
+//   Ana quer assistir  Permitir  Recusar    request waiting for approval (approveViewers)
+//   ⚠ Duas conexões dizem ser Ana…          suspicious identity (click: details)
 //   720p60 · menor: processador             auto quality (current level; reason when lowered, full text in tooltip)
 //   ⚠ <capture warning>                     black image / frozen window (clears itself)
 //   [ Parar transmissão ]
@@ -22,10 +24,11 @@ import type { QualityReason } from "@plugins/telinha/types";
 import { SelectedChannelStore, Tooltip, useStateFromStores } from "@webpack/common";
 import type { ReactNode } from "react";
 
-import { cl, findPeer, peerName, runAction, watchersLabel } from "./common";
+import { cl, displayName, findPeer, identityAlertText, peerName, runAction, watchersLabel } from "./common";
 import { BroadcastIcon, CloseIcon, EyeIcon, StopIcon, WarningIcon } from "./icons";
 import { openSourcePicker } from "./SourcePickerModal";
 import { openStreamersModal } from "./StreamersModal";
+import { approveWithToast, declineWithToast, openViewersModal } from "./ViewersModal";
 import { openViewer } from "./viewerWindows";
 
 const REASON_SHORT: Record<QualityReason, string> = {
@@ -72,7 +75,7 @@ function VoiceBarInner() {
                             className={cl("bar-row", "bar-status")}
                             onClick={() => {
                                 props.onClick();
-                                openStreamersModal();
+                                openViewersModal();
                             }}
                         >
                             <span className={cl("bar-live-dot")} />
@@ -83,6 +86,33 @@ function VoiceBarInner() {
                     )}
                 </Tooltip>
             )}
+
+            {local?.pendingViewers?.map(p => {
+                const name = displayName(p.discordUserId, p.username);
+                return (
+                    <div key={p.peerId} className={cl("bar-request")} role="alert" title={`${name} quer assistir sua transmissão (recusado sozinho em 60 s)`}>
+                        <span className={cl("bar-row-text")}>{name} quer assistir</span>
+                        <button className={cl("bar-request-btn", "bar-request-allow")} onClick={() => approveWithToast(p.peerId, name)}>Permitir</button>
+                        <button className={cl("bar-request-btn")} onClick={() => declineWithToast(p.peerId, name)}>Recusar</button>
+                    </div>
+                );
+            })}
+
+            {state.identityAlerts?.map(a => {
+                const text = `${identityAlertText(a)}${local && !a.self ? ". Nenhuma recebe sua transmissão." : ""}`;
+                return (
+                    <button
+                        key={a.discordUserId + (a.self ? ":self" : "")}
+                        className={cl("bar-row", "bar-error", "bar-wrap")}
+                        role="alert"
+                        title={text}
+                        onClick={() => local ? openViewersModal() : openStreamersModal()}
+                    >
+                        <WarningIcon size={14} className={cl("bar-row-icon")} />
+                        <span className={cl("bar-row-text")}>{text}</span>
+                    </button>
+                );
+            })}
 
             {local?.autoQuality && (
                 <div

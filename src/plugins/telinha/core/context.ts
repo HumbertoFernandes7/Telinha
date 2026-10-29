@@ -4,9 +4,12 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import type { HelloMessage, PresenceMessage, WatchMessage } from "@plugins/telinha/protocol";
+import type { HelloMessage, PresenceMessage, WatchActionMessage } from "@plugins/telinha/protocol";
 import { setState } from "@plugins/telinha/store";
-import type { AutoQualityState, CaptureSource, PeerId, Quality, RemotePeer, StreamInfo, TelinhaState, ViewerSession, ViewerStatus } from "@plugins/telinha/types";
+import type {
+    AutoQualityState, BlockedViewer, BlockReason, CaptureSource, IdentityAlert, PeerId, PendingViewer, Quality, RemotePeer, StreamInfo,
+    TelinhaState, ViewDeniedReason, ViewerSession, ViewerStatus
+} from "@plugins/telinha/types";
 import type { MessageAction, Room } from "trystero";
 
 import { shortId } from "./log";
@@ -26,6 +29,27 @@ export interface PeerEntry {
      * So peers admitidos recebem nossa presenca e nossa transmissao. Cache de presence.isAdmitted().
      */
     admitted: boolean;
+    /** outra conexao viva na sala anuncia o mesmo discordUserId (session.ts → checkIdentities) */
+    duplicate: boolean;
+    /** o handshake anunciou o SEU discordUserId (e incompatible tambem: nunca e aceito) */
+    claimsSelf: boolean;
+}
+
+/** Expulso/recusado: bloqueia o discordUserId anunciado E as conexoes (peerIds) que foram expulsas. */
+export interface BlockEntry {
+    discordUserId: string;
+    username: string;
+    peerIds: Set<PeerId>;
+    reason: BlockReason;
+}
+
+/** Pedido para assistir esperando aprovacao (opcao approveViewers). */
+export interface PendingEntry {
+    peerId: PeerId;
+    discordUserId: string;
+    username: string;
+    expiresAt: number;
+    timer: ReturnType<typeof setTimeout>;
 }
 
 export interface LocalCapture {
@@ -47,6 +71,10 @@ export interface ViewerEntry {
     error?: string;
     stream: MediaStream | null;
     stats?: ViewerSession["stats"];
+    /** o transmissor respondeu "pending": esperando a aprovacao dele */
+    awaitingApproval?: boolean;
+    /** o transmissor respondeu "denied" */
+    denied?: ViewDeniedReason;
     /** performance.now() do pedido */
     requestedAt: number;
     /** performance.now() do primeiro quadro decodificado */
@@ -62,14 +90,30 @@ export interface ViewerEntry {
 export const rt = {
     room: null as Room | null,
     presenceAction: null as MessageAction<PresenceMessage> | null,
-    watchAction: null as MessageAction<WatchMessage> | null,
+    watchAction: null as MessageAction<WatchActionMessage> | null,
     channelId: null as string | null,
     guildId: null as string | null,
     peers: new Map<PeerId, PeerEntry>(),
     local: null as LocalCapture | null,
     viewing: new Map<PeerId, ViewerEntry>(),
-    lastError: null as string | null
+    lastError: null as string | null,
+    /** expulsos (ate sair da sala) e recusados (ate a transmissao acabar), por discordUserId anunciado */
+    blocked: new Map<string, BlockEntry>(),
+    /** conexoes aprovadas nesta transmissao (opcao approveViewers) */
+    approved: new Set<PeerId>(),
+    /** pedidos esperando aprovacao */
+    pending: new Map<PeerId, PendingEntry>()
 };
+
+/** Bloqueio que vale para esta conexao: pelo discordUserId anunciado ou pela propria conexao. */
+export function blockOf(peerId: PeerId, discordUserId: string | undefined): BlockEntry | null {
+    if (discordUserId) {
+        const byUser = rt.blocked.get(discordUserId);
+        if (byUser) return byUser;
+    }
+    for (const b of rt.blocked.values()) if (b.peerIds.has(peerId)) return b;
+    return null;
+}
 
 export function peerLabel(peerId: PeerId) {
     const p = rt.peers.get(peerId);
@@ -96,19 +140,38 @@ let scheduled = false;
 
 function buildSnapshot(): TelinhaState {
     const peers: RemotePeer[] = [];
+    const alerts = new Map<string, IdentityAlert>();
     for (const p of rt.peers.values()) {
+        if (p.claimsSelf && p.hello) {
+            const a = alerts.get(p.hello.discordUserId) ?? { discordUserId: p.hello.discordUserId, username: p.hello.username, peerIds: [], self: true };
+            a.peerIds.push(p.peerId);
+            alerts.set(p.hello.discordUserId, a);
+        }
         if (p.incompatible || !p.hello) continue;
         const pres = p.presence;
+        const username = pres?.username ?? p.hello.username;
+        const block = blockOf(p.peerId, p.hello.discordUserId);
         peers.push({
             peerId: p.peerId,
             discordUserId: p.hello.discordUserId,
-            username: pres?.username ?? p.hello.username,
+            username,
             streaming: !!pres?.streaming,
             ...(pres?.streaming && pres.stream ? { stream: { ...pres.stream } } : {}),
-            admitted: p.admitted
+            admitted: p.admitted,
+            inVoice: p.inVoice,
+            ...(p.duplicate ? { duplicateIdentity: true } : {}),
+            ...(block ? { blocked: block.reason } : {})
         });
+        if (p.duplicate) {
+            const a = alerts.get(p.hello.discordUserId) ?? { discordUserId: p.hello.discordUserId, username, peerIds: [], self: false };
+            a.peerIds.push(p.peerId);
+            alerts.set(p.hello.discordUserId, a);
+        }
     }
     peers.sort((a, b) => a.username.localeCompare(b.username) || a.peerId.localeCompare(b.peerId));
+
+    const blocked: BlockedViewer[] = [...rt.blocked.values()].map(b => ({ discordUserId: b.discordUserId, username: b.username, reason: b.reason }));
+    const pendingViewers: PendingViewer[] = [...rt.pending.values()].map(p => ({ peerId: p.peerId, discordUserId: p.discordUserId, username: p.username, expiresAt: p.expiresAt }));
 
     const viewing: Record<PeerId, ViewerSession> = {};
     for (const v of rt.viewing.values()) {
@@ -117,7 +180,9 @@ function buildSnapshot(): TelinhaState {
             stream: v.stream,
             status: v.status,
             ...(v.error ? { error: v.error } : {}),
-            ...(v.stats ? { stats: { ...v.stats } } : {})
+            ...(v.stats ? { stats: { ...v.stats } } : {}),
+            ...(v.awaitingApproval && v.status === "connecting" ? { awaitingApproval: true } : {}),
+            ...(v.denied && v.status === "error" ? { denied: v.denied } : {})
         };
     }
 
@@ -134,11 +199,14 @@ function buildSnapshot(): TelinhaState {
                 startedAt: local.startedAt,
                 viewers: [...local.viewers],
                 autoQuality: local.autoQuality ?? null,
-                captureWarning: local.captureWarning ?? null
+                captureWarning: local.captureWarning ?? null,
+                pendingViewers
             }
             : null,
         viewing,
-        lastError: rt.lastError
+        lastError: rt.lastError,
+        blocked,
+        identityAlerts: [...alerts.values()]
     };
 }
 

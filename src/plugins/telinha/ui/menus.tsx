@@ -13,10 +13,11 @@ import { getState, useTelinhaState } from "@plugins/telinha/store";
 import type { User } from "@vencord/discord-types";
 import { Menu, SelectedChannelStore, useStateFromStores } from "@webpack/common";
 
-import { currentUserId, runAction, watchersLabel } from "./common";
+import { currentUserId, peerName, runAction, watchersLabel } from "./common";
 import { BroadcastIcon } from "./icons";
 import { openSourcePicker } from "./SourcePickerModal";
 import { openStreamersModal } from "./StreamersModal";
+import { kickWithToast, openViewersModal } from "./ViewersModal";
 import { openViewer } from "./viewerWindows";
 
 const MenuBroadcastIcon = () => <BroadcastIcon size={18} />;
@@ -34,6 +35,12 @@ export function renderToolboxActions() {
                 key="vc-telinha-stop"
                 label={`Parar transmissão (${watchersLabel(state.local.viewers.length)})`}
                 action={() => runAction("stopStreaming", () => stopStreaming())}
+            />,
+            <Menu.MenuItem
+                id="vc-telinha-viewers"
+                key="vc-telinha-viewers"
+                label="Quem está assistindo"
+                action={openViewersModal}
             />,
             <Menu.MenuItem
                 id="vc-telinha-switch"
@@ -82,16 +89,28 @@ export const userContextMenuPatch: NavContextMenuPatchCallback = (children, { us
     }
 
     const peer = findPeerByDiscordId(user.id);
-    if (!peer?.streaming) return;
+    // quem diz ser essa pessoa e esta recebendo a sua transmissao (pode haver mais de uma conexao)
+    const watchingMe = state.local ? state.peers.filter(p => p.discordUserId === user.id && state.local!.viewers.includes(p.peerId)) : [];
+    if (!peer?.streaming && !watchingMe.length) return;
 
     children.push(
         <Menu.MenuGroup>
-            <Menu.MenuItem
-                id="vc-telinha-watch"
-                label={state.viewing[peer.peerId] ? "Abrir transmissão Telinha" : "Assistir transmissão Telinha"}
-                icon={MenuBroadcastIcon}
-                action={() => openViewer(peer.peerId)}
-            />
+            {peer?.streaming && (
+                <Menu.MenuItem
+                    id="vc-telinha-watch"
+                    label={state.viewing[peer.peerId] ? "Abrir transmissão Telinha" : "Assistir transmissão Telinha"}
+                    icon={MenuBroadcastIcon}
+                    action={() => openViewer(peer.peerId)}
+                />
+            )}
+            {watchingMe.length > 0 && (
+                <Menu.MenuItem
+                    id="vc-telinha-kick"
+                    label="Expulsar da sua transmissão Telinha"
+                    color="danger"
+                    action={() => kickWithToast(watchingMe[0].peerId, peerName(watchingMe[0]))}
+                />
+            )}
         </Menu.MenuGroup>
     );
 };

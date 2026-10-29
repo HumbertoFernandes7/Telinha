@@ -8,7 +8,7 @@
 // read inside the functions, which run at render/click time.
 
 import { settings } from "@plugins/telinha/settings";
-import type { PeerId, Quality, RemotePeer, StreamInfo, TelinhaState } from "@plugins/telinha/types";
+import type { IdentityAlert, PeerId, Quality, RemotePeer, StreamInfo, TelinhaState, ViewDeniedReason } from "@plugins/telinha/types";
 import { classNameFactory } from "@utils/css";
 import { Logger } from "@utils/Logger";
 import { SelectedChannelStore, showToast, UserStore } from "@webpack/common";
@@ -100,6 +100,22 @@ export function pluralPeople(n: number, singular: string, plural: string) {
 
 export function watchersLabel(n: number) {
     return n === 0 ? "ninguém assistindo ainda" : `${pluralPeople(n, "pessoa", "pessoas")} assistindo`;
+}
+
+/** Titulo do aviso quando o transmissor encerra/recusa a sua visualizacao (o detalhe vem em ViewerSession.error) */
+export const DENIED_TITLE: Record<ViewDeniedReason, string> = {
+    kicked: "O transmissor encerrou sua visualização",
+    declined: "O transmissor recusou sua visualização",
+    timeout: "O transmissor não respondeu ao seu pedido",
+    duplicate: "Transmissão bloqueada por segurança"
+};
+
+/** Aviso de identidade suspeita, ex.: "Duas conexões dizem ser Ana — uma pode ser falsa" */
+export function identityAlertText(alert: IdentityAlert): string {
+    if (alert.self) return "Uma conexão na call diz ser você — alguém pode estar se passando por você";
+    const name = displayName(alert.discordUserId, alert.username);
+    const count = alert.peerIds.length === 2 ? "Duas conexões" : `${alert.peerIds.length} conexões`;
+    return `${count} dizem ser ${name} — uma pode ser falsa`;
 }
 
 export function streamSummary(info: StreamInfo | undefined): string {

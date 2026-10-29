@@ -17,7 +17,9 @@ const INITIAL_STATE: TelinhaState = Object.freeze({
     peers: [],
     local: null,
     viewing: {},
-    lastError: null
+    lastError: null,
+    blocked: [],
+    identityAlerts: []
 });
 
 let state: TelinhaState = INITIAL_STATE;
@@ -89,8 +91,10 @@ export function formatDiagnostics(): string {
         `gerado: ${new Date().toISOString()}`,
         `agente: ${typeof navigator !== "undefined" ? navigator.userAgent : "?"}`,
         `na sala: ${s.inRoom ? "sim" : "não"}; canal: ${s.channelId ?? "—"}; erro: ${s.lastError ?? "—"}`,
-        `peers: ${s.peers.map(p => `${p.username}${p.admitted ? "" : " (fora do canal)"}${p.streaming ? " [transmitindo]" : ""}`).join(", ") || "nenhum"}`,
-        `transmitindo: ${s.local ? `${s.local.source.kind} ${s.local.quality}${s.local.hasAudio ? " com áudio" : ""}, espectadores: ${s.local.viewers.length}` : "não"}`,
+        `peers: ${s.peers.map(p => `${p.username}${p.admitted ? "" : " (fora do canal)"}${p.duplicateIdentity ? " (identidade duplicada)" : ""}${p.blocked ? ` [${p.blocked === "kicked" ? "expulso" : "recusado"}]` : ""}${p.streaming ? " [transmitindo]" : ""}`).join(", ") || "nenhum"}`,
+        `transmitindo: ${s.local ? `${s.local.source.kind} ${s.local.quality}${s.local.hasAudio ? " com áudio" : ""}, espectadores: ${s.local.viewers.length}, pedidos pendentes: ${s.local.pendingViewers?.length ?? 0}` : "não"}`,
+        `alertas de identidade: ${(s.identityAlerts ?? []).map(a => `${a.self ? "diz ser você" : a.username} (${a.peerIds.length} conexões)`).join(", ") || "nenhum"}`,
+        `bloqueados: ${(s.blocked ?? []).map(b => `${b.username} (${b.reason === "kicked" ? "expulso" : "recusado"})`).join(", ") || "ninguém"}`,
         `assistindo: ${Object.values(s.viewing).map(v => `${v.peerId.slice(0, 6)}=${v.status}${v.stats ? ` ${v.stats.width}x${v.stats.height}@${v.stats.fps} ${v.stats.kbps} kbps` : ""}`).join(", ") || "nada"}`,
         "",
         "eventos:",

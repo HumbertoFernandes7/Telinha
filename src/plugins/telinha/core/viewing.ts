@@ -7,14 +7,24 @@
 // Assistir: pede o stream ao transmissor, recebe no onPeerStream, detecta o primeiro quadro
 // decodificado pelas estatisticas do receiver e publica estatisticas basicas a cada 2 s.
 
-import { type PresenceMessage, STREAM_KIND_SCREEN } from "@plugins/telinha/protocol";
-import type { PeerId } from "@plugins/telinha/types";
+import { type PresenceMessage, STREAM_KIND_SCREEN, type WatchReplyMessage } from "@plugins/telinha/protocol";
+import type { PeerId, ViewDeniedReason } from "@plugins/telinha/types";
 import type { JsonValue } from "trystero";
 
 import { getPc, peerLabel, publish, rt, type ViewerEntry } from "./context";
 import { errorText, log, logThrottled } from "./log";
 
 const RESPONSE_TIMEOUT_MS = 20_000;
+/** o transmissor pediu para esperar a aprovacao dele (60 s do lado dele + folga de rede) */
+const APPROVAL_WAIT_MS = 75_000;
+
+/** Frase pronta (pt-BR) para cada recusa do transmissor; vai em ViewerSession.error. */
+const DENIED_TEXT: Record<ViewDeniedReason, string> = {
+    kicked: "O transmissor encerrou a sua visualização.",
+    declined: "O transmissor recusou o seu pedido para assistir.",
+    timeout: "O transmissor não respondeu ao pedido a tempo. Você pode pedir de novo.",
+    duplicate: "Outra conexão na call diz ser você, então o transmissor bloqueou as duas por segurança. Se você acabou de reabrir o Discord, espere alguns segundos e tente de novo."
+};
 const FIRST_FRAME_TIMEOUT_MS = 45_000;
 const FIRST_FRAME_POLL_MS = 150;
 
@@ -39,7 +49,42 @@ function fail(v: ViewerEntry, message: string, keepStream = false) {
     }
     v.status = "error";
     v.error = message;
+    v.awaitingApproval = false;
     log.warn(`Assistir ${peerLabel(v.peerId)}: ${message}`);
+    publish();
+}
+
+/** O transmissor encerrou/recusou a nossa visualizacao: para de esperar e mostra o motivo. */
+function denied(v: ViewerEntry, reason: ViewDeniedReason) {
+    if (rt.viewing.get(v.peerId) !== v) return;
+    runCleanup(v.requestCleanup);
+    runCleanup(v.streamCleanup);
+    v.stream = null;
+    v.stats = undefined;
+    v.status = "error";
+    v.error = DENIED_TEXT[reason];
+    v.denied = reason;
+    v.awaitingApproval = false;
+    log.warn(`Assistir ${peerLabel(v.peerId)}: ${DENIED_TEXT[reason]}`);
+    publish();
+}
+
+/** Resposta do transmissor a um pedido nosso (protocol.ts, passo 5). Sem sessao para esse peer: ignorada. */
+export function onWatchReply(peerId: PeerId, reply: WatchReplyMessage) {
+    const v = rt.viewing.get(peerId);
+    if (!v) return;
+    if (reply.op === "denied") {
+        denied(v, reply.reason);
+        return;
+    }
+    if (v.status !== "connecting" || v.awaitingApproval) return;
+    v.awaitingApproval = true;
+    runCleanup(v.requestCleanup);
+    const timer = setTimeout(() => {
+        if (v.status === "connecting") fail(v, "O transmissor não respondeu ao pedido a tempo.");
+    }, APPROVAL_WAIT_MS);
+    v.requestCleanup.push(() => clearTimeout(timer));
+    log.info(`Assistir ${peerLabel(peerId)}: esperando o transmissor aprovar o pedido`);
     publish();
 }
 
@@ -174,6 +219,8 @@ function attachStream(v: ViewerEntry, stream: MediaStream) {
     v.stream = stream;
     v.status = "waiting-first-frame";
     v.error = undefined;
+    v.denied = undefined;
+    v.awaitingApproval = false;
     v.stats = undefined;
     v.firstFrameAt = null;
     v.meter = null;
