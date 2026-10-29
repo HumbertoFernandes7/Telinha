@@ -1,6 +1,7 @@
 # Telinha — prova de identidade do Discord entre peers
 
-Status: **protótipo** em `src/plugins/telinha/core/identity/` (ainda não ligado à sessão).
+Status: **integrado** à sessão (branch `feat/identity`), com o Client ID do app "Telinha" em
+`src/plugins/telinha/core/identity/config.ts`. Falta o teste manual com o app real (checklist no fim).
 Sem servidor nosso: só o Discord (OIDC) e os próprios peers.
 
 ## O problema
@@ -118,27 +119,37 @@ Não impede:
 - Privacidade: o id_token só tem o id (escopo `openid`), que o hello já anuncia; o fingerprint
   persistente é um identificador estável para quem conecta com você (que já vê o seu id).
 
-### 5. UX e política
+### 5. UX e política (implementado)
 
-- **Uma vez por conta/PC**: botão "Autorizar o Telinha" (configurações e aviso na barra de voz) →
-  modal do próprio Discord ("Telinha quer acessar sua conta: saber quem você é") → pronto.
-- **Renovação**: pelo `refresh_token` sem UI (se o Discord devolver id_token com o mesmo `nonce`;
-  a medir); senão, ao entrar numa sala, o modal com `prompt=none` (pisca e fecha). Nunca no meio da
-  call; nunca para quem nunca autorizou.
-- **Peers**: selo "✔ verificado", "não verificado" (sem token/vencido) ou "✖ identidade falsa"
-  (token inválido: log de aviso, nunca é aceito).
-- **Recomendação**: opção `requireVerifiedIdentity` **ligada por padrão** — presença e transmissão
-  só para verificados. Quem não autorizou vê no próprio cliente "seus amigos não conseguem confirmar
-  que é você — Autorizar". Desligada: não verificados no canal de voz são aceitos, mas o pedido para
-  assistir cai na aprovação manual com aviso. "Inválido" nunca é aceito.
-- **Senha do grupo**: complementar. A senha esconde a sala de quem não a tem (sinalização cifrada,
-  desafio do Trystero), mas não diz **quem** é quem (qualquer um com a senha anuncia qualquer id).
-  A identidade prova quem é quem, mas não esconde a sala. Com a identidade ligada a senha vira
-  opcional.
-- Enquanto `DISCORD_CLIENT_ID` for o placeholder vazio, tudo fica "não verificado" e a política não
-  muda nada (comportamento de hoje).
-- O amigo virtual (`tools/telinha-peer`) não tem token: nos testes com ele, desligue
-  `requireVerifiedIdentity`.
+- **Uma vez por conta/PC**: aviso discreto na barra do Telinha ("Autorize o Telinha no Discord para provar
+  que é você", com **Autorizar** e um × que esconde até o Discord reiniciar) e, na página do plugin, a seção
+  "Identidade no Discord" com **Autorizar o Telinha no Discord** / **Desvincular**. O fluxo é o modal do
+  próprio Discord ("Telinha quer acessar sua conta: saber quem você é"). O aviso só aparece com Client ID e
+  enquanto a conta não autorizou (ou a última tentativa falhou); autorização vencida não gera aviso.
+- **Renovação**: ao entrar numa sala, sem UI pelo `refresh_token` (falhou: só tenta de novo depois de 30 min;
+  o refresh_token novo que o Discord devolve é guardado mesmo se o id_token não servir); senão o modal com
+  `prompt=none` no máximo 1× a cada 6 h. Nunca no meio da call; nunca para quem nunca autorizou.
+- **Selo por peer**: "✔ verificado", "não verificado" (sem token, versão antiga, vencido) ou "✖ identidade
+  falsa", em "Quem está transmitindo", "Quem está assistindo" (assistindo, pedidos, suspeitos), no pedido de
+  aprovação da barra e na dica da etiqueta TELINHA.
+- **Identidade falsa** (assinatura, conta, aplicativo ou certificado errados; token copiado): nunca é
+  admitida, não vê a presença, não recebe a transmissão nem respostas, o que ela manda (presença, pedidos,
+  stream) é ignorado, sai da lista de peers e vira só um alerta "Uma conexão apresentou uma prova de identidade
+  falsa de Ana — ignorada". Log uma vez (sem IPs).
+- **`requireVerifiedIdentity`** ("Exigir identidade verificada", **ligada por padrão**, escondida sem Client
+  ID): quem não está verificado e está no seu canal de voz continua vendo a sua presença, mas o pedido para
+  assistir cai em Permitir/Recusar mesmo com "Aprovar quem vai assistir" desligado, e o pedido mostra "não
+  verificado". **Desligada**: não verificado funciona como na v0.1.0. Mudar a opção no meio da transmissão não
+  derruba quem já assiste (igual a "Aprovar quem vai assistir").
+- **Identidade duplicada**: conexão verificada nunca é marcada; verificada + não verificada com o mesmo id →
+  só a não verificada é bloqueada ("Uma conexão não verificada diz ser Ana, que já provou a identidade — só ela
+  fica bloqueada"); duas verificadas = a mesma pessoa em dois PCs; duas não verificadas = regra de hoje.
+- **Senha do grupo**: complementar. A senha esconde a sala de quem não a tem (sinalização cifrada, desafio do
+  Trystero), mas não diz **quem** é quem. A identidade prova quem é quem, mas não esconde a sala.
+- **Sem Client ID** (`DISCORD_CLIENT_ID` vazio): nada muda em relação à v0.1.0 — sem certificado próprio, sem
+  token no hello, sem ação "identity", sem aviso, sem opção, mesma admissão e mesma regra de duplicados.
+- O amigo virtual (`tools/telinha-peer`) não tem token: nos testes com ele, desligue `requireVerifiedIdentity`
+  (senão cada pedido dele para assistir precisa de Permitir).
 
 ## O que o usuário faz no Discord Developer Portal
 
@@ -148,142 +159,104 @@ Não impede:
 3. **OAuth2** → **Public Client** → **ligado** (é a flag `PUBLIC_OAUTH2_CLIENT`: troca do code só com
    PKCE, sem client secret) → **Save Changes**.
 4. **Installation** → **Install Link** → **None** (o app não é instalado em servidores; só OAuth).
-5. Não criar bot, não gerar/usar **Client Secret** (nunca vai no plugin).
+5. Não usar bot nem gerar/usar **Client Secret** (nunca vai no plugin).
 6. Copiar o **Client ID** (OAuth2 → Client information, = Application ID) para `DISCORD_CLIENT_ID`
    em `src/plugins/telinha/core/identity/config.ts`.
-7. Primeiro teste: autorizar e conferir no log "Identidade do Discord pronta (válida por ~N min)".
-   Se a autorização falhar com escopo, testar `OAUTH_SCOPES = ["openid", "identify"]`.
 
-## Integração (para quem mexe em session/settings/UI)
+**Feito em 2026-10-29**: app "Telinha", Client ID `1565419793446862929` já em `config.ts`.
 
-API do protótipo (`@plugins/telinha/core/identity`): `prepareIdentity()`, `getLocalIdToken()`,
-`authorizeIdentity({ silent })`, `renewIdentity({ interactive })`, `forgetIdentity()`,
-`getLocalIdentityState()`, `subscribeLocalIdentity(cb)`, `verifyRemoteIdentity({ pc, idToken, claimedUserId })`;
-`isIdentityConfigured()` em `./identity/config`.
+Conferido contra o app real **sem login** (2026-10-29):
+- `GET /api/v10/oauth2/applications/1565419793446862929/rpc` → 200, `name: "Telinha"`. O Discord criou um
+  usuário bot automaticamente (`bot_public: true`); não é usado (Install Link = None), mas dá para desligar
+  "Public Bot" na aba Bot por arrumação.
+- `POST /api/oauth2/token` com `client_id` real, `code` inválido, `code_verifier` e sem `client_secret` →
+  `400 {"error": "invalid_grant", "error_description": "Invalid \"code\" in request."}`, com
+  `access-control-allow-origin: https://discord.com`. Com um client id falso → `400 {"error":"invalid_client"}`.
+  Ou seja: o app existe e o endpoint responde no formato que `requestToken` espera. **Não** dá para provar
+  sem login que "Public Client" está ligado (o Discord valida o code antes; sem `code_verifier` também
+  responde `invalid_grant`): isso aparece no primeiro teste real (`invalid_client` na troca = Public Client
+  desligado).
+- `refresh_token` inválido → `400 {"error": "invalid_grant"}`. JWKS e `openid-configuration` como na seção 2.
+- `GET /api/v10/oauth2/authorize?...` sem login → redireciona para a página web de autorização (esperado;
+  o modal do cliente usa a sessão do usuário).
 
-**protocol.ts** (e a cópia em `tools/telinha-peer/telinha-peer.js`):
+## Integração (onde está cada coisa)
 
-```ts
-export const ACTION_IDENTITY = "identity";
-export type HelloMessage = { type: typeof HELLO_TYPE; v: number; discordUserId: string; username: string; idToken?: string; };
-export type IdentityMessage = { idToken: string; };
-export const isIdentityMessage = (d: unknown): d is IdentityMessage =>
-    isObject(d) && typeof d.idToken === "string" && d.idToken.length <= 8192;
-```
-
-**context.ts**: `PeerEntry.identity: "pending" | IdentityVerdict`, `PeerEntry.identityReason?: IdentityFailure`;
-`rt.identityAction: MessageAction<IdentityMessage> | null`; `publish()` copia `identity` para `RemotePeer`.
-
-**presence.ts**:
-
-```ts
-export function selfHello(): HelloMessage {
-    const { id, username } = me();
-    const idToken = getLocalIdToken();
-    return { type: HELLO_TYPE, v: PROTOCOL_VERSION, discordUserId: id, username, ...(idToken ? { idToken } : {}) };
-}
-
-export function computeAdmitted(entry: PeerEntry) {
-    if (entry.incompatible || !entry.hello) return false;
-    if (entry.identity === "invalid") return false;
-    if (isIdentityConfigured() && settings.store.requireVerifiedIdentity && entry.identity !== "verified") return false;
-    return entry.inVoice || !settings.store.rejectOutsiders;
-}
-```
-
-**session.ts**:
-
-```ts
-// switchRoom: depois do `await leaving` e antes do joinNow
-const { certificates } = await prepareIdentity();
-if (seq !== joinSeq || !active) return;
-void renewIdentity({ interactive: true }); // so faz algo se ja autorizou e o token falta/esta vencendo
-joinNow(roomId, reason, certificates);
-
-// joinNow(roomId, reason, certificates: RTCCertificate[])
-rtcConfig: { iceServers: ICE_SERVERS, ...(certificates.length ? { certificates } : {}) },
-// ...
-rt.identityAction = room.makeAction<IdentityMessage>(ACTION_IDENTITY);
-rt.identityAction.onMessage = onIdentity;
-
-// handshake: guardar o token junto com o hello
-const hello: HelloMessage = { ..., ...(typeof data.idToken === "string" && data.idToken.length <= 8192 ? { idToken: data.idToken } : {}) };
-
-// onPeerJoin: entry.identity = "pending" (computeAdmitted da false enquanto isso) e, depois de rt.peers.set:
-if (hello && !claimsSelf) void checkPeerIdentity(peerId, hello.idToken);
-
-async function checkPeerIdentity(peerId: PeerId, idToken: unknown) {
-    const entry = rt.peers.get(peerId);
-    if (!entry?.hello || entry.incompatible) return;
-    const pc = rt.room?.getPeers()[peerId];
-    const { verdict, result } = await verifyRemoteIdentity({ pc, idToken, claimedUserId: entry.hello.discordUserId });
-    if (rt.peers.get(peerId) !== entry) return; // saiu ou a sala mudou no meio
-    if (entry.identity === "verified" && verdict === "unverified") return; // renovacao ruim nao rebaixa
-    entry.identity = verdict;
-    entry.identityReason = result.ok ? undefined : result.reason;
-    if (verdict === "invalid") logThrottled(`id-invalid:${peerId}`, "warn",
-        `${peerLabel(peerId)} apresentou uma prova de identidade inválida (${entry.identityReason}): pode ser alguém se passando por ${entry.hello.username}; ignorado`, 60_000);
-    else if (verdict === "verified") log.info(`${peerLabel(peerId)}: identidade do Discord verificada`);
-    checkIdentities();
-    reevaluateAdmission();
-    publish();
-}
-
-function onIdentity(data: IdentityMessage, { peerId }: { peerId: string; }) {
-    if (!isIdentityMessage(data)) return;
-    const entry = rt.peers.get(peerId);
-    if (!entry?.hello || entry.incompatible) return;
-    void checkPeerIdentity(peerId, data.idToken); // limitar a ~1 por 10 s por peer
-}
-
-// startSession: anunciar token novo/renovado a todos os peers compativeis (nao so admitidos:
-// eles precisam do nosso token para NOS admitir)
-unsubscribeIdentity = subscribeLocalIdentity(s => {
-    const idToken = s.status === "ready" ? getLocalIdToken() : null;
-    const targets = [...rt.peers.values()].filter(p => p.hello && !p.incompatible).map(p => p.peerId);
-    if (idToken && targets.length) rt.identityAction?.send({ idToken }, { target: targets }).catch(() => { });
-    publish();
-});
-// stopSession: unsubscribeIdentity?.(); leaveRoom: rt.identityAction = null
-
-// checkIdentities (duplicados): ignorar peers "invalid" no agrupamento e nunca marcar um
-// "verified" como duplicado (o nao verificado do par e o suspeito; dois verificados = a mesma
-// pessoa em dois PCs).
-```
-
-**settings.ts**:
-
-```ts
-requireVerifiedIdentity: {
-    type: OptionType.BOOLEAN,
-    description: "Só mostrar sua presença e transmitir para quem provou ser quem diz (conta do Discord) (recomendado). Desligado: amigos não verificados no seu canal de voz também são aceitos, com aviso e aprovação manual.",
-    default: true,
-    onChange: () => onAdmissionSettingChanged()
-},
-identity: { type: OptionType.COMPONENT, component: IdentitySettingRow } // estado + "Autorizar o Telinha" / "Desvincular"
-```
-
-**types.ts / UI**: `RemotePeer.identity?: "pending" | "verified" | "unverified" | "invalid"` e
-`TelinhaState.localIdentity: LocalIdentityState["status"]`; selo por peer (StreamersModal/VoiceUserTag);
-aviso na VoiceBar quando `localIdentity` é `unauthorized`/`error` com botão que chama
-`authorizeIdentity()`; com `requireVerifiedIdentity` desligado, pedido de não verificado vai para a
-aprovação manual com o texto "não verificado".
+- `core/identity/policy.ts` (**puro**, testado): `isAdmitted` (falsa e "conferindo" nunca; o resto pela regra
+  do canal de voz), `watchNeedsApproval` / `identityRequiresApproval` (approveViewers, ou não verificado com a
+  opção ligada), `findDuplicates` (regras acima), `nextPeerIdentity` (verificada não é rebaixada, falsa não vira
+  confiável), `initialPeerIdentity`. `configured` sempre por parâmetro: o caminho sem Client ID é testado sem
+  depender da constante.
+- `protocol.ts`: `HelloMessage.idToken?`, `parseHello` (só campos conhecidos; token ruim sai e o peer fica "não
+  verificado"), `buildHello` (sem token = hello da v0.1.0), `ACTION_IDENTITY = "identity"`, `isIdentityMessage`.
+  `PROTOCOL_VERSION` continua 1. A cópia em `tools/telinha-peer` não precisa mudar (campos opcionais).
+- `core/identity/index.ts`: estado local `disabled | loading | unauthorized | expired | authorizing | ready |
+  error`; `prepareIdentity()` devolve `{ certificates, fingerprint }` (sem Client ID: vazio, sem gerar
+  certificado); `getLocalIdToken({ fingerprint })` só devolve o token amarrado ao certificado da sala;
+  `localIdentityDiagnostics()`.
+- `core/session.ts`: `prepareIdentity` (máx. 3 s) antes do `joinRoom` + `rtcConfig.certificates`;
+  `renewIdentity({ interactive: true })` ao entrar; hello com token; `onPeerJoin` marca "conferindo" quem mandou
+  token e chama `verifyRemoteIdentity` (máx. 10 s → "não verificado"; 1 nova tentativa se o fingerprint ainda não
+  der para ler); ação "identity" (1 verificação por peer a cada 10 s, ignorada para verificado/falso); o token
+  novo/renovado vai uma vez por peer (`announcedTo`); `checkIdentities` com `findDuplicates`;
+  `peerIdentityDiagnostics()`. Nada disso lança para fora dos handlers do Trystero.
+- `core/streaming.ts`: aprovação por `watchNeedsApproval`; `onApprovalPolicyChanged` (approveViewers e
+  requireVerifiedIdentity); `reviewPendingApprovals` (quem provou a identidade com pedido pendente é atendido).
+- `core/viewing.ts`: não assiste a "conferindo"/falsa; para de assistir quem vira falsa.
+- `types.ts`: `PeerIdentityStatus`, `RemotePeer.identity?`, `PendingViewer.identity?`, `IdentityAlert.kind?`
+  (`duplicate | impostor | fake`). Sem Client ID os campos não aparecem (snapshot igual ao da v0.1.0).
+- UI: `ui/IdentityUI.tsx` (selo, aviso da barra, seção da página do plugin), `VoiceBar`, `StreamersModal`,
+  `ViewersModal`, `VoiceUserTag`, `notices`; "Copiar diagnóstico" inclui a identidade (sem tokens nem IPs).
 
 ## Testes
 
-`pnpm exec tsx --test src/plugins/telinha/core/identity/identity.test.ts` — 32 testes das partes
-puras: token válido; fingerprint no formato SDP; token copiado (fingerprint diferente) e copiado +
-vencido; `sub` errado; vencido e tolerância de relógio; `iat`/`nbf` no futuro; `aud`/`azp`/`iss`;
-payload adulterado; outra chave com o mesmo `kid`; `kid` desconhecido; sem `kid`; `alg` none/HS256/`crit`;
-entradas malformadas; placeholder; chave RSA curta; nonce/normalização/SDP; fingerprint remoto com
-RTCPeerConnection falsa (fontes concordam, só SDP, DTLS não conectado, certificado ≠ SDP); PKCE
-(vetor da RFC 7636); `location` do modal (state, iss, redirect, erro); troca do code sem
-`client_secret` e sem cookies; erro do token endpoint; `JwksCache` (TTL, refetch limitado, offline).
+`pnpm test:identity` — 54 testes das partes puras: os 32 do protótipo (token válido, copiado, vencido, `sub`/
+`aud`/`iss` errados, assinatura, `kid`, `alg`, entradas malformadas, fingerprint remoto, PKCE, `location` do
+modal, troca do code, `JwksCache`) e mais: **sem Client ID = v0.1.0** para todas as combinações (hello byte a
+byte, admissão, aprovação, duplicados, nenhum token vira "falso"); admissão para verificado / não verificado
+com a opção ligada e desligada / falso (token copiado, assinatura falsa, conta errada) / conferindo; regras de
+duplicado; `nextPeerIdentity`; timeout = não verificado; hello sem `idToken` (v0.1.0) e com `idToken` ruim
+continuam válidos; ação "identity". O teste do renderer confere que "Exigir identidade verificada" nasce ligada.
+
+## Teste manual com o app real (checklist)
+
+Dois PCs (ou duas contas) com este build, no mesmo canal de voz. Ter "Copiar diagnóstico" à mão.
+
+1. **Autorizar**: a barra mostra "Autorize o Telinha no Discord…" → **Autorizar** → aparece o modal do
+   Discord com o nome **Telinha** pedindo só "saber quem você é" → Autorizar. Toast "Telinha autorizado"; o
+   aviso some; no log: "Identidade do Discord pronta (válida por ~N min)" → **anotar N** (o `exp` real).
+   Se der `invalid_client`: ligar **Public Client** no portal. Se der erro de escopo: testar
+   `OAUTH_SCOPES = ["openid", "identify"]`.
+2. **Página do plugin**: "Identidade no Discord: autorizado" + **Desvincular**; "Exigir identidade verificada"
+   aparece ligada.
+3. **Verificado**: com os dois autorizados, cada um vê o outro com "✔ verificado" em "Quem está transmitindo"
+   e "Quem está assistindo"; a dica da etiqueta TELINHA diz "(identidade verificada)"; assistir funciona sem
+   pedido de aprovação (approveViewers desligado).
+4. **Não verificado**: no PC B, **Desvincular** e sair/entrar na call. A vê B como "não verificado"; B ainda
+   vê A transmitindo; B pede para assistir → A recebe "B quer assistir · não verificado" com Permitir/Recusar
+   (mesmo com "Aprovar quem vai assistir" desligado); Permitir → B assiste; Recusar → B vê a recusa.
+5. **Opção desligada**: em A, desligar "Exigir identidade verificada" → B (não verificado) assiste direto,
+   como na v0.1.0. Religar.
+6. **Autorizar no meio da call**: B autoriza com os dois na call → em A, B passa de "não verificado" para
+   "✔ verificado" sem reconectar (ação "identity").
+7. **Renovação**: esperar o token vencer (o `exp` do item 1) e entrar numa call → o selo volta a
+   "verificado" sem clicar em nada: ou pela renovação sem janela, ou pelo modal que pisca e fecha (`prompt=none`). Anotar
+   se o `refresh_token` devolve id_token **com** o mesmo `nonce` (se não, o log mostra
+   "fingerprint-mismatch"/"sem id_token" na renovação sem janela).
+8. **Mesmo id, verificado + não verificado**: precisa de um cliente modificado ou do amigo virtual anunciando o
+   id de B (`tools/telinha-peer`, que não tem token) → só a conexão não verificada fica bloqueada, alerta
+   "Uma conexão não verificada diz ser B, que já provou a identidade — só ela fica bloqueada"; B verificado
+   continua assistindo.
+9. **Identidade falsa**: cliente modificado reapresentando o id_token capturado de B (aparece no hello de B; dá
+   para pegar com um breakpoint no `parseHello`) → "✖ identidade falsa", alerta "prova de identidade falsa de
+   B — ignorada", log uma vez, nenhuma presença/stream/resposta para ele.
+10. **Diagnóstico**: "Copiar diagnóstico" traz `identidade: configurada (app …); local: pronta…`, a lista de
+    peers com verificado/não verificado e as últimas falhas — sem nenhum `eyJ…` (token) e sem IPs.
+11. **Versão antiga**: um PC com a v0.1.0 na mesma call: ele vê e assiste o PC novo (com Permitir, se a
+    opção estiver ligada), e o PC novo o vê como "não verificado"; nenhum erro no console da v0.1.0.
 
 ## A medir com o app real
 
-- `exp` do id_token e se o `refresh_token` devolve um id_token com o mesmo `nonce`.
-- Se o Discord exige `identify` junto com `openid` (o protótipo pede só `openid`).
+- `exp` do id_token e se o `refresh_token` devolve um id_token com o mesmo `nonce` (itens 1 e 7 acima).
+- Se o Discord exige `identify` junto com `openid` (o build pede só `openid`).
 - Se `prompt=none` realmente fecha sozinho no modal do cliente desktop.
-- Ponta a ponta: dois clientes reais, um modificado anunciando o id do outro (deve sair "não
-  verificado") e reapresentando o token capturado do outro (deve sair "identidade falsa").
