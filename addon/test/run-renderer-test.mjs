@@ -74,8 +74,9 @@ const SPIES = `(() => {
     p.renderCallTileStream = (participant, isUser) => (calls.push(["renderCallTileStream", isUser]), isUser ? "SPY:tile" : real(participant, isUser));
 })();`;
 
-async function boot(code, storedSettings) {
-    const page = makePage({ storedSettings, pluginHelpers: { Telinha: { listSources: async () => ({ sources: [] }) } } });
+async function boot(code, storedSettings, pluginHelpers = { Telinha: { listSources: async () => ({ sources: [] }) } }, setup = null) {
+    const page = makePage({ storedSettings, pluginHelpers });
+    setup?.(page);
     let thrown = null;
     try {
         runScript(page.context, code, "file:///VencordRenderer");
@@ -190,6 +191,47 @@ console.log("\nE Telinha renderer without Vencord (e.g. served alone): refuses q
 {
     const p = await boot(wrapAddonRenderer(addonJs, { via: "control" }), {});
     check("no throw out of the wrapper, error logged once", !p.thrown && p.consoleLines.some(l => /Vencord renderer not found/.test(l)), p.consoleLines.slice(0, 3));
+}
+
+// ------------------------------------------------------------------------------------------- F: updates
+console.log("\nF updates, renderer side: boot report, automatic check, notice only when 'Atualizar automaticamente' is off");
+{
+    const status = (phase, extra = {}) => ({ supported: true, installed: { version: "0.1.0", commit: "abc" }, phase, latest: { version: "0.1.1", tag: "v0.1.1" }, ready: null, error: null, checkedAt: 1, skipped: null, lastRollback: null, ...extra });
+    for (const autoUpdate of [true, false]) {
+        const calls = [];
+        const helpers = {
+            Telinha: { listSources: async () => ({ sources: [] }) },
+            TelinhaAddon: {
+                bootOk: async info => (calls.push(["bootOk", info]), { confirmed: true }),
+                updateStatus: async () => (calls.push(["updateStatus"]), status("idle", { latest: null })),
+                updateCheck: async o => (calls.push(["updateCheck", o]), o.autoDownload ? status("ready", { ready: "0.1.1" }) : status("available")),
+                updateDownload: async () => (calls.push(["updateDownload"]), status("ready", { ready: "0.1.1" }))
+            }
+        };
+        const stored = autoUpdate ? {} : { plugins: { Telinha: { enabled: true, autoUpdate: false } } };
+        // the first automatic check waits 15 s after the plugin starts: run it right away here
+        const p = await boot(page0.code, stored, helpers, pg => {
+            pg.context.setTimeout = (fn, ms, ...a) => setTimeout(fn, ms === 15_000 ? 1 : ms, ...a).unref();
+        });
+        const label = autoUpdate ? "on (default)" : "off";
+        check(`[${label}] the plugin reads autoUpdate = ${autoUpdate}${autoUpdate ? " (default)" : " (saved)"}`, p.$(`${P}.settings.store.autoUpdate`) === autoUpdate);
+        p.$(`Vencord.Plugins.startPlugin(${P})`);
+        await sleep(1300);
+        const checkCall = calls.find(c => c[0] === "updateCheck");
+        check(`[${label}] plugin started -> one quiet automatic check (autoDownload: ${autoUpdate})`, checkCall?.[1]?.autoDownload === autoUpdate && checkCall[1].manual === false && calls.filter(c => c[0] === "updateCheck").length === 1, calls);
+        check(`[${label}] nothing downloaded by the renderer on its own`, !calls.some(c => c[0] === "updateDownload"), calls);
+        check(`[${label}] boot report sent once the plugin started (boot marker)`, calls.some(c => c[0] === "bootOk" && c[1]?.enabled === true && c[1].started === true), calls);
+        // (this fake page has no React, so the notification itself can't render here: the notice is logged first)
+        const notice = p.consoleLines.filter(l => /Aviso de atualização: /.test(l));
+        check(`[${label}] one notice: "Telinha 0.1.1 ${autoUpdate ? "pronto" : "disponível"}"`, notice.length === 1 && notice[0].includes(`Telinha 0.1.1 ${autoUpdate ? "pronto" : "disponível"}`), notice);
+        check(`[${label}] a notice failing to render does not break the plugin`, !p.consoleLines.some(l => /update listener failed/.test(l)) && p.$(`${P}.started`) === true);
+        p.$(`Vencord.Plugins.stopPlugin(${P})`);
+    }
+    const calls = [];
+    const p = await boot(page0.code, { plugins: { Telinha: { enabled: false } } }, { TelinhaAddon: { bootOk: async info => (calls.push(info), { confirmed: true }) } });
+    await sleep(20);
+    check("plugin disabled: the boot report still goes out (registered, not started)", calls.length === 1 && calls[0].enabled === false, calls);
+    check("plugin disabled: no update check", p.$(`${P}.started`) !== true);
 }
 
 if (asyncErrors.length) console.log(`\n(async errors in the fake page: ${asyncErrors.map(e => String(e).split("\n")[0].slice(0, 140)).join(" | ")})`);

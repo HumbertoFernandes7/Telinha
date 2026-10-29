@@ -71,5 +71,11 @@ export const settings = definePluginSettings({
             { label: "VP9", value: "vp9" },
             { label: "AV1", value: "av1" }
         ]
+    },
+    autoUpdate: {
+        type: OptionType.BOOLEAN,
+        displayName: "Atualizar automaticamente",
+        description: "Recomendado: ao abrir o Discord (e a cada 6 horas), o Telinha procura uma versão nova, baixa em segundo plano e confere o SHA-256 publicado no GitHub. A versão nova só entra quando o Discord reiniciar, nunca no meio de uma transmissão. Desligado: só avisa que há versão nova, com o botão Atualizar.",
+        default: true
     }
 });

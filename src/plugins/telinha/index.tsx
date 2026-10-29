@@ -13,6 +13,7 @@ import definePlugin from "@utils/types";
 import { showToast } from "@webpack/common";
 
 import { startSession, stopSession } from "./actions";
+import { refreshUpdateStatus, startUpdateChecks, stopUpdateChecks, updateDiagnostics } from "./core/update";
 import { settings } from "./settings";
 import { formatDiagnostics } from "./store";
 import { callViewPatches, renderCallTileStream, stopCallView } from "./ui/callView";
@@ -20,8 +21,21 @@ import { runAction } from "./ui/common";
 import { panelJsx, voiceUserIconsJsx } from "./ui/jsxShims";
 import { renderToolboxActions, userContextMenuPatch } from "./ui/menus";
 import { startNotices, stopNotices } from "./ui/notices";
+import { startUpdateNotices, stopUpdateNotices } from "./ui/updateNotice";
+import { UpdateSection } from "./ui/UpdateSection";
 import { closeAllViewers } from "./ui/viewerWindows";
 import { formatVoiceTagDiagnostics } from "./ui/VoiceUserTag";
+
+function copyDiagnostics() {
+    // fresh version/update status first (asks the main process), then the copy
+    refreshUpdateStatus()
+        .catch(() => null)
+        .then(() => copyToClipboard(`${formatDiagnostics()}\n${updateDiagnostics()}\n\n${formatVoiceTagDiagnostics()}`))
+        .then(
+            () => showToast({ text: "Diagnóstico do Telinha copiado", variant: "success" }),
+            () => showToast({ text: "Não consegui copiar o diagnóstico", variant: "critical" })
+        );
+}
 
 function SettingsAbout() {
     return (
@@ -31,16 +45,10 @@ function SettingsAbout() {
                 Vencord, na barra de título). Quem transmite pelo Telinha aparece com a etiqueta TELINHA na lista do canal
                 de voz: clique nela para assistir numa janela própria. Todos na call precisam ter o Telinha.
             </Paragraph>
-            <Button
-                size="small"
-                variant="secondary"
-                onClick={() => copyToClipboard(`${formatDiagnostics()}\n\n${formatVoiceTagDiagnostics()}`).then(
-                    () => showToast({ text: "Diagnóstico do Telinha copiado", variant: "success" }),
-                    () => showToast({ text: "Não consegui copiar o diagnóstico", variant: "critical" })
-                )}
-            >
+            <Button size="small" variant="secondary" onClick={copyDiagnostics}>
                 Copiar diagnóstico
             </Button>
+            <UpdateSection />
         </div>
     );
 }
@@ -91,10 +99,14 @@ export default definePlugin({
 
     start() {
         startNotices();
+        startUpdateNotices();
+        startUpdateChecks();
         runAction("startSession", () => startSession(), () => { });
     },
 
     stop() {
+        stopUpdateChecks();
+        stopUpdateNotices();
         stopNotices();
         closeAllViewers();
         stopCallView();

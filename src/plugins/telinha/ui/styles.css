@@ -561,3 +561,38 @@
 }
 
 /* #endregion */
+
+/* #region updates (settings page + notice) */
+
+.vc-telinha-update {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+    margin-top: 8px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border-subtle, var(--background-modifier-accent));
+}
+
+.vc-telinha-update-status {
+    color: var(--text-muted);
+}
+
+.vc-telinha-update-buttons,
+.vc-telinha-update-notice-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.vc-telinha-update-notice {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.vc-telinha-update-notice-text {
+    margin: 0;
+}
+
+/* #endregion */
