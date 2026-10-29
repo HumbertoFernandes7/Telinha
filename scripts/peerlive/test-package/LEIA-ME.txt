@@ -1,0 +1,59 @@
+PEERLIVE - BUILD DE TESTE (fase de viabilidade)
+===============================================
+
+O QUE É ISTO
+Este pacote é um TESTE temporário do PeerLive: o Vencord oficial + 2 plugins de
+teste (PeerLiveTest e PeerLiveP2PTest). Serve só para a gente fazer um teste real
+de transmissão P2P entre a sua casa e a minha. Não é a versão final nem um
+instalador de verdade, e dá para desfazer a qualquer momento (veja mais abaixo).
+
+Ele só troca os arquivos da pasta  %APPDATA%\Vencord\dist  (guardando uma cópia dos
+oficiais antes). Suas configurações, temas e plugins do Vencord não são tocados.
+
+ANTES DE COMEÇAR
+- Windows, com o Discord instalado normalmente e o Vencord OFICIAL já instalado
+  (https://vencord.dev/download/). Sem o Vencord, o instalar.cmd avisa e não faz nada.
+- Aviso do Windows: como o ZIP foi baixado da internet, o Windows pode mostrar
+  "O Windows protegeu o computador" (SmartScreen) ao abrir o instalar.cmd, ou o
+  antivírus pode reclamar de scripts .cmd/.ps1. Para evitar: ANTES de extrair, clique
+  com o botão direito no ZIP > Propriedades > marque "Desbloquear" > OK. Se o aviso
+  aparecer mesmo assim: "Mais informações" > "Executar assim mesmo". Os scripts são
+  texto puro; pode abrir no Bloco de Notas para conferir.
+
+COMO INSTALAR
+1. Clique com o botão direito no ZIP > Extrair tudo. (Não rode de dentro do ZIP.)
+2. Feche o Discord POR COMPLETO: botão direito no ícone dele na bandeja do sistema
+   (perto do relógio, talvez dentro da seta "^") > "Sair do Discord".
+3. Dê dois cliques em  instalar.cmd  e espere aparecer "Instalação concluída".
+4. Abra o Discord. Vá em Configurações do usuário > Vencord > Plugins, pesquise
+   "PeerLive" e ative os dois: PeerLiveTest e PeerLiveP2PTest.
+   (Se o Discord pedir para reiniciar, aceite.)
+
+COMO FAZER O TESTE P2P (com o amigo, ao mesmo tempo)
+1. Entrem no MESMO canal de voz do Discord.
+2. Cada um abre o painel: Configurações > Plugins > PeerLiveP2PTest > "Abrir painel"
+   (também dá para abrir pelo ícone da caixa de ferramentas do Vencord, no topo do
+   Discord > "Abrir painel P2P").
+3. Uma pessoa clica em "Transmitir padrão de teste". A outra clica em "Assistir".
+4. Deixem rodando uns 2 a 3 minutos, olhando o painel. Depois, quem quiser pode
+   inverter os papéis e repetir.
+Atenção: em um teste P2P o outro participante vê o seu endereço IP (é assim que o
+WebRTC funciona). Só faça o teste com quem você confia.
+
+ONDE FICAM OS LOGS / O QUE ME ENVIAR
+Os logs ficam em:  %APPDATA%\PeerLive-test
+(cole esse caminho na barra de endereços do Explorador de Arquivos).
+Me envie o arquivo  p2p-*.json  MAIS RECENTE dessa pasta (ordene por data).
+
+COMO DESFAZER (voltar ao Vencord oficial)
+1. Feche o Discord POR COMPLETO (inclusive o ícone da bandeja).
+2. Dê dois cliques em  restaurar.cmd  e espere aparecer "Restauração concluída".
+3. Abra o Discord de novo. Os plugins de teste somem.
+O backup do oficial fica em  %APPDATA%\Vencord\dist.backup-oficial-...  ; não apague
+essa pasta até terminar os testes (depois pode apagar).
+
+DEU PROBLEMA?
+- Discord não abre ou o Vencord sumiu: rode o restaurar.cmd.
+- Se nem isso resolver: reinstale o Vencord oficial pelo instalador
+  (https://vencord.dev/download/ > "Reinstalar" / "Reparar").
+- Em qualquer erro, tire um print da janela preta e me mande.
