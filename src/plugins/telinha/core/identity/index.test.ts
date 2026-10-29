@@ -222,15 +222,22 @@ describe("identidade local (index.ts)", () => {
             assert.equal(await done, false);
             const s = getLocalIdentityState();
             assert.equal(s.status, "error");
-            assert.match((s as { error: string; }).error, expected);
-            assert.equal(logged(/^Identidade: falha ao autorizar o Telinha: /, mark).length, 1);
-            assert.match(localIdentityDiagnostics(), /; último erro local .* UTC: autorizar: /);
+            const { error } = s as { error: string; };
+            assert.match(error, expected);
+            assert.doesNotMatch(error, /^\w*Error: /, "a UI mostra so a mensagem, sem o nome tecnico do erro");
+            assert.equal(logged(/^Identidade: falha ao autorizar o Telinha: \w*Error: /, mark).length, 1, "o log fica com o nome do erro");
+            assert.match(localIdentityDiagnostics(), /; último erro local .* UTC: autorizar: \w*Error: /);
         }
 
         test("o token endpoint recusa o code", async () => {
             discord.tokenImpl = () => tokenResponse({ error: "invalid_grant" }, { status: 400 });
-            await failing(/^OAuthError: OAuth2 400 invalid_grant$/, approve);
+            await failing(/^OAuth2 400 invalid_grant$/, approve);
             assert.equal(getLocalIdToken(), null, "erro: o token antigo nao vai mais no hello");
+        });
+
+        test("sem rede ate o Discord: a mensagem do erro, sem IPs", async () => {
+            discord.tokenImpl = () => Promise.reject(new TypeError("connect ECONNREFUSED 162.159.128.233:443"));
+            await failing(/^connect ECONNREFUSED \[ip\]:443$/, approve);
         });
 
         test("o modal nao devolve o location", async () => {
@@ -258,7 +265,7 @@ describe("identidade local (index.ts)", () => {
             UserStore.setCurrentUser(null);
             const done = authorizeIdentity();
             assert.equal(await done, false);
-            assert.deepEqual(getLocalIdentityState(), { status: "error", error: "Error: usuário do Discord desconhecido" });
+            assert.deepEqual(getLocalIdentityState(), { status: "error", error: "usuário do Discord desconhecido" });
             assert.equal(modals.list().length, 0);
             UserStore.reset();
 

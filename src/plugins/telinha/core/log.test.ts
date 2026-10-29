@@ -13,7 +13,7 @@ import { describe, test } from "node:test";
 
 import { getEventLog } from "@plugins/telinha/store";
 
-import { errorText, log, logThrottled, shortId, stripIps } from "./log";
+import { errorMessage, errorText, log, logThrottled, shortId, stripIps } from "./log";
 
 const last = () => getEventLog().at(-1)!;
 
@@ -35,6 +35,16 @@ describe("errorText", () => {
         assert.equal(errorText(null), "null");
         assert.equal(errorText(undefined), "undefined");
         assert.equal(errorText(42), "42");
+    });
+});
+
+describe("errorMessage (textos da UI)", () => {
+    test("so a mensagem, sem o nome tecnico; sem IPs", () => {
+        assert.equal(errorMessage(new Error("state não confere")), "state não confere");
+        assert.equal(errorMessage({ name: "OAuthError", message: "OAuth2 400 invalid_grant" }), "OAuth2 400 invalid_grant");
+        assert.equal(errorMessage(new TypeError("connect ECONNREFUSED 10.0.0.1:443")), "connect ECONNREFUSED [ip]:443");
+        assert.equal(errorMessage("texto 8.8.8.8"), "texto [ip]");
+        assert.equal(errorMessage(undefined), "undefined");
     });
 });
 

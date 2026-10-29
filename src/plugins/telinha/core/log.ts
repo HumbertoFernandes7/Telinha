@@ -25,6 +25,12 @@ export function errorText(e: unknown): string {
     return stripIps(String(e));
 }
 
+/** So a mensagem, sem o nome tecnico ("Error:", "OAuthError:"): para textos da UI (toasts, avisos). Sem IPs. */
+export function errorMessage(e: unknown): string {
+    if (e instanceof Error || (e && typeof e === "object" && "message" in e)) return stripIps(String((e as Error).message));
+    return stripIps(String(e));
+}
+
 function emit(level: TelinhaEventLevel, msg: string) {
     const clean = stripIps(msg);
     pushEvent({ at: Date.now(), level, msg: clean });

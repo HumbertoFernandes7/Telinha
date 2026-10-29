@@ -20,7 +20,7 @@
 // fica no DataStore do Vencord (IndexedDB), por conta do Discord, para renovar sem abrir o modal.
 
 import * as DataStore from "@api/DataStore";
-import { errorText, log, logThrottled } from "@plugins/telinha/core/log";
+import { errorMessage, errorText, log, logThrottled } from "@plugins/telinha/core/log";
 import { UserStore } from "@webpack/common";
 
 import { AuthorizationCancelled, openAuthorizeModal } from "./authorize";
@@ -270,7 +270,8 @@ export function authorizeIdentity({ silent = false }: { silent?: boolean; } = {}
             }
             log.warn("Identidade: falha ao autorizar o Telinha: " + errorText(e));
             lastError = { at: Date.now(), text: "autorizar: " + errorText(e) };
-            setState(keepReady ? previous : { status: "error", error: errorText(e) });
+            // o estado vai para a UI (toast, barra): so a mensagem; o log e o diagnostico ficam com o nome do erro
+            setState(keepReady ? previous : { status: "error", error: errorMessage(e) });
             return false;
         }
     })();
