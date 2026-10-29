@@ -11,6 +11,8 @@ rem
 rem "fast" skips go vet / go test. Icon, manifest and version resource come from the checked-in
 rem rsrc_windows_*.syso; to change them edit winres\winres.json and run (needs network once):
 rem   go run github.com/tc-hib/go-winres@v0.3.3 make --in winres/winres.json --arch amd64,arm64 --out rsrc
+rem The icon PNGs in winres\ are generated from assets\telinha-icon-1024.png: run "go run winres/genicon.go"
+rem from installer\ before the command above (see the header of winres\genicon.go).
 setlocal
 cd /d "%~dp0"
 
