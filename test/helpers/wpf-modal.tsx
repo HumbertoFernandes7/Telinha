@@ -11,8 +11,15 @@
 //   modal.button("Fechar")                                  // its "Fechar" action
 //   modal.text()                                            // everything written in it
 
+import { eventually } from "@test/fakes/clock";
 import { act, fireEvent, render, screen, within } from "@test/fakes/render";
 import { ModalHost } from "@test/fakes/vencord";
+
+/**
+ * Lets the core's async work (promises, setTimeout(0)) run inside act() until `check` holds, so the React updates it
+ * causes land in the DOM without "not wrapped in act" warnings. Real timers only.
+ */
+export const until = (check: () => unknown) => act(async () => void await eventually(check));
 
 export interface OpenModalView {
     /** the Modal's dialog element (the last one opened) */
@@ -31,9 +38,16 @@ export interface OpenModalView {
     click(name: string | RegExp): void;
 }
 
-/** Renders the fake modal host and runs `open` (which calls the plugin's open*Modal function) inside act. */
+let host: { container: HTMLElement; } | null = null;
+
+/** One ModalHost per test (the render fake unmounts it after each test): two hosts would draw every modal twice. */
+function ensureHost() {
+    if (!host || !host.container.isConnected) host = render(<ModalHost />);
+}
+
+/** Renders the fake modal host (once) and runs `open` (which calls the plugin's open*Modal function) inside act. */
 export function openInHost(open: () => void): OpenModalView {
-    render(<ModalHost />);
+    ensureHost();
     act(() => open());
     const dialog = () => {
         const all = screen.getAllByRole("dialog");

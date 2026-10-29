@@ -24,6 +24,7 @@ import { getState } from "@plugins/telinha/store";
 import type { AccessMode, Quality, RemotePeer } from "@plugins/telinha/types";
 import { eventually } from "@test/fakes/clock";
 import { installNative, type NativeEnv } from "@test/fakes/native";
+import { act } from "@test/fakes/render";
 import { type FakeRoom, trystero } from "@test/fakes/trystero";
 import { FRIEND_ID, joinVoice, makeUser, modals, OTHER_ID, toasts, UserStore, VOICE_CHANNEL_ID } from "@test/fakes/vencord";
 import { type FakeRTCPeerConnection, installWebRtc, type WebRtcEnv } from "@test/fakes/webrtc";
@@ -88,7 +89,7 @@ export async function openLiveScene(): Promise<LiveScene> {
         },
         resetUi() {
             toasts.length = 0;
-            modals.reset();
+            act(() => modals.reset()); // a mounted ModalHost re-renders
         },
         close() {
             stopStreaming();
