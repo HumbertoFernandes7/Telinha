@@ -9,6 +9,8 @@
 //
 //   [ Transmitir com PeerLive ]             idle
 //   ● Ao vivo · 2 assistindo                streaming (click: list / switch source)
+//   720p60 · menor: processador             auto quality (current level; reason when lowered, full text in tooltip)
+//   ⚠ <capture warning>                     black image / frozen window (clears itself)
 //   [ Parar transmissão ]
 //   ◉ Ana está transmitindo · Assistir      someone else streams (1 → opens it, 2+ → list)
 //   ⚠ <last error>  ×                       core reported an error
@@ -16,6 +18,7 @@
 import ErrorBoundary from "@components/ErrorBoundary";
 import { clearLastError, stopStreaming } from "@plugins/peerLive/actions";
 import { usePeerLiveState } from "@plugins/peerLive/store";
+import type { QualityReason } from "@plugins/peerLive/types";
 import { SelectedChannelStore, Tooltip, useStateFromStores } from "@webpack/common";
 import type { ReactNode } from "react";
 
@@ -24,6 +27,12 @@ import { BroadcastIcon, CloseIcon, EyeIcon, StopIcon, WarningIcon } from "./icon
 import { openSourcePicker } from "./SourcePickerModal";
 import { openStreamersModal } from "./StreamersModal";
 import { openViewer } from "./viewerWindows";
+
+const REASON_SHORT: Record<QualityReason, string> = {
+    cpu: "processador",
+    upload: "seu upload",
+    bandwidth: "conexão de quem assiste"
+};
 
 function VoiceBarInner() {
     const inVoice = useStateFromStores([SelectedChannelStore], () => SelectedChannelStore.getVoiceChannelId() != null);
@@ -73,6 +82,25 @@ function VoiceBarInner() {
                         </button>
                     )}
                 </Tooltip>
+            )}
+
+            {local?.autoQuality && (
+                <div
+                    className={cl("bar-info", local.autoQuality.reason && "bar-info-lowered")}
+                    title={local.autoQuality.reasonText ?? "Qualidade automática: no máximo escolhido"}
+                >
+                    <span className={cl("bar-row-text")}>
+                        {local.autoQuality.current}
+                        {local.autoQuality.reason && ` · menor: ${REASON_SHORT[local.autoQuality.reason]}`}
+                    </span>
+                </div>
+            )}
+
+            {local?.captureWarning && (
+                <div className={cl("bar-error", "bar-wrap")} role="status" title={local.captureWarning}>
+                    <WarningIcon size={14} className={cl("bar-row-icon")} />
+                    <span className={cl("bar-row-text")}>{local.captureWarning}</span>
+                </div>
             )}
 
             {local

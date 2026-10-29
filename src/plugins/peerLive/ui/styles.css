@@ -49,6 +49,7 @@
 }
 
 .vc-peerlive-bar-row,
+.vc-peerlive-bar-info,
 .vc-peerlive-bar-error {
     display: flex;
     align-items: center;
@@ -115,6 +116,22 @@
 
 .vc-peerlive-bar-error .vc-peerlive-bar-row-icon {
     color: inherit;
+}
+
+/* streaming info lines (auto quality level, capture warning): read-only, compact */
+.vc-peerlive-bar-info {
+    min-height: 20px;
+    font-size: 12px;
+    cursor: default;
+}
+
+.vc-peerlive-bar-info-lowered {
+    color: var(--status-warning, #f0b232);
+}
+
+/* long capture warnings wrap instead of being cut off */
+.vc-peerlive-bar-wrap .vc-peerlive-bar-row-text {
+    white-space: normal;
 }
 
 .vc-peerlive-bar-error-close {

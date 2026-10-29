@@ -74,6 +74,11 @@ export function findPeerByDiscordId(id: string): RemotePeer | undefined {
     return getState().peers.find(p => p.discordUserId === id);
 }
 
+/** Stream da captura local (previa da sua propria transmissao), ou null se voce nao esta transmitindo. Toque sempre mudo. */
+export function getLocalPreviewStream(): MediaStream | null {
+    return rt.local?.stream ?? null;
+}
+
 /** Limpa lastError (ex.: quando a UI fecha o aviso). */
 export function clearLastError(): void {
     if (rt.lastError == null) return;

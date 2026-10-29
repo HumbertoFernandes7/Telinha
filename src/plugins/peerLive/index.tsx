@@ -15,6 +15,7 @@ import { showToast } from "@webpack/common";
 import { startSession, stopSession } from "./actions";
 import { settings } from "./settings";
 import { formatDiagnostics } from "./store";
+import { callViewPatches, renderCallTileStream, stopCallView } from "./ui/callView";
 import { runAction } from "./ui/common";
 import { panelJsx, voiceUserIconsJsx } from "./ui/jsxShims";
 import { renderToolboxActions, userContextMenuPatch } from "./ui/menus";
@@ -76,7 +77,9 @@ export default definePlugin({
                 match: /\i\.(jsxs?)(?=\)\(\i,{[^{}]{0,120}?isHovered:)/,
                 replace: "$self.voiceUserIconsJsx.$1"
             }
-        }
+        },
+        // Assistir dentro da tela da call (tiles dos participantes); detalhes em ui/callView/patches.ts
+        ...callViewPatches
     ],
 
     contextMenus: {
@@ -91,9 +94,11 @@ export default definePlugin({
 
     stop() {
         closeAllViewers();
+        stopCallView();
         runAction("stopSession", () => stopSession(), () => { });
     },
 
     panelJsx,
-    voiceUserIconsJsx
+    voiceUserIconsJsx,
+    renderCallTileStream
 });
