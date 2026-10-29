@@ -6,7 +6,7 @@
 
 // Testes das regras PURAS dos sons de entrar/sair (ui/soundEvents.ts): so o diff de estado e o tempo, sem som nenhum.
 // Nao entra no build (nada importa este arquivo).
-// Rodar:  npx tsx --test src/plugins/telinha/ui/soundEvents.test.ts
+// Rodar:  pnpm test:file src/plugins/telinha/ui/soundEvents.test.ts  (todos: pnpm test:unit)
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";

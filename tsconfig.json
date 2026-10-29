@@ -41,6 +41,8 @@
             "@webpack/types": ["./.vencord/src/webpack/types"],
             // ours (the more specific pattern wins over @plugins/*)
             "@plugins/telinha/*": ["./src/plugins/telinha/*"],
+            // test harness (fakes for the unit tests; never imported by the plugin, see test/README.md)
+            "@test/*": ["./test/*"],
             "@plugins/*": ["./.vencord/src/plugins/*"],
             // type-only packages the plugin imports: the very copies Vencord's lockfile installed, so the program
             // has a single React/Discord type world (this repo installs no type packages of its own)
@@ -53,6 +55,7 @@
     },
     "include": [
         "src/**/*",
+        "test/**/*",
         // Vencord's ambient declarations (IS_DEV and the other build defines, VencordNative, "*.css" modules, electron)
         ".vencord/src/globals.d.ts",
         ".vencord/src/modules.d.ts",

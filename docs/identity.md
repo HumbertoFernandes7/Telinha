@@ -228,7 +228,7 @@ Conferido contra o app real **sem login** (2026-10-29):
 
 ## Testes
 
-`pnpm test:identity` — 54 testes das partes puras: os 32 do protótipo (token válido, copiado, vencido, `sub`/
+`pnpm test:file src/plugins/telinha/core/identity/identity.test.ts` (também no `pnpm test:unit`) — 54 testes das partes puras: os 32 do protótipo (token válido, copiado, vencido, `sub`/
 `aud`/`iss` errados, assinatura, `kid`, `alg`, entradas malformadas, fingerprint remoto, PKCE, `location` do
 modal, troca do code, `JwksCache`) e mais: **sem Client ID = v0.1.0** para todas as combinações (hello byte a
 byte, admissão, aprovação, duplicados, nenhum token vira "falso"); admissão para verificado / não verificado

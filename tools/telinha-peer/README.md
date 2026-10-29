@@ -13,7 +13,7 @@ duas em sincronia**.
 
 Arquivos: `index.html` + `telinha-peer.js` + `password-proof.js` (sem build; o Trystero vem do
 jsDelivr, versão fixa `trystero@0.26.0`). `password-proof.js` é a cópia da prova de senha de
-`src/plugins/telinha/core/access.ts`, com o **mesmo vetor de teste**: `pnpm test:access` confere as
+`src/plugins/telinha/core/access.ts`, com o **mesmo vetor de teste**: `pnpm test:file src/plugins/telinha/core/access.test.ts` confere as
 duas sem navegador, e a página roda o vetor ao carregar ("Prova de senha: vetor de teste
 compartilhado com o plugin OK" em Eventos).
 

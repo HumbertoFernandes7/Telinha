@@ -196,12 +196,15 @@ pnpm build:helper      # compila native-audio/bin/telinha-audio.exe (MSVC) e cop
 pnpm typecheck         # tsc do plugin contra as fontes do Vencord fixado
 pnpm lint              # ESLint com as regras de plugin do Vencord
 pnpm lint-styles       # Stylelint do CSS do plugin
-pnpm test:identity     # testes da prova de identidade (tsx --test)
+pnpm test:unit         # testes de unidade do plugin (tsx --test: src/**/*.test.ts(x) e test/**; ver test/README.md)
+pnpm test:file <arq>   # um arquivo de teste só
 pnpm build:addon       # dist/addon/Telinha-addon-<commit>.zip + smoke e checagem de ABI contra .vencord/dist
 pnpm test:addon        # testes offline do add-on (rode o build:addon antes)
-pnpm test              # test:identity + test:addon
+pnpm test              # test:unit + test:addon
+pnpm test:coverage     # cobertura (c8) do plugin e do carregador do add-on: coverage/lcov.info e coverage-summary.json
+pnpm test:coverage:go  # cobertura do instalador em Go: coverage/go/
 pnpm build:installer   # dist/installer/TelinhaInstaller.exe e TelinhaInstaller-cli.exe (roda go vet e go test antes)
-pnpm check             # typecheck, lint, lint-styles, test:identity, build:addon e test:addon, nessa ordem
+pnpm check             # typecheck, lint, lint-styles, test:unit, build:addon e test:addon, nessa ordem
 ```
 
 - O `pnpm bootstrap` é idempotente: numa segunda vez só confere o que já está pronto. `pnpm bootstrap --force` refaz tudo e descarta edições locais dentro de `.vencord/`. (O nome não é `setup` porque `pnpm setup` é um comando do próprio pnpm, que mexe no PATH do usuário.)

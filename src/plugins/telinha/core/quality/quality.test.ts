@@ -8,7 +8,7 @@
 // reducao de resolucao em tamanho par (H.264 na placa de video).
 // O controller em si nao e testado aqui: controller.ts importa core/log -> store -> @webpack/common (Vencord), que nao carrega
 // no Node. Nao entra no build (nada importa este arquivo).
-// Rodar:  pnpm test:quality
+// Rodar:  pnpm test:file src/plugins/telinha/core/quality/quality.test.ts  (todos: pnpm test:unit)
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";

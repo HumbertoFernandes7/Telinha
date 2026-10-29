@@ -1,0 +1,26 @@
+{
+    // Runtime config for the unit tests only (`pnpm test:unit`: tsx --tsconfig tsconfig.test.json). Type checking stays
+    // on tsconfig.json (tests are type-checked against the real Vencord sources, like the plugin). Here every Vencord,
+    // Discord and Trystero import resolves to the controllable fakes in test/fakes/ (see test/README.md), React is the
+    // real `react` package, and JSX compiles to the same VencordCreateElement/VencordFragment globals the add-on build
+    // uses (test/setup.ts points them at React).
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "jsx": "react",
+        "jsxFactory": "VencordCreateElement",
+        "jsxFragmentFactory": "VencordFragment",
+        // replaces tsconfig.json's paths entirely (no inheritance of individual keys)
+        "paths": {
+            "@webpack/common": ["./test/fakes/vencord/webpack-common.ts"],
+            "@webpack": ["./test/fakes/vencord/webpack.ts"],
+            "@api/*": ["./test/fakes/vencord/api/*"],
+            "@components/*": ["./test/fakes/vencord/components/*"],
+            "@utils/*": ["./test/fakes/vencord/utils/*"],
+            "@main/*": ["./test/fakes/vencord/main/*"],
+            "@plugins/telinha/*": ["./src/plugins/telinha/*"],
+            "@test/*": ["./test/*"],
+            "trystero": ["./test/fakes/trystero.ts"],
+            "electron": ["./test/fakes/electron.ts"]
+        }
+    }
+}

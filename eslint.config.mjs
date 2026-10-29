@@ -1,5 +1,6 @@
-// Telinha lint: the plugin sources (src/) under the same rules Vencord applies to its plugins, so the code stays
-// upstream-style. Typed rules use ./tsconfig.json, which needs the pinned Vencord in .vencord/ (`pnpm bootstrap`).
+// Telinha lint: the plugin sources (src/) and the unit-test harness (test/) under the same rules Vencord applies to
+// its plugins, so the code stays upstream-style. Typed rules use ./tsconfig.json, which needs the pinned Vencord in
+// .vencord/ (`pnpm bootstrap`).
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import stylistic from "@stylistic/eslint-plugin";
@@ -10,7 +11,7 @@ import unusedImports from "eslint-plugin-unused-imports";
 import { join } from "node:path";
 import tseslint from "typescript-eslint";
 
-const SOURCES = ["src/**/*.{tsx,ts,mts,mjs,js,jsx}"];
+const SOURCES = ["src/**/*.{tsx,ts,mts,mjs,js,jsx}", "test/**/*.{tsx,ts,mts,mjs,js,jsx}"];
 
 export default tseslint.config(
     { ignores: [".vencord", "dist", "**/node_modules"] },

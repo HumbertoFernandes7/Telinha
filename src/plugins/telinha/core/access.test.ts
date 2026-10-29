@@ -6,7 +6,7 @@
 
 // Testes das partes PURAS de "Quem pode assistir" (core/access.ts + o passo 7 de protocol.ts) e da copia da prova
 // de senha no amigo virtual. Nao entra no build (nada importa este arquivo).
-// Rodar:  pnpm test:access
+// Rodar:  pnpm test:file src/plugins/telinha/core/access.test.ts  (todos: pnpm test:unit)
 
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";

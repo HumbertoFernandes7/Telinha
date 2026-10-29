@@ -5,7 +5,7 @@
  */
 
 // Testes das partes PURAS da prova de identidade. Nao entra no build (nada importa este arquivo).
-// Rodar:  pnpm exec tsx --test src/plugins/telinha/core/identity/identity.test.ts
+// Rodar:  pnpm test:file src/plugins/telinha/core/identity/identity.test.ts  (todos: pnpm test:unit)
 
 import assert from "node:assert/strict";
 import { createHash, createSign, generateKeyPairSync, type KeyObject, randomBytes } from "node:crypto";

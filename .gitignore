@@ -19,3 +19,6 @@ dist/
 .idea/
 .vscode/
 .DS_Store
+
+# coverage reports (pnpm test:coverage, pnpm test:coverage:go)
+coverage/

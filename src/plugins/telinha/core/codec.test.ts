@@ -7,7 +7,7 @@
 // Testes do codec de envio (core/codec.ts + a ordem dos codecs no SDP remoto, core/sdp.ts): sonda de H.264 por hardware
 // por perfil, chooseCodec, ordem das variantes e a checagem do encoder no ar. RTCRtpSender/RTCRtpReceiver e
 // navigator.mediaCapabilities sao falsos em globalThis. Nao entra no build (nada importa este arquivo).
-// Rodar:  pnpm test:codec
+// Rodar:  pnpm test:file src/plugins/telinha/core/codec.test.ts  (todos: pnpm test:unit)
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
