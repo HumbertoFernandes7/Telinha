@@ -147,7 +147,9 @@
     align-items: center;
     gap: 3px;
     height: 16px;
-    margin: 0 4px;
+
+    /* Flex item of the voice row's content (gap: 8px), between the name and the mute/deafen icons */
+    margin: 0;
     padding: 0 5px;
     border-radius: 8px;
     background: #0b8a83;

@@ -16,9 +16,10 @@ import { startSession, stopSession } from "./actions";
 import { settings } from "./settings";
 import { formatDiagnostics } from "./store";
 import { runAction } from "./ui/common";
-import { panelJsx, voiceNameJsx } from "./ui/jsxShims";
+import { panelJsx, voiceUserIconsJsx } from "./ui/jsxShims";
 import { renderToolboxActions, userContextMenuPatch } from "./ui/menus";
 import { closeAllViewers } from "./ui/viewerWindows";
+import { formatVoiceTagDiagnostics } from "./ui/VoiceUserTag";
 
 function SettingsAbout() {
     return (
@@ -31,7 +32,7 @@ function SettingsAbout() {
             <Button
                 size="small"
                 variant="secondary"
-                onClick={() => copyToClipboard(formatDiagnostics()).then(
+                onClick={() => copyToClipboard(`${formatDiagnostics()}\n\n${formatVoiceTagDiagnostics()}`).then(
                     () => showToast({ text: "Diagnóstico do PeerLive copiado", variant: "success" }),
                     () => showToast({ text: "Não consegui copiar o diagnóstico", variant: "critical" })
                 )}
@@ -61,14 +62,19 @@ export default definePlugin({
                 replace: "$self.panelJsx.$1"
             }
         },
-        // "PEERLIVE" tag after the user's name in voice channel rows. Same module RoleColorEverywhere patches: the
-        // name element is the nearest jsx call before `GUEST_NAME_SUFFIX...""]`. Only its callee is swapped (the
-        // props, the GUEST_NAME_SUFFIX text and the guildId/user destructuring RoleColorEverywhere looks for stay).
+        // "PEERLIVE" tag in the voice channel member list (left sidebar), right before the mute/deafen/"AO VIVO"
+        // icons. The find is Discord's VoiceUser row module (the same one RoleColorEverywhere patches). The row ends
+        // with `(0,r.jsx)(VoiceUserIcons,{disabled:…,...rowProps,isHovered:…})`, the only call that gets isHovered;
+        // we swap that call's jsx callee for a shim that reads user/collapsed from the props it already receives and
+        // renders the tag before the icons. Props and children stay untouched, so RoleColorEverywhere's name patch
+        // matches whichever plugin is patched first.
+        // (The previous match grabbed the nearest jsx call before GUEST_NAME_SUFFIX, which in real Discord code is
+        // the guest suffix <span> itself, rendered only for guest users: the tag never showed for anyone else.)
         {
             find: "#{intl::GUEST_NAME_SUFFIX})]",
             replacement: {
-                match: /\i\.(jsxs?)(?=\)\((?:(?!\.jsxs?\)\()[^;]){0,300}?#{intl::GUEST_NAME_SUFFIX}.{0,50}?""\])(?<=user:(\i).+?)/,
-                replace: (_, jsx, user) => `$self.voiceNameJsx(typeof ${user}==="undefined"?void 0:${user}).${jsx}`
+                match: /\i\.(jsxs?)(?=\)\(\i,{[^{}]{0,120}?isHovered:)/,
+                replace: "$self.voiceUserIconsJsx.$1"
             }
         }
     ],
@@ -89,5 +95,5 @@ export default definePlugin({
     },
 
     panelJsx,
-    voiceNameJsx
+    voiceUserIconsJsx
 });
