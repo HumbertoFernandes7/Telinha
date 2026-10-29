@@ -20,7 +20,7 @@
 import { log, logThrottled } from "@plugins/telinha/core/log";
 import type { AutoQualityState, AutoQualityViewer, PeerId, Quality, QualityLevel, QualityReason } from "@plugins/telinha/types";
 
-import { LEVELS, levelText, meet, pixelRate, rank, stepDown, stepUp } from "./levels";
+import { inBandwidthGrace, LEVELS, levelText, meet, pixelRate, rank, stepDown, stepUp } from "./levels";
 import { diffSamples, readSenderSample, type SenderSample, type WindowMetrics } from "./stats";
 
 export interface QualityDeps {
@@ -98,6 +98,8 @@ interface ViewerState {
     peerId: PeerId;
     /** o sender ja existe (addStream resolveu) */
     ready: boolean;
+    /** performance.now() em que ficou pronto (Infinity = ainda nao); carencia de banda: levels.inBandwidthGrace */
+    readyAt: number;
     ignoreUntil: number;
     prev: SenderSample | null;
     metrics: WindowMetrics | null;
@@ -172,7 +174,7 @@ export class QualityController {
         if (this.disposed || this.viewers.has(peerId)) return;
         const now = performance.now();
         this.viewers.set(peerId, {
-            peerId, ready: false, ignoreUntil: now + WARMUP_MS, prev: null, metrics: null, fresh: false,
+            peerId, ready: false, readyAt: Infinity, ignoreUntil: now + WARMUP_MS, prev: null, metrics: null, fresh: false,
             bwLevel: this.deps.ceiling, bwHold: newHold(now), bwStreak: 0, applied: null, applying: false
         });
         if (this.deps.enabled()) this.preempt(now);
@@ -183,8 +185,10 @@ export class QualityController {
     markReady(peerId: PeerId) {
         const v = this.viewers.get(peerId);
         if (!v || this.disposed) return;
+        const now = performance.now();
         v.ready = true;
-        v.ignoreUntil = Math.max(v.ignoreUntil, performance.now() + WARMUP_MS);
+        if (v.readyAt === Infinity) v.readyAt = now; // so a primeira vez: nao reinicia a carencia
+        v.ignoreUntil = Math.max(v.ignoreUntil, now + WARMUP_MS);
         this.applyViewer(v);
     }
 
@@ -377,8 +381,11 @@ export class QualityController {
         }
 
         // banda: a maioria limitada ao mesmo tempo = o upload do streamer
+        // (espectador novo, ainda na carencia de banda, fica de fora: nao entra em bwBad, entao nao soma
+        // no upload geral e o bwStreak dele volta a zero no laco por espectador)
         const bwBad = new Map<Active, string>();
         for (const v of active) {
+            if (inBandwidthGrace(v.readyAt, now)) continue;
             const why = this.bandwidthProblem(v, now);
             if (why) bwBad.set(v, why);
         }

@@ -16,16 +16,17 @@
         "lint": "eslint",
         "lint:fix": "eslint --fix",
         "lint-styles": "stylelint \"src/**/*.css\"",
-        "test": "pnpm test:identity && pnpm test:access && pnpm test:codec && pnpm test:sounds && pnpm test:addon",
+        "test": "pnpm test:identity && pnpm test:access && pnpm test:codec && pnpm test:sounds && pnpm test:quality && pnpm test:addon",
         "test:identity": "tsx --test src/plugins/telinha/core/identity/identity.test.ts",
         "test:access": "tsx --test src/plugins/telinha/core/access.test.ts",
         "test:codec": "tsx --test src/plugins/telinha/core/codec.test.ts",
         "test:sounds": "tsx --test src/plugins/telinha/ui/soundEvents.test.ts",
+        "test:quality": "tsx --test src/plugins/telinha/core/quality/quality.test.ts",
         "test:addon": "node addon/test/run-main-test.mjs && node addon/test/run-renderer-test.mjs && node addon/test/run-update-test.mjs",
         "build:helper": "native-audio\\build.cmd --copy-to-dist",
         "build:addon": "node addon/build/build-addon.mjs",
         "build:installer": "installer\\build.cmd",
-        "check": "pnpm typecheck && pnpm lint && pnpm lint-styles && pnpm test:identity && pnpm test:access && pnpm test:codec && pnpm test:sounds && pnpm build:addon && pnpm test:addon"
+        "check": "pnpm typecheck && pnpm lint && pnpm lint-styles && pnpm test:identity && pnpm test:access && pnpm test:codec && pnpm test:sounds && pnpm test:quality && pnpm build:addon && pnpm test:addon"
     },
     "dependencies": {
         "trystero": "0.26.0"
