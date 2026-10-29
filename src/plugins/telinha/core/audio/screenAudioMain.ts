@@ -21,7 +21,7 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "child_process";
 import { existsSync } from "fs";
 import { release } from "os";
-import { join } from "path";
+import { isAbsolute, join } from "path";
 
 import {
     SCREEN_AUDIO_BYTES_PER_FRAME,
@@ -64,9 +64,18 @@ let exitHookInstalled = false;
 let probeOk: Promise<ScreenAudioStatus> | null = null;
 let helperPathOverride: string | null = null;
 
+/**
+ * Pasta do exe. Build do fork: ao lado do patcher.js (onde este codigo e empacotado), em .../Vencord/dist.
+ * Add-on (Vencord oficial + Telinha): o loader do add-on poe a pasta dele (%APPDATA%\Telinha\addon) em
+ * TELINHA_HELPER_DIR antes de carregar este codigo (addon/PAYLOAD.md); so vale caminho absoluto.
+ */
+function helperDir() {
+    const fromLoader = process.env.TELINHA_HELPER_DIR;
+    return fromLoader && isAbsolute(fromLoader) ? fromLoader : __dirname;
+}
+
 function helperPath() {
-    // patcher.js (onde este codigo e empacotado) fica em .../Vencord/dist: o exe vai ao lado dele
-    return helperPathOverride ?? join(__dirname, SCREEN_AUDIO_HELPER);
+    return helperPathOverride ?? join(helperDir(), SCREEN_AUDIO_HELPER);
 }
 
 /** So para testes fora do Electron (o exe nao fica ao lado do .ts). */

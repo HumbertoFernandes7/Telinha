@@ -1,5 +1,5 @@
 /*
- * PeerLive addon prototype - pure helpers shared by the main-process loader and the offline tests
+ * Telinha add-on - pure helpers shared by the main-process loader and the offline tests
  * (no electron import here, so tests can load this file directly).
  */
 "use strict";
@@ -29,14 +29,14 @@ function patchPluginMeta(code, pluginName, meta) {
  * magic comments of the outer script. Vencord's CSP patch always adds 'unsafe-eval' (src/main/csp/index.ts:120).
  */
 function wrapAddonRenderer(addonJs, bootInfo) {
-    const source = addonJs + "\n//# sourceURL=peerlive-addon:///renderer.js\n";
-    return "\n;try{globalThis.__PeerLiveAddonBoot=" + JSON.stringify(bootInfo) + ";(0,eval)(" + JSON.stringify(source) + ")}" +
-        "catch(e){console.error(\"[PeerLiveAddon] renderer failed\",e)}\n";
+    const source = addonJs + "\n//# sourceURL=telinha-addon:///telinha.renderer.js\n";
+    return "\n;try{globalThis.__TelinhaAddonBoot=" + JSON.stringify(bootInfo) + ";(0,eval)(" + JSON.stringify(source) + ")}" +
+        "catch(e){console.error(\"[Telinha] addon: renderer failed\",e)}\n";
 }
 
 /** What the hooked `VencordPreloadGetRendererJs` answers: Vencord's renderer (PluginMeta-patched) + ours. */
 function buildRendererPayload(vencordJs, addonJs, manifest) {
-    const meta = patchPluginMeta(vencordJs, manifest.pluginName, manifest.meta ?? { folderName: "peerlive-addon", userPlugin: true });
+    const meta = patchPluginMeta(vencordJs, manifest.pluginName, manifest.meta ?? { folderName: "telinha-addon", userPlugin: true });
     const code = meta.code + wrapAddonRenderer(addonJs, { via: "ipc-hook", metaPatched: meta.ok, metaReason: meta.reason });
     return { code, metaPatched: meta.ok, metaReason: meta.reason };
 }

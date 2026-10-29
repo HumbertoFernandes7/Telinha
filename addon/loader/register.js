@@ -1,5 +1,5 @@
 /*
- * PeerLive addon prototype - renderer-side plugin registration (prepended by the loader to the plugin bundle).
+ * Telinha add-on - renderer-side plugin registration (prepended by the loader to the plugin bundle).
  *
  * Runs in Discord's main world right after the official Vencord renderer: window.Vencord exists, Vencord's
  * initPluginManager() and startAllPlugins(StartAt.Init) already ran, and NO Discord webpack chunk has loaded yet.
@@ -13,16 +13,16 @@
 (() => {
     "use strict";
 
-    if (globalThis.__PeerLiveAddonRegister) return;
+    if (globalThis.__TelinhaAddonRegister) return;
 
-    const TAG = "[PeerLiveAddon]";
+    const TAG = "[Telinha]";
     const V = globalThis.Vencord;
     const registrations = {};
-    globalThis.PeerLiveAddon = { boot: globalThis.__PeerLiveAddonBoot ?? null, registrations };
+    globalThis.TelinhaAddon = { boot: globalThis.__TelinhaAddonBoot ?? null, registrations };
 
     if (!V?.Plugins?.plugins || typeof V.Plugins.addPatch !== "function" || !V.Api?.Settings?.SettingsStore || !V.Settings) {
-        console.error(TAG, "Vencord renderer not found or incompatible; addon plugins will not load");
-        globalThis.__PeerLiveAddonRegister = () => ({ enabled: false, error: "Vencord not found" });
+        console.error(TAG, "addon: Vencord renderer not found or incompatible; addon plugins will not load");
+        globalThis.__TelinhaAddonRegister = () => ({ enabled: false, error: "Vencord not found" });
         return;
     }
 
@@ -47,7 +47,7 @@
     function enableLateDependency(name) {
         const dep = PM.plugins[name];
         if (!dep) {
-            console.warn(TAG, "missing dependency", name);
+            console.warn(TAG, "addon: missing dependency", name);
             return;
         }
         dep.isDependency = true;
@@ -59,7 +59,13 @@
 
     /** Does for one late plugin what initPluginManager() (src/api/PluginManager.ts:327-398) did for the bundled ones. */
     function registerLatePlugin(p) {
-        if (PM.plugins[p.name]) throw new Error(`a plugin named ${p.name} already exists`);
+        if (PM.plugins[p.name]) {
+            // e.g. %APPDATA%\Vencord\dist is a Vencord build that already bundles this plugin: that copy wins.
+            console.warn(TAG, `addon: Vencord already has a plugin named ${p.name}; the add-on copy stays passive`);
+            const result = { enabled: false, duplicate: true };
+            registrations[p.name] = result;
+            return result;
+        }
         const webpackAlreadyRunning = V.Webpack?.wreq != null;
 
         // The object the settings UI lists (tabs/plugins/index.tsx:151), startAllPlugins() iterates, and that
@@ -84,18 +90,18 @@
             // run later and iterate Plugins.plugins, so they start this plugin like any bundled one.
         }
 
-        if (webpackAlreadyRunning) console.warn(TAG, "webpack was already initialised; some patches may miss modules");
+        if (webpackAlreadyRunning) console.warn(TAG, "addon: webpack was already initialised; some patches may miss modules");
         const result = { enabled, webpackAlreadyRunning };
         registrations[p.name] = result;
-        console.log(TAG, `registered ${p.name}`, result);
+        console.log(TAG, `addon: registered ${p.name}`, result);
         return result;
     }
 
-    globalThis.__PeerLiveAddonRegister = p => {
+    globalThis.__TelinhaAddonRegister = p => {
         try {
             return registerLatePlugin(p);
         } catch (err) {
-            console.error(TAG, `registration of ${p?.name} failed`, err);
+            console.error(TAG, `addon: registration of ${p?.name} failed`, err);
             return { enabled: false, error: String(err) };
         }
     };

@@ -1,10 +1,10 @@
 /*
- * PeerLive addon prototype - minimal asar writer/reader for the resources/app.asar stub.
+ * Telinha add-on - minimal asar writer/reader for the resources/app.asar stub.
  *
  * The writer is a byte-for-byte port of WriteAppAsar() from the official Vencord installer
  * (github.com/Vencord/Installer, app_asar.go): two files, index.js + package.json, header JSON padded
  * with "0" characters to a 4-byte boundary, four little-endian int32 size fields. Keeping the exact same
- * layout means a stub we regenerate for Vencord (on PeerLive uninstall) is identical to the one the
+ * layout means a stub we regenerate for Vencord (on Telinha uninstall) is identical to the one the
  * Vencord installer would have written.
  */
 "use strict";

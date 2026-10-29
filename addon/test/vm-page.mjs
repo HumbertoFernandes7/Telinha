@@ -1,6 +1,6 @@
 /*
  * A node:vm "Discord main world" good enough to evaluate a Vencord renderer bundle (same idea as
- * scripts/peerlive/smokeRenderer.mjs, trimmed): browser globals as stubs, a VencordNative look-alike whose
+ * scripts/telinha/smokeRenderer.mjs, trimmed): browser globals as stubs, a VencordNative look-alike whose
  * settings store and plugin helpers are supplied by the test.
  */
 import { webcrypto } from "crypto";

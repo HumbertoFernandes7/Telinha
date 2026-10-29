@@ -12,7 +12,7 @@ const tick = () => new Promise(r => setImmediate(r));
 function ctorChain(obj) {
     const names = [];
     for (let p = Object.getPrototypeOf(obj); p && p !== Object.prototype; p = Object.getPrototypeOf(p)) {
-        const file = p.constructor?.toString().includes("PEERLIVE_VENCORD_PRELOAD") ? "peerlive" :
+        const file = p.constructor?.toString().includes("TELINHA_VENCORD_PRELOAD") ? "telinha" :
             p.constructor?.toString().includes("DISCORD_PRELOAD") ? "vencord" : "electron/other";
         names.push(`${p.constructor?.name}(${file})`);
     }
@@ -26,7 +26,7 @@ async function run(entry) {
     const { buildStubAsar, readAsarFile } = require("../../installer/asar");
 
     const report = { entry, steps: [] };
-    const addon = () => globalThis.__PeerLiveAddon ? JSON.parse(JSON.stringify(globalThis.__PeerLiveAddon)) : null;
+    const addon = () => globalThis.__TelinhaAddon ? JSON.parse(JSON.stringify(globalThis.__TelinhaAddon)) : null;
 
     try {
         const { app, ipcMain } = fakeCore;
@@ -39,6 +39,8 @@ async function run(entry) {
             electronExportsReplaced: electron.BrowserWindow !== fakeCore.BrowserWindow || require.cache[require.resolve("electron")].exports !== fakeCore,
             addon: addon()
         };
+        report.helperDir = process.env.TELINHA_HELPER_DIR ?? null;
+        report.cspSources = Object.keys(globalThis.__TelinhaAddonCsp ?? {});
 
         app.becomeReady();
         await tick();
@@ -50,7 +52,7 @@ async function run(entry) {
             sandbox: win.options.webPreferences.sandbox,
             ctorChain: ctorChain(win),
             listedByGetAllWindows: fakeCore.BrowserWindow.getAllWindows().includes(win),
-            env: { DISCORD_PRELOAD: process.env.DISCORD_PRELOAD ?? null, PEERLIVE_VENCORD_PRELOAD: process.env.PEERLIVE_VENCORD_PRELOAD ?? null }
+            env: { DISCORD_PRELOAD: process.env.DISCORD_PRELOAD ?? null, TELINHA_VENCORD_PRELOAD: process.env.TELINHA_VENCORD_PRELOAD ?? null }
         } : null;
 
         // Optional: simulate a Vencord update of renderer.js between boot and window load
@@ -67,32 +69,37 @@ async function run(entry) {
                 executedScripts: renderer.executed.length,
                 discordPreloadRan: !!globalThis.__fakeDiscordPreloadRan,
                 pluginHelpers: Object.keys(helpers),
-                addonHelpers: Object.keys(helpers.PeerLiveAddonHello ?? {}),
-                peerLiveNative: Object.keys(renderer.exposed.PeerLiveNative ?? {}),
+                telinhaHelpers: Object.keys(helpers.Telinha ?? {}),
+                telinhaNative: Object.keys(renderer.exposed.TelinhaNative ?? {}),
                 hasVencordRenderer: all.includes("var Vencord="),
-                hasAddonRenderer: all.includes("__PeerLiveAddonBoot"),
-                addonAfterVencord: all.indexOf("__PeerLiveAddonBoot") > all.indexOf("var Vencord="),
-                pluginMetaEntry: all.includes('"PeerLiveAddonHello":{"folderName":"peerlive-addon","userPlugin":true}'),
+                hasAddonRenderer: all.includes("__TelinhaAddonBoot"),
+                addonAfterVencord: all.indexOf("__TelinhaAddonBoot") > all.indexOf("var Vencord="),
+                pluginMetaEntry: all.includes('"Telinha":{"folderName":"telinha-addon","userPlugin":true}'),
                 sawVencordUpdate: all.includes("FAKE_VENCORD_UPDATE_MARKER")
             };
             if (process.env.FAKE_SERVED_OUT) fs.writeFileSync(process.env.FAKE_SERVED_OUT, all);
 
-            // --- natives through whatever the page would use
-            const api = helpers.PeerLiveAddonHello ?? renderer.exposed.PeerLiveNative;
-            if (api) {
-                report.natives = { ping: await api.ping("from-test") };
-                report.natives.arm = await api.armDisplayMedia("window:123:0");
+            // --- natives through what the plugin uses: VencordNative.pluginHelpers.Telinha (core/nativeApi.ts)
+            const api = helpers.Telinha;
+            if (api && process.env.FAKE_EXERCISE_NATIVES) {
+                report.natives = { channels: (addon()?.nativeChannels ?? []) };
+                report.natives.listSources = await api.listSources(320, 180);
+                report.natives.prepare = await api.prepareDisplayMedia("window:123:0", "Janela de teste", false);
                 const ses = fakeCore.session.defaultSession;
                 let answer;
-                ses.displayMediaHandler({ audioRequested: false }, v => (answer = v));
+                await ses.displayMediaHandler?.({ audioRequested: false }, v => (answer = v));
                 report.natives.displayMediaAnswer = answer;
+                report.natives.finish = await api.finishDisplayMedia();
                 report.natives.handlerRemovedAfterUse = ses.displayMediaHandler === null;
+                if (process.env.FAKE_HELPER_PROBE) report.natives.screenAudio = await api.screenAudioStatus();
                 try {
-                    await ipcMain.invoke("PeerLiveAddon_PeerLiveAddonHello_ping", {}, "https://evil.example/", "x");
+                    await ipcMain.invoke("TelinhaAddon_Telinha_listSources", {}, "https://evil.example/", 320, 180);
                     report.natives.untrustedFrame = "accepted";
                 } catch {
                     report.natives.untrustedFrame = "rejected";
                 }
+            } else if (typeof api?.listSources === "function") {
+                report.natives = { listSources: await api.listSources(320, 180) };
             }
         }
 
@@ -124,7 +131,7 @@ async function run(entry) {
             const newAsar = path.join(newRes, "app.asar");
             report.persist = {
                 newAppAsarIsOurStub: fs.existsSync(newAsar) && Buffer.compare(fs.readFileSync(newAsar), stubBytes) === 0,
-                newIndexIsPeerLiveStub: (readAsarFile(newAsar, "index.js") ?? "").startsWith("// PeerLive stub"),
+                newIndexIsTelinhaStub: (readAsarFile(newAsar, "index.js") ?? "").startsWith("// Telinha stub"),
                 newOriginalMovedTo_app: fs.existsSync(path.join(newRes, "_app.asar")) && fs.readFileSync(path.join(newRes, "_app.asar"), "utf8") === "NEW DISCORD ORIGINAL ASAR"
             };
         }
