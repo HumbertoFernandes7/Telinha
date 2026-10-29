@@ -1,0 +1,5 @@
+[*.go]
+indent_style = tab
+
+[*.cmd]
+end_of_line = crlf

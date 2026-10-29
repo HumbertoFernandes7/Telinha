@@ -1,0 +1,5 @@
+*.asar binary
+*.syso binary
+*.ico binary
+*.png binary
+internal/testdata/* -text
