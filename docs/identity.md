@@ -151,10 +151,12 @@ Não impede:
   stream) é ignorado, sai da lista de peers e vira só um alerta "Uma conexão apresentou uma prova de identidade
   falsa de Ana — ignorada". Log uma vez (sem IPs).
 - **`requireVerifiedIdentity`** ("Exigir identidade verificada", **ligada por padrão**, escondida sem Client
-  ID): quem não está verificado e está no seu canal de voz continua vendo a sua presença, mas o pedido para
-  assistir cai em Permitir/Recusar mesmo com "Aprovar quem vai assistir" desligado, e o pedido mostra "não
-  verificado". **Desligada**: não verificado funciona como na v0.1.0. Mudar a opção no meio da transmissão não
-  derruba quem já assiste (igual a "Aprovar quem vai assistir").
+  ID), vale para "Quem pode assistir: Todos da call": quem não está verificado e está no seu canal de voz continua
+  vendo a sua presença, mas o pedido para assistir cai em Permitir/Recusar, e o pedido mostra "não verificado".
+  **Desligada**: não verificado funciona como na v0.1.0. Mudar a opção no meio da transmissão não derruba quem já
+  assiste. Os outros modos de "Quem pode assistir" (v0.2.0, `core/access.ts`): "Só meus amigos do Discord" só
+  aceita verificado **e** amigo; "Só quem eu aprovar" sempre pede Permitir; "Com senha" aceita quem acertar a
+  senha, mesmo não verificado. Identidade falsa nunca, em nenhum modo.
 - **Identidade duplicada**: conexão verificada nunca é marcada; verificada + não verificada com o mesmo id →
   só a não verificada é bloqueada ("Uma conexão não verificada diz ser Ana, que já provou a identidade — só ela
   fica bloqueada"); duas verificadas = a mesma pessoa em dois PCs; duas não verificadas = regra de hoje.
@@ -197,8 +199,9 @@ Conferido contra o app real **sem login** (2026-10-29):
 ## Integração (onde está cada coisa)
 
 - `core/identity/policy.ts` (**puro**, testado): `isAdmitted` (falsa e "conferindo" nunca; o resto pela regra
-  do canal de voz), `watchNeedsApproval` / `identityRequiresApproval` (approveViewers, ou não verificado com a
-  opção ligada), `findDuplicates` (regras acima), `nextPeerIdentity` (verificada não é rebaixada, falsa não vira
+  do canal de voz), `identityRequiresApproval` (não verificado com a opção ligada; usado por `decideWatch` em
+  `core/access.ts` no modo "Todos da call") e `watchNeedsApproval` (a regra da v0.1.0 com o antigo approveViewers,
+  só para os testes de compatibilidade), `findDuplicates` (regras acima), `nextPeerIdentity` (verificada não é rebaixada, falsa não vira
   confiável), `initialPeerIdentity`. `configured` sempre por parâmetro: o caminho sem Client ID é testado sem
   depender da constante.
 - `protocol.ts`: `HelloMessage.idToken?`, `parseHello` (só campos conhecidos; token ruim sai e o peer fica "não
@@ -214,8 +217,9 @@ Conferido contra o app real **sem login** (2026-10-29):
   der para ler); ação "identity" (1 verificação por peer a cada 10 s, ignorada para verificado/falso); o token
   novo/renovado vai uma vez por peer (`announcedTo`); `checkIdentities` com `findDuplicates`;
   `peerIdentityDiagnostics()`. Nada disso lança para fora dos handlers do Trystero.
-- `core/streaming.ts`: aprovação por `watchNeedsApproval`; `onApprovalPolicyChanged` (approveViewers e
-  requireVerifiedIdentity); `reviewPendingApprovals` (quem provou a identidade com pedido pendente é atendido).
+- `core/streaming.ts`: cada pedido decidido por `decideWatch` (`core/access.ts`: modo da transmissão + identidade);
+  `onApprovalPolicyChanged` (requireVerifiedIdentity e troca do modo no ar); `reviewPendingApprovals` (pedidos
+  pendentes decididos de novo, ex.: quem provou a identidade é atendido).
 - `core/viewing.ts`: não assiste a "conferindo"/falsa; para de assistir quem vira falsa.
 - `types.ts`: `PeerIdentityStatus`, `RemotePeer.identity?`, `PendingViewer.identity?`, `IdentityAlert.kind?`
   (`duplicate | impostor | fake`). Sem Client ID os campos não aparecem (snapshot igual ao da v0.1.0).
@@ -245,10 +249,10 @@ Dois PCs (ou duas contas) com este build, no mesmo canal de voz. Ter "Copiar dia
    aparece ligada.
 3. **Verificado**: com os dois autorizados, cada um vê o outro com "✔ verificado" em "Quem está transmitindo"
    e "Quem está assistindo"; a dica da etiqueta TELINHA diz "(identidade verificada)"; assistir funciona sem
-   pedido de aprovação (approveViewers desligado).
+   pedido de aprovação (transmitindo com "Quem pode assistir: Todos da call").
 4. **Não verificado**: no PC B, **Desvincular** e sair/entrar na call. A vê B como "não verificado"; B ainda
    vê A transmitindo; B pede para assistir → A recebe "B quer assistir · não verificado" com Permitir/Recusar
-   (mesmo com "Aprovar quem vai assistir" desligado); Permitir → B assiste; Recusar → B vê a recusa.
+   (em "Todos da call"); Permitir → B assiste; Recusar → B vê a recusa.
 5. **Opção desligada**: em A, desligar "Exigir identidade verificada" → B (não verificado) assiste direto,
    como na v0.1.0. Religar.
 6. **Autorizar no meio da call**: B autoriza com os dois na call → em A, B passa de "não verificado" para
