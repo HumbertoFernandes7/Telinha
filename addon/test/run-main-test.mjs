@@ -3,17 +3,18 @@
  * (patcher.js + preload.js + renderer.js), on fake Discord trees under %TEMP%\tl-addon. Never touches the real
  * Discord or %APPDATA%: the Vencord build and the payload are only READ (copied into the scratch trees).
  *
- *   node addon/test/run-main-test.mjs [--vencord-dist <dir>] [--payload <dir>] [--no-helper-probe]
+ *   node addon/test/run-main-test.mjs [--vencord-dist <dir>] [--payload <dir>] [--no-helper-probe] [--fork-dist <dir>]
  *
  * S1 spawns the real telinha-audio.exe once with --probe (what the plugin does when asked for whole-screen audio
- * status); --no-helper-probe skips that.
+ * status); --no-helper-probe skips that. S7 needs a Vencord build that already bundles Telinha (the old fork-era test
+ * builds): pass one with --fork-dist <dir>, otherwise S7 is skipped.
  */
 import { execFileSync, spawnSync } from "child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { createRequire } from "module";
 import { dirname, join } from "path";
 
-import { ADDON, HERE, makeChecker, pickPayload, pickVencordDist, REPO, SCRATCH } from "./common.mjs";
+import { ADDON, argValue, HERE, makeChecker, pickPayload, pickVencordDist, SCRATCH } from "./common.mjs";
 
 const require = createRequire(import.meta.url);
 const { buildStubAsar, readAsarFile } = require("../installer/asar.js");
@@ -207,16 +208,16 @@ console.log("\nS6 broken natives (telinha.main.js throws)");
 }
 
 // ---------------------------------------------------------------------------------------------- S7
-const forkDist = join(REPO, "dist");
-if (existsSync(join(forkDist, "patcher.js")) && readFileSync(join(forkDist, "renderer.js"), "utf8").includes('name:"Telinha"')) {
-    console.log("\nS7 Vencord build that already bundles Telinha (this repo's fork build in dist/): add-on stays passive");
+const forkDist = argValue("--fork-dist");
+if (forkDist && existsSync(join(forkDist, "patcher.js")) && readFileSync(join(forkDist, "renderer.js"), "utf8").includes('name:"Telinha"')) {
+    console.log(`\nS7 Vencord build that already bundles Telinha (old fork build in ${forkDist}): add-on stays passive`);
     const t = makeTree("s7", { vencord: copyVencord(forkDist, "vencord-fork") });
     const r = boot("s7", t);
     const a = r.addon ?? {};
     check("Discord + Vencord loaded, hooks fired", r.afterLoad.discordLoaded && a.vencordLoaded && a.rendererHooked && a.ipcMapHooked);
     check("Vencord's own Telinha natives kept (not replaced by ours)", a.vencordBundlesPlugin === true && r.preload?.telinhaHelpers?.length >= NATIVES.length && JSON.stringify(r.natives?.listSources) === '{"sources":[]}', { bundles: a.vencordBundlesPlugin, helpers: r.preload?.telinhaHelpers });
     check("main.log says the add-on stays passive", /already bundles Telinha; the add-on stays passive/.test(r.mainLog));
-} else console.log("\nS7 skipped (no fork build with Telinha in dist/)");
+} else console.log("\nS7 skipped (no --fork-dist <dir> with a Vencord build that bundles Telinha)");
 
 // ---------------------------------------------------------------------------------------------- installer
 console.log("\nDev installer on a fake tree (asar files, like the real machine)");

@@ -1,0 +1,6 @@
+{
+    "$comment": "The official Vencord Telinha is compiled against and tested with. `pnpm bootstrap` fetches exactly this commit into .vencord/ (gitignored, never committed). To move to a newer Vencord: change commit and version, run `pnpm bootstrap`, then every gate (see README).",
+    "repository": "https://github.com/Vendicated/Vencord.git",
+    "commit": "443688b5366a4d43e9868519f48a4544cd7520d4",
+    "version": "1.15.13"
+}

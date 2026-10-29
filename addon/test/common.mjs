@@ -2,13 +2,15 @@
  * Shared bits of the offline add-on tests: which Vencord build and which payload are under test, scratch dir, checks.
  *
  *   --vencord-dist <dir>   Vencord build with patcher.js, preload.js, renderer.js
- *                          (default: %APPDATA%\Vencord\dist.backup-oficial-* = official release, read-only)
+ *                          (default: .vencord/dist = the pinned official Vencord built by `pnpm bootstrap`, read-only)
  *   --payload <dir>        built payload (default: dist/addon/payload, from `pnpm build:addon`)
  */
-import { existsSync, readdirSync, readFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
+
+import { VENCORD_DIST } from "../../scripts/vencord.mjs";
 
 export const HERE = dirname(fileURLToPath(import.meta.url));
 export const ADDON = resolve(HERE, "..");
@@ -16,18 +18,15 @@ export const REPO = resolve(ADDON, "..");
 // Short on purpose: Windows MAX_PATH and the fake trees nest a few levels deep. Never the real %APPDATA%.
 export const SCRATCH = join(tmpdir(), "tl-addon");
 
-const argValue = name => (process.argv.includes(name) ? resolve(process.argv[process.argv.indexOf(name) + 1]) : null);
+export const argValue = name => (process.argv.includes(name) ? resolve(process.argv[process.argv.indexOf(name) + 1]) : null);
 
 export function pickVencordDist() {
-    const explicit = argValue("--vencord-dist");
-    if (explicit) return explicit;
-    const roaming = process.env.APPDATA && join(process.env.APPDATA, "Vencord");
-    const official = roaming && existsSync(roaming) && readdirSync(roaming).find(d => d.startsWith("dist.backup-oficial"));
-    if (!official) {
-        console.error("No official Vencord build found: pass --vencord-dist <dir with patcher.js, preload.js, renderer.js>");
+    const dir = argValue("--vencord-dist") ?? VENCORD_DIST;
+    if (!["patcher.js", "preload.js", "renderer.js"].every(f => existsSync(join(dir, f)))) {
+        console.error(`No Vencord build in ${dir}: run \`pnpm bootstrap\` (or pass --vencord-dist <dir with patcher.js, preload.js, renderer.js>)`);
         process.exit(2);
     }
-    return join(roaming, official);
+    return dir;
 }
 
 export function pickPayload() {

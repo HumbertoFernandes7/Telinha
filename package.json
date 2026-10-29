@@ -1,0 +1,49 @@
+{
+    "name": "telinha",
+    "private": true,
+    "version": "0.1.0",
+    "description": "Stream your screen to friends in the same Discord voice channel, peer to peer, and watch inside Discord (Vencord plugin, add-on loader and Windows installer)",
+    "homepage": "https://github.com/HumbertoFernandes7/Telinha#readme",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/HumbertoFernandes7/Telinha.git"
+    },
+    "license": "GPL-3.0-or-later",
+    "author": "Humberto Fernandes",
+    "scripts": {
+        "bootstrap": "node scripts/bootstrap.mjs",
+        "typecheck": "tsc --noEmit",
+        "lint": "eslint",
+        "lint:fix": "eslint --fix",
+        "lint-styles": "stylelint \"src/**/*.css\"",
+        "test": "pnpm test:identity && pnpm test:addon",
+        "test:identity": "tsx --test src/plugins/telinha/core/identity/identity.test.ts",
+        "test:addon": "node addon/test/run-main-test.mjs && node addon/test/run-renderer-test.mjs",
+        "build:helper": "native-audio\\build.cmd --copy-to-dist",
+        "build:addon": "node addon/build/build-addon.mjs",
+        "build:installer": "installer\\build.cmd",
+        "check": "pnpm typecheck && pnpm lint && pnpm lint-styles && pnpm test:identity && pnpm build:addon && pnpm test:addon"
+    },
+    "dependencies": {
+        "trystero": "0.26.0"
+    },
+    "devDependencies": {
+        "@stylistic/eslint-plugin": "5.10.0",
+        "esbuild": "0.28.1",
+        "eslint": "10.6.0",
+        "eslint-plugin-react": "7.37.5",
+        "eslint-plugin-simple-header": "1.2.2",
+        "eslint-plugin-simple-import-sort": "13.0.0",
+        "eslint-plugin-unused-imports": "4.4.1",
+        "fflate": "0.8.3",
+        "stylelint": "17.14.0",
+        "stylelint-config-standard": "40.0.0",
+        "tsx": "4.22.4",
+        "typescript": "6.0.3",
+        "typescript-eslint": "8.62.1"
+    },
+    "packageManager": "pnpm@11.9.0",
+    "engines": {
+        "node": ">=22"
+    }
+}

@@ -97,6 +97,8 @@ let finds;
     const p = await boot(page0.code, {});
     const { $ } = p;
     check("Vencord renderer evaluated, Vencord global defined", !p.thrown && $("typeof Vencord") === "object", String(p.thrown));
+    // the safety property of the old fork-era smoke:renderer: top-level JSX / Vencord.* / webpack access must not throw at load
+    check("add-on top level evaluated without throwing (no JSX, Vencord.* or webpack use at module load)", !p.consoleLines.some(l => /addon: renderer failed/.test(l)), p.consoleLines.filter(l => /renderer failed/.test(l)).map(l => l.slice(0, 300)));
     check("add-on ran via ipc-hook with PluginMeta patched", $("JSON.stringify(__TelinhaAddonBoot)") === JSON.stringify({ via: "ipc-hook", metaPatched: true, metaReason: null }));
     check("registered into Vencord.Plugins.plugins, enabled by default, before webpack", $("JSON.stringify(TelinhaAddon.registrations.Telinha)") === '{"enabled":true,"webpackAlreadyRunning":false}' && $("Vencord.Webpack.wreq === undefined"));
     const queued = queuedPatches($);

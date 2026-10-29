@@ -1,0 +1,8 @@
+# pnpm settings for this repo. There are no workspace packages: .vencord/ (the pinned official Vencord, fetched by
+# `pnpm bootstrap`) is a separate pnpm project with its own lockfile and node_modules.
+allowBuilds:
+  esbuild: true
+peerDependencyRules:
+  allowedVersions:
+    # same pairing Vencord's own lint uses (eslint-plugin-react 7.37 works with eslint 10; its peer range lags)
+    eslint-plugin-react>eslint: "10"

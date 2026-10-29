@@ -4,15 +4,16 @@
  *   pnpm build:addon            (= node addon/build/build-addon.mjs)
  *   options: --out <dir>            default dist/addon
  *            --helper <exe>         default native-audio/bin/telinha-audio.exe, else dist/telinha-audio.exe
- *            --vencord-dist <dir>   official Vencord build for the smoke (default %APPDATA%\Vencord\dist.backup-oficial-*)
+ *            --vencord-dist <dir>   official Vencord build for the smoke (default .vencord/dist, made by `pnpm bootstrap`)
  *            --skip-smoke
  *
  * Output: <out>/payload/ (the files of %APPDATA%\Telinha\addon\), <out>/Telinha-addon-<commit>.zip (+ .sha256).
  *
- * The plugin (src/plugins/telinha) is compiled against this repo's Vencord sources WITHOUT bundling Vencord: every
- * `@api/*`, `@components/*`, `@utils/*`, `@webpack(/common)` import becomes a shim over the running Vencord's
- * `window.Vencord` exports (shared settings store, finders, React). `@utils/types` is the only inlined module (identity
- * definePlugin + enum constants, checked against src/utils/types.ts). Any other Vencord import fails the build.
+ * The plugin (src/plugins/telinha) is compiled against the pinned official Vencord sources in .vencord/ (vencord.json,
+ * fetched by `pnpm bootstrap`) WITHOUT bundling Vencord: every `@api/*`, `@components/*`, `@utils/*`,
+ * `@webpack(/common)` import becomes a shim over the running Vencord's `window.Vencord` exports (shared settings store,
+ * finders, React). `@utils/types` is the only inlined module (identity definePlugin + enum constants, checked against
+ * .vencord/src/utils/types.ts). Any other Vencord import fails the build.
  * Natives: native.ts as CommonJS, `@main/csp` shimmed to a global the loader merges into its CSP chain.
  */
 import { createHash } from "crypto";
@@ -26,11 +27,15 @@ import { basename, dirname, join, relative, resolve } from "path";
 import { fileURLToPath } from "url";
 import vm from "vm";
 
+import { requirePinnedCheckout, VENCORD_DIR, VENCORD_DIST } from "../../scripts/vencord.mjs";
+
 const ADDON_VERSION = "0.1.0";
 const PLUGIN_DIR = "src/plugins/telinha";
 const PLUGIN_NAME = "Telinha";
 const HELPER = "telinha-audio.exe";
 const LOADER_FILES = ["main.js", "payload.js", "preload.js", "register.js", "stub-template.js"];
+// Vencord's JSX inject (VencordCreateElement -> Vencord.Webpack.Common.React.createElement), used from the pinned checkout
+const REACT_INJECT = ".vencord/scripts/build/inject/react.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ADDON = resolve(HERE, "..");
@@ -67,9 +72,14 @@ if (otherHelper && sha256(readFileSync(otherHelper)) !== sha256(readFileSync(hel
 const shortHead = git("rev-parse", "--short=8", "HEAD") ?? "nogit";
 const dirty = !!git("status", "--porcelain");
 const commit = shortHead + (dirty ? "-dirty" : "");
-const vencordBaseCommit = (git("merge-base", "HEAD", "upstream/main") ?? "").slice(0, 8) || null;
-if (!vencordBaseCommit) console.warn("[build:addon] warning: could not find the upstream Vencord base commit (git remote 'upstream' missing?)");
-const vencordVersion = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8")).version;
+let pin;
+try {
+    pin = requirePinnedCheckout();
+} catch (e) {
+    die(e.message);
+}
+const vencordBaseCommit = pin.commit.slice(0, 8);
+const vencordVersion = JSON.parse(readFileSync(join(VENCORD_DIR, "package.json"), "utf8")).version;
 const builtAt = new Date().toISOString();
 
 // ------------------------------------------------------------------------------------------- shims
@@ -137,9 +147,9 @@ const defines = {
     VERSION: JSON.stringify(`telinha-addon-${ADDON_VERSION}`), BUILD_TIMESTAMP: String(Date.parse(builtAt))
 };
 
-/** OptionType / StartAt in the shim must equal src/utils/types.ts (const enums are inlined by Vencord's build). */
+/** OptionType / StartAt in the shim must equal Vencord's src/utils/types.ts (const enums are inlined by Vencord's build). */
 function checkTypesShim() {
-    const src = readFileSync(join(REPO, "src", "utils", "types.ts"), "utf8");
+    const src = readFileSync(join(VENCORD_DIR, "src", "utils", "types.ts"), "utf8");
     const enumBody = name => /export const enum (\w+) \{([\s\S]*?)\}/g;
     const found = {};
     for (const m of src.matchAll(enumBody())) found[m[1]] = m[2];
@@ -177,7 +187,7 @@ else console.error("[Telinha] addon: register.js did not run; plugin not registe
         banner: { js: banner }, legalComments: "eof",
         tsconfig: join(REPO, "tsconfig.json"),
         jsx: "transform", jsxFactory: "VencordCreateElement", jsxFragment: "VencordFragment",
-        inject: [join(REPO, "scripts", "build", "inject", "react.mjs")],
+        inject: [join(REPO, REACT_INJECT)],
         define: defines, logLevel: "warning",
         plugins: [vencordShimPlugin("renderer")]
     });
@@ -200,7 +210,7 @@ try {
 // No Vencord source may end up inside the add-on (it must use the user's official Vencord at runtime)
 const repoInputs = meta => Object.keys(meta.inputs).map(i => i.replaceAll("\\", "/")).filter(i => !i.startsWith("node_modules/") && !i.includes(":"));
 const foreign = [...repoInputs(renderer.metafile), ...repoInputs(main.metafile)]
-    .filter(i => !i.startsWith(PLUGIN_DIR + "/") && i !== "scripts/build/inject/react.mjs" && i !== "telinha-addon-entry.ts");
+    .filter(i => !i.startsWith(PLUGIN_DIR + "/") && i !== REACT_INJECT && i !== "telinha-addon-entry.ts");
 if (foreign.length) die(`Vencord sources would be bundled into the add-on: ${[...new Set(foreign)].join(", ")}`);
 
 const rendererJs = renderer.outputFiles[0].text;
@@ -255,11 +265,9 @@ if (argv.includes("--skip-smoke")) {
     process.exit(0);
 }
 
-const roaming = process.env.APPDATA && join(process.env.APPDATA, "Vencord");
-const official = roaming && existsSync(roaming) && readdirSync(roaming).find(d => d.startsWith("dist.backup-oficial"));
-const vencordDist = arg("--vencord-dist") ? resolve(arg("--vencord-dist")) : official ? join(roaming, official) : null;
-if (!vencordDist || !existsSync(join(vencordDist, "renderer.js")))
-    die("no official Vencord build for the smoke: pass --vencord-dist <dir with renderer.js> (or --skip-smoke)");
+const vencordDist = arg("--vencord-dist") ? resolve(arg("--vencord-dist")) : VENCORD_DIST;
+if (!existsSync(join(vencordDist, "renderer.js")))
+    die(`no official Vencord build for the smoke in ${vencordDist}: run \`pnpm bootstrap\` or pass --vencord-dist <dir with renderer.js> (or --skip-smoke)`);
 const vencordJs = readFileSync(join(vencordDist, "renderer.js"), "utf8");
 const vencordHeader = vencordJs.slice(0, 200).split("\n")[0];
 
@@ -291,6 +299,8 @@ await new Promise(r => setTimeout(r, 50));
 const $ = e => vm.runInContext(e, page.context);
 const N = JSON.stringify(PLUGIN_NAME);
 check("Vencord renderer + add-on evaluated", !thrown && $("typeof Vencord") === "object", String(thrown));
+// the safety property of the old fork-era smoke:renderer: no JSX / Vencord.* / webpack use at module top level
+check("add-on top level evaluated without throwing (no JSX, Vencord.* or webpack use at module load)", !page.consoleLines.some(l => /addon: renderer failed/.test(l)), page.consoleLines.filter(l => /renderer failed/.test(l)).map(l => l.slice(0, 300)));
 const reg = $(`JSON.stringify(globalThis.TelinhaAddon?.registrations?.[${N}] ?? null)`);
 check(`Telinha registered, enabled, before webpack (${reg})`, reg === '{"enabled":true,"webpackAlreadyRunning":false}', page.consoleLines.filter(l => /error|Telinha/i.test(l)).slice(0, 5));
 const pluginPatches = $(`Vencord.Plugins.plugins[${N}]?.patches?.length ?? -1`);

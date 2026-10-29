@@ -1,7 +1,9 @@
 /*
- * A node:vm "Discord main world" good enough to evaluate a Vencord renderer bundle (same idea as
+ * A node:vm "Discord main world" good enough to evaluate a Vencord renderer bundle (same idea as the fork-era
  * scripts/telinha/smokeRenderer.mjs, trimmed): browser globals as stubs, a VencordNative look-alike whose
- * settings store and plugin helpers are supplied by the test.
+ * settings store and plugin helpers are supplied by the test. Discord runs the renderer as a classic script in its main
+ * world: anything the add-on does at module top level (JSX, Vencord.* or webpack access before Discord loaded) throws
+ * here exactly as it would there.
  */
 import { webcrypto } from "crypto";
 import vm from "vm";

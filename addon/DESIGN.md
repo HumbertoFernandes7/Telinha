@@ -285,8 +285,8 @@ addon/
   test/run-renderer-test.mjs  vm: real Vencord renderer + payload actually served in S1 + fake Discord webpack
 ```
 
-Run (Vencord build defaults to `%APPDATA%\Vencord\dist.backup-oficial-*`, read-only, else `./dist`; scratch is
-`%TEMP%\tl-addon`):
+Run (Vencord build defaults to `.vencord/dist`, the pinned official Vencord built by `pnpm bootstrap`, read-only;
+scratch is `%TEMP%\tl-addon`):
 
 ```
 node addon/build/build-addon.mjs        # optional; enables S5

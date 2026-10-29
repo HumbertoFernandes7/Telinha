@@ -1,0 +1,21 @@
+# dependencies
+node_modules/
+
+# the pinned official Vencord, fetched by `pnpm bootstrap` (build-time dependency, never committed)
+.vencord/
+
+# build outputs (add-on payload, installer, telinha-audio.exe copy)
+dist/
+*.exe
+*.test
+*.out
+
+# logs and caches
+*.log
+.pnpm-debug.log*
+*.tsbuildinfo
+
+# editors / OS
+.idea/
+.vscode/
+.DS_Store

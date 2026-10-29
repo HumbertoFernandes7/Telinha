@@ -1,0 +1,61 @@
+{
+    // Type-checks the plugin (src/plugins/telinha) against the pinned official Vencord in .vencord/ (`pnpm bootstrap`).
+    // The compiler options are Vencord's own, so the Vencord sources the plugin imports (@api, @components, @utils,
+    // @webpack...) are checked exactly as upstream checks them. addon/build/build-addon.mjs also hands this file to
+    // esbuild (for the @plugins/telinha alias); there the Vencord aliases are replaced by window.Vencord shims.
+    "compilerOptions": {
+        "resolveJsonModule": true,
+        "allowSyntheticDefaultImports": true,
+        "esModuleInterop": true,
+        "skipLibCheck": false,
+        "allowJs": true,
+        "lib": [
+            "DOM",
+            "DOM.Iterable",
+            "esnext",
+            "esnext.array",
+            "esnext.asynciterable",
+            "esnext.symbol"
+        ],
+        "module": "esnext",
+        "moduleResolution": "bundler",
+        "strict": true,
+        "noImplicitAny": false,
+        "target": "ESNEXT",
+        "jsx": "preserve",
+        "noEmit": true,
+
+        "paths": {
+            // Vencord's aliases, pointing into the pinned checkout
+            "@main/*": ["./.vencord/src/main/*"],
+            "@api/*": ["./.vencord/src/api/*"],
+            "@components/*": ["./.vencord/src/components/*"],
+            "@debug/*": ["./.vencord/src/debug/*"],
+            "@utils/*": ["./.vencord/src/utils/*"],
+            "@shared/*": ["./.vencord/src/shared/*"],
+            "@webpack/common": ["./.vencord/src/webpack/common"],
+            "@webpack/common/*": ["./.vencord/src/webpack/common/*"],
+            "@webpack": ["./.vencord/src/webpack/webpack"],
+            "@webpack/patcher": ["./.vencord/src/webpack/patchWebpack"],
+            "@webpack/wreq.d": ["./.vencord/src/webpack/wreq.d"],
+            "@webpack/types": ["./.vencord/src/webpack/types"],
+            // ours (the more specific pattern wins over @plugins/*)
+            "@plugins/telinha/*": ["./src/plugins/telinha/*"],
+            "@plugins/*": ["./.vencord/src/plugins/*"],
+            // type-only packages the plugin imports: the very copies Vencord's lockfile installed, so the program
+            // has a single React/Discord type world (this repo installs no type packages of its own)
+            "react": ["./.vencord/node_modules/@types/react"],
+            "react-dom/client": ["./.vencord/node_modules/@types/react-dom/client"],
+            "@vencord/discord-types": ["./.vencord/node_modules/@vencord/discord-types"]
+        },
+        // global types (node, react, chrome...) from Vencord's install, as in Vencord's own program
+        "typeRoots": ["./.vencord/node_modules/@types"]
+    },
+    "include": [
+        "src/**/*",
+        // Vencord's ambient declarations (IS_DEV and the other build defines, VencordNative, "*.css" modules, electron)
+        ".vencord/src/globals.d.ts",
+        ".vencord/src/modules.d.ts",
+        ".vencord/src/nativeModules.d.ts"
+    ]
+}
