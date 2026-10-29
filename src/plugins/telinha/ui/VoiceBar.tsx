@@ -23,7 +23,7 @@ import ErrorBoundary from "@components/ErrorBoundary";
 import { clearLastError, stopStreaming } from "@plugins/telinha/actions";
 import { ACCESS_LABEL } from "@plugins/telinha/core/access";
 import { useTelinhaState } from "@plugins/telinha/store";
-import type { QualityReason } from "@plugins/telinha/types";
+import type { AccessMode, QualityReason } from "@plugins/telinha/types";
 import { SelectedChannelStore, Tooltip, useStateFromStores } from "@webpack/common";
 import type { ReactNode } from "react";
 
@@ -35,6 +35,14 @@ import { openSourcePicker } from "./SourcePickerModal";
 import { openStreamersModal } from "./StreamersModal";
 import { approveWithToast, declineWithToast, openViewersModal } from "./ViewersModal";
 import { openViewer } from "./viewerWindows";
+
+/** "Quem pode assistir" in the narrow bar (the full label is in the tooltip) */
+const ACCESS_SHORT: Record<AccessMode, string> = {
+    all: "todos da call",
+    friends: "👥 só amigos",
+    approval: "✋ com aprovação",
+    password: "🔒 com senha"
+};
 
 const REASON_SHORT: Record<QualityReason, string> = {
     cpu: "processador",
@@ -102,7 +110,7 @@ function VoiceBarInner() {
                         onClick={openAccessModal}
                     >
                         <span className={cl("bar-row-text")}>
-                            {accessBadge(local.access)?.split(" ")[0] ?? "👥"} {ACCESS_LABEL[local.access]}
+                            Quem assiste: <strong>{ACCESS_SHORT[local.access]}</strong>
                         </span>
                         <span className={cl("bar-row-action")}>Mudar</span>
                     </button>
