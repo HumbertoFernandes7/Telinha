@@ -6,6 +6,7 @@
 
 // API do nucleo para a UI. Tudo aqui e seguro de importar no topo de um modulo: nada roda no carregamento.
 
+import { generatePassword } from "./core/access";
 import { getScreenAudioStatus as fetchScreenAudioStatus } from "./core/audio/screenAudio";
 import { publish, rt, setLastError } from "./core/context";
 import { authorizeIdentity, forgetIdentity, getLocalIdentityState, type LocalIdentityState, subscribeLocalIdentity } from "./core/identity";
@@ -16,7 +17,7 @@ import * as session from "./core/session";
 import * as streaming from "./core/streaming";
 import * as viewing from "./core/viewing";
 import { getState } from "./store";
-import type { CaptureSource, PeerId, RemotePeer, StreamOptions } from "./types";
+import type { AccessMode, CaptureSource, PeerId, RemotePeer, StreamOptions } from "./types";
 
 /**
  * O plugin sabe transmitir o audio da tela inteira (todo o som do PC, menos o do Discord, via
@@ -86,7 +87,7 @@ export function kickViewer(peerId: PeerId): boolean {
     return streaming.kickViewer(peerId);
 }
 
-/** "Permitir" num pedido pendente (opcao approveViewers): vale ate a transmissao acabar. */
+/** "Permitir" num pedido pendente: vale ate a transmissao acabar. */
 export function approveViewer(peerId: PeerId): boolean {
     return streaming.approveViewer(peerId);
 }
@@ -100,6 +101,56 @@ export function declineViewer(peerId: PeerId): boolean {
 export function unblockViewer(discordUserId: string): boolean {
     return streaming.unblockViewer(discordUserId);
 }
+
+// #region quem pode assistir (core/access.ts)
+
+/**
+ * Troca "Quem pode assistir" com a transmissao no ar (vale para pedidos novos; quem ja assiste continua). Com
+ * "password", `password` e obrigatoria. Lanca com a frase pronta em pt-BR.
+ */
+export function setStreamAccess(access: AccessMode, password?: string): void {
+    streaming.setStreamAccess(access, password);
+}
+
+/** A senha da transmissao atual (so no modo "password"), para copiar de novo. Nunca vai para o estado/diagnostico. */
+export function getStreamPassword(): string | null {
+    return streaming.getStreamPassword();
+}
+
+/** Senha curta e aleatoria para o botao "Gerar" ("palavra-NN"). */
+export function generateStreamPassword(): string {
+    return generatePassword();
+}
+
+/** "Só meus amigos do Discord" depende da prova de identidade (Client ID no build). */
+export function friendsAccessAvailable(): boolean {
+    return isIdentityConfigured();
+}
+
+/**
+ * Senha digitada para assistir ao peer (responde a ViewerSession.passwordPrompt). So a prova HMAC sai daqui.
+ * false = nao havia pedido de senha, ou a senha e vazia/longa demais.
+ */
+export function submitWatchPassword(peerId: PeerId, password: string): boolean {
+    return viewing.submitPassword(peerId, password);
+}
+
+/**
+ * Recusado com "notVerified": abre o "Autorizar" do Discord e, se der certo, pede para assistir de novo depois
+ * de alguns segundos (o tempo de o transmissor conferir a prova nova). true = autorizou.
+ */
+export async function authorizeAndRewatch(peerId: PeerId): Promise<boolean> {
+    const ok = await authorizeIdentity();
+    if (ok) {
+        setTimeout(() => {
+            const v = getState().viewing[peerId];
+            if (v?.status === "error" && v.denied === "notVerified") viewing.watch(peerId);
+        }, 2500);
+    }
+    return ok;
+}
+
+// #endregion
 
 /** Tipo da conexao com o peer em pt-BR (ex.: "Conexão direta pela internet (P2P) · 35 ms"), sem IPs; null = sem conexao. */
 export function getConnectionInfo(peerId: PeerId): Promise<string | null> {

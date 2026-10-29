@@ -89,7 +89,13 @@ const IDENTITY_SHORT: Record<NonNullable<RemotePeer["identity"]>, string> = {
     invalid: "identidade falsa"
 };
 
-/** Texto pronto para colar (diagnostico): resumo do estado + eventos recentes. Nao contem IPs nem tokens. */
+const BLOCK_SHORT: Record<NonNullable<RemotePeer["blocked"]>, string> = {
+    kicked: "expulso",
+    declined: "recusado",
+    tooManyAttempts: "errou a senha"
+};
+
+/** Texto pronto para colar (diagnostico): resumo do estado + eventos recentes. Nao contem IPs, tokens nem a senha. */
 export function formatDiagnostics(): string {
     const s = state;
     const time = (at: number) => new Date(at).toISOString().slice(11, 23);
@@ -98,11 +104,11 @@ export function formatDiagnostics(): string {
         `gerado: ${new Date().toISOString()}`,
         `agente: ${typeof navigator !== "undefined" ? navigator.userAgent : "?"}`,
         `na sala: ${s.inRoom ? "sim" : "não"}; canal: ${s.channelId ?? "—"}; erro: ${s.lastError ?? "—"}`,
-        `peers: ${s.peers.map(p => `${p.username}${p.admitted ? "" : " (fora do canal)"}${p.duplicateIdentity ? " (identidade duplicada)" : ""}${p.identity ? ` <${IDENTITY_SHORT[p.identity]}>` : ""}${p.blocked ? ` [${p.blocked === "kicked" ? "expulso" : "recusado"}]` : ""}${p.streaming ? " [transmitindo]" : ""}`).join(", ") || "nenhum"}`,
-        `transmitindo: ${s.local ? `${s.local.source.kind} ${s.local.quality}${s.local.hasAudio ? " com áudio" : ""}, espectadores: ${s.local.viewers.length}, pedidos pendentes: ${s.local.pendingViewers?.length ?? 0}` : "não"}`,
+        `peers: ${s.peers.map(p => `${p.username}${p.admitted ? "" : " (fora do canal)"}${p.duplicateIdentity ? " (identidade duplicada)" : ""}${p.identity ? ` <${IDENTITY_SHORT[p.identity]}>` : ""}${p.blocked ? ` [${BLOCK_SHORT[p.blocked]}]` : ""}${p.streaming ? ` [transmitindo${p.stream?.access ? `, acesso ${p.stream.access}` : ""}]` : ""}`).join(", ") || "nenhum"}`,
+        `transmitindo: ${s.local ? `${s.local.source.kind} ${s.local.quality}${s.local.hasAudio ? " com áudio" : ""}, quem pode assistir: ${s.local.access}, espectadores: ${s.local.viewers.length}, pedidos pendentes: ${s.local.pendingViewers?.length ?? 0}` : "não"}`,
         `alertas de identidade: ${(s.identityAlerts ?? []).map(a => `${a.self ? "diz ser você" : a.username}${a.kind && a.kind !== "duplicate" ? ` [${a.kind === "fake" ? "prova falsa" : "não verificada x verificada"}]` : ""} (${a.peerIds.length} conexões)`).join(", ") || "nenhum"}`,
-        `bloqueados: ${(s.blocked ?? []).map(b => `${b.username} (${b.reason === "kicked" ? "expulso" : "recusado"})`).join(", ") || "ninguém"}`,
-        `assistindo: ${Object.values(s.viewing).map(v => `${v.peerId.slice(0, 6)}=${v.status}${v.stats ? ` ${v.stats.width}x${v.stats.height}@${v.stats.fps} ${v.stats.kbps} kbps` : ""}`).join(", ") || "nada"}`,
+        `bloqueados: ${(s.blocked ?? []).map(b => `${b.username} (${BLOCK_SHORT[b.reason]})`).join(", ") || "ninguém"}`,
+        `assistindo: ${Object.values(s.viewing).map(v => `${v.peerId.slice(0, 6)}=${v.status}${v.passwordPrompt ? " (pedindo senha)" : v.checkingPassword ? " (conferindo senha)" : ""}${v.denied ? ` [${v.denied}]` : ""}${v.stats ? ` ${v.stats.width}x${v.stats.height}@${v.stats.fps} ${v.stats.kbps} kbps` : ""}`).join(", ") || "nada"}`,
         "",
         "eventos:",
         ...events.map(e => `${time(e.at)} ${e.level === "error" ? "ERRO " : e.level === "warn" ? "AVISO " : ""}${e.msg}`)

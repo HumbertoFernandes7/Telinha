@@ -7,7 +7,7 @@
 import type { HelloMessage, IdentityMessage, PresenceMessage, WatchActionMessage } from "@plugins/telinha/protocol";
 import { setState } from "@plugins/telinha/store";
 import type {
-    AutoQualityState, BlockedViewer, BlockReason, CaptureSource, IdentityAlert, PeerId, PendingViewer, Quality, RemotePeer, StreamInfo,
+    AccessMode, AutoQualityState, BlockedViewer, BlockReason, CaptureSource, IdentityAlert, PeerId, PendingViewer, Quality, RemotePeer, StreamInfo,
     TelinhaState, ViewDeniedReason, ViewerSession, ViewerStatus
 } from "@plugins/telinha/types";
 import type { MessageAction, Room } from "trystero";
@@ -56,7 +56,7 @@ export interface BlockEntry {
     reason: BlockReason;
 }
 
-/** Pedido para assistir esperando aprovacao (opcao approveViewers). */
+/** Pedido para assistir esperando aprovacao (Permitir/Recusar). */
 export interface PendingEntry {
     peerId: PeerId;
     discordUserId: string;
@@ -76,6 +76,10 @@ export interface LocalCapture {
     autoQuality?: AutoQualityState | null;
     /** aviso da captura (core/quality/captureMonitor.ts); null = ok */
     captureWarning?: string | null;
+    /** quem pode assistir (core/access.ts); muda pela barra do Telinha com a transmissao no ar */
+    access: AccessMode;
+    /** com access "password": a senha desta transmissao, normalizada. So na memoria; some quando ela acaba */
+    password: string | null;
 }
 
 export interface ViewerEntry {
@@ -88,6 +92,14 @@ export interface ViewerEntry {
     awaitingApproval?: boolean;
     /** o transmissor respondeu "denied" */
     denied?: ViewDeniedReason;
+    /** transmissao com senha: o ultimo desafio do transmissor, esperando a senha (UI: passwordPrompt) */
+    challenge?: { nonce: string; attemptsLeft: number | null; wrong: boolean; } | null;
+    /** a senha da prova que esta a caminho (vira a senha lembrada quando o stream chega) */
+    proofPassword?: string | null;
+    /** a prova a caminho usou a senha lembrada (se estiver errada, ela e esquecida) */
+    proofFromMemory?: boolean;
+    /** ja reenviou uma vez a mesma senha porque o desafio tinha vencido */
+    staleRetried?: boolean;
     /** performance.now() do pedido */
     requestedAt: number;
     /** performance.now() do primeiro quadro decodificado */
@@ -212,7 +224,9 @@ function buildSnapshot(): TelinhaState {
             ...(v.error ? { error: v.error } : {}),
             ...(v.stats ? { stats: { ...v.stats } } : {}),
             ...(v.awaitingApproval && v.status === "connecting" ? { awaitingApproval: true } : {}),
-            ...(v.denied && v.status === "error" ? { denied: v.denied } : {})
+            ...(v.denied && v.status === "error" ? { denied: v.denied } : {}),
+            ...(v.status === "connecting" && v.challenge ? { passwordPrompt: { attemptsLeft: v.challenge.attemptsLeft, wrong: v.challenge.wrong } } : {}),
+            ...(v.status === "connecting" && !v.challenge && v.proofPassword ? { checkingPassword: true } : {})
         };
     }
 
@@ -230,7 +244,8 @@ function buildSnapshot(): TelinhaState {
                 viewers: [...local.viewers],
                 autoQuality: local.autoQuality ?? null,
                 captureWarning: local.captureWarning ?? null,
-                pendingViewers
+                pendingViewers,
+                access: local.access
             }
             : null,
         viewing,

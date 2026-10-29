@@ -6,13 +6,18 @@
 
 // Assistir: pede o stream ao transmissor, recebe no onPeerStream, detecta o primeiro quadro
 // decodificado pelas estatisticas do receiver e publica estatisticas basicas a cada 2 s.
+// Transmissao com senha (protocol.ts, passo 7): o transmissor responde { op: "password", nonce }; a UI mostra o
+// campo de senha (ViewerSession.passwordPrompt) e submitPassword manda so a prova HMAC. A senha aceita fica
+// lembrada para ESTA transmissao desse peer (assistir de novo nao pergunta outra vez) e e esquecida quando ela acaba.
 
-import { type PresenceMessage, STREAM_KIND_SCREEN, type WatchReplyMessage } from "@plugins/telinha/protocol";
+import { type PresenceMessage, STREAM_KIND_SCREEN, type WatchMessage, type WatchReplyMessage } from "@plugins/telinha/protocol";
 import type { PeerId, ViewDeniedReason } from "@plugins/telinha/types";
 import type { JsonValue } from "trystero";
 
+import { computePasswordProof, isValidPassword, normalizePassword } from "./access";
 import { getPc, peerLabel, publish, rt, type ViewerEntry } from "./context";
 import { errorText, log, logThrottled } from "./log";
+import { me } from "./presence";
 
 const RESPONSE_TIMEOUT_MS = 20_000;
 /** o transmissor pediu para esperar a aprovacao dele (60 s do lado dele + folga de rede) */
@@ -23,13 +28,31 @@ const DENIED_TEXT: Record<ViewDeniedReason, string> = {
     kicked: "O transmissor encerrou a sua visualização.",
     declined: "O transmissor recusou o seu pedido para assistir.",
     timeout: "O transmissor não respondeu ao pedido a tempo. Você pode pedir de novo.",
-    duplicate: "Outra conexão na call diz ser você, então o transmissor bloqueou as duas por segurança. Se você acabou de reabrir o Discord, espere alguns segundos e tente de novo."
+    duplicate: "Outra conexão na call diz ser você, então o transmissor bloqueou as duas por segurança. Se você acabou de reabrir o Discord, espere alguns segundos e tente de novo.",
+    friendsOnly: "Quem transmite escolheu \"Só meus amigos do Discord\": só amigos dessa pessoa no Discord, com a identidade verificada, assistem.",
+    notVerified: "Esta transmissão é só para amigos com a identidade do Discord verificada. Autorize o Telinha no Discord (uma vez só) e tente de novo.",
+    tooManyAttempts: "Você errou a senha vezes demais. Só dá para tentar de novo quando esta transmissão acabar (ou se o transmissor liberar você)."
 };
+
+/** Senha aceita por transmissor (conexao), so enquanto a transmissao dele durar. */
+const rememberedPasswords = new Map<PeerId, string>();
+
+/** Esquece a senha lembrada desse transmissor (a transmissao acabou, ele saiu, ou a senha nao vale mais). */
+function forgetPassword(peerId: PeerId) {
+    rememberedPasswords.delete(peerId);
+}
+
+function clearPasswordState(v: ViewerEntry) {
+    v.challenge = null;
+    v.proofPassword = null;
+    v.proofFromMemory = false;
+    v.staleRetried = false;
+}
 const FIRST_FRAME_TIMEOUT_MS = 45_000;
 const FIRST_FRAME_POLL_MS = 150;
 
-function sendWatch(peerId: PeerId, op: "start" | "stop") {
-    return rt.watchAction?.send({ op }, { target: peerId }) ?? Promise.resolve();
+function sendWatch(peerId: PeerId, message: WatchMessage) {
+    return rt.watchAction?.send(message, { target: peerId }) ?? Promise.resolve();
 }
 
 function runCleanup(list: (() => void)[]) {
@@ -50,6 +73,7 @@ function fail(v: ViewerEntry, message: string, keepStream = false) {
     v.status = "error";
     v.error = message;
     v.awaitingApproval = false;
+    clearPasswordState(v);
     log.warn(`Assistir ${peerLabel(v.peerId)}: ${message}`);
     publish();
 }
@@ -65,11 +89,85 @@ function denied(v: ViewerEntry, reason: ViewDeniedReason) {
     v.error = DENIED_TEXT[reason];
     v.denied = reason;
     v.awaitingApproval = false;
+    if (reason === "tooManyAttempts" || v.proofFromMemory) forgetPassword(v.peerId);
+    clearPasswordState(v);
     log.warn(`Assistir ${peerLabel(v.peerId)}: ${DENIED_TEXT[reason]}`);
     publish();
 }
 
-/** Resposta do transmissor a um pedido nosso (protocol.ts, passo 5). Sem sessao para esse peer: ignorada. */
+/** Espera a resposta a um pedido/prova; sem resposta em RESPONSE_TIMEOUT_MS, desiste com `message`. */
+function armResponseTimer(v: ViewerEntry, message: string) {
+    runCleanup(v.requestCleanup);
+    const timer = setTimeout(() => {
+        if (v.status === "connecting") fail(v, message);
+    }, RESPONSE_TIMEOUT_MS);
+    v.requestCleanup.push(() => clearTimeout(timer));
+}
+
+/** Manda a prova da senha para o desafio `nonce` (a senha em si nunca sai daqui). */
+function sendProof(v: ViewerEntry, nonce: string, password: string, fromMemory: boolean) {
+    const streamerId = rt.peers.get(v.peerId)?.hello?.discordUserId;
+    v.challenge = null;
+    v.proofPassword = password;
+    v.proofFromMemory = fromMemory;
+    armResponseTimer(v, "O transmissor não respondeu à senha.");
+    publish();
+    if (!streamerId) return fail(v, "Esse amigo não está mais na call.");
+    computePasswordProof({ password, nonce, streamerId, viewerId: me().id })
+        .then(proof => {
+            if (rt.viewing.get(v.peerId) !== v || v.status !== "connecting" || v.proofPassword !== password) return;
+            return sendWatch(v.peerId, { op: "start", proof });
+        })
+        .catch(e => fail(v, "Não foi possível enviar a senha: " + errorText(e)));
+}
+
+/** { op: "password" }: o transmissor pediu a senha (de novo, se `wrong`). Usa a lembrada; senao mostra o campo. */
+function onPasswordChallenge(v: ViewerEntry, reply: Extract<WatchReplyMessage, { op: "password"; }>) {
+    if (v.status !== "connecting") return;
+    v.awaitingApproval = false;
+    runCleanup(v.requestCleanup);
+    const { peerId } = v;
+    if (reply.wrong) {
+        // a senha lembrada nao vale mais (o transmissor trocou a senha): esquece e pergunta
+        if (v.proofFromMemory) forgetPassword(peerId);
+        log.info(`Assistir ${peerLabel(peerId)}: senha incorreta${reply.attemptsLeft != null ? ` (restam ${reply.attemptsLeft})` : ""}`);
+    } else if (v.proofPassword && !v.staleRetried) {
+        // desafio novo sem "errada": a prova chegou com o desafio vencido/trocado; manda a mesma senha uma vez
+        v.staleRetried = true;
+        sendProof(v, reply.nonce, v.proofPassword, !!v.proofFromMemory);
+        return;
+    } else if (!v.proofPassword) {
+        const remembered = rememberedPasswords.get(peerId);
+        if (remembered) {
+            log.info(`Assistir ${peerLabel(peerId)}: transmissão com senha; usando a senha que já deu certo nela`);
+            sendProof(v, reply.nonce, remembered, true);
+            return;
+        }
+        log.info(`Assistir ${peerLabel(peerId)}: a transmissão é com senha`);
+    }
+    v.proofPassword = null;
+    v.proofFromMemory = false;
+    v.staleRetried = false;
+    v.challenge = { nonce: reply.nonce, attemptsLeft: reply.attemptsLeft ?? null, wrong: !!reply.wrong };
+    publish();
+}
+
+/**
+ * Senha digitada para a transmissao desse peer (responde ao ViewerSession.passwordPrompt). false = nao havia
+ * pedido de senha ou a senha e invalida (vazia / longa demais).
+ */
+export function submitPassword(peerId: PeerId, raw: string): boolean {
+    const v = rt.viewing.get(peerId);
+    if (!v || v.status !== "connecting" || !v.challenge) return false;
+    const password = normalizePassword(raw);
+    if (!isValidPassword(password)) return false;
+    const { nonce } = v.challenge;
+    v.staleRetried = false;
+    sendProof(v, nonce, password, false);
+    return true;
+}
+
+/** Resposta do transmissor a um pedido nosso (protocol.ts, passos 5 e 7). Sem sessao para esse peer: ignorada. */
 export function onWatchReply(peerId: PeerId, reply: WatchReplyMessage) {
     const v = rt.viewing.get(peerId);
     if (!v) return;
@@ -77,7 +175,12 @@ export function onWatchReply(peerId: PeerId, reply: WatchReplyMessage) {
         denied(v, reply.reason);
         return;
     }
+    if (reply.op === "password") {
+        onPasswordChallenge(v, reply);
+        return;
+    }
     if (v.status !== "connecting" || v.awaitingApproval) return;
+    clearPasswordState(v);
     v.awaitingApproval = true;
     runCleanup(v.requestCleanup);
     const timer = setTimeout(() => {
@@ -130,12 +233,8 @@ export function watch(peerId: PeerId) {
     if (!entry.presence?.streaming) return fail(v, "Esse amigo não está transmitindo agora.");
 
     log.info(`Assistir ${peerLabel(peerId)}: pedido enviado`);
-    sendWatch(peerId, "start").catch(e => fail(v, "Falha ao pedir a transmissão: " + errorText(e)));
-
-    const timer = setTimeout(() => {
-        if (v.status === "connecting") fail(v, "O amigo não respondeu ao pedido para assistir.");
-    }, RESPONSE_TIMEOUT_MS);
-    v.requestCleanup.push(() => clearTimeout(timer));
+    sendWatch(peerId, { op: "start" }).catch(e => fail(v, "Falha ao pedir a transmissão: " + errorText(e)));
+    armResponseTimer(v, "O amigo não respondeu ao pedido para assistir.");
 }
 
 export function unwatch(peerId: PeerId) {
@@ -144,7 +243,7 @@ export function unwatch(peerId: PeerId) {
     runCleanup(v.requestCleanup);
     runCleanup(v.streamCleanup);
     rt.viewing.delete(peerId);
-    if (rt.peers.has(peerId)) sendWatch(peerId, "stop").catch(() => { });
+    if (rt.peers.has(peerId)) sendWatch(peerId, { op: "stop" }).catch(() => { });
     log.info(`Parou de assistir ${peerLabel(peerId)}`);
     publish();
 }
@@ -156,6 +255,7 @@ export function clearAll() {
         runCleanup(v.streamCleanup);
     }
     rt.viewing.clear();
+    rememberedPasswords.clear();
     publish();
 }
 
@@ -223,6 +323,9 @@ function attachStream(v: ViewerEntry, stream: MediaStream) {
     v.error = undefined;
     v.denied = undefined;
     v.awaitingApproval = false;
+    // a senha enviada deu certo: lembrada so para esta transmissao desse peer
+    if (v.proofPassword) rememberedPasswords.set(v.peerId, v.proofPassword);
+    clearPasswordState(v);
     v.stats = undefined;
     v.firstFrameAt = null;
     v.meter = null;
@@ -278,7 +381,7 @@ export function onPeerStream(peerId: PeerId, stream: MediaStream, metadata: Json
     if (!v) {
         // chegou sem pedido (ou depois de parar de assistir): pede para o transmissor parar
         logThrottled(`stream-unsolicited:${peerId}`, "warn", `Stream de ${peerLabel(peerId)} sem pedido; pedindo para parar`);
-        sendWatch(peerId, "stop").catch(() => { });
+        sendWatch(peerId, { op: "stop" }).catch(() => { });
         return;
     }
     if (v.stream === stream) return;
@@ -286,11 +389,14 @@ export function onPeerStream(peerId: PeerId, stream: MediaStream, metadata: Json
 }
 
 export function onPresence(peerId: PeerId, presence: PresenceMessage) {
+    // a transmissao acabou: a senha dela nao serve para a proxima
+    if (!presence.streaming) forgetPassword(peerId);
     const v = rt.viewing.get(peerId);
     if (v && !presence.streaming && v.status !== "ended") end(v, "o amigo parou de transmitir");
 }
 
 export function onPeerGone(peerId: PeerId) {
+    forgetPassword(peerId);
     const v = rt.viewing.get(peerId);
     if (v) end(v, "o amigo saiu da call");
 }

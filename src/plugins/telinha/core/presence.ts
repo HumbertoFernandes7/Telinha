@@ -39,7 +39,8 @@ export function selfPresence(): PresenceMessage {
         discordUserId: id,
         username,
         streaming: !!local,
-        ...(local ? { stream: { ...local.info } } : {}),
+        // stream.access: quem pode assistir (a v0.1.0 ignora); nunca a senha
+        ...(local ? { stream: { ...local.info, access: local.access } } : {}),
         caps: { h264HwDecode: getLocalCaps().h264HwDecode }
     };
 }

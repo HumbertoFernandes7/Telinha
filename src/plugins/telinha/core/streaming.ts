@@ -6,30 +6,37 @@
 
 // Transmitir: captura (handler de display media do native.ts) + envio do stream so para quem pediu.
 //
-// Quem pode receber (refusalFor), nesta ordem:
-//   1. admitido (rejectOutsiders: no seu canal de voz) — quem esta fora nao recebe nem resposta;
-//   2. nao expulso/recusado (rt.blocked, pelo discordUserId anunciado OU pela conexao);
+// Quem pode receber: "Quem pode assistir" (core/access.ts → decideWatch), nesta ordem:
+//   1. admitido (rejectOutsiders: no seu canal de voz; nunca prova de identidade falsa) — quem esta fora nao
+//      recebe nem resposta;
+//   2. nao expulso/recusado/bloqueado por errar a senha (rt.blocked, pelo discordUserId anunciado OU pela conexao);
 //   3. sem identidade duplicada (outra conexao viva diz ter o mesmo discordUserId; uma conexao com a
 //      identidade verificada nunca e a duplicada);
-//   4. com approveViewers ligado, ou sem identidade verificada com requireVerifiedIdentity ligado:
-//      aprovado nesta transmissao (senao vira um pedido pendente).
-// Recusas 2-4 respondem { op: "denied" } na acao "watch" (protocol.ts, passo 5). Prova de identidade falsa
-// nunca e admitida (cai no 1: sem resposta nenhuma).
+//   4. aprovado nesta transmissao, ou o modo da transmissao deixa: "all" (nao verificado com
+//      requireVerifiedIdentity → Permitir/Recusar), "friends" (verificado e amigo no Discord), "approval"
+//      (sempre Permitir/Recusar), "password" (prova da senha certa; desafio-resposta em protocol.ts, passo 7).
+// Recusas 2-4 respondem { op: "denied" } na acao "watch" (protocol.ts, passos 5 e 7). Mudar o modo com a
+// transmissao no ar vale so para pedidos novos: quem ja assiste continua (e fica aprovado).
 
-import { STREAM_KIND_SCREEN, type WatchDeniedReason, type WatchReplyMessage } from "@plugins/telinha/protocol";
+import { isStreamAccess, STREAM_KIND_SCREEN, type WatchDeniedReason, type WatchMessage, type WatchReplyMessage } from "@plugins/telinha/protocol";
 import { type CodecSetting, settings } from "@plugins/telinha/settings";
-import type { BlockReason, CaptureSource, PeerId, Quality, QualityLevel, StreamInfo, StreamOptions } from "@plugins/telinha/types";
+import type { AccessMode, BlockReason, CaptureSource, PeerId, Quality, QualityLevel, StreamInfo, StreamOptions } from "@plugins/telinha/types";
+import { RelationshipStore } from "@webpack/common";
 import type { Room } from "trystero";
 
+import {
+    ACCESS_LABEL, decideWatch, isValidPassword, MAX_PASSWORD_ATTEMPTS, normalizePassword, PASSWORD_MAX_CHARS, PASSWORD_NONCE_TTL_MS, PasswordChallenges,
+    type ProofState, verifyPasswordProof, type WatchAccessInput, type WatchDecision
+} from "./access";
 import { startScreenAudioCapture } from "./audio/screenAudio";
 import { chooseCodec, type CodecDecision, getLocalCaps } from "./codec";
 import { blockOf, getPc, type LocalCapture, peerLabel, publish, rt, setLastError } from "./context";
 import { isIdentityConfigured } from "./identity/config";
-import { type ApprovalInput, identityRequiresApproval, watchNeedsApproval } from "./identity/policy";
+import { type ApprovalInput, identityRequiresApproval } from "./identity/policy";
 import { errorText, log, logThrottled } from "./log";
 import { getNative } from "./nativeApi";
 import type { SendPlan } from "./peerConnection";
-import { sendPresence } from "./presence";
+import { me, sendPresence } from "./presence";
 import { CaptureMonitor } from "./quality/captureMonitor";
 import { QualityController } from "./quality/controller";
 import { encodingFor, LEVELS, levelText } from "./quality/levels";
@@ -53,7 +60,7 @@ export const QUALITY: Record<Quality, QualityProfile> = {
 
 const SOURCE_ID_RE = /^(screen|window):-?\d{1,20}:-?\d{1,10}$/;
 
-/** Pedido de aprovacao (approveViewers) sem resposta: recusado sozinho depois disto. */
+/** Pedido de aprovacao (Permitir/Recusar) sem resposta: recusado sozinho depois disto. */
 export const APPROVAL_TIMEOUT_MS = 60_000;
 
 interface ViewerSend {
@@ -109,11 +116,29 @@ function captureErrorMessage(e: any, handlerCalled: boolean | null): string {
     return "Falha ao capturar: " + errorText(e);
 }
 
+interface AccessChoice {
+    access: AccessMode;
+    password: string | null;
+}
+
+/** Valida "Quem pode assistir" (e a senha, no modo "password"). Lanca com a frase pronta em pt-BR. */
+function validateAccess(mode: unknown, rawPassword: unknown): AccessChoice {
+    if (!isStreamAccess(mode)) throw new Error("Opção de \"Quem pode assistir\" inválida.");
+    if (mode === "friends" && !isIdentityConfigured()) throw new Error("\"Só meus amigos do Discord\" precisa da prova de identidade do Discord, que esta versão do Telinha não tem.");
+    if (mode !== "password") return { access: mode, password: null };
+    const password = normalizePassword(typeof rawPassword === "string" ? rawPassword : "");
+    if (!password) throw new Error("Digite ou gere uma senha para esta transmissão.");
+    if (!isValidPassword(password)) throw new Error(`A senha pode ter no máximo ${PASSWORD_MAX_CHARS} caracteres.`);
+    return { access: mode, password };
+}
+
 function validateOptions(opts: StreamOptions) {
     const source = opts?.source as CaptureSource | undefined;
     if (!source || typeof source.id !== "string" || !SOURCE_ID_RE.test(source.id)) throw new Error("Fonte de captura inválida.");
     if (!QUALITY[opts.quality]) throw new Error("Qualidade inválida.");
-    return { source, profile: QUALITY[opts.quality] };
+    // sem escolha: trocando de fonte, continua o modo atual; transmissao nova, "Todos da call"
+    const access = opts.access === undefined ? null : validateAccess(opts.access, opts.password);
+    return { source, profile: QUALITY[opts.quality], access };
 }
 
 export async function startStreaming(opts: StreamOptions): Promise<void> {
@@ -124,7 +149,7 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
         throw new Error(msg);
     }
 
-    const { source, profile } = validateOptions(opts);
+    const { source, profile, access: chosenAccess } = validateOptions(opts);
     const kind = source.id.startsWith("screen:") ? "screen" : "window";
     // janela: audio so do processo da janela (getDisplayMedia); tela inteira: audio do PC sem o Discord (telinha-audio.exe)
     const wantAudio = !!opts.withAudio && kind === "window";
@@ -194,12 +219,16 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
             fps: Math.round(s.frameRate ?? profile.fps)
         };
 
-        // trocar de fonte com a transmissao no ar: os espectadores atuais recebem a nova
+        // trocar de fonte com a transmissao no ar: os espectadores atuais recebem a nova (e o modo continua, se nao veio outro)
         const previous = rt.local;
         const keepViewers = previous ? [...previous.viewers] : [];
+        const access: AccessChoice = chosenAccess ?? (previous ? { access: previous.access, password: previous.password } : { access: "all", password: null });
         if (previous) stopCapture(previous, "trocando de fonte");
 
-        const local: LocalCapture = { stream, source: { ...source }, quality: opts.quality, info, startedAt: Date.now(), viewers: new Set() };
+        const local: LocalCapture = {
+            stream, source: { ...source }, quality: opts.quality, info, startedAt: Date.now(), viewers: new Set(),
+            access: access.access, password: access.password
+        };
         rt.local = local;
         rt.lastError = null;
         startExtras(local, video);
@@ -211,7 +240,7 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
             setLastError("A transmissão parou: a janela foi fechada ou a captura foi interrompida.");
         });
 
-        log.info(`Transmitindo ${info.width}x${info.height} @ ${info.fps} fps${info.hasAudio ? " com áudio" : ""}`);
+        log.info(`Transmitindo ${info.width}x${info.height} @ ${info.fps} fps${info.hasAudio ? " com áudio" : ""} · quem pode assistir: ${ACCESS_LABEL[local.access]}`);
         sendPresence();
         for (const peerId of keepViewers) sendTo(peerId);
         publish();
@@ -287,6 +316,8 @@ function stopCapture(local: LocalCapture, reason: string) {
         }
     }
     local.stream.getTracks().forEach(t => t.stop());
+    // a senha vale so para esta captura (trocando de fonte, a nova ja recebeu uma copia)
+    local.password = null;
     if (rt.local === local) rt.local = null;
     log.info(`Transmissão encerrada (${reason})`);
 }
@@ -307,8 +338,29 @@ type Refusal = "outsider" | BlockReason | "duplicate";
 const REFUSAL_TEXT: Record<Exclude<Refusal, "outsider">, string> = {
     kicked: "foi expulso por você",
     declined: "foi recusado por você nesta transmissão",
+    tooManyAttempts: `errou a senha ${MAX_PASSWORD_ATTEMPTS} vezes nesta transmissão`,
     duplicate: "outra conexão diz ser a mesma pessoa (identidade duplicada)"
 };
+
+/** Por que um pedido foi recusado (log do transmissor). */
+const DENY_TEXT: Record<WatchDeniedReason, string> = {
+    ...REFUSAL_TEXT,
+    timeout: "o pedido de aprovação expirou",
+    friendsOnly: "a transmissão é só para amigos e essa pessoa não é sua amiga no Discord",
+    notVerified: "a transmissão é só para amigos e essa pessoa não provou a identidade do Discord (não verificado)"
+};
+
+const BLOCK_TEXT: Record<BlockReason, { why: string; until: string; rank: number; }> = {
+    declined: { why: "recusado por você", until: "até esta transmissão acabar", rank: 1 },
+    tooManyAttempts: { why: `bloqueado por errar a senha ${MAX_PASSWORD_ATTEMPTS} vezes`, until: "até esta transmissão acabar", rank: 2 },
+    kicked: { why: "expulso por você", until: "até você sair da call", rank: 3 }
+};
+
+/** Desafios de senha pendentes (um por conexao, uso unico, ~2 min) e erros de senha por discordUserId, nesta transmissao. */
+const challenges = new PasswordChallenges();
+const wrongAttempts = new Map<string, number>();
+/** muda a cada troca do modo/senha: uma prova conferida durante a troca nao vale (vira um desafio novo) */
+let accessGeneration = 0;
 
 /** Por que esta conexao nao pode receber a transmissao agora; null = pode. A admissao (rejectOutsiders) vem primeiro. */
 function refusalFor(peerId: PeerId): Refusal | null {
@@ -354,9 +406,111 @@ function approvalInput(peerId: PeerId): ApprovalInput {
     };
 }
 
-/** O pedido desta conexao precisa de Permitir/Recusar (approveViewers, ou identidade nao verificada com requireVerifiedIdentity). */
-function needsApproval(peerId: PeerId): boolean {
-    return watchNeedsApproval({ ...approvalInput(peerId), approveViewers: !!settings.store.approveViewers });
+/** Amigo no Discord de quem transmite. RelationshipStore so e lido aqui, na hora do pedido (nunca no carregamento). */
+function isFriend(discordUserId: string): boolean {
+    try {
+        return RelationshipStore?.isFriend?.(discordUserId) === true;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Decide o pedido desta conexao com o modo atual (core/access.ts). `proof` "wrong" ja conta mais um erro de senha
+ * para o discordUserId anunciado. null = sem transmissao ou peer sumiu.
+ */
+function decideFor(peerId: PeerId, proof: ProofState): WatchDecision | null {
+    const entry = rt.peers.get(peerId);
+    const { local } = rt;
+    if (!local || !entry?.hello) return null;
+    const id = entry.hello.discordUserId;
+    let attempts = wrongAttempts.get(id) ?? 0;
+    if (proof === "wrong") wrongAttempts.set(id, ++attempts);
+    const input: WatchAccessInput = {
+        configured: isIdentityConfigured(),
+        mode: local.access,
+        identity: entry.identity,
+        admitted: entry.admitted && !entry.incompatible,
+        blocked: blockOf(peerId, id)?.reason ?? null,
+        duplicate: entry.duplicate,
+        approved: rt.approved.has(peerId),
+        requireVerified: settings.store.requireVerifiedIdentity !== false,
+        friend: local.access === "friends" && isFriend(id),
+        proof,
+        wrongAttempts: attempts
+    };
+    return decideWatch(input);
+}
+
+/** Aplica a decisao: manda o stream, abre o pedido de aprovacao, pede a senha ou recusa. */
+function applyDecision(peerId: PeerId, d: WatchDecision, proof: ProofState) {
+    switch (d.kind) {
+        case "ignore":
+            logThrottled(`watch-refused:${peerId}`, "warn", `${peerLabel(peerId)} pediu para assistir, mas não está admitido: ignorado`);
+            return;
+        case "send":
+            if (proof === "ok") log.info(`${peerLabel(peerId)} acertou a senha`);
+            sendTo(peerId);
+            return;
+        case "approval":
+            requestApproval(peerId);
+            return;
+        case "password":
+            askPassword(peerId, d.wrong, d.attemptsLeft);
+            return;
+        case "deny":
+            if (d.block) {
+                block(peerId, "tooManyAttempts");
+                return;
+            }
+            logThrottled(`watch-denied:${peerId}:${d.reason}`, "warn", `${peerLabel(peerId)} pediu para assistir, mas ${DENY_TEXT[d.reason]}: recusado`);
+            deny(peerId, d.reason);
+    }
+}
+
+/** Pede a senha: desafio novo (nonce de uso unico, ~2 min). A senha nunca trafega, so a prova (protocol.ts, passo 7). */
+function askPassword(peerId: PeerId, wrong: boolean, attemptsLeft: number) {
+    const { nonce } = challenges.issue(peerId);
+    const left = attemptsLeft === 1 ? "resta 1 tentativa" : `restam ${attemptsLeft} tentativas`;
+    if (wrong) log.warn(`${peerLabel(peerId)} errou a senha (${left})`);
+    else logThrottled(`watch-password:${peerId}`, "info", `${peerLabel(peerId)} pediu para assistir: a transmissão é com senha, pedindo a senha (${left}). `
+        + "Se ele usa uma versão antiga do Telinha (v0.1.0), ela não entende o pedido de senha: o pedido dele expira sem resposta.", 60_000);
+    reply(peerId, { op: "password", nonce, attemptsLeft, ...(wrong ? { wrong: true } : {}) });
+}
+
+/**
+ * Prova de senha recebida: consome o desafio pendente (uso unico) e confere em tempo constante. Sem desafio valido
+ * (vencido, ja usado, senha trocada no meio) a prova nao conta como erro: vai um desafio novo. Nunca lanca.
+ */
+async function checkPasswordProof(peerId: PeerId, proof: string) {
+    const { local } = rt;
+    const entry = rt.peers.get(peerId);
+    const nonce = challenges.take(peerId);
+    const gen = accessGeneration;
+    const password = local?.password;
+    if (!local || !entry?.hello || !nonce || !password) {
+        handleStart(peerId, "stale");
+        return;
+    }
+    let ok = false;
+    try {
+        ok = await verifyPasswordProof({ password, nonce, streamerId: me().id, viewerId: entry.hello.discordUserId, proof });
+    } catch {
+        ok = false;
+    }
+    if (rt.local !== local || accessGeneration !== gen || rt.peers.get(peerId) !== entry) {
+        // a transmissao, a regra ou a conexao mudou durante a conta: decide de novo do zero
+        if (rt.local && rt.peers.get(peerId)) handleStart(peerId, "stale");
+        return;
+    }
+    handleStart(peerId, ok ? "ok" : "wrong");
+}
+
+/** Pedido "start" (com a prova ja conferida, se veio uma). */
+function handleStart(peerId: PeerId, proof: ProofState) {
+    if (!rt.local || rt.local.viewers.has(peerId)) return;
+    const d = decideFor(peerId, proof);
+    if (d) applyDecision(peerId, d, proof);
 }
 
 /** Pedido que precisa de aprovacao: fica pendente ate Permitir/Recusar ou 60 s. */
@@ -379,21 +533,29 @@ function requestApproval(peerId: PeerId) {
         expiresAt: Date.now() + APPROVAL_TIMEOUT_MS,
         timer
     });
-    const unverified = identityRequiresApproval(approvalInput(peerId));
+    const unverified = rt.local?.access === "all" && identityRequiresApproval(approvalInput(peerId));
     log.info(`${peerLabel(peerId)} (discord ${entry.hello.discordUserId}) pediu para assistir${unverified ? " sem identidade verificada" : ""}: esperando a sua aprovação`);
     reply(peerId, { op: "pending" });
     publish();
 }
 
-/** Fim da transmissao: aprovacoes, pedidos pendentes e recusas valem so para ela (expulsoes continuam). */
+/**
+ * Fim da transmissao: aprovacoes, pedidos pendentes, desafios/erros de senha, recusas e bloqueios por senha valem so
+ * para ela (expulsoes continuam).
+ */
 function endOfStreamGuards() {
     for (const p of rt.pending.values()) clearTimeout(p.timer);
     rt.pending.clear();
     rt.approved.clear();
-    for (const [id, b] of rt.blocked) if (b.reason === "declined") rt.blocked.delete(id);
+    challenges.clear();
+    wrongAttempts.clear();
+    for (const [id, b] of rt.blocked) if (b.reason === "declined" || b.reason === "tooManyAttempts") rt.blocked.delete(id);
 }
 
-/** Expulsa (ate sair da call) ou recusa (ate a transmissao acabar) a conexao e o discordUserId que ela anuncia. */
+/**
+ * Expulsa (ate sair da call), recusa ou bloqueia por errar a senha (ate a transmissao acabar) a conexao e o
+ * discordUserId que ela anuncia. O motivo mais forte vence (expulso > senha > recusado).
+ */
 function block(peerId: PeerId, reason: BlockReason): boolean {
     const entry = rt.peers.get(peerId);
     const id = entry?.hello?.discordUserId;
@@ -401,20 +563,28 @@ function block(peerId: PeerId, reason: BlockReason): boolean {
 
     const b = rt.blocked.get(id) ?? { discordUserId: id, username: nameOf(peerId), peerIds: new Set<PeerId>(), reason };
     b.peerIds.add(peerId);
-    if (reason === "kicked") b.reason = "kicked";
+    if (BLOCK_TEXT[reason].rank > BLOCK_TEXT[b.reason].rank) b.reason = reason;
     rt.blocked.set(id, b);
 
-    const why = reason === "kicked" ? "expulso por você" : "recusado por você";
+    const { why, until } = BLOCK_TEXT[reason];
+    let told = false;
     for (const p of rt.peers.values()) {
         if (p.peerId !== peerId && p.hello?.discordUserId !== id) continue;
         rt.approved.delete(p.peerId);
-        if (cancelPending(p.peerId, reason)) continue;
+        challenges.delete(p.peerId);
+        if (cancelPending(p.peerId, reason)) {
+            told ||= p.peerId === peerId;
+            continue;
+        }
         if (rt.local?.viewers.has(p.peerId)) {
             deny(p.peerId, reason);
+            told ||= p.peerId === peerId;
             removeFrom(p.peerId, why);
         }
     }
-    log.warn(`${peerLabel(peerId)} (discord ${id}) foi ${why}: não recebe a sua transmissão ${reason === "kicked" ? "até você sair da call" : "até esta transmissão acabar"}`);
+    // errou a senha: quem errou nao esta pendente nem assistindo, mas precisa saber por que nao vai assistir
+    if (reason === "tooManyAttempts" && !told) deny(peerId, reason);
+    log.warn(`${peerLabel(peerId)} (discord ${id}) foi ${why}: não recebe a sua transmissão ${until}`);
     publish();
     return true;
 }
@@ -446,23 +616,67 @@ export function unblockViewer(discordUserId: string): boolean {
     const b = rt.blocked.get(discordUserId);
     if (!b) return false;
     rt.blocked.delete(discordUserId);
+    // liberado depois de errar a senha: ganha as tentativas de novo
+    wrongAttempts.delete(discordUserId);
     log.info(`Você liberou de novo ${b.username} (discord ${discordUserId}) para pedir para assistir`);
     publish();
     return true;
 }
 
-/** Pedidos pendentes que nao precisam mais de aprovacao (opcao desligada, ou a pessoa provou a identidade) sao atendidos. */
+/**
+ * Pedidos pendentes decididos de novo com a regra atual (a pessoa provou a identidade, a opcao mudou, o modo
+ * mudou): os que nao precisam mais de Permitir sao atendidos, recusados ou recebem o pedido de senha.
+ */
 export function reviewPendingApprovals() {
-    for (const peerId of [...rt.pending.keys()]) if (!needsApproval(peerId)) approveViewer(peerId);
+    for (const peerId of [...rt.pending.keys()]) {
+        const d = decideFor(peerId, "none");
+        if (!d || d.kind === "approval") continue;
+        cancelPending(peerId, null);
+        applyDecision(peerId, d, "none");
+    }
 }
 
 /**
- * A opcao approveViewers ou requireVerifiedIdentity mudou: quem ja assiste fica aprovado (nao cai da
- * transmissao por causa da mudanca) e os pedidos pendentes que nao precisam mais de aprovacao sao atendidos.
+ * A opcao requireVerifiedIdentity (ou o modo da transmissao) mudou: quem ja assiste fica aprovado (nao cai da
+ * transmissao por causa da mudanca) e os pedidos pendentes sao decididos de novo.
  */
 export function onApprovalPolicyChanged() {
     for (const peerId of rt.local?.viewers ?? []) rt.approved.add(peerId);
     reviewPendingApprovals();
+}
+
+/** Quem pode assistir agora (null = nao esta transmitindo). */
+export function getStreamAccess(): AccessMode | null {
+    return rt.local?.access ?? null;
+}
+
+/** A senha desta transmissao (so com o modo "password"; nunca vai para o estado da UI nem para o diagnostico). */
+export function getStreamPassword(): string | null {
+    return rt.local?.access === "password" ? rt.local.password : null;
+}
+
+/**
+ * Troca "Quem pode assistir" com a transmissao no ar. Vale para pedidos novos: quem ja assiste continua (fica
+ * aprovado), os pedidos pendentes sao decididos de novo, desafios de senha em andamento deixam de valer e os erros
+ * de senha zeram (quem ja foi bloqueado continua bloqueado). Lanca com a frase pronta em pt-BR.
+ */
+export function setStreamAccess(mode: AccessMode, rawPassword?: string) {
+    const { local } = rt;
+    if (!local) throw new Error("Você não está transmitindo.");
+    const { access, password } = validateAccess(mode, rawPassword);
+    if (access === local.access && password === local.password) return;
+    const passwordOnly = access === local.access;
+    local.access = access;
+    local.password = password;
+    accessGeneration++;
+    challenges.clear();
+    wrongAttempts.clear();
+    log.info(passwordOnly
+        ? "Senha da transmissão trocada (vale para novos pedidos; quem já assiste continua)"
+        : `Quem pode assistir agora: ${ACCESS_LABEL[access]} (vale para novos pedidos; quem já assiste continua)`);
+    onApprovalPolicyChanged();
+    sendPresence();
+    publish();
 }
 
 /** Conexoes que passaram a ter identidade duplicada (session.ts): param de receber agora, sem voltar sozinhas. */
@@ -631,8 +845,9 @@ async function applySenderParams(peerId: PeerId, local: LocalCapture, level: Qua
 
 // #region eventos vindos da sessao
 
-export function onWatchRequest(peerId: PeerId, op: "start" | "stop") {
-    if (op === "stop") {
+export function onWatchRequest(peerId: PeerId, request: WatchMessage) {
+    if (request.op === "stop") {
+        challenges.delete(peerId);
         if (cancelPending(peerId, null)) log.info(`${peerLabel(peerId)} desistiu do pedido para assistir`);
         removeFrom(peerId, "parou de assistir");
         return;
@@ -650,17 +865,18 @@ export function onWatchRequest(peerId: PeerId, op: "start" | "stop") {
         return;
     }
     if (rt.local.viewers.has(peerId)) return;
-    const refusal = refusalFor(peerId);
-    if (!refusal && needsApproval(peerId) && !rt.approved.has(peerId)) {
-        requestApproval(peerId);
+    // prova da senha so conta no modo "password" (num modo que mudou no meio, vale como um pedido comum)
+    if (request.proof && rt.local.access === "password") {
+        void checkPasswordProof(peerId, request.proof).catch(e => log.warn("Senha: erro ao conferir a prova: " + errorText(e)));
         return;
     }
-    sendTo(peerId);
+    handleStart(peerId, "none");
 }
 
 export function onPeerGone(peerId: PeerId) {
     sends.delete(peerId);
     rt.approved.delete(peerId);
+    challenges.delete(peerId);
     cancelPending(peerId, null);
     const { local } = rt;
     if (!local?.viewers.delete(peerId)) return;
@@ -689,6 +905,11 @@ export function onRoomClosing(reason: string) {
 export function tick() {
     const { local } = rt;
     if (!local) return;
+    for (const peerId of challenges.sweep()) {
+        if (!rt.peers.has(peerId)) continue;
+        log.warn(`${peerLabel(peerId)} não respondeu ao pedido de senha em ${PASSWORD_NONCE_TTL_MS / 60_000} min: desistiu, ou usa uma versão antiga do Telinha (v0.1.0), `
+            + "que não entende transmissão com senha (do lado dele o pedido expira sem resposta)");
+    }
     for (const peerId of [...local.viewers]) {
         const refusal = refusalFor(peerId);
         if (!refusal) continue;

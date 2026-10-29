@@ -10,7 +10,7 @@
 
 import {
     ACTION_IDENTITY, ACTION_PRESENCE, ACTION_WATCH, APP_ID, deriveRoomId, type HelloMessage, ICE_SERVERS, type IdentityMessage, isIdentityMessage,
-    isPresenceMessage, isWatchMessage, parseHello, parseWatchReply, type PresenceMessage, PROTOCOL_VERSION, RELAY_URLS, sanitizePresence,
+    isPresenceMessage, parseHello, parseWatchReply, parseWatchRequest, type PresenceMessage, PROTOCOL_VERSION, RELAY_URLS, sanitizePresence,
     type WatchActionMessage
 } from "@plugins/telinha/protocol";
 import { settings } from "@plugins/telinha/settings";
@@ -217,7 +217,7 @@ async function switchRoom(gid: string | null, vc: string | null, reason: string)
             // o certificado precisa estar pronto ANTES do joinRoom: o Trystero cria ofertas logo na entrada
             identity = await withTimeout(prepareIdentity(), IDENTITY_PREPARE_TIMEOUT_MS, NO_IDENTITY);
             if (seq !== joinSeq || !active) return;
-            // so faz algo se ja autorizou e o token falta/esta vencendo (refresh_token; modal "none" no maximo 1x/6 h)
+            // so faz algo se ja autorizou e o token falta/esta vencendo (refresh_token; modal "none" no maximo 1x/24 h)
             renewIdentity({ interactive: true }).catch(e => log.warn("Identidade: renovação falhou: " + errorText(e)));
         }
         joinNow(roomId, reason, identity);
@@ -437,15 +437,21 @@ function onPresence(data: PresenceMessage, { peerId }: { peerId: string; }) {
 }
 
 function onWatch(data: WatchActionMessage, { peerId }: { peerId: string; }) {
-    const entry = rt.peers.get(peerId);
-    if (!entry?.hello || entry.incompatible || isFake(entry)) return;
-    if (isWatchMessage(data)) {
-        streaming.onWatchRequest(peerId, data.op);
-        return;
+    // dado do peer e hostil: so campos conhecidos (parse*), e nada lanca para fora do handler do Trystero
+    try {
+        const entry = rt.peers.get(peerId);
+        if (!entry?.hello || entry.incompatible || isFake(entry)) return;
+        const request = parseWatchRequest(data);
+        if (request) {
+            streaming.onWatchRequest(peerId, request);
+            return;
+        }
+        // resposta do transmissor a um pedido nosso (pending/denied/password); so mexe na sessao que assiste esse peer
+        const reply = parseWatchReply(data);
+        if (reply) viewing.onWatchReply(peerId, reply);
+    } catch (e) {
+        logThrottled(`watch-msg:${peerId}`, "warn", `Mensagem "watch" de ${peerLabel(peerId)} ignorada: ${errorText(e)}`);
     }
-    // resposta do transmissor a um pedido nosso (pending/denied); so mexe na sessao que assiste esse peer
-    const reply = parseWatchReply(data);
-    if (reply) viewing.onWatchReply(peerId, reply);
 }
 
 function onPeerStream(stream: MediaStream, peerId: string, metadata?: JsonValue) {
