@@ -33,6 +33,7 @@ import (
 	"github.com/HumbertoFernandes7/Telinha/installer/internal/logx"
 	"github.com/HumbertoFernandes7/Telinha/installer/internal/payload"
 	"github.com/HumbertoFernandes7/Telinha/installer/internal/winproc"
+	"github.com/HumbertoFernandes7/Telinha/installer/internal/winver"
 )
 
 // version is set by build.cmd (-ldflags "-X main.version=...").
@@ -107,8 +108,21 @@ type app struct {
 	gh  *payload.Client
 }
 
+// The calls below look at the machine the installer runs on. They are variables so the tests can aim the
+// installer at fake folders and a fake process table instead.
+var (
+	knownFolderPath = windows.KnownFolderPath
+	// systemProcesses lists and closes the running processes (the real thing kills Discord).
+	systemProcesses core.Processes = procAdapter{}
+	// checkWindows returns an error when this Windows is too old (nil when it is new enough).
+	checkWindows = winver.Check
+	// attachConsole / hideConsole are the console tricks of main; tests must not run the real ones.
+	attachConsole = attachParentConsole
+	hideConsole   = hideOwnConsole
+)
+
 func knownFolder(id *windows.KNOWNFOLDERID, env string) string {
-	if p, err := windows.KnownFolderPath(id, 0); err == nil && p != "" {
+	if p, err := knownFolderPath(id, 0); err == nil && p != "" {
 		return p
 	}
 	return os.Getenv(env)
@@ -126,7 +140,7 @@ func newApp(o *options, extraLog io.Writer) (*app, error) {
 		AppData:            appData,
 		VencordDataDir:     os.Getenv("VENCORD_USER_DATA_DIR"),
 		AllowCustomVencord: o.allowCustom,
-		Procs:              procAdapter{},
+		Procs:              systemProcesses,
 		InstallerVersion:   version,
 	}
 	if len(o.discordDirs) > 0 {
@@ -157,23 +171,26 @@ func newApp(o *options, extraLog io.Writer) (*app, error) {
 
 type procAdapter struct{ winproc.System }
 
-func main() {
-	opt, err := parseFlags(os.Args[1:], io.Discard)
+func main() { os.Exit(run(os.Args[1:])) }
+
+// run is main without the os.Exit: it parses the command line and starts the CLI or the GUI.
+func run(args []string) int {
+	opt, err := parseFlags(args, io.Discard)
 	if err != nil || (opt != nil && opt.cli()) {
-		attachParentConsole()
+		attachConsole()
 		if err != nil {
 			// re-parse to print usage where the user can see it
-			_, err2 := parseFlags(os.Args[1:], os.Stderr)
+			_, err2 := parseFlags(args, os.Stderr)
 			if err2 != nil && err2 != flag.ErrHelp {
 				fmt.Fprintln(os.Stderr, err2)
 			}
 			if err == flag.ErrHelp {
-				os.Exit(0)
+				return exitOK
 			}
-			os.Exit(exitUsage)
+			return exitUsage
 		}
-		os.Exit(runCLI(opt))
+		return runCLI(opt)
 	}
-	hideOwnConsole()
-	os.Exit(runGUI(opt))
+	hideConsole()
+	return runGUI(opt)
 }

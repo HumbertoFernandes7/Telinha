@@ -58,6 +58,7 @@ func TestWindowsVersionGate(t *testing.T) {
 // zip, all under one temp folder. Nothing here touches the real Discord or the real %APPDATA%.
 type fakeTrees struct {
 	dir, appdata, discordRoot, zip, installerLog string
+	extraRoots                                   []string // more Discords (addFlavor)
 }
 
 func newFakeTrees(t *testing.T) *fakeTrees {
@@ -75,7 +76,7 @@ func newFakeTrees(t *testing.T) *fakeTrees {
 }
 
 func (f *fakeTrees) options() *options {
-	return &options{appdata: f.appdata, discordDirs: multiFlag{f.discordRoot}}
+	return &options{appdata: f.appdata, discordDirs: append(multiFlag{f.discordRoot}, f.extraRoots...)}
 }
 
 func (f *fakeTrees) log(t *testing.T) string {
@@ -178,7 +179,9 @@ func TestCLIInstallWritesInstallerLog(t *testing.T) {
 	f := newFakeTrees(t)
 	o := f.options()
 	o.install, o.yes, o.payload = true, true, f.zip
-	if code := runCLI(o); code != exitOK {
+	var code int
+	capture(t, func() { code = runCLI(o) })
+	if code != exitOK {
 		t.Fatalf("exit code %d", code)
 	}
 	mustContain(t, f.log(t),

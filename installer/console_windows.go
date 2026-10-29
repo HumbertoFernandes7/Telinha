@@ -25,6 +25,30 @@ func consoleWindow() uintptr {
 // hasOwnConsole: started with a console (console build, or launched from a terminal with one).
 var hasOwnConsole = consoleWindow() != 0
 
+// The calls below act on the console of whoever runs the program (they attach to a terminal, hide a window).
+// They are variables so the tests can stand in for them and exercise the decisions around them.
+var (
+	// attachToParentConsole is AttachConsole(ATTACH_PARENT_PROCESS); true when it worked.
+	attachToParentConsole = func() bool {
+		const attachParentProcess = ^uintptr(0)
+		r, _, _ := procAttachConsole.Call(attachParentProcess)
+		return r != 0
+	}
+	// openConsoleOutput opens the console's output buffer.
+	openConsoleOutput = func() (*os.File, error) { return os.OpenFile("CONOUT$", os.O_WRONLY, 0) }
+	// consoleProcessCount is how many processes share this console (2 slots are enough to tell "only us").
+	consoleProcessCount = func() uint32 {
+		var pids [2]uint32
+		n, _, _ := procGetConsoleProcessList.Call(uintptr(unsafe.Pointer(&pids[0])), 2)
+		return uint32(n)
+	}
+	// hideConsoleWindow is ShowWindow(console, SW_HIDE).
+	hideConsoleWindow = func() {
+		const swHide = 0
+		procShowWindow.Call(consoleWindow(), swHide)
+	}
+)
+
 // usable reports whether a standard handle is open (console, pipe or file).
 func usable(f *os.File) bool {
 	if f == nil {
@@ -45,11 +69,10 @@ func attachParentConsole() {
 	if hasOwnConsole || usable(os.Stdout) {
 		return
 	}
-	const attachParentProcess = ^uintptr(0)
-	if r, _, _ := procAttachConsole.Call(attachParentProcess); r == 0 {
+	if !attachToParentConsole() {
 		return
 	}
-	if f, err := os.OpenFile("CONOUT$", os.O_WRONLY, 0); err == nil {
+	if f, err := openConsoleOutput(); err == nil {
 		os.Stdout, os.Stderr = f, f
 	}
 }
@@ -60,10 +83,7 @@ func hideOwnConsole() {
 	if !hasOwnConsole {
 		return
 	}
-	var pids [2]uint32
-	n, _, _ := procGetConsoleProcessList.Call(uintptr(unsafe.Pointer(&pids[0])), 2)
-	if n == 1 {
-		const swHide = 0
-		procShowWindow.Call(consoleWindow(), swHide)
+	if consoleProcessCount() == 1 {
+		hideConsoleWindow()
 	}
 }

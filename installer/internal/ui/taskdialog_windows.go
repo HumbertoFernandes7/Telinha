@@ -120,8 +120,38 @@ var (
 
 func init() { runtime.LockOSThread() } // UI calls stay on the main thread
 
+// The calls below are the only ones that need a desktop and a user (or launch another program). They are
+// variables so the tests can stand in for them and drive everything around them.
+var (
+	// available reports whether TaskDialogIndirect can be used (comctl32 v6 via the manifest).
+	available = func() bool { return procTaskDialogIndirect.Find() == nil }
+	// taskDialogIndirect shows the dialog described by cfg (a packed TASKDIALOGCONFIG) and returns its HRESULT.
+	taskDialogIndirect = func(cfg []byte, button, radio *int32) uintptr {
+		hr, _, _ := procTaskDialogIndirect.Call(uintptr(unsafe.Pointer(&cfg[0])), uintptr(unsafe.Pointer(button)), uintptr(unsafe.Pointer(radio)), 0)
+		return hr
+	}
+	// sendMessage is SendMessageW (talks to the dialog's window while it is open).
+	sendMessage = func(hwnd, msg, wparam, lparam uintptr) uintptr {
+		r, _, _ := procSendMessage.Call(hwnd, msg, wparam, lparam)
+		return r
+	}
+	// messageBox is MessageBoxW (the fallback when TaskDialogIndirect is not available).
+	messageBox = func(text, caption string, style uint32) int {
+		t, _ := windows.UTF16PtrFromString(text)
+		c, _ := windows.UTF16PtrFromString(caption)
+		r, _, _ := procMessageBox.Call(0, uintptr(unsafe.Pointer(t)), uintptr(unsafe.Pointer(c)), uintptr(style|mbSetForeground))
+		return int(r)
+	}
+	// shellOpen hands a URL to the default browser.
+	shellOpen = func(url string) {
+		verb, _ := windows.UTF16PtrFromString("open")
+		u, _ := windows.UTF16PtrFromString(url)
+		_ = windows.ShellExecute(0, verb, u, nil, nil, windows.SW_SHOWNORMAL)
+	}
+)
+
 // Available reports whether TaskDialogIndirect can be used (comctl32 v6 via the manifest).
-func Available() bool { return procTaskDialogIndirect.Find() == nil }
+func Available() bool { return available() }
 
 type packer struct {
 	b    []byte
@@ -271,7 +301,7 @@ func run(d *Dialog, flags uint32, handler func(hwnd, msg, wparam, lparam uintptr
 		}
 		if auto && msg == tdnTimer && !autoDone && time.Duration(wparam)*time.Millisecond >= AutoClick {
 			autoDone = true
-			procSendMessage.Call(hwnd, tdmClickButton, uintptr(d.defaultButton()), 0)
+			sendMessage(hwnd, tdmClickButton, uintptr(d.defaultButton()), 0)
 			return 0
 		}
 		if handler != nil {
@@ -286,7 +316,7 @@ func run(d *Dialog, flags uint32, handler func(hwnd, msg, wparam, lparam uintptr
 		activeMu.Unlock()
 	}()
 	var button, radio int32
-	hr, _, _ := procTaskDialogIndirect.Call(uintptr(unsafe.Pointer(&cfg[0])), uintptr(unsafe.Pointer(&button)), uintptr(unsafe.Pointer(&radio)), 0)
+	hr := taskDialogIndirect(cfg, &button, &radio)
 	runtime.KeepAlive(p)
 	runtime.KeepAlive(cfg)
 	if int32(hr) < 0 {
@@ -334,9 +364,7 @@ func fallback(d *Dialog) int {
 	default:
 		style |= mbIconInfo
 	}
-	t, _ := windows.UTF16PtrFromString(text)
-	c, _ := windows.UTF16PtrFromString(d.Title)
-	r, _, _ := procMessageBox.Call(0, uintptr(unsafe.Pointer(t)), uintptr(unsafe.Pointer(c)), uintptr(style|mbSetForeground))
+	r := messageBox(text, d.Title, style)
 	if len(d.Buttons) > 0 {
 		switch r {
 		case IDYES:
@@ -348,7 +376,7 @@ func fallback(d *Dialog) int {
 		}
 		return IDCANCEL
 	}
-	return int(r)
+	return r
 }
 
 func firstLine(s string) string {
@@ -405,7 +433,7 @@ func Progress(title, instruction string, cancel func(), work func(set func(strin
 	handler := func(hwnd, msg, wparam, _ uintptr) uintptr {
 		switch msg {
 		case tdnCreated:
-			procSendMessage.Call(hwnd, tdmSetProgressMarquee, 1, 30)
+			sendMessage(hwnd, tdmSetProgressMarquee, 1, 30)
 		case tdnTimer:
 			mu.Lock()
 			t, ch, f := text, changed, finished
@@ -414,11 +442,11 @@ func Progress(title, instruction string, cancel func(), work func(set func(strin
 			if ch {
 				u, _ := windows.UTF16PtrFromString(t)
 				textBuf = append(textBuf, u) // must outlive the call
-				procSendMessage.Call(hwnd, tdmSetElementText, tdeContent, uintptr(unsafe.Pointer(u)))
+				sendMessage(hwnd, tdmSetElementText, tdeContent, uintptr(unsafe.Pointer(u)))
 			}
 			if f && !closing {
 				closing = true
-				procSendMessage.Call(hwnd, tdmClickButton, uintptr(firstCommon(d.Common)), 0)
+				sendMessage(hwnd, tdmClickButton, uintptr(firstCommon(d.Common)), 0)
 			}
 		case tdnButtonClicked:
 			if closing {
@@ -429,7 +457,7 @@ func Progress(title, instruction string, cancel func(), work func(set func(strin
 				cancel()
 				u, _ := windows.UTF16PtrFromString("Cancelando…")
 				textBuf = append(textBuf, u)
-				procSendMessage.Call(hwnd, tdmSetElementText, tdeContent, uintptr(unsafe.Pointer(u)))
+				sendMessage(hwnd, tdmSetElementText, tdeContent, uintptr(unsafe.Pointer(u)))
 			}
 			return sFalse // stay open until work returns
 		}
@@ -469,7 +497,5 @@ func OpenURL(url string) {
 	if len(url) < 8 || url[:8] != "https://" {
 		return
 	}
-	verb, _ := windows.UTF16PtrFromString("open")
-	u, _ := windows.UTF16PtrFromString(url)
-	_ = windows.ShellExecute(0, verb, u, nil, nil, windows.SW_SHOWNORMAL)
+	shellOpen(url)
 }
