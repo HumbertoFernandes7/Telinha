@@ -126,9 +126,10 @@ jobs:
         working-directory: installer
         run: go vet ./...
 
+      # -count=1: setup-go restores the build cache, which would otherwise replay earlier results as "(cached)".
       - name: go test -cover
         working-directory: installer
-        run: go test -cover ./... 2>&1 | tee "$RUNNER_TEMP/go-test.txt"
+        run: go test -count=1 -cover ./... 2>&1 | tee "$RUNNER_TEMP/go-test.txt"
 
       - name: Build the installer
         shell: cmd
