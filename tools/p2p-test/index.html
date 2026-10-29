@@ -1,0 +1,252 @@
+<!doctype html>
+<!--
+    Vencord, a Discord client mod
+    Copyright (c) 2026 Vendicated and contributors
+    SPDX-License-Identifier: GPL-3.0-or-later
+
+    PeerLive - pagina de teste do spike P2P (mesmo protocolo do plugin PeerLiveP2PTest).
+    Sirva com um servidor HTTP local (veja README.md); file:// nao funciona com modulos ES.
+-->
+<html lang="pt-BR">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PeerLive P2P — teste</title>
+    <style>
+        :root {
+            color-scheme: light dark;
+            --bg: #f6f6f8;
+            --fg: #1e1f22;
+            --muted: #6d6f78;
+            --card: #fff;
+            --line: #e0e1e5;
+            --ok: #1a8d4a;
+            --warn: #b7791f;
+            --err: #d22d39;
+            --accent: #5865f2;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #1e1f22;
+                --fg: #dbdee1;
+                --muted: #949ba4;
+                --card: #2b2d31;
+                --line: #3f4147;
+                --ok: #23a55a;
+                --warn: #f0b232;
+                --err: #f23f43;
+            }
+        }
+
+        body {
+            margin: 0;
+            padding: 16px;
+            background: var(--bg);
+            color: var(--fg);
+            font: 14px/1.45 system-ui, sans-serif;
+        }
+
+        h1 {
+            font-size: 20px;
+            margin: 0 0 4px;
+        }
+
+        h2 {
+            font-size: 15px;
+            margin: 0 0 8px;
+        }
+
+        section {
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 12px;
+        }
+
+        .cols {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+            gap: 12px;
+        }
+
+        @media (max-width: 900px) {
+            .cols {
+                grid-template-columns: minmax(0, 1fr);
+            }
+        }
+
+        label {
+            display: block;
+            font-size: 12px;
+            color: var(--muted);
+        }
+
+        input,
+        textarea {
+            width: 100%;
+            box-sizing: border-box;
+            padding: 6px 8px;
+            border: 1px solid var(--line);
+            border-radius: 4px;
+            background: var(--bg);
+            color: var(--fg);
+            font: inherit;
+        }
+
+        .form {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        button {
+            padding: 6px 12px;
+            border: 0;
+            border-radius: 4px;
+            background: var(--accent);
+            color: #fff;
+            font: inherit;
+            cursor: pointer;
+        }
+
+        button.positive {
+            background: var(--ok);
+        }
+
+        button.secondary {
+            background: var(--muted);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        td {
+            padding: 4px 6px;
+            border-bottom: 1px solid var(--line);
+            vertical-align: top;
+        }
+
+        .mono,
+        #events {
+            font-family: Consolas, "Courier New", monospace;
+            font-size: 12px;
+        }
+
+        .muted {
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .ok {
+            color: var(--ok);
+        }
+
+        .warn {
+            color: var(--warn);
+        }
+
+        .err {
+            color: var(--err);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            gap: 6px;
+            margin: 6px 0;
+        }
+
+        video,
+        #preview canvas {
+            width: 100%;
+            background: #000;
+            border-radius: 6px;
+        }
+
+        #events {
+            max-height: 260px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+
+        #clock {
+            font-family: Consolas, monospace;
+            font-size: 28px;
+            font-weight: 700;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>PeerLive P2P — página de teste</h1>
+    <div class="muted">Mesmo protocolo do plugin <code>PeerLiveP2PTest</code>: Trystero 0.26.0 (Nostr) + WebRTC direto, só STUN.</div>
+
+    <section>
+        <div class="form">
+            <div><label for="userId">ID do Discord (falso)</label><input id="userId" autocomplete="off"></div>
+            <div><label for="username">Nome</label><input id="username" autocomplete="off"></div>
+            <div><label for="guildId">guildId (vazio ou "dm" = DM)</label><input id="guildId" autocomplete="off"></div>
+            <div><label for="channelId">channelId do canal de voz</label><input id="channelId" autocomplete="off"></div>
+            <div><label for="password">Senha do grupo (vazio = sem senha)</label><input id="password" type="password" autocomplete="off"></div>
+            <div><label for="members">IDs "no canal de voz" (simulação da admissão; vazio = não verifica)</label><input id="members" autocomplete="off"></div>
+        </div>
+        <label style="display:flex;gap:6px;align-items:center;margin-bottom:8px"><input id="enforce" type="checkbox" style="width:auto"> Rejeitar de verdade quem não está na lista</label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button id="join">Entrar na sala</button>
+            <button id="stream" class="positive">Transmitir padrão de teste</button>
+            <button id="download" class="secondary">Baixar log</button>
+        </div>
+        <div id="status" style="margin-top:8px"></div>
+    </section>
+
+    <div class="cols">
+        <div>
+            <section>
+                <h2 id="peers-title">Peers na sala</h2>
+                <table><tbody id="peers"></tbody></table>
+            </section>
+
+            <section id="watch" hidden>
+                <h2 id="watch-title">Assistindo</h2>
+                <video id="remote" autoplay playsinline controls></video>
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+                    <div>Meu relógio (compare com o do vídeo): <span id="clock"></span></div>
+                    <button id="stop-watch" class="secondary">Parar de assistir</button>
+                </div>
+                <div id="watch-stats"></div>
+            </section>
+
+            <section id="out" hidden>
+                <h2 id="out-title">Minha transmissão</h2>
+                <div id="preview"></div>
+                <div id="out-stats"></div>
+            </section>
+        </div>
+
+        <div>
+            <section>
+                <h2>Relays Nostr</h2>
+                <table><tbody id="relays"></tbody></table>
+            </section>
+            <section>
+                <h2>Tempos medidos</h2>
+                <table><tbody id="timings"></tbody></table>
+            </section>
+            <section>
+                <h2>Eventos (mais recentes primeiro)</h2>
+                <div id="events"></div>
+            </section>
+        </div>
+    </div>
+
+    <script type="module" src="./p2p-test.js"></script>
+</body>
+
+</html>
