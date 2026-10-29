@@ -17,8 +17,8 @@ setlocal
 cd /d "%~dp0"
 
 set "VER=%~1"
-if "%VER%"=="" set "VER=0.2.1"
-if /i "%VER%"=="fast" (set "VER=0.2.1" & set "FAST=1")
+if "%VER%"=="" set "VER=0.2.2"
+if /i "%VER%"=="fast" (set "VER=0.2.2" & set "FAST=1")
 if /i "%~2"=="fast" set "FAST=1"
 
 set "GO=go"
