@@ -13,7 +13,7 @@ import { useTelinhaState } from "@plugins/telinha/store";
 import { Tooltip } from "@webpack/common";
 import type { MouseEvent } from "react";
 
-import { cl, currentUserId, watchersLabel } from "./common";
+import { accessBadge, cl, currentUserId, watchersLabel } from "./common";
 import { BroadcastIcon } from "./icons";
 import { identityHint } from "./IdentityUI";
 import { openViewer } from "./viewerWindows";
@@ -104,7 +104,8 @@ function VoiceUserTagInner({ userId, collapsed }: { userId: string; collapsed?: 
 
     noteTagRender(false);
     const hint = identityHint(peer.identity);
-    const what = `Transmitindo pelo Telinha${hint ? ` (${hint})` : ""}`;
+    const badge = accessBadge(peer.stream?.access);
+    const what = `Transmitindo pelo Telinha${hint ? ` (${hint})` : ""}${badge ? ` · ${badge}` : ""}`;
     return (
         <Pill
             tooltip={state.viewing[peer.peerId] ? `${what} — clique para abrir a janela` : `${what} — clique para assistir`}

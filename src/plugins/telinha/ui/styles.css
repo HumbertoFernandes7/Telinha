@@ -217,6 +217,20 @@
     line-height: 1.25;
 }
 
+/* "Quem pode assistir" of the live stream: "🔒 Com senha  Mudar  [Copiar senha]" */
+.vc-telinha-bar-access {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    width: 100%;
+    min-width: 0;
+}
+
+.vc-telinha-bar-access-row {
+    flex: 1;
+    font-size: 12px;
+}
+
 /* #endregion */
 
 /* #region identity badges (verificado / não verificado / identidade falsa) */
@@ -435,6 +449,65 @@
 
 .vc-telinha-option-control {
     width: 220px;
+}
+
+/* "Quem pode assistir" (transmit picker and the live-change modal) */
+.vc-telinha-access {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-subtle, var(--background-modifier-accent));
+}
+
+.vc-telinha-access-hint {
+    color: var(--text-muted);
+    font-size: 13px;
+    line-height: 1.3;
+}
+
+.vc-telinha-access-error {
+    color: var(--status-danger, #da373c);
+}
+
+.vc-telinha-access-password {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.vc-telinha-input {
+    flex: 1;
+    min-width: 0;
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid var(--input-border, var(--background-modifier-accent));
+    border-radius: 6px;
+    background: var(--input-background, var(--background-tertiary));
+    color: var(--text-default, var(--text-normal));
+    font-size: 15px;
+    font-family: var(--font-code, monospace);
+}
+
+.vc-telinha-input:focus {
+    border-color: #0b8a83;
+    outline: none;
+}
+
+/* "🔒 com senha" / "👥 só amigos" / "✋ com aprovação" next to a streamer's name */
+.vc-telinha-access-badge {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    height: 16px;
+    padding: 0 5px;
+    border-radius: 4px;
+    background: var(--background-modifier-hover, rgb(78 80 88 / 30%));
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 16px;
+    white-space: nowrap;
 }
 
 .vc-telinha-empty {

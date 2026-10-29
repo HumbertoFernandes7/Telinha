@@ -13,8 +13,9 @@ import type { PeerId, ViewerSession } from "@plugins/telinha/types";
 import { useEffect, useLayoutEffect, useRef, useState } from "@webpack/common";
 import type { CSSProperties, ReactNode, RefObject } from "react";
 
-import { ACCENT, DENIED_TITLE, errorText, findPeer, logger, peerName } from "./common";
+import { ACCENT, deniedTitle, errorText, findPeer, logger, peerName } from "./common";
 import { CloseIcon, FullscreenIcon, StopIcon, VolumeIcon } from "./icons";
+import { AuthorizeToWatchButton, PasswordForm, passwordOverlayText } from "./WatchGate";
 
 export type ViewerMode = "popout" | "floating";
 
@@ -120,9 +121,11 @@ interface OverlayInfo {
     detail?: string;
     spinner?: boolean;
     closable?: boolean;
+    /** "Quem pode assistir": campo de senha, ou o botao "Autorizar o Telinha" depois de um "notVerified" */
+    gate?: "password" | "authorize";
 }
 
-function getOverlay(session: ViewerSession | undefined, hadSession: boolean): OverlayInfo | null {
+function getOverlay(session: ViewerSession | undefined, hadSession: boolean, name: string): OverlayInfo | null {
     if (!session) {
         return hadSession
             ? { title: "A transmissão terminou", closable: true }
@@ -130,10 +133,14 @@ function getOverlay(session: ViewerSession | undefined, hadSession: boolean): Ov
     }
 
     switch (session.status) {
-        case "connecting":
+        case "connecting": {
+            const password = passwordOverlayText(session, name);
+            if (password) return { ...password, gate: "password", closable: true };
+            if (session.checkingPassword) return { title: "Conferindo a senha…", spinner: true };
             return session.awaitingApproval
                 ? { title: "Aguardando o transmissor aprovar…", detail: "Ele recebeu o seu pedido para assistir.", spinner: true }
                 : { title: "Conectando…", spinner: true };
+        }
         case "waiting-first-frame":
             return { title: "Aguardando a primeira imagem…", spinner: true };
         case "playing":
@@ -142,7 +149,7 @@ function getOverlay(session: ViewerSession | undefined, hadSession: boolean): Ov
             return { title: "A transmissão terminou", closable: true };
         case "error":
             return session.denied
-                ? { title: DENIED_TITLE[session.denied], detail: session.error, closable: true }
+                ? { title: deniedTitle(session.denied, name), detail: session.error, closable: true, ...(session.denied === "notVerified" ? { gate: "authorize" as const } : {}) }
                 : { title: "Não foi possível assistir a esta transmissão", detail: session.error, closable: true };
         default:
             return null;
@@ -271,7 +278,7 @@ export function ViewerContent({ peerId, mode, onMounted, onUnmounted, onClose }:
     }, [volume, muted, autoplayBlocked, stream]);
 
     const hasAudio = (stream?.getAudioTracks().length ?? 0) > 0 || !!peer?.stream?.hasAudio;
-    const overlay = getOverlay(session, hadSession.current);
+    const overlay = getOverlay(session, hadSession.current, name);
     const showControls = active || overlay != null;
 
     const poke = () => {
@@ -359,6 +366,8 @@ export function ViewerContent({ peerId, mode, onMounted, onUnmounted, onClose }:
                     {overlay.spinner && <Spinner />}
                     <div style={{ fontSize: 17, fontWeight: 600 }}>{overlay.title}</div>
                     {overlay.detail && <div style={{ maxWidth: 520, color: "#b5bac1", fontSize: 13 }}>{overlay.detail}</div>}
+                    {overlay.gate === "password" && <PasswordForm key={peerId} peerId={peerId} />}
+                    {overlay.gate === "authorize" && <AuthorizeToWatchButton peerId={peerId} />}
                     {overlay.closable && (
                         <button style={ghostButton} onClick={onClose}>
                             <CloseIcon size={14} />

@@ -7,15 +7,15 @@
 // "Quem está assistindo", opened from the voice bar's "Ao vivo · N assistindo" (and the toolbox). While streaming it
 // lists, for each person receiving the stream: Discord avatar/name (resolved from the ANNOUNCED Discord id through
 // UserStore), whether that id is in your voice channel right now, the connection type, and "Expulsar". It also shows
-// requests waiting for approval (approveViewers), suspicious identities (two connections claiming the same person,
-// or someone claiming to be you) and who you kicked/declined, with "Liberar".
+// requests waiting for approval (Permitir/Recusar), suspicious identities (two connections claiming the same person,
+// or someone claiming to be you) and who you kicked/declined/blocked after 5 wrong passwords, with "Liberar".
 
 import { Button } from "@components/Button";
 import ErrorBoundary from "@components/ErrorBoundary";
 import { Paragraph } from "@components/Paragraph";
 import { approveViewer, declineViewer, getConnectionInfo, kickViewer, unblockViewer } from "@plugins/telinha/actions";
 import { useTelinhaState } from "@plugins/telinha/store";
-import type { PeerId, PeerIdentityStatus, PendingViewer, RemotePeer } from "@plugins/telinha/types";
+import type { BlockReason, PeerId, PeerIdentityStatus, PendingViewer, RemotePeer } from "@plugins/telinha/types";
 import { RenderModalProps } from "@vencord/discord-types";
 import { Modal, openModal, showToast, useEffect, UserStore, useState } from "@webpack/common";
 import type { ReactNode } from "react";
@@ -27,6 +27,12 @@ import { IdentityBadge } from "./IdentityUI";
 import { openSourcePicker } from "./SourcePickerModal";
 
 const CONNECTION_REFRESH_MS = 3000;
+
+const BLOCKED_META: Record<BlockReason, string> = {
+    kicked: "Expulso até você sair da call",
+    declined: "Recusado até esta transmissão acabar",
+    tooManyAttempts: "Errou a senha 5 vezes · bloqueado até esta transmissão acabar"
+};
 
 /** Connection type per peer, refreshed while the modal is open */
 function useConnectionInfo(peerIds: PeerId[]): Record<PeerId, string | null> {
@@ -251,7 +257,7 @@ function ViewersModal({ modalProps }: { modalProps: RenderModalProps; }) {
                                 key={b.discordUserId}
                                 userId={b.discordUserId}
                                 name={displayName(b.discordUserId, b.username)}
-                                meta={b.reason === "kicked" ? "Expulso até você sair da call" : "Recusado até esta transmissão acabar"}
+                                meta={BLOCKED_META[b.reason] ?? BLOCKED_META.declined}
                                 actions={
                                     <Button size="small" variant="secondary" onClick={() => runAction("unblockViewer", () => unblockViewer(b.discordUserId))}>
                                         Liberar

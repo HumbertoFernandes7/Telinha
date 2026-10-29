@@ -10,11 +10,12 @@ import { FormSwitch } from "@components/FormSwitch";
 import { Paragraph } from "@components/Paragraph";
 import { getScreenAudioStatus, listSources, screenAudioSupported, startStreaming } from "@plugins/telinha/actions";
 import { getState } from "@plugins/telinha/store";
-import type { CaptureSource, Quality } from "@plugins/telinha/types";
+import type { AccessMode, CaptureSource, Quality } from "@plugins/telinha/types";
 import { RenderModalProps } from "@vencord/discord-types";
 import { Modal, openModal, Select, showToast, useEffect, useState } from "@webpack/common";
 
-import { cl, defaultQuality, errorText, inVoiceChannel, logger, QUALITY_OPTIONS, shareAudioByDefault } from "./common";
+import { AccessPicker, accessReady } from "./AccessPicker";
+import { cl, defaultAccess, defaultQuality, errorText, inVoiceChannel, logger, QUALITY_OPTIONS, shareAudioByDefault } from "./common";
 
 type Kind = CaptureSource["kind"];
 
@@ -56,6 +57,10 @@ function SourcePickerModal({ modalProps, switching, initialQuality }: { modalPro
     const [selectedId, setSelectedId] = useState<string | null>(null);
     const [quality, setQuality] = useState<Quality>(initialQuality);
     const [audio, setAudio] = useState(shareAudioByDefault);
+    // "Quem pode assistir": so ao comecar (trocando de fonte, o modo atual continua; muda-se pela barra do Telinha).
+    // A senha nunca vem preenchida: digitada ou gerada a cada transmissao, nunca salva.
+    const [access, setAccess] = useState<AccessMode>(defaultAccess);
+    const [password, setPassword] = useState("");
     const [starting, setStarting] = useState(false);
     const [startError, setStartError] = useState<string | null>(null);
     // null = ainda verificando; so a tela inteira depende disso (janela usa o som do proprio processo)
@@ -108,12 +113,23 @@ function SourcePickerModal({ modalProps, switching, initialQuality }: { modalPro
         else audioDescription = `Sem som na tela inteira: ${screenAudio.reason || "o ajudante de áudio não está disponível"}. A tela vai só com imagem.`;
     }
 
+    const ready = switching || accessReady(access, password);
+
     const start = async (source = selected) => {
         if (!source || starting) return;
+        if (!ready) {
+            setStartError("Digite ou gere uma senha para esta transmissão.");
+            return;
+        }
         setStarting(true);
         setStartError(null);
         try {
-            await startStreaming({ source, quality, withAudio: audio && (source.kind !== "screen" || screenAudioReady) });
+            await startStreaming({
+                source,
+                quality,
+                withAudio: audio && (source.kind !== "screen" || screenAudioReady),
+                ...(switching ? {} : { access, ...(access === "password" ? { password } : {}) })
+            });
             modalProps.onClose();
             showToast({ text: switching ? "Telinha: transmissão trocada" : "Telinha: transmissão iniciada", variant: "success" });
         } catch (e) {
@@ -176,7 +192,7 @@ function SourcePickerModal({ modalProps, switching, initialQuality }: { modalPro
                 : "Escolha o que seus amigos na call vão ver. A imagem vai direto do seu PC para o deles, sem servidor."}
             notice={startError ? { message: `Não foi possível começar a transmissão: ${startError}`, type: "critical" } : undefined}
             actions={[
-                { text: starting ? "Iniciando…" : switching ? "Trocar" : "Transmitir", variant: "primary", onClick: () => void start(), disabled: !selected || starting, loading: starting },
+                { text: starting ? "Iniciando…" : switching ? "Trocar" : "Transmitir", variant: "primary", onClick: () => void start(), disabled: !selected || starting || !ready, loading: starting },
                 { text: "Cancelar", variant: "secondary", onClick: modalProps.onClose }
             ]}
         >
@@ -214,6 +230,20 @@ function SourcePickerModal({ modalProps, switching, initialQuality }: { modalPro
                         onChange={setAudio}
                         hideBorder
                     />
+                    {!switching && (
+                        <AccessPicker
+                            access={access}
+                            onAccess={a => {
+                                setAccess(a);
+                                setStartError(null);
+                            }}
+                            password={password}
+                            onPassword={p => {
+                                setPassword(p);
+                                setStartError(null);
+                            }}
+                        />
+                    )}
                 </div>
             </div>
         </Modal>

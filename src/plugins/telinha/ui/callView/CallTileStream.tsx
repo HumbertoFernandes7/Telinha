@@ -15,9 +15,10 @@ import ErrorBoundary from "@components/ErrorBoundary";
 import { getLocalPreviewStream } from "@plugins/telinha/actions";
 import { useTelinhaState } from "@plugins/telinha/store";
 import type { PeerId, RemotePeer, ViewerSession } from "@plugins/telinha/types";
-import { ACCENT, currentUserId, DENIED_TITLE, errorText, logger, peerName, watchersLabel } from "@plugins/telinha/ui/common";
+import { ACCENT, accessBadge, currentUserId, deniedTitle, errorText, logger, peerName, watchersLabel } from "@plugins/telinha/ui/common";
 import { BroadcastIcon, CloseIcon, FullscreenIcon, StopIcon, VolumeIcon } from "@plugins/telinha/ui/icons";
 import { isViewerOpen, openViewer } from "@plugins/telinha/ui/viewerWindows";
+import { AuthorizeToWatchButton, PasswordForm, passwordOverlayText } from "@plugins/telinha/ui/WatchGate";
 import { PopoutWindowStore, useEffect, useRef, useState } from "@webpack/common";
 import type { CSSProperties, ReactNode, RefObject, SyntheticEvent } from "react";
 
@@ -127,6 +128,21 @@ const watchBadgeStyle: CSSProperties = {
     background: ACCENT,
     boxShadow: "0 1px 4px rgba(0, 0, 0, 0.45)",
     font: `700 12px ${FONT}`
+};
+
+/** "🔒 com senha" / "👥 só amigos" / "✋ com aprovação" next to the "Assistir" badge */
+const accessPillStyle: CSSProperties = {
+    position: "absolute",
+    top: 36,
+    left: 8,
+    height: 20,
+    padding: "0 7px",
+    borderRadius: 4,
+    background: "rgba(0, 0, 0, 0.62)",
+    color: "#f2f3f5",
+    font: `600 11px/20px ${FONT}`,
+    whiteSpace: "nowrap",
+    pointerEvents: "none"
 };
 
 const spinnerStyle: CSSProperties = {
@@ -328,14 +344,20 @@ interface StatusInfo {
     detail?: string;
     spinner?: boolean;
     finished?: boolean;
+    /** "Quem pode assistir": campo de senha, ou "Autorizar o Telinha" depois de um "notVerified" */
+    gate?: "password" | "authorize";
 }
 
-function getStatus(session: ViewerSession): StatusInfo | null {
+function getStatus(session: ViewerSession, name: string): StatusInfo | null {
     switch (session.status) {
-        case "connecting":
+        case "connecting": {
+            const password = passwordOverlayText(session, name);
+            if (password) return { ...password, gate: "password" };
+            if (session.checkingPassword) return { title: "Conferindo a senha…", spinner: true };
             return session.awaitingApproval
                 ? { title: "Aguardando o transmissor aprovar…", spinner: true }
                 : { title: "Conectando…", spinner: true };
+        }
         case "waiting-first-frame":
             return { title: "Aguardando a primeira imagem…", spinner: true };
         case "playing":
@@ -343,7 +365,12 @@ function getStatus(session: ViewerSession): StatusInfo | null {
         case "ended":
             return { title: "A transmissão terminou", finished: true };
         case "error":
-            return { title: session.denied ? DENIED_TITLE[session.denied] : "Não foi possível assistir", detail: session.error, finished: true };
+            return {
+                title: session.denied ? deniedTitle(session.denied, name) : "Não foi possível assistir",
+                detail: session.error,
+                finished: true,
+                ...(session.denied === "notVerified" ? { gate: "authorize" as const } : {})
+            };
         default:
             return null;
     }
@@ -408,7 +435,7 @@ function TilePlayer({ peer, session }: { peer: RemotePeer; session: ViewerSessio
     const { autoplayBlocked, enableSound } = useStreamVideo(mediaRef, stream, muted || !audioHere, volume);
 
     const hasAudio = (stream?.getAudioTracks().length ?? 0) > 0 || !!peer.stream?.hasAudio;
-    const status = getStatus(session);
+    const status = getStatus(session, name);
     const showControls = active || fullscreen || status != null || (autoplayBlocked && hasAudio && audioHere);
 
     const { stats } = session;
@@ -475,6 +502,8 @@ function TilePlayer({ peer, session }: { peer: RemotePeer; session: ViewerSessio
                     {status.spinner && <Spinner />}
                     <div style={{ fontSize: tiny ? 12 : 15, fontWeight: 600 }}>{status.title}</div>
                     {status.detail && !tiny && <div style={{ maxWidth: 420, color: "#b5bac1", fontSize: 12 }}>{status.detail}</div>}
+                    {status.gate === "password" && <PasswordForm key={peerId} peerId={peerId} compact={compact} />}
+                    {status.gate === "authorize" && <AuthorizeToWatchButton peerId={peerId} />}
                     {status.finished && (
                         <div style={{ display: "flex", gap: 6 }} {...stopTileEvents}>
                             {peer.streaming && (
@@ -517,13 +546,14 @@ function WatchBadge({ peer }: { peer: RemotePeer; }) {
     const width = useWidth(layerRef);
     const tiny = width > 0 && width < TINY_WIDTH;
     const name = peerName(peer);
+    const badge = accessBadge(peer.stream?.access);
 
     return (
         <div ref={layerRef} style={layerStyle}>
             <button
                 type="button"
                 style={watchBadgeStyle}
-                title={`${name} está transmitindo pelo Telinha — clique para assistir aqui na call`}
+                title={`${name} está transmitindo pelo Telinha${badge ? ` (${badge})` : ""} — clique para assistir aqui na call`}
                 aria-label={`Assistir a transmissão de ${name} pelo Telinha`}
                 {...stopTileEvents}
                 onClick={e => {
@@ -534,6 +564,7 @@ function WatchBadge({ peer }: { peer: RemotePeer; }) {
                 <BroadcastIcon size={12} />
                 {tiny ? "Assistir" : "TELINHA · Assistir"}
             </button>
+            {badge && <span style={accessPillStyle}>{tiny ? badge.split(" ")[0] : badge}</span>}
         </div>
     );
 }

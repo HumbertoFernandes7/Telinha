@@ -8,13 +8,14 @@ import { Button } from "@components/Button";
 import ErrorBoundary from "@components/ErrorBoundary";
 import { Paragraph } from "@components/Paragraph";
 import { stopStreaming } from "@plugins/telinha/actions";
+import { ACCESS_LABEL } from "@plugins/telinha/core/access";
 import { useTelinhaState } from "@plugins/telinha/store";
 import type { IdentityAlert, RemotePeer } from "@plugins/telinha/types";
 import { RenderModalProps } from "@vencord/discord-types";
 import { Modal, openModal } from "@webpack/common";
 
 import { Avatar } from "./Avatar";
-import { cl, currentUserId, displayName, identityAlertText, inVoiceChannel, peerName, runAction, streamSummary, watchersLabel } from "./common";
+import { accessBadge, cl, currentUserId, displayName, identityAlertText, inVoiceChannel, peerName, runAction, streamSummary, watchersLabel } from "./common";
 import { WarningIcon } from "./icons";
 import { IdentityBadge } from "./IdentityUI";
 import { openSourcePicker } from "./SourcePickerModal";
@@ -22,6 +23,7 @@ import { openViewersModal } from "./ViewersModal";
 import { openViewer } from "./viewerWindows";
 
 function StreamerRow({ peer, alert, watching, onWatch }: { peer: RemotePeer; alert: IdentityAlert | undefined; watching: boolean; onWatch(): void; }) {
+    const badge = accessBadge(peer.stream?.access);
     return (
         <div className={cl("streamer")}>
             <Avatar userId={peer.discordUserId} />
@@ -29,6 +31,7 @@ function StreamerRow({ peer, alert, watching, onWatch }: { peer: RemotePeer; ale
                 <span className={cl("streamer-name-row")}>
                     <span className={cl("streamer-name")}>{peerName(peer)}</span>
                     <IdentityBadge identity={peer.identity} />
+                    {badge && <span className={cl("access-badge")} title={`Quem pode assistir: ${ACCESS_LABEL[peer.stream!.access!]}`}>{badge}</span>}
                 </span>
                 <span className={cl("streamer-meta")}>
                     {streamSummary(peer.stream)}
@@ -82,7 +85,7 @@ function StreamersModal({ modalProps }: { modalProps: RenderModalProps; }) {
                         <div className={cl("streamer-info")}>
                             <span className={cl("streamer-name")}>{displayName(me, "Você")} (você)</span>
                             <span className={cl("streamer-meta")}>
-                                {state.local.source.kind === "screen" ? "Tela inteira" : `Janela: ${state.local.source.name}`} · {watchersLabel(state.local.viewers.length)}
+                                {state.local.source.kind === "screen" ? "Tela inteira" : `Janela: ${state.local.source.name}`} · {ACCESS_LABEL[state.local.access]} · {watchersLabel(state.local.viewers.length)}
                             </span>
                         </div>
                         <div className={cl("streamer-actions")}>

@@ -5,7 +5,7 @@
  */
 
 // Non-blocking heads-up for things the streamer must see even when the voice bar is out of view (e.g. in a game):
-// a watch request waiting for approval (approveViewers) and a new suspicious identity. Uses Vencord's notifications
+// a watch request waiting for approval (Permitir/Recusar) and a new suspicious identity. Uses Vencord's notifications
 // (in-app popup, or the system notification when Discord isn't focused, per the user's Vencord settings). The answer
 // itself (Permitir/Recusar) is in the voice bar and in "Quem está assistindo"; clicking the notification opens it.
 // Nothing runs at module load: start()/stop() are called by the plugin.

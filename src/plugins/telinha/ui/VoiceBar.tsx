@@ -9,7 +9,8 @@
 //
 //   [ Transmitir com Telinha ]             idle
 //   ● Ao vivo · 2 assistindo                streaming (click: who is watching → kick / switch source)
-//   Ana quer assistir  Permitir  Recusar    request waiting for approval (approveViewers)
+//   🔒 Com senha · Mudar  Copiar senha      "Quem pode assistir" of the live stream (click: change it)
+//   Ana quer assistir  Permitir  Recusar    request waiting for approval ("Só quem eu aprovar", or unverified)
 //   ⚠ Duas conexões dizem ser Ana…          suspicious identity (click: details)
 //   720p60 · menor: processador             auto quality (current level; reason when lowered, full text in tooltip)
 //   ⚠ <capture warning>                     black image / frozen window (clears itself)
@@ -20,12 +21,14 @@
 
 import ErrorBoundary from "@components/ErrorBoundary";
 import { clearLastError, stopStreaming } from "@plugins/telinha/actions";
+import { ACCESS_LABEL } from "@plugins/telinha/core/access";
 import { useTelinhaState } from "@plugins/telinha/store";
 import type { QualityReason } from "@plugins/telinha/types";
 import { SelectedChannelStore, Tooltip, useStateFromStores } from "@webpack/common";
 import type { ReactNode } from "react";
 
-import { cl, displayName, findPeer, identityAlertBlocksAll, identityAlertText, peerName, runAction, watchersLabel } from "./common";
+import { copyStreamPassword, openAccessModal } from "./AccessPicker";
+import { accessBadge, cl, displayName, findPeer, identityAlertBlocksAll, identityAlertText, peerName, runAction, watchersLabel } from "./common";
 import { BroadcastIcon, CloseIcon, EyeIcon, StopIcon, WarningIcon } from "./icons";
 import { IdentityBadge, IdentityBanner } from "./IdentityUI";
 import { openSourcePicker } from "./SourcePickerModal";
@@ -57,7 +60,9 @@ function VoiceBarInner() {
         streamersRow = (
             <button
                 className={cl("bar-row")}
-                title={single ? "Assistir pelo Telinha" : streamers.map(peerName).join(", ")}
+                title={single
+                    ? `Assistir pelo Telinha${accessBadge(single.stream?.access) ? ` (${accessBadge(single.stream?.access)})` : ""}`
+                    : streamers.map(p => `${peerName(p)}${accessBadge(p.stream?.access) ? ` (${accessBadge(p.stream?.access)})` : ""}`).join(", ")}
                 onClick={() => single ? openViewer(single.peerId) : openStreamersModal()}
             >
                 <BroadcastIcon size={14} className={cl("bar-row-icon")} />
@@ -87,6 +92,24 @@ function VoiceBarInner() {
                         </button>
                     )}
                 </Tooltip>
+            )}
+
+            {local && (
+                <div className={cl("bar-access")}>
+                    <button
+                        className={cl("bar-row", "bar-access-row")}
+                        title={`Quem pode assistir: ${ACCESS_LABEL[local.access]}. Clique para mudar (vale para os próximos pedidos; quem já assiste continua).`}
+                        onClick={openAccessModal}
+                    >
+                        <span className={cl("bar-row-text")}>
+                            {accessBadge(local.access)?.split(" ")[0] ?? "👥"} {ACCESS_LABEL[local.access]}
+                        </span>
+                        <span className={cl("bar-row-action")}>Mudar</span>
+                    </button>
+                    {local.access === "password" && (
+                        <button className={cl("bar-request-btn")} title="Copiar a senha desta transmissão" onClick={copyStreamPassword}>Copiar senha</button>
+                    )}
+                </div>
             )}
 
             {local?.pendingViewers?.map(p => {
