@@ -4,7 +4,7 @@
 
 *(antigo nome: PeerLive)*
 
-> **Status: em teste.** O Telinha ainda não é uma versão final. Já funciona em testes reais, mas há partes em andamento (veja [Status](#status)). Quer testar? Vá para [Como instalar a versão de teste](#como-instalar-a-versão-de-teste).
+> **Status: em teste.** O Telinha ainda não é uma versão final. Já funciona em testes reais, mas há partes em andamento (veja [Status](#status)). Quer testar? Vá para [Como instalar](#como-instalar).
 
 ---
 
@@ -64,12 +64,12 @@ Em andamento / planejado:
 - **Todo mundo que transmite ou assiste precisa ter o Telinha.**
 - Funciona com a aceleração de hardware do Discord **ligada ou desligada** (desligada usa mais CPU).
 
-## Como instalar a versão de teste
+## Como instalar
 
-> **Aviso:** o Telinha é instalado pelo **`TelinhaInstaller.exe`, por cima do Vencord oficial**. Ele **não mexe nos arquivos do Vencord** (nem em suas configurações, temas e outros plugins): só troca o pequeno arquivo que o Vencord coloca no Discord (`app.asar`) por um que carrega o Vencord e também o Telinha, guardando uma cópia do original. É uma **versão de teste** (pre-release).
+> **Aviso:** o Telinha é instalado pelo **`TelinhaInstaller.exe`, por cima do Vencord oficial**. Ele **não mexe nos arquivos do Vencord** (nem em suas configurações, temas e outros plugins): só troca o pequeno arquivo que o Vencord coloca no Discord (`app.asar`) por um que carrega o Vencord e também o Telinha, guardando uma cópia do original.
 
 1. Tenha o **Vencord oficial** instalado: [vencord.dev/download](https://vencord.dev/download/). (Sem ele, o instalador avisa e não faz nada.)
-2. Baixe o **`TelinhaInstaller.exe`** da versão de teste mais recente na página de [**Releases**](https://github.com/HumbertoFernandes7/Telinha/releases). As versões de teste são marcadas como **pre-release**.
+2. Baixe o [**`TelinhaInstaller.exe`**](https://github.com/HumbertoFernandes7/Telinha/releases/latest/download/TelinhaInstaller.exe) (download direto da versão mais recente; as notas da versão ficam na [página da versão mais recente](https://github.com/HumbertoFernandes7/Telinha/releases/latest)).
 3. Dê dois cliques nele. O Windows (SmartScreen) vai avisar, porque o instalador ainda não é assinado digitalmente: clique em **Mais informações > Executar assim mesmo**.
 4. Clique em **Instalar**. Se o Discord estiver aberto, o instalador pede para fechá-lo.
 5. Quando aparecer "Pronto!", **abra o Discord de novo** (se ele ainda estiver aberto, feche por completo antes: botão direito no ícone dele na bandeja do sistema, perto do relógio > "Sair do Discord"). O Telinha já vem **ativado**; se não aparecer, confira em **Configurações do usuário > Vencord > Plugins**.
@@ -82,9 +82,7 @@ O instalador registra o que fez em `%APPDATA%\Telinha\logs\installer.log`.
 
 **Se usar o "Reparar" do instalador do próprio Vencord** (ou reinstalar o Vencord), o Discord volta ao Vencord puro e o Telinha deixa de carregar: **rode o `TelinhaInstaller.exe` de novo** para colocá-lo de volta.
 
-### Versões de teste antigas
-
-As primeiras versões de teste (`teste-1` e `teste-2`) eram um **build de teste**: um fork do Vencord 1.15.13 com o Telinha incluído, num ZIP `Telinha-teste-….zip` com `instalar.cmd` e `restaurar.cmd`. Esse build **substituía os arquivos** de `%APPDATA%\Vencord\dist` (guardando uma cópia dos oficiais em `dist.backup-oficial-…`). Esses ZIPs e o código daquela época agora ficam no repositório arquivado [**Telinha-fork-antigo**](https://github.com/HumbertoFernandes7/Telinha-fork-antigo). Não use mais: se você instalou um desses, dê dois cliques no `restaurar.cmd` dele (com o Discord fechado por completo) para voltar ao Vencord oficial **antes** de usar o `TelinhaInstaller.exe`.
+Instalou uma das versões de teste antigas (o ZIP com `instalar.cmd`)? Veja a [nota no fim](#versões-de-teste-antigas) antes.
 
 ## Como usar
 
@@ -196,13 +194,17 @@ O Telinha é **baseado no [Vencord](https://github.com/Vendicated/Vencord)**, da
 
 Licenciado sob a **GPL-3.0-or-later**, a mesma licença do Vencord. Veja o arquivo [`LICENSE`](LICENSE).
 
+## Versões de teste antigas
+
+As primeiras versões de teste (`teste-1` e `teste-2`) eram um fork do Vencord 1.15.13 com o Telinha incluído, num ZIP com `instalar.cmd` e `restaurar.cmd`, que substituía os arquivos de `%APPDATA%\Vencord\dist`. Elas e o código daquela época estão no repositório arquivado [Telinha-fork-antigo](https://github.com/HumbertoFernandes7/Telinha-fork-antigo). Não use mais: se instalou uma delas, rode o `restaurar.cmd` dela (com o Discord fechado por completo) **antes** de usar o `TelinhaInstaller.exe`.
+
 ---
 
 ## English summary
 
 **Telinha** lets friends in the same Discord voice channel stream their screen or a window to each other and watch **inside Discord**, directly between their PCs (peer-to-peer, WebRTC). It is free and there is no server of ours: public Nostr relays (through the Trystero library) are used only so peers can find each other, and the video goes straight PC to PC (STUN only). It supports up to 1080p at 60 fps, and captures audio: the sound of a single window, or, for whole-screen streams, all PC sound except Discord's (Windows 10 2004+; done by a small unsigned helper, `telinha-audio.exe`, which antivirus or Smart App Control may block, in which case the screen streams without sound).
 
-It is a plugin for [Vencord](https://github.com/Vendicated/Vencord) (a Discord client mod), and it is currently **in testing**. You keep the **official Vencord**: install Telinha with **`TelinhaInstaller.exe`**, downloaded from the latest test release in [Releases](https://github.com/HumbertoFernandes7/Telinha/releases) (pre-release; SmartScreen: "More info" > "Run anyway", since it is not code-signed yet). Click Install and reopen Discord; Telinha comes enabled. It does not modify Vencord's files; running the installer again and choosing Uninstall puts Vencord back exactly as before. If you use the Vencord installer's "Repair", run the Telinha installer again. It needs official Vencord to be installed first. The older test builds (`teste-1`, `teste-2`: a Vencord 1.15.13 fork installed with `instalar.cmd` from a zip) are obsolete and now live in the archived repo [Telinha-fork-antigo](https://github.com/HumbertoFernandes7/Telinha-fork-antigo): run their `restaurar.cmd` before using the installer.
+It is a plugin for [Vencord](https://github.com/Vendicated/Vencord) (a Discord client mod), and it is currently **in testing**. You keep the **official Vencord**: install Telinha with [**`TelinhaInstaller.exe`**](https://github.com/HumbertoFernandes7/Telinha/releases/latest/download/TelinhaInstaller.exe) (direct download of the latest release; notes on the [latest release page](https://github.com/HumbertoFernandes7/Telinha/releases/latest)). SmartScreen will warn because it is not code-signed yet: "More info" > "Run anyway". Click Install and reopen Discord; Telinha comes enabled. It does not modify Vencord's files; running the installer again and choosing Uninstall puts Vencord back exactly as before. If you use the Vencord installer's "Repair", run the Telinha installer again. It needs official Vencord to be installed first.
 
 - **Requirements:** Windows 10 2004+/11, Discord desktop with official Vencord. Everyone who streams or watches needs Telinha.
 - **Verified so far:** screen/window capture in stock Discord on Windows, window audio, a direct connection between two homes (720p, ~57 fps, 0% loss), viewing in a separate Discord window, and the installer + add-on on top of the official Vencord on a real PC (streaming with whole-screen audio working). Watching inside the call view is in progress.
@@ -212,3 +214,4 @@ It is a plugin for [Vencord](https://github.com/Vendicated/Vencord) (a Discord c
 - **Developers:** this repo holds only Telinha's code; the official Vencord commit pinned in `vencord.json` is fetched into `.vencord/` (gitignored) by `pnpm bootstrap`. See [Para desenvolvedores](#para-desenvolvedores) for the commands (`pnpm check`, `pnpm build:addon`, `pnpm build:installer`).
 - **Credits and disclaimer:** based on Vencord by the Vencord team; not affiliated with Discord or the Vencord team, and not supported by the Vencord team. Client mods violate Discord's Terms of Service, so use it at your own risk.
 - **License:** GPL-3.0-or-later, like Vencord.
+- **Old test builds:** `teste-1` and `teste-2` (a Vencord 1.15.13 fork installed from a zip with `instalar.cmd`) are obsolete and live in the archived repo [Telinha-fork-antigo](https://github.com/HumbertoFernandes7/Telinha-fork-antigo); run their `restaurar.cmd` before using the installer.
