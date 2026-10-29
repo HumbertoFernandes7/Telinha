@@ -305,6 +305,18 @@ describe("ViewerContent", () => {
             assertAbsent(within(bottomBar()).queryByText(/fps/));
         });
 
+        test("painel flutuante: a barra com o nome some e volta junto com os controles", async t => {
+            const clock = useFakeClock(t);
+            show(session({ stream: stream() }));
+            const { root } = await mount("floating");
+            const nameBar = () => screen.getByText("amigo — Telinha").parentElement as HTMLElement;
+            assert.equal(nameBar().style.opacity, "1");
+            act(() => clock.tick(2500));
+            assert.equal(nameBar().style.opacity, "0");
+            fireEvent.mouseMove(root);
+            assert.equal(nameBar().style.opacity, "1");
+        });
+
         test("barra de cima com o nome: sempre no painel flutuante; no pop-out so em tela cheia (o Discord ja poe o titulo)", async () => {
             show(session({ stream: stream() }));
             const floating = await mount("floating");
