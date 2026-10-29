@@ -67,7 +67,11 @@ export function identityRequiresApproval({ configured, identity, requireVerified
     return configured && requireVerified && identity !== "verified";
 }
 
-/** O pedido para assistir vira um pedido pendente (aprovacao manual)? */
+/**
+ * O pedido para assistir vira um pedido pendente (aprovacao manual)? Regra da v0.1.0 + identidade, com o booleano
+ * approveViewers. Desde "Quem pode assistir" (v0.2.0) a sessao decide por core/access.ts (decideWatch), que usa
+ * identityRequiresApproval no modo "Todos da call"; esta funcao fica para os testes de compatibilidade.
+ */
 export function watchNeedsApproval(input: ApprovalInput & { approveViewers: boolean; }): boolean {
     return input.approveViewers || identityRequiresApproval(input);
 }

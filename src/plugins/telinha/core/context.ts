@@ -128,7 +128,7 @@ export const rt = {
     lastError: null as string | null,
     /** expulsos (ate sair da sala) e recusados (ate a transmissao acabar), por discordUserId anunciado */
     blocked: new Map<string, BlockEntry>(),
-    /** conexoes aprovadas nesta transmissao (opcao approveViewers) */
+    /** conexoes aprovadas nesta transmissao (Permitir, ou ja assistiam quando a regra mudou) */
     approved: new Set<PeerId>(),
     /** pedidos esperando aprovacao */
     pending: new Map<PeerId, PendingEntry>()

@@ -154,7 +154,7 @@
     color: var(--interactive-hover, var(--text-default));
 }
 
-/* watch request waiting for approval (approveViewers): "Ana quer assistir  Permitir  Recusar" */
+/* watch request waiting for approval (Permitir/Recusar): "Ana quer assistir  Permitir  Recusar" */
 .vc-telinha-bar-request {
     display: flex;
     align-items: center;
