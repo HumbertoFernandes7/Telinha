@@ -5,8 +5,9 @@
  */
 
 import { definePluginSettings } from "@api/Settings";
+import { isIdentityConfigured } from "@plugins/telinha/core/identity/config";
 import { onAdmissionSettingChanged, onPasswordChanged } from "@plugins/telinha/core/session";
-import { onApproveViewersSettingChanged, onAutoQualitySettingChanged } from "@plugins/telinha/core/streaming";
+import { onApprovalPolicyChanged, onAutoQualitySettingChanged } from "@plugins/telinha/core/streaming";
 import { OptionType } from "@utils/types";
 
 export type CodecSetting = "auto" | "h264" | "vp8" | "vp9" | "av1";
@@ -35,7 +36,16 @@ export const settings = definePluginSettings({
         displayName: "Aprovar quem vai assistir",
         description: "Pedir minha aprovação antes de alguém começar a assistir. Cada pedido aparece na barra do Telinha com Permitir/Recusar e é recusado sozinho depois de 60 segundos; quem você permitir pode assistir até a transmissão acabar.",
         default: false,
-        onChange: () => onApproveViewersSettingChanged()
+        onChange: () => onApprovalPolicyChanged()
+    },
+    requireVerifiedIdentity: {
+        type: OptionType.BOOLEAN,
+        displayName: "Exigir identidade verificada",
+        description: "Recomendado. Quem não provou ser a conta do Discord que diz ser (aparece como \"não verificado\": não autorizou o Telinha ou usa uma versão antiga) continua vendo que você está na call, mas só assiste à sua transmissão depois que você clicar em Permitir, mesmo com \"Aprovar quem vai assistir\" desligado. Desligado: quem não está verificado assiste como antes. Uma identidade falsa nunca é aceita.",
+        default: true,
+        // sem Client ID o recurso esta desligado e a opcao nao faria nada
+        hidden: () => !isIdentityConfigured(),
+        onChange: () => onApprovalPolicyChanged()
     },
     defaultQuality: {
         type: OptionType.SELECT,

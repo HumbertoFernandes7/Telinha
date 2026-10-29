@@ -7,16 +7,19 @@
 // Fachada da prova de identidade (renderer). Ver docs/identity.md.
 //
 // Lado local:  prepareIdentity() antes do joinRoom (certificado fixo + token guardado),
-//              getLocalIdToken() para o hello, authorizeIdentity() no botao "Autorizar o Telinha",
-//              renewIdentity() quando o token esta para vencer.
+//              getLocalIdToken({ fingerprint }) para o hello, authorizeIdentity() no botao "Autorizar o
+//              Telinha no Discord", renewIdentity() ao entrar numa sala quando o token esta para vencer.
 // Lado remoto: verifyRemoteIdentity({ pc, idToken, claimedUserId }) no onPeerJoin / acao "identity".
 //
-// Nada roda no carregamento do modulo. Tokens nunca vao para o log. O access_token e descartado na
-// hora (so o id_token interessa); o refresh_token (escopo openid, so le /oauth2/userinfo) fica no
-// DataStore para renovar sem abrir o modal.
+// Sem Client ID (isIdentityConfigured() false) nada disso faz efeito: estado "disabled", sem certificado
+// proprio, sem token, sem rede (comportamento da v0.1.0).
+//
+// Nada roda no carregamento do modulo. Tokens nunca vao para o log nem para o diagnostico. O access_token
+// e descartado na hora (so o id_token interessa); o refresh_token (escopo openid, so le /oauth2/userinfo)
+// fica no DataStore do Vencord (IndexedDB), por conta do Discord, para renovar sem abrir o modal.
 
 import * as DataStore from "@api/DataStore";
-import { errorText, log } from "@plugins/telinha/core/log";
+import { errorText, log, logThrottled } from "@plugins/telinha/core/log";
 import { UserStore } from "@webpack/common";
 
 import { AuthorizationCancelled, openAuthorizeModal } from "./authorize";
@@ -36,6 +39,8 @@ const TOKEN_STORE_KEY = "telinha-identity-tokens-v1";
 const JWKS_STORE_KEY = "telinha-identity-jwks-v1";
 /** renovacao com modal (prompt "none") no maximo 1x neste intervalo: cancelar nao reabre a cada sala */
 const INTERACTIVE_RENEW_INTERVAL_MS = 6 * 60 * 60_000;
+/** refresh_token recusado: nao tenta de novo a cada sala antes disto */
+const REFRESH_RETRY_MS = 30 * 60_000;
 
 interface StoredIdentity {
     idToken: string;
@@ -51,17 +56,26 @@ type TokenStore = Record<string, StoredIdentity>;
 export type LocalIdentityState =
     /** sem client id real (placeholder): ninguem prova nada */
     | { status: "disabled"; }
-    /** nunca autorizou nesta conta/PC, ou o token venceu e nao deu para renovar */
+    /** ainda lendo o token guardado (logo depois de abrir o Discord) */
+    | { status: "loading"; }
+    /** nunca autorizou nesta conta/PC (ou desvinculou) */
     | { status: "unauthorized"; }
+    /** ja autorizou, mas o token venceu (ou o certificado mudou): renova sozinho ao entrar numa call */
+    | { status: "expired"; }
     | { status: "authorizing"; }
     | { status: "ready"; userId: string; expiresAt: number; }
     | { status: "error"; error: string; };
 
-let state: LocalIdentityState = { status: "unauthorized" };
+export type LocalIdentityStatus = LocalIdentityState["status"];
+
+let state: LocalIdentityState = isIdentityConfigured() ? { status: "loading" } : { status: "disabled" };
 let token: StoredIdentity | null = null;
 let inflightAuth: Promise<boolean> | null = null;
 let lastInteractiveRenew = -Infinity;
+let lastRefreshFailure = -Infinity;
 let jwksCache: JwksCache | null = null;
+/** ultimo erro do lado local (diagnostico; nunca contem tokens) */
+let lastError: { at: number; text: string; } | null = null;
 const listeners = new Set<(s: LocalIdentityState) => void>();
 
 function setState(next: LocalIdentityState) {
@@ -110,30 +124,44 @@ export function subscribeLocalIdentity(listener: (s: LocalIdentityState) => void
     return () => listeners.delete(listener);
 }
 
-/** id_token para o hello / acao "identity"; null se nao ha um valido para a conta atual. */
-export function getLocalIdToken(now = Date.now()): string | null {
+/**
+ * id_token para o hello / acao "identity"; null se nao ha um valido para a conta atual. Com `fingerprint`
+ * (o certificado que a sala atual usa), so devolve o token amarrado a ele: um token de outro certificado
+ * faria os peers verem "identidade falsa".
+ */
+export function getLocalIdToken({ fingerprint, now = Date.now() }: { fingerprint?: string | null; now?: number; } = {}): string | null {
     if (!token || state.status !== "ready" || state.userId !== myId() || token.expiresAt <= now) return null;
+    if (fingerprint !== undefined && token.fingerprint !== fingerprint) return null;
     return token.idToken;
+}
+
+export interface PreparedIdentity {
+    /** para rtcConfig.certificates (vazio = o Chromium gera um por conexao, como na v0.1.0) */
+    certificates: RTCCertificate[];
+    /** fingerprint do certificado acima (null sem certificado) */
+    fingerprint: string | null;
 }
 
 /**
  * Chamar antes do joinRoom e passar `certificates` em rtcConfig. Nunca lanca: sem certificado
- * persistente o Telinha funciona como hoje (so nao prova a identidade).
+ * persistente o Telinha funciona como hoje (so nao prova a identidade). Sem Client ID nao faz nada.
  */
-export async function prepareIdentity(): Promise<{ certificates: RTCCertificate[]; }> {
+export async function prepareIdentity(): Promise<PreparedIdentity> {
+    if (!isIdentityConfigured()) {
+        if (state.status !== "disabled") setState({ status: "disabled" });
+        return { certificates: [], fingerprint: null };
+    }
+
     let cert: LocalCertificate;
     try {
         cert = await getLocalCertificate();
     } catch (e) {
         log.warn("Identidade: não foi possível preparar o certificado DTLS: " + errorText(e));
-        return { certificates: [] };
+        lastError = { at: Date.now(), text: "certificado DTLS: " + errorText(e) };
+        if (state.status === "loading") setState({ status: "error", error: "certificado DTLS indisponível" });
+        return { certificates: [], fingerprint: null };
     }
-    if (!cert.persisted) log.warn("Identidade: o certificado DTLS não pôde ser gravado; a autorização valerá só até fechar o Discord.");
-
-    if (!isIdentityConfigured()) {
-        setState({ status: "disabled" });
-        return { certificates: [cert.certificate] };
-    }
+    if (!cert.persisted) logThrottled("identity-cert-persist", "warn", "Identidade: o certificado DTLS não pôde ser gravado; a autorização valerá só até fechar o Discord.", 6 * 60 * 60_000);
 
     const userId = myId();
     const stored = userId ? await loadStored(userId) : null;
@@ -143,9 +171,9 @@ export async function prepareIdentity(): Promise<{ certificates: RTCCertificate[
         setState({ status: "ready", userId, expiresAt: stored.expiresAt });
     } else if (state.status !== "authorizing") {
         token = null;
-        setState({ status: "unauthorized" });
+        setState(stored ? { status: "expired" } : { status: "unauthorized" });
     }
-    return { certificates: [cert.certificate] };
+    return { certificates: [cert.certificate], fingerprint: cert.fingerprint };
 }
 
 /** true se ja autorizou alguma vez nesta conta (renovar pode usar prompt "none"). */
@@ -223,6 +251,7 @@ export function authorizeIdentity({ silent = false }: { silent?: boolean; } = {}
                 return false;
             }
             log.warn("Identidade: falha ao autorizar o Telinha: " + errorText(e));
+            lastError = { at: Date.now(), text: "autorizar: " + errorText(e) };
             setState({ status: "error", error: errorText(e) });
             return false;
         } finally {
@@ -243,13 +272,15 @@ export async function renewIdentity({ interactive = false }: { interactive?: boo
     const userId = myId();
     const stored = userId ? await loadStored(userId) : null;
     if (!stored) return false; // nunca autorizou: so pelo botao
-    if (stored.refreshToken) {
+    if (stored.refreshToken && Date.now() - lastRefreshFailure >= REFRESH_RETRY_MS) {
         try {
             const cert = await getLocalCertificate();
             const tokens = await requestToken(buildRefreshBody({ clientId: DISCORD_CLIENT_ID, refreshToken: stored.refreshToken }));
             await acceptOwnTokens(tokens, cert, userId, stored.refreshToken);
             return true;
         } catch (e) {
+            lastRefreshFailure = Date.now();
+            lastError = { at: Date.now(), text: "renovação sem janela: " + errorText(e) };
             log.info("Identidade: renovação sem janela não deu certo (" + errorText(e) + ")");
         }
     }
@@ -258,12 +289,34 @@ export async function renewIdentity({ interactive = false }: { interactive?: boo
     return authorizeIdentity({ silent: true });
 }
 
-/** Esquece o token desta conta (o certificado continua). */
+/** Esquece o token desta conta ("Desvincular"; o certificado continua). Quem ja verificou continua ate reconectar. */
 export async function forgetIdentity(): Promise<void> {
     const userId = myId();
     token = null;
+    lastInteractiveRenew = lastRefreshFailure = -Infinity;
     if (userId) await saveStored(userId, null);
     setState(isIdentityConfigured() ? { status: "unauthorized" } : { status: "disabled" });
+    log.info("Identidade: Telinha desvinculado desta conta neste PC");
+}
+
+const LOCAL_STATUS_TEXT: Record<Exclude<LocalIdentityStatus, "ready" | "error">, string> = {
+    disabled: "desligada",
+    loading: "carregando",
+    unauthorized: "não autorizada",
+    expired: "vencida (renova ao entrar numa call)",
+    authorizing: "autorizando"
+};
+
+/** Linha do "Copiar diagnóstico" (lado local). Nunca contem tokens. */
+export function localIdentityDiagnostics(): string {
+    if (!isIdentityConfigured()) return "identidade: desligada (sem Client ID)";
+    const time = (at: number) => new Date(at).toISOString().slice(0, 16).replace("T", " ");
+    const s = state;
+    const local = s.status === "ready" ? `pronta, válida até ${time(s.expiresAt)} UTC`
+        : s.status === "error" ? `erro (${s.error})`
+            : LOCAL_STATUS_TEXT[s.status];
+    return `identidade: configurada (app ${DISCORD_CLIENT_ID}); local: ${local}; renovação sem janela: ${token?.refreshToken ? "sim" : "não"}`
+        + (lastError ? `; último erro local ${time(lastError.at)} UTC: ${lastError.text}` : "");
 }
 
 // #endregion

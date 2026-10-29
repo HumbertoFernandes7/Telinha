@@ -124,6 +124,8 @@ export function watch(peerId: PeerId) {
     const entry = rt.peers.get(peerId);
     if (!rt.room || !rt.watchAction) return fail(v, "Você não está em um canal de voz com o Telinha ativo.");
     if (!entry || entry.incompatible) return fail(v, "Esse amigo não está mais na call.");
+    if (entry.identity === "invalid") return fail(v, INVALID_IDENTITY_TEXT);
+    if (entry.identity === "pending") return fail(v, "Ainda conferindo a identidade desse amigo no Discord. Tente de novo em instantes.");
     if (!entry.admitted) return fail(v, "Essa pessoa não está no seu canal de voz.");
     if (!entry.presence?.streaming) return fail(v, "Esse amigo não está transmitindo agora.");
 
@@ -291,6 +293,14 @@ export function onPresence(peerId: PeerId, presence: PresenceMessage) {
 export function onPeerGone(peerId: PeerId) {
     const v = rt.viewing.get(peerId);
     if (v) end(v, "o amigo saiu da call");
+}
+
+const INVALID_IDENTITY_TEXT = "Essa conexão apresentou uma prova de identidade falsa (pode ser alguém se passando pelo seu amigo). A transmissão dela foi bloqueada.";
+
+/** A conexao apresentou prova de identidade falsa (session.ts): para de assistir, sem avisar o outro lado. */
+export function onIdentityInvalid(peerId: PeerId) {
+    const v = rt.viewing.get(peerId);
+    if (v) fail(v, INVALID_IDENTITY_TEXT);
 }
 
 /** A cada 2 s: largura, altura, fps e kbps de cada stream assistido; tambem recupera de um timeout de 1o quadro. */

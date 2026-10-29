@@ -9,9 +9,12 @@
 // Quem pode receber (refusalFor), nesta ordem:
 //   1. admitido (rejectOutsiders: no seu canal de voz) — quem esta fora nao recebe nem resposta;
 //   2. nao expulso/recusado (rt.blocked, pelo discordUserId anunciado OU pela conexao);
-//   3. sem identidade duplicada (outra conexao viva diz ter o mesmo discordUserId);
-//   4. com approveViewers ligado: aprovado nesta transmissao (senao vira um pedido pendente).
-// Recusas 2-4 respondem { op: "denied" } na acao "watch" (protocol.ts, passo 5).
+//   3. sem identidade duplicada (outra conexao viva diz ter o mesmo discordUserId; uma conexao com a
+//      identidade verificada nunca e a duplicada);
+//   4. com approveViewers ligado, ou sem identidade verificada com requireVerifiedIdentity ligado:
+//      aprovado nesta transmissao (senao vira um pedido pendente).
+// Recusas 2-4 respondem { op: "denied" } na acao "watch" (protocol.ts, passo 5). Prova de identidade falsa
+// nunca e admitida (cai no 1: sem resposta nenhuma).
 
 import { STREAM_KIND_SCREEN, type WatchDeniedReason, type WatchReplyMessage } from "@plugins/telinha/protocol";
 import { type CodecSetting, settings } from "@plugins/telinha/settings";
@@ -21,6 +24,8 @@ import type { Room } from "trystero";
 import { startScreenAudioCapture } from "./audio/screenAudio";
 import { chooseCodec, type CodecDecision, getLocalCaps } from "./codec";
 import { blockOf, getPc, type LocalCapture, peerLabel, publish, rt, setLastError } from "./context";
+import { isIdentityConfigured } from "./identity/config";
+import { type ApprovalInput, identityRequiresApproval, watchNeedsApproval } from "./identity/policy";
 import { errorText, log, logThrottled } from "./log";
 import { getNative } from "./nativeApi";
 import type { SendPlan } from "./peerConnection";
@@ -341,7 +346,20 @@ function cancelPending(peerId: PeerId, denyWith: WatchDeniedReason | null) {
     return true;
 }
 
-/** Pedido com approveViewers ligado: fica pendente ate Permitir/Recusar ou 60 s. */
+function approvalInput(peerId: PeerId): ApprovalInput {
+    return {
+        configured: isIdentityConfigured(),
+        identity: rt.peers.get(peerId)?.identity ?? "unverified",
+        requireVerified: settings.store.requireVerifiedIdentity !== false
+    };
+}
+
+/** O pedido desta conexao precisa de Permitir/Recusar (approveViewers, ou identidade nao verificada com requireVerifiedIdentity). */
+function needsApproval(peerId: PeerId): boolean {
+    return watchNeedsApproval({ ...approvalInput(peerId), approveViewers: !!settings.store.approveViewers });
+}
+
+/** Pedido que precisa de aprovacao: fica pendente ate Permitir/Recusar ou 60 s. */
 function requestApproval(peerId: PeerId) {
     const entry = rt.peers.get(peerId);
     if (!entry?.hello) return;
@@ -361,7 +379,8 @@ function requestApproval(peerId: PeerId) {
         expiresAt: Date.now() + APPROVAL_TIMEOUT_MS,
         timer
     });
-    log.info(`${peerLabel(peerId)} (discord ${entry.hello.discordUserId}) pediu para assistir: esperando a sua aprovação`);
+    const unverified = identityRequiresApproval(approvalInput(peerId));
+    log.info(`${peerLabel(peerId)} (discord ${entry.hello.discordUserId}) pediu para assistir${unverified ? " sem identidade verificada" : ""}: esperando a sua aprovação`);
     reply(peerId, { op: "pending" });
     publish();
 }
@@ -432,13 +451,18 @@ export function unblockViewer(discordUserId: string): boolean {
     return true;
 }
 
-/** A opcao approveViewers mudou: ligada → quem ja assiste fica aprovado; desligada → pedidos pendentes sao atendidos. */
-export function onApproveViewersSettingChanged() {
-    if (settings.store.approveViewers) {
-        for (const peerId of rt.local?.viewers ?? []) rt.approved.add(peerId);
-        return;
-    }
-    for (const peerId of [...rt.pending.keys()]) approveViewer(peerId);
+/** Pedidos pendentes que nao precisam mais de aprovacao (opcao desligada, ou a pessoa provou a identidade) sao atendidos. */
+export function reviewPendingApprovals() {
+    for (const peerId of [...rt.pending.keys()]) if (!needsApproval(peerId)) approveViewer(peerId);
+}
+
+/**
+ * A opcao approveViewers ou requireVerifiedIdentity mudou: quem ja assiste fica aprovado (nao cai da
+ * transmissao por causa da mudanca) e os pedidos pendentes que nao precisam mais de aprovacao sao atendidos.
+ */
+export function onApprovalPolicyChanged() {
+    for (const peerId of rt.local?.viewers ?? []) rt.approved.add(peerId);
+    reviewPendingApprovals();
 }
 
 /** Conexoes que passaram a ter identidade duplicada (session.ts): param de receber agora, sem voltar sozinhas. */
@@ -613,9 +637,11 @@ export function onWatchRequest(peerId: PeerId, op: "start" | "stop") {
         removeFrom(peerId, "parou de assistir");
         return;
     }
-    // rejectOutsiders primeiro: quem esta fora do canal de voz nao recebe nem resposta
-    if (!rt.peers.get(peerId)?.admitted) {
-        logThrottled(`watch-refused:${peerId}`, "warn", `${peerLabel(peerId)} pediu para assistir, mas não está no seu canal de voz: recusado`);
+    // admissao primeiro: quem esta fora do canal de voz (ou com prova de identidade falsa) nao recebe nem resposta
+    const entry = rt.peers.get(peerId);
+    if (!entry?.admitted) {
+        if (entry?.identity === "pending") logThrottled(`watch-pending-id:${peerId}`, "info", `${peerLabel(peerId)} pediu para assistir enquanto a identidade ainda é conferida: ignorado`);
+        else if (entry?.identity !== "invalid") logThrottled(`watch-refused:${peerId}`, "warn", `${peerLabel(peerId)} pediu para assistir, mas não está no seu canal de voz: recusado`);
         return;
     }
     if (!rt.local) {
@@ -625,7 +651,7 @@ export function onWatchRequest(peerId: PeerId, op: "start" | "stop") {
     }
     if (rt.local.viewers.has(peerId)) return;
     const refusal = refusalFor(peerId);
-    if (!refusal && settings.store.approveViewers && !rt.approved.has(peerId)) {
+    if (!refusal && needsApproval(peerId) && !rt.approved.has(peerId)) {
         requestApproval(peerId);
         return;
     }

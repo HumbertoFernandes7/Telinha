@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import type { HelloMessage, PresenceMessage, WatchActionMessage } from "@plugins/telinha/protocol";
+import type { HelloMessage, IdentityMessage, PresenceMessage, WatchActionMessage } from "@plugins/telinha/protocol";
 import { setState } from "@plugins/telinha/store";
 import type {
     AutoQualityState, BlockedViewer, BlockReason, CaptureSource, IdentityAlert, PeerId, PendingViewer, Quality, RemotePeer, StreamInfo,
@@ -12,6 +12,9 @@ import type {
 } from "@plugins/telinha/types";
 import type { MessageAction, Room } from "trystero";
 
+import { isIdentityConfigured } from "./identity/config";
+import type { PeerIdentity } from "./identity/policy";
+import type { IdentityFailure } from "./identity/verify";
 import { shortId } from "./log";
 
 // Estado mutavel do nucleo. A UI nunca ve isto: publish() monta um snapshot imutavel para o store.
@@ -31,8 +34,18 @@ export interface PeerEntry {
     admitted: boolean;
     /** outra conexao viva na sala anuncia o mesmo discordUserId (session.ts → checkIdentities) */
     duplicate: boolean;
+    /** duplicate, e o mesmo discordUserId provou a identidade em outra conexao: esta e a impostora */
+    impostor: boolean;
     /** o handshake anunciou o SEU discordUserId (e incompatible tambem: nunca e aceito) */
     claimsSelf: boolean;
+    /** prova de identidade do Discord (core/identity/policy.ts). Sem Client ID: sempre "unverified" e ignorada */
+    identity: PeerIdentity;
+    /** por que nao esta verificada (diagnostico) */
+    identityReason?: IdentityFailure;
+    /** verificacao em andamento (uma por vez por conexao) */
+    identityChecking: boolean;
+    /** Date.now() da ultima verificacao iniciada (limita a acao "identity") */
+    identityCheckedAt: number;
 }
 
 /** Expulso/recusado: bloqueia o discordUserId anunciado E as conexoes (peerIds) que foram expulsas. */
@@ -91,6 +104,10 @@ export const rt = {
     room: null as Room | null,
     presenceAction: null as MessageAction<PresenceMessage> | null,
     watchAction: null as MessageAction<WatchActionMessage> | null,
+    /** acao "identity" (so com Client ID) */
+    identityAction: null as MessageAction<IdentityMessage> | null,
+    /** fingerprint do certificado DTLS que a sala atual usa (rtcConfig.certificates); null = o do Chromium */
+    certFingerprint: null as string | null,
     channelId: null as string | null,
     guildId: null as string | null,
     peers: new Map<PeerId, PeerEntry>(),
@@ -139,39 +156,52 @@ export function setLastError(message: string | null) {
 let scheduled = false;
 
 function buildSnapshot(): TelinhaState {
+    const configured = isIdentityConfigured();
     const peers: RemotePeer[] = [];
     const alerts = new Map<string, IdentityAlert>();
+    const alert = (key: string, init: () => IdentityAlert, peerId: PeerId) => {
+        const a = alerts.get(key) ?? init();
+        a.peerIds.push(peerId);
+        alerts.set(key, a);
+    };
     for (const p of rt.peers.values()) {
-        if (p.claimsSelf && p.hello) {
-            const a = alerts.get(p.hello.discordUserId) ?? { discordUserId: p.hello.discordUserId, username: p.hello.username, peerIds: [], self: true };
-            a.peerIds.push(p.peerId);
-            alerts.set(p.hello.discordUserId, a);
+        const { hello } = p;
+        if (p.claimsSelf && hello) {
+            alert(hello.discordUserId, () => ({ discordUserId: hello.discordUserId, username: hello.username, peerIds: [], self: true }), p.peerId);
         }
-        if (p.incompatible || !p.hello) continue;
+        if (p.incompatible || !hello) continue;
+        if (configured && p.identity === "invalid") {
+            // prova falsa: fora da lista de peers (nao ve nada, nao assiste, nao e assistido), so o alerta
+            alert(`fake:${hello.discordUserId}`, () => ({ discordUserId: hello.discordUserId, username: hello.username, peerIds: [], self: false, kind: "fake" }), p.peerId);
+            continue;
+        }
         const pres = p.presence;
-        const username = pres?.username ?? p.hello.username;
-        const block = blockOf(p.peerId, p.hello.discordUserId);
+        const username = pres?.username ?? hello.username;
+        const block = blockOf(p.peerId, hello.discordUserId);
         peers.push({
             peerId: p.peerId,
-            discordUserId: p.hello.discordUserId,
+            discordUserId: hello.discordUserId,
             username,
             streaming: !!pres?.streaming,
             ...(pres?.streaming && pres.stream ? { stream: { ...pres.stream } } : {}),
             admitted: p.admitted,
             inVoice: p.inVoice,
             ...(p.duplicate ? { duplicateIdentity: true } : {}),
-            ...(block ? { blocked: block.reason } : {})
+            ...(block ? { blocked: block.reason } : {}),
+            ...(configured ? { identity: p.identity } : {})
         });
         if (p.duplicate) {
-            const a = alerts.get(p.hello.discordUserId) ?? { discordUserId: p.hello.discordUserId, username, peerIds: [], self: false };
-            a.peerIds.push(p.peerId);
-            alerts.set(p.hello.discordUserId, a);
+            const kind = p.impostor ? "impostor" : "duplicate";
+            alert(`${kind}:${hello.discordUserId}`, () => ({ discordUserId: hello.discordUserId, username, peerIds: [], self: false, ...(p.impostor ? { kind } : {}) }), p.peerId);
         }
     }
     peers.sort((a, b) => a.username.localeCompare(b.username) || a.peerId.localeCompare(b.peerId));
 
     const blocked: BlockedViewer[] = [...rt.blocked.values()].map(b => ({ discordUserId: b.discordUserId, username: b.username, reason: b.reason }));
-    const pendingViewers: PendingViewer[] = [...rt.pending.values()].map(p => ({ peerId: p.peerId, discordUserId: p.discordUserId, username: p.username, expiresAt: p.expiresAt }));
+    const pendingViewers: PendingViewer[] = [...rt.pending.values()].map(p => {
+        const identity = configured ? rt.peers.get(p.peerId)?.identity : undefined;
+        return { peerId: p.peerId, discordUserId: p.discordUserId, username: p.username, expiresAt: p.expiresAt, ...(identity ? { identity } : {}) };
+    });
 
     const viewing: Record<PeerId, ViewerSession> = {};
     for (const v of rt.viewing.values()) {

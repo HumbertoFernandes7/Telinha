@@ -9,6 +9,13 @@
 
 export type PeerId = string;
 
+/**
+ * Prova de identidade do Discord desta conexao (docs/identity.md):
+ * "verified" = provou ser a conta do Discord que anuncia; "unverified" = nao provou (nao autorizou o Telinha,
+ * versao antiga...); "invalid" = prova falsa (nunca e aceita); "pending" = conferindo (~100 ms).
+ */
+export type PeerIdentityStatus = "pending" | "verified" | "unverified" | "invalid";
+
 export interface StreamInfo {
     kind: "screen" | "window";
     title: string;
@@ -34,6 +41,11 @@ export interface RemotePeer {
     duplicateIdentity?: boolean;
     /** voce expulsou/recusou esta conexao ou esta pessoa: nao recebe a sua transmissao */
     blocked?: BlockReason;
+    /**
+     * Prova de identidade do Discord. Ausente = recurso desligado (sem Client ID): a UI nao mostra selo.
+     * Conexoes "invalid" nao aparecem em `peers` (so em identityAlerts, kind "fake").
+     */
+    identity?: PeerIdentityStatus;
 }
 
 /** "kicked" = expulso (vale ate voce sair da call); "declined" = recusado (vale ate a transmissao acabar) */
@@ -46,6 +58,8 @@ export interface PendingViewer {
     username: string;
     /** Date.now() em que o pedido e recusado sozinho */
     expiresAt: number;
+    /** identidade de quem pede (ausente = recurso desligado). "unverified" com a opcao requireVerifiedIdentity = aprovacao obrigatoria */
+    identity?: PeerIdentityStatus;
 }
 
 /** Pessoa que voce expulsou/recusou (pode ser liberada de novo com unblockViewer). */
@@ -59,9 +73,16 @@ export interface BlockedViewer {
 export interface IdentityAlert {
     discordUserId: string;
     username: string;
+    /** as conexoes suspeitas (as que ficam bloqueadas) */
     peerIds: PeerId[];
     /** a conexao diz ser VOCE (nunca e aceita) */
     self: boolean;
+    /**
+     * Sem `self`: "duplicate" (padrao) = varias conexoes nao verificadas com o mesmo id, todas bloqueadas;
+     * "impostor" = conexoes NAO verificadas dizem ser alguem que provou a identidade em outra conexao (so elas
+     * ficam bloqueadas); "fake" = conexao com prova de identidade falsa (ignorada por completo).
+     */
+    kind?: "duplicate" | "impostor" | "fake";
 }
 
 /** Por que o transmissor nao manda (ou parou de mandar) a transmissao para voce. */

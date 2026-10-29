@@ -4,13 +4,16 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { HELLO_TYPE, type HelloMessage, type PresenceMessage, PROTOCOL_VERSION, truncateName } from "@plugins/telinha/protocol";
+import { buildHello, type HelloMessage, type PresenceMessage, PROTOCOL_VERSION, truncateName } from "@plugins/telinha/protocol";
 import { settings } from "@plugins/telinha/settings";
 import type { PeerId } from "@plugins/telinha/types";
 import { UserStore } from "@webpack/common";
 
 import { getLocalCaps } from "./codec";
 import { type PeerEntry, rt } from "./context";
+import { getLocalIdToken } from "./identity";
+import { isIdentityConfigured } from "./identity/config";
+import { isAdmitted } from "./identity/policy";
 import { errorText, logThrottled } from "./log";
 
 export function me() {
@@ -18,9 +21,14 @@ export function me() {
     return { id: user?.id ?? "", username: truncateName(user?.username || "?") };
 }
 
+/** O nosso hello: com o id_token so se houver um amarrado ao certificado desta sala (sem Client ID: nunca). */
 export function selfHello(): HelloMessage {
     const { id, username } = me();
-    return { type: HELLO_TYPE, v: PROTOCOL_VERSION, discordUserId: id, username };
+    let idToken: string | null = null;
+    try {
+        idToken = getLocalIdToken({ fingerprint: rt.certFingerprint });
+    } catch { }
+    return buildHello(id, username, idToken);
 }
 
 export function selfPresence(): PresenceMessage {
@@ -36,10 +44,13 @@ export function selfPresence(): PresenceMessage {
     };
 }
 
-/** Politica de admissao: peer compativel e (no nosso canal de voz OU a opcao "recusar de fora" desligada). */
+/**
+ * Politica de admissao: peer compativel e (no nosso canal de voz OU a opcao "recusar de fora" desligada); com
+ * Client ID, nunca quem apresentou prova de identidade falsa nem quem ainda esta sendo conferido (policy.ts).
+ */
 export function computeAdmitted(entry: PeerEntry) {
     if (entry.incompatible || !entry.hello) return false;
-    return entry.inVoice || !settings.store.rejectOutsiders;
+    return isAdmitted({ configured: isIdentityConfigured(), identity: entry.identity, inVoice: entry.inVoice, rejectOutsiders: !!settings.store.rejectOutsiders });
 }
 
 /** Envia a presenca para um peer, ou para todos os admitidos. Peers nao admitidos nunca recebem. */
