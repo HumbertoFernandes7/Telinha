@@ -25,8 +25,11 @@ func Current() (major, minor, build uint32) {
 }
 
 // Check returns an error when this Windows is too old.
-func Check() error {
-	major, minor, build := Current()
+func Check() error { return check(Current) }
+
+// check is Check with the version source injected (the tests feed it old versions).
+func check(current func() (major, minor, build uint32)) error {
+	major, minor, build := current()
 	if !Supported(major, build) {
 		return fmt.Errorf("Windows %d.%d build %d", major, minor, build)
 	}

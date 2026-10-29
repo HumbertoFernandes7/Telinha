@@ -13,7 +13,14 @@ import (
 
 	"github.com/HumbertoFernandes7/Telinha/installer/internal/core"
 	"github.com/HumbertoFernandes7/Telinha/installer/internal/ui"
-	"github.com/HumbertoFernandes7/Telinha/installer/internal/winver"
+)
+
+// The dialogs are variables so the tests can answer them without a desktop (the real ones are native
+// Windows windows that wait for a click).
+var (
+	showDialog   = ui.Show
+	showProgress = ui.Progress
+	openURL      = ui.OpenURL
 )
 
 const (
@@ -30,7 +37,7 @@ const (
 func runGUI(o *options) (code int) {
 	a, err := newApp(o, nil)
 	if err != nil {
-		ui.Show(ui.Dialog{Title: title, Instruction: "Não foi possível iniciar o instalador", Content: err.Error(), Icon: ui.IconError, Common: ui.BtnClose})
+		showDialog(ui.Dialog{Title: title, Instruction: "Não foi possível iniciar o instalador", Content: err.Error(), Icon: ui.IconError, Common: ui.BtnClose})
 		return exitFailed
 	}
 	defer func() { a.finish(code) }()
@@ -41,9 +48,9 @@ func runGUI(o *options) (code int) {
 		a.log.Printf("test: auto-click after %v", ui.AutoClick)
 	}
 
-	if err := winver.Check(); err != nil {
+	if err := checkWindows(); err != nil {
 		a.log.Printf("unsupported windows: %v", err)
-		ui.Show(ui.Dialog{Title: title, Icon: ui.IconError, Common: ui.BtnClose,
+		showDialog(ui.Dialog{Title: title, Icon: ui.IconError, Common: ui.BtnClose,
 			Instruction: "Este Windows é antigo demais para o Telinha",
 			Content:     "O Telinha precisa do Windows 10 versão 2004 ou mais recente (ou do Windows 11). Atualize o Windows pelo Windows Update e tente de novo.",
 			Expanded:    err.Error()})
@@ -71,7 +78,7 @@ func runGUI(o *options) (code int) {
 	if installed || s.Record != nil {
 		buttons = append(buttons, ui.Button{ID: idUninstall, Text: "Desinstalar\nRemove o Telinha. O Vencord continua instalado normalmente."})
 	}
-	choice, _ := ui.Show(ui.Dialog{
+	choice, _ := showDialog(ui.Dialog{
 		Title: title, Instruction: "Telinha para Discord", Content: content, Icon: ui.IconApp,
 		Buttons: buttons, CommandLinks: true, Common: ui.BtnCancel, Default: idInstall, Links: true,
 		Footer: "Instalador " + version + " · software livre (GPL-3.0) · <a href=\"" + projectURL + "\">página do projeto</a>",
@@ -90,12 +97,12 @@ func runGUI(o *options) (code int) {
 
 func (a *app) guiNoDiscord() int {
 	a.log.Printf("no Discord found")
-	r, _ := ui.Show(ui.Dialog{Title: title, Icon: ui.IconWarning, Common: ui.BtnClose, CommandLinks: true,
+	r, _ := showDialog(ui.Dialog{Title: title, Icon: ui.IconWarning, Common: ui.BtnClose, CommandLinks: true,
 		Instruction: "Não encontramos o Discord",
 		Content:     "Instale o Discord, abra-o uma vez e rode este instalador de novo.\n\nDepois você também vai precisar do Vencord oficial (vencord.dev).",
 		Buttons:     []ui.Button{{ID: idOpenSite, Text: "Abrir o site do Discord"}}})
 	if r == idOpenSite {
-		ui.OpenURL(discordDownloadURL)
+		openURL(discordDownloadURL)
 	}
 	return exitNoDiscord
 }
@@ -104,20 +111,20 @@ func (a *app) guiError(what string, err error) int {
 	p := core.AsProblem(err)
 	a.log.Printf("error [%s]: %v", p.Code, err)
 	if p.Code == core.CodeNoVencord {
-		r, _ := ui.Show(ui.Dialog{Title: title, Icon: ui.IconWarning, Common: ui.BtnClose, CommandLinks: true,
+		r, _ := showDialog(ui.Dialog{Title: title, Icon: ui.IconWarning, Common: ui.BtnClose, CommandLinks: true,
 			Instruction: "Primeiro instale o Vencord",
 			Content:     p.Msg,
 			Buttons:     []ui.Button{{ID: idOpenSite, Text: "Abrir o site do Vencord\nvencord.dev/download: baixe e rode o instalador do Vencord."}},
 			Expanded:    detail(p, a.log.Where())})
 		if r == idOpenSite {
-			ui.OpenURL(vencordDownloadURL)
+			openURL(vencordDownloadURL)
 		}
 		return exitNoVencord
 	}
 	if p.Code == core.CodeNoDiscord {
 		return a.guiNoDiscord()
 	}
-	ui.Show(ui.Dialog{Title: title, Icon: ui.IconError, Common: ui.BtnClose,
+	showDialog(ui.Dialog{Title: title, Icon: ui.IconError, Common: ui.BtnClose,
 		Instruction: what, Content: p.Msg, Expanded: detail(p, a.log.Where())})
 	if p.Code == core.CodeDiscordRunning {
 		return exitDiscordRunning
@@ -142,7 +149,7 @@ func (a *app) pickTargets(ready []core.Target) ([]core.Target, bool) {
 	for i, t := range ready {
 		radios = append(radios, ui.Button{ID: idOne + i, Text: "Só no " + t.Name})
 	}
-	b, r := ui.Show(ui.Dialog{Title: title, Icon: ui.IconApp, Common: ui.BtnOK | ui.BtnCancel, Default: ui.IDOK,
+	b, r := showDialog(ui.Dialog{Title: title, Icon: ui.IconApp, Common: ui.BtnOK | ui.BtnCancel, Default: ui.IDOK,
 		Instruction: "Em qual Discord instalar?",
 		Content:     "Encontramos mais de um Discord com o Vencord instalado.",
 		Radios:      radios, DefaultRadio: idAll})
@@ -162,7 +169,7 @@ func (a *app) askCloseDiscord(verb string) (bool, error) {
 		return true, err
 	}
 	a.log.Printf("discord running: %d process(es), asking to close it to %s", len(ps), verb)
-	b, _ := ui.Show(ui.Dialog{Title: title, Icon: ui.IconWarning, Common: ui.BtnCancel, CommandLinks: true, Default: idProceed,
+	b, _ := showDialog(ui.Dialog{Title: title, Icon: ui.IconWarning, Common: ui.BtnCancel, CommandLinks: true, Default: idProceed,
 		Instruction: "O Discord precisa ser fechado para " + verb + ". Fechar agora?",
 		Content:     "Se estiver no meio de uma conversa ou call, termine antes. Depois é só abrir o Discord de novo.",
 		Buttons:     []ui.Button{{ID: idProceed, Text: "Fechar o Discord e continuar"}}})
@@ -171,7 +178,7 @@ func (a *app) askCloseDiscord(verb string) (bool, error) {
 		return false, nil
 	}
 	a.log.Printf("user agreed to close Discord")
-	return true, ui.Progress(title, "Fechando o Discord…", nil, func(set func(string)) error {
+	return true, showProgress(title, "Fechando o Discord…", nil, func(set func(string)) error {
 		set("Aguarde um instante.")
 		return a.cfg.CloseDiscord(ps)
 	})
@@ -187,7 +194,7 @@ func (a *app) guiInstall() int {
 			if cancellable {
 				c = cancel
 			}
-			return ui.Progress(title, "Instalando o Telinha", c, work)
+			return showProgress(title, "Instalando o Telinha", c, work)
 		},
 		closeDiscord: func() (bool, error) { return a.askCloseDiscord("instalar") },
 	})
@@ -208,7 +215,7 @@ func (a *app) guiInstall() int {
 	if len(skipped) > 0 {
 		extra = "\n\nNão instalado em: " + strings.Join(skipped, "; ") + "."
 	}
-	ui.Show(ui.Dialog{Title: title, Icon: ui.IconApp, Common: ui.BtnClose,
+	showDialog(ui.Dialog{Title: title, Icon: ui.IconApp, Common: ui.BtnClose,
 		Instruction: "Pronto!",
 		Content:     "Feche o Discord completamente e abra de novo. O Telinha já vem ativado; se ele não aparecer, confira em Configurações → Vencord → Plugins." + extra,
 		Expanded:    fmt.Sprintf("Telinha %s instalado em: %s.\nRegistro: %s", res.Version, targetNames(chosen), a.log.Where())})
@@ -225,7 +232,7 @@ func (a *app) guiUninstall() int {
 		return a.guiError("Não foi possível desinstalar o Telinha", err)
 	}
 	var res *core.UninstallResult
-	err = ui.Progress(title, "Removendo o Telinha", nil, func(set func(string)) error {
+	err = showProgress(title, "Removendo o Telinha", nil, func(set func(string)) error {
 		set("Devolvendo o Discord ao Vencord original…")
 		var err error
 		res, err = a.cfg.Uninstall()
@@ -234,7 +241,7 @@ func (a *app) guiUninstall() int {
 	if err != nil {
 		return a.guiError("Não foi possível desinstalar o Telinha", err)
 	}
-	ui.Show(ui.Dialog{Title: title, Icon: ui.IconApp, Common: ui.BtnClose,
+	showDialog(ui.Dialog{Title: title, Icon: ui.IconApp, Common: ui.BtnClose,
 		Instruction: "O Telinha foi removido",
 		Content:     "O Vencord continua instalado normalmente. Pode abrir o Discord de novo.",
 		Expanded:    fmt.Sprintf("Stub do Vencord devolvido em: %s\nRegistro: %s", strings.Join(res.Restored, ", "), a.log.Where())})

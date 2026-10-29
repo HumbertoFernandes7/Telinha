@@ -15,14 +15,17 @@ import (
 	"time"
 )
 
-// Retry runs fn up to 10 times, 300 ms apart, while it fails with a "file in use"/"access denied" error.
+// RetryDelay is the pause between two attempts of Retry. It is a variable only so the tests can shorten it.
+var RetryDelay = 300 * time.Millisecond
+
+// Retry runs fn up to 10 times, RetryDelay (300 ms) apart, while it fails with a "file in use"/"access denied" error.
 func Retry(fn func() error) error {
 	var err error
 	for i := 0; i < 10; i++ {
 		if err = fn(); err == nil || !IsBusy(err) {
 			return err
 		}
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(RetryDelay)
 	}
 	return err
 }

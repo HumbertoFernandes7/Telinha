@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/HumbertoFernandes7/Telinha/installer/internal/core"
-	"github.com/HumbertoFernandes7/Telinha/installer/internal/winver"
 )
 
 const (
@@ -34,7 +33,7 @@ func runCLI(o *options) (code int) {
 		return exitFailed
 	}
 	defer func() { a.finish(code) }()
-	if err := winver.Check(); err != nil && !o.status {
+	if err := checkWindows(); err != nil && !o.status {
 		a.log.Printf("unsupported windows: %v", err)
 		fmt.Fprintln(os.Stderr, "erro: o Telinha precisa do Windows 10 versão 2004 ou mais recente ("+err.Error()+")")
 		return exitFailed
@@ -205,7 +204,7 @@ func (a *app) cliStatus() int {
 		}
 		fmt.Println("Abertos agora:", strings.Join(n, ", "))
 	}
-	if err := winver.Check(); err != nil {
+	if err := checkWindows(); err != nil {
 		fmt.Println("Windows sem suporte:", err)
 	}
 	return exitOK
