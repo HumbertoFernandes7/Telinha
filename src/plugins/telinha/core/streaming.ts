@@ -794,7 +794,8 @@ function sendTo(peerId: PeerId) {
     const send: ViewerSend = { decision };
     sends.set(peerId, send);
     local.viewers.add(peerId);
-    qualityOf(local)?.addViewer(peerId);
+    // H.264 com este PC codificando por hardware: mais um encoder na placa de video (a qualidade automatica preve o tempo dela)
+    qualityOf(local)?.addViewer(peerId, decision.codec === "h264" && getLocalCaps().h264HwEncode);
     log.info(`Enviando para ${peerLabel(peerId)}: codec ${decision.codec.toUpperCase()} (${decision.reason})`);
     if (decision.codec === "h264" && entry.presence?.caps.h264HwDecode !== true)
         log.warn(`${peerLabel(peerId)} não decodifica H.264 por hardware: o início pode travar por 15+ s`);

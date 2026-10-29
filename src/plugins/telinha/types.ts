@@ -145,8 +145,8 @@ export interface ViewerSession {
 /** Degrau da qualidade automatica. A qualidade escolhida e o teto; 720p30 so existe como degrau automatico. */
 export type QualityLevel = Quality | "720p30";
 
-/** Por que a qualidade automatica desceu: processador, upload do streamer ou conexao de um espectador. */
-export type QualityReason = "cpu" | "upload" | "bandwidth";
+/** Por que a qualidade automatica desceu: processador, placa de video (encoder por hardware), upload do streamer ou conexao de um espectador. */
+export type QualityReason = "cpu" | "gpu" | "upload" | "bandwidth";
 
 export interface AutoQualityViewer {
     level: QualityLevel;

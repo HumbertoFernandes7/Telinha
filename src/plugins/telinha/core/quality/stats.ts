@@ -24,6 +24,26 @@ export interface SenderSample {
     sourceFrames: number | null;
     sourceFps: number | null;
     availableKbps: number | null;
+    /** powerEfficientEncoder (null = o Chromium nao expos) */
+    powerEfficient: boolean | null;
+    /** encoderImplementation, ex.: "MediaFoundationVideoEncodeAccelerator (NVIDIA H.264 Encoder MFT)", "libvpx" */
+    implementation: string | null;
+}
+
+/**
+ * Nomes de encoder por hardware no Chromium (encoderImplementation): "ExternalEncoder" (RTCVideoEncoder, nome antigo),
+ * "<Plataforma>VideoEncodeAccelerator" (MediaFoundation no Windows, Vaapi/V4L2 no Linux, VideoToolbox no macOS), ou o
+ * nome do fabricante entre parenteses. Software: "libvpx", "OpenH264", "libaom"...
+ */
+const HARDWARE_ENCODER_RE = /VideoEncodeAccelerator|ExternalEncoder|MediaFoundation|VideoToolbox|Vaapi|V4L2|NVIDIA|NVENC|QuickSync|AMF/i;
+
+/**
+ * O encoder deste sender roda na placa de video? powerEfficientEncoder decide quando o Chromium o expoe; sem ele, o
+ * nome do encoder (HARDWARE_ENCODER_RE).
+ */
+export function isHardwareEncoder(powerEfficient: boolean | null, implementation: string | null): boolean {
+    if (powerEfficient != null) return powerEfficient;
+    return HARDWARE_ENCODER_RE.test(implementation ?? "");
 }
 
 /** Resumo da janela entre duas leituras do mesmo sender. */
@@ -39,6 +59,13 @@ export interface WindowMetrics {
     availableKbps: number | null;
     /** fracao do tempo de parede codificando (ΔtotalEncodeTime / Δt); ~ uso do detector de sobrecarga do WebRTC */
     encodeBusy: number | null;
+    /**
+     * ms de codificacao por quadro na janela (ΔtotalEncodeTime / ΔframesEncoded); null = nenhum quadro. Num encoder por
+     * hardware e quase todo espera pela placa de video, que e compartilhada por todos os espectadores.
+     */
+    encodeMsPerFrame: number | null;
+    /** o encoder roda na placa de video (isHardwareEncoder, na leitura mais recente) */
+    hardware: boolean;
     /** pixels codificados por segundo na janela */
     pixelsPerSecond: number;
     frameHeight: number;
@@ -79,7 +106,9 @@ export async function readSenderSample(sender: RTCRtpSender): Promise<SenderSamp
         frameHeight: num(out.frameHeight) ?? 0,
         sourceFrames: num(source?.frames),
         sourceFps: num(source?.framesPerSecond),
-        availableKbps: available != null ? available / 1000 : null
+        availableKbps: available != null ? available / 1000 : null,
+        powerEfficient: typeof out.powerEfficientEncoder === "boolean" ? out.powerEfficientEncoder : null,
+        implementation: typeof out.encoderImplementation === "string" ? out.encoderImplementation : null
     };
 }
 
@@ -116,6 +145,8 @@ export function diffSamples(prev: SenderSample, cur: SenderSample): WindowMetric
         sentKbps: (cur.bytesSent - prev.bytesSent) * 8 / 1000 / dt,
         availableKbps: cur.availableKbps,
         encodeBusy: frames > 0 && encodeTime >= 0 ? encodeTime / dt : null,
+        encodeMsPerFrame: frames > 0 && encodeTime >= 0 ? encodeTime / frames * 1000 : null,
+        hardware: isHardwareEncoder(cur.powerEfficient, cur.implementation),
         pixelsPerSecond: cur.frameWidth * cur.frameHeight * encodedFps,
         frameHeight: cur.frameHeight
     };
