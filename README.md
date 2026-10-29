@@ -59,7 +59,8 @@ Já está disponível, mas **ainda não foi testado entre dois PCs reais**:
 - Assistir **dentro da tela da call**: um botão **Assistir** no quadradinho da pessoa, na grade da call do Discord, toca a transmissão ali mesmo. Ela também pode ser aberta em uma janela separada.
 - Lista **"Quem está assistindo"**, que abre ao clicar em **"Ao vivo · N assistindo"** na barra do Telinha, com **Expulsar** e **Liberar**.
 - Aviso quando **duas conexões dizem ser a mesma conta do Discord**: nesse caso, nenhuma das duas recebe a transmissão.
-- Opção **"Aprovar quem vai assistir"** (desligada por padrão): cada pedido espera a sua resposta, com **Permitir** ou **Recusar**.
+- **Quem pode assistir**, escolhido na hora de transmitir: Todos da call, Só meus amigos do Discord, Só quem eu aprovar ou Com senha.
+- **Identidade verificada** pelo próprio Discord: o selo "✔ verificado" mostra que a pessoa é mesmo dona daquela conta.
 
 Ainda falta:
 
@@ -99,7 +100,22 @@ Instalou uma das versões de teste antigas (o ZIP com `instalar.cmd`)? Veja a [n
 1. Entre no mesmo canal de voz que os amigos (todos com o Telinha).
 2. No painel da conexão de voz (canto inferior esquerdo), clique em **"Transmitir com Telinha"**.
 3. Escolha uma **tela** ou uma **janela**. Janela = vai com o som daquela janela; tela inteira = vai todo o som do PC, menos o do Discord.
-4. Escolha a qualidade (até 1080p60) e clique em **Transmitir**.
+4. Escolha a qualidade (até 1080p60) e **quem pode assistir** (veja abaixo), e clique em **Transmitir**.
+
+**Quem pode assistir**
+
+Na hora de transmitir, escolha uma destas opções:
+
+- **Todos da call** (padrão): qualquer um do canal de voz com o Telinha. Com **"Exigir identidade verificada"** ligada (o padrão), quem não autorizou o Telinha só assiste depois do seu **Permitir**.
+- **Só meus amigos do Discord**: seus amigos com a identidade verificada entram direto; os outros são recusados.
+- **Só quem eu aprovar**: cada pedido espera o seu **Permitir** ou **Recusar**.
+- **Com senha**: digite ou gere uma senha só para aquela transmissão (ela nunca fica salva) e passe para os amigos por mensagem. Quem errar 5 vezes fica bloqueado até a transmissão acabar. A senha não trafega pela rede: o Telinha só troca uma prova dela.
+
+Dá para mudar durante a transmissão, na barra do Telinha (**"Quem assiste: … Mudar"**); quem já está assistindo continua. Quem vai assistir vê o modo de cada transmissão: 🔒 com senha, 👥 só amigos, ✋ com aprovação. O padrão fica nas configurações do Telinha, em **"Quem pode assistir (padrão)"**.
+
+**Identidade verificada**
+
+Na primeira vez, o Telinha pede para você autorizá-lo no Discord (a janela é do próprio Discord e só diz quem você é: ele não lê mensagens, não entra em servidores e não age em seu nome). Assim seus amigos veem o selo **"✔ verificado"** ao seu lado, e ninguém consegue se passar por você na call. Você autoriza uma vez só: a prova se renova sozinha quando você entra numa call. Quem não autorizou aparece como **"não verificado"**; uma conexão com prova falsa é ignorada e aparece como **"✖ identidade falsa"**. Para desfazer, use **"Desvincular"** nas configurações do Telinha (e, no Discord, Configurações → Apps autorizados).
 
 **Assistir** (qualquer uma destas formas)
 
@@ -120,7 +136,7 @@ Quem transmite clica em **"Ao vivo · N assistindo"**, na barra do Telinha, e v�
 
 - **Conexão direta significa que quem está na call pode ver o IP das outras pessoas.** Use só com quem você confia.
 - Por padrão, **só são aceitas pessoas que estão no mesmo canal de voz** (configuração **"Recusar quem não está na call"**).
-- Opcional: a configuração **"Aprovar quem vai assistir"** (desligada por padrão) pede a sua aprovação antes de alguém começar a assistir. Cada pedido aparece com **Permitir** e **Recusar**.
+- Você escolhe **quem pode assistir** a cada transmissão (todos da call, só amigos do Discord, só quem você aprovar ou com senha), e a **identidade de cada pessoa é conferida pelo próprio Discord**.
 - Você pode **expulsar** quem está assistindo a qualquer momento (**Expulsar**, na lista "Quem está assistindo").
 - Opcional: nas configurações do plugin você pode definir uma **senha do grupo** (todos precisam usar a mesma).
 - Os relays do Nostr só servem para as pessoas se encontrarem; eles não recebem seu vídeo.
@@ -222,7 +238,7 @@ It is a plugin for [Vencord](https://github.com/Vendicated/Vencord) (a Discord c
 
 - **Requirements:** Windows 10 2004+/11, Discord desktop with official Vencord. Everyone who streams or watches needs Telinha.
 - **Verified so far:** screen/window capture in stock Discord on Windows, window audio, a direct connection between two homes (720p, ~57 fps, 0% loss), viewing in a separate Discord window, and the installer + add-on on top of the official Vencord on a real PC (streaming with whole-screen audio working).
-- **Available, not yet tested between two real PCs:** watching right inside the call view (an "Assistir" button on the person's tile, which can still pop out into a separate window) and the viewer controls: a "Quem está assistindo" (who is watching) list with Expulsar (kick) and Liberar (unblock), a warning when two connections claim the same Discord account (neither gets the stream), and the optional "Aprovar quem vai assistir" setting (off by default) with Permitir/Recusar per request.
+- **Available, not yet tested between two real PCs:** watching right inside the call view (an "Assistir" button on the person's tile, which can still pop out into a separate window) and the viewer controls: a "Quem está assistindo" (who is watching) list with Expulsar (kick) and Liberar (unblock), a warning when two connections claim the same Discord account (neither gets the stream), "Quem pode assistir" (who can watch), chosen when you start streaming: everyone in the call, only your Discord friends, only people you approve, or a per-stream password; and Discord-verified identity (a one-time "Autorizar" in Discord's own window, so nobody can pretend to be someone else in the call).
 - **Privacy:** a direct connection means people in the call can see each other's IP. Only people in the same voice channel are accepted by default, there is an optional group password, and logs never contain IP addresses.
 - **Limitations:** each viewer gets a separate copy from the streamer (2-4 viewers recommended); exclusive-fullscreen games may show black (use borderless); no DLL injection into games.
 - **Support:** use "Copy diagnostics" in the plugin settings and send it to the author; GitHub Issues are not used in this repository.
