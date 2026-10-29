@@ -276,7 +276,16 @@ export async function renewIdentity({ interactive = false }: { interactive?: boo
         try {
             const cert = await getLocalCertificate();
             const tokens = await requestToken(buildRefreshBody({ clientId: DISCORD_CLIENT_ID, refreshToken: stored.refreshToken }));
-            await acceptOwnTokens(tokens, cert, userId, stored.refreshToken);
+            try {
+                await acceptOwnTokens(tokens, cert, userId, stored.refreshToken);
+            } catch (e) {
+                // o Discord troca o refresh_token a cada uso: guarda o novo mesmo se o id_token nao servir (ex.: sem
+                // o nonce), senao a proxima renovacao sem janela usaria um refresh_token ja invalidado
+                if (tokens.refresh_token && tokens.refresh_token !== stored.refreshToken) {
+                    await saveStored(userId, { ...stored, refreshToken: tokens.refresh_token }).catch(() => { });
+                }
+                throw e;
+            }
             return true;
         } catch (e) {
             lastRefreshFailure = Date.now();

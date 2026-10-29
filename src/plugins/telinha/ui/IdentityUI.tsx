@@ -130,7 +130,9 @@ export function IdentitySection() {
     const [busy, setBusy] = useState(false);
     if (!identityEnabled()) return null;
 
-    const { label, detail } = describe(s);
+    // "ready" com o token ja vencido (a call durou mais que ele): renova ao entrar na proxima call
+    const shown: LocalIdentityState = s.status === "ready" && s.expiresAt <= Date.now() ? { status: "expired" } : s;
+    const { label, detail } = describe(shown);
     const unlink = () => {
         setBusy(true);
         unlinkTelinhaIdentity()
@@ -146,7 +148,7 @@ export function IdentitySection() {
             </Paragraph>
             {detail && <Paragraph className={cl("identity-status")}>{detail}</Paragraph>}
             <div className={cl("identity-buttons")}>
-                {s.status === "ready"
+                {shown.status === "ready"
                     ? (
                         <Button size="small" variant="secondary" disabled={busy} onClick={unlink}>
                             Desvincular
@@ -158,7 +160,7 @@ export function IdentitySection() {
                         </Button>
                     )}
             </div>
-            {s.status === "ready" && (
+            {shown.status === "ready" && (
                 <Paragraph className={cl("identity-status")}>
                     Desvincular apaga a autorização só deste PC. Para tirar também do Discord: Configurações de usuário → Apps autorizados → Telinha.
                 </Paragraph>
