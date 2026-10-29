@@ -315,8 +315,9 @@ export function isSoftwareH264(r: EncoderReport): boolean {
  * diferente de "none", ex.: banda baixa com degradationPreference "maintain-framerate") e chegou num tamanho que a placa
  * de video nao aceita (h264HwAcceptsSize). Medido no Chromium 152 (RTX 3070): o OpenH264 assume nesse quadro e a placa
  * volta sozinha na proxima reconfiguracao com um tamanho valido, sem o espectador travar. Nao e queda.
- * Com o WebRTC sem reduzir nada (ex.: janela capturada com tamanho impar), o tamanho e o nosso e nao muda sozinho: conta
- * como queda (softwareFallback).
+ * Com o WebRTC sem reduzir nada (ex.: uma reducao nossa com tamanho impar, 1798x1080 ÷1,5 = 1199x720, que
+ * quality/levels.ts → evenScale agora evita; a captura em si sempre chega par), o tamanho e o nosso e nao muda sozinho:
+ * conta como queda (softwareFallback).
  */
 export function isTransientSoftwareH264(r: EncoderReport): boolean {
     if (!isSoftwareH264(r) || !r.limitation || r.limitation === "none" || !r.width || !r.height) return false;

@@ -111,6 +111,8 @@ interface ViewerState {
     bwStreak: number;
     applied: QualityLevel | null;
     applying: boolean;
+    /** a captura mudou de tamanho depois do ultimo apply: reaplicar o mesmo degrau (captureResized) */
+    resized: boolean;
 }
 
 type Active = ViewerState & { metrics: WindowMetrics; };
@@ -175,7 +177,7 @@ export class QualityController {
         const now = performance.now();
         this.viewers.set(peerId, {
             peerId, ready: false, readyAt: Infinity, ignoreUntil: now + WARMUP_MS, prev: null, metrics: null, fresh: false,
-            bwLevel: this.deps.ceiling, bwHold: newHold(now), bwStreak: 0, applied: null, applying: false
+            bwLevel: this.deps.ceiling, bwHold: newHold(now), bwStreak: 0, applied: null, applying: false, resized: false
         });
         if (this.deps.enabled()) this.preempt(now);
         this.emit();
@@ -194,6 +196,18 @@ export class QualityController {
 
     removeViewer(peerId: PeerId) {
         if (this.viewers.delete(peerId)) this.emit();
+    }
+
+    /**
+     * A captura mudou de tamanho (janela redimensionada): reaplica o degrau de todos, porque a reducao de resolucao e
+     * relativa ao tamanho (levels.encodingFor) e a antiga pode dar tamanho impar (H.264 fora da placa de video).
+     */
+    captureResized() {
+        if (this.disposed) return;
+        for (const v of this.viewers.values()) {
+            v.resized = true;
+            this.applyViewer(v);
+        }
     }
 
     /** A configuracao autoQuality mudou: volta todos para o teto e recomeca. */
@@ -496,15 +510,20 @@ export class QualityController {
     private applyViewer(v: ViewerState) {
         if (!v.ready || v.applying || this.disposed) return;
         const level = this.levelFor(v.peerId);
-        if (v.applied === level) return;
+        if (v.applied === level && !v.resized) return;
+        // falhou: o resized volta, para tentar de novo na proxima avaliacao
+        const { resized } = v;
+        v.resized = false;
         v.applying = true;
         this.deps.apply(v.peerId, level).then(ok => {
             v.applying = false;
+            if (!ok) v.resized ||= resized;
             if (!ok || this.disposed || this.viewers.get(v.peerId) !== v) return;
             v.applied = level;
-            if (this.levelFor(v.peerId) !== level) this.applyViewer(v);
+            if (this.levelFor(v.peerId) !== level || v.resized) this.applyViewer(v);
         }, () => {
             v.applying = false;
+            v.resized ||= resized;
         });
     }
 

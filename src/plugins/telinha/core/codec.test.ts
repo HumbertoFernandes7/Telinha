@@ -390,12 +390,12 @@ describe("checagem do encoder no ar", () => {
 
         // queda de verdade: tamanho que a placa aceita, ou o tamanho e o nosso (o WebRTC nao esta reduzindo nada)
         assert.equal(isTransientSoftwareH264(sw(1280, 720, "bandwidth")), false, "1280x720 a placa aceita");
-        assert.equal(isTransientSoftwareH264(sw(1001, 701, "none")), false, "janela de tamanho impar: nao muda sozinho");
+        assert.equal(isTransientSoftwareH264(sw(1199, 720, "none")), false, "reducao nossa com largura impar: nao muda sozinho");
         assert.equal(isTransientSoftwareH264(sw(853, 480)), false, "sem qualityLimitationReason: como antes");
         assert.equal(isTransientSoftwareH264({ ...OPENH264, limitation: "bandwidth" }), false, "sem tamanho: como antes");
         assert.equal(isTransientSoftwareH264({ ...NVIDIA, width: 427, height: 240, limitation: "bandwidth" }), false, "na placa nao e software");
         assert.equal(softwareFallback(sw(1280, 720, "bandwidth"), false, HW, "auto", caps())?.codec, "vp9");
-        assert.equal(softwareFallback(sw(1001, 701, "none"), false, HW, "auto", caps())?.codec, "vp9");
+        assert.equal(softwareFallback(sw(1199, 720, "none"), false, HW, "auto", caps())?.codec, "vp9");
     });
 
     test("pickNegotiatedCodec: variante certa entre os ja negociados, so os campos de RTCRtpCodec", () => {

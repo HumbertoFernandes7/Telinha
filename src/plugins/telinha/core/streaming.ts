@@ -29,7 +29,9 @@ import {
     type ProofState, verifyPasswordProof, type WatchAccessInput, type WatchDecision
 } from "./access";
 import { startScreenAudioCapture } from "./audio/screenAudio";
-import { chooseCodec, type CodecDecision, type EncoderReport, getLocalCaps, isTransientSoftwareH264, noteH264Fallback, pickNegotiatedCodec, softwareFallback } from "./codec";
+import {
+    chooseCodec, type CodecDecision, type EncoderReport, getLocalCaps, isSoftwareH264, isTransientSoftwareH264, noteH264Fallback, pickNegotiatedCodec, softwareFallback
+} from "./codec";
 import { blockOf, getPc, type LocalCapture, peerLabel, publish, rt, setLastError } from "./context";
 import { isIdentityConfigured } from "./identity/config";
 import { type ApprovalInput, identityRequiresApproval } from "./identity/policy";
@@ -39,7 +41,7 @@ import type { SendPlan } from "./peerConnection";
 import { me, sendPresence } from "./presence";
 import { CaptureMonitor } from "./quality/captureMonitor";
 import { QualityController } from "./quality/controller";
-import { encodingFor, LEVELS, levelText } from "./quality/levels";
+import { encodingFor, LEVELS, levelText, scaledSize } from "./quality/levels";
 
 export interface QualityProfile {
     width: number;
@@ -82,7 +84,14 @@ interface CaptureExtras {
     local: LocalCapture;
     quality: QualityController;
     monitor: CaptureMonitor | null;
+    /** tamanho da captura visto no ultimo tick (checkCaptureSize) */
+    size: { width: number; height: number; };
+    /** performance.now() da ultima mudanca de tamanho vista (checkCaptureSize) */
+    resizedAt: number;
 }
+
+/** Depois de a janela capturada mudar de tamanho: OpenH264 nesse meio tempo e a reducao antiga, sendo reaplicada (checkEncoder). */
+const RESIZE_GRACE_MS = 5000;
 
 const sends = new Map<PeerId, ViewerSend>();
 let starting = false;
@@ -91,6 +100,15 @@ let tickCount = 0;
 
 function qualityOf(local: LocalCapture): QualityController | null {
     return extras?.local === local ? extras.quality : null;
+}
+
+/**
+ * Tamanho atual da captura, o que vai para os encoders antes da nossa reducao (a janela pode mudar de tamanho no
+ * meio). Sempre par: o capturador do Chromium ja entrega a janela em tamanho par (ver checkEncoder).
+ */
+function captureSizeOf(local: LocalCapture): { width: number; height: number; } {
+    const s = local.stream.getVideoTracks()[0]?.getSettings();
+    return { width: s?.width ?? local.info.width, height: s?.height ?? local.info.height };
 }
 
 /** Plano de envio consultado pela RTCPeerConnection na negociacao (peerConnection.ts). */
@@ -267,10 +285,7 @@ function startExtras(local: LocalCapture, video: MediaStreamTrack) {
         sender: peerId => videoSender(peerId, local),
         apply: (peerId, level) => applySenderParams(peerId, local, level),
         label: peerLabel,
-        captureSize: () => {
-            const s = video.getSettings();
-            return { width: s.width ?? local.info.width, height: s.height ?? local.info.height };
-        },
+        captureSize: () => captureSizeOf(local),
         motion: () => (extras?.local === local ? extras.monitor?.motion() ?? null : null),
         sourceFrames: (key, frames) => {
             if (extras?.local === local) extras.monitor?.noteSourceFrames(key, frames);
@@ -292,7 +307,36 @@ function startExtras(local: LocalCapture, video: MediaStreamTrack) {
     });
     local.autoQuality = quality.state;
     local.captureWarning = null;
-    extras = { local, quality, monitor: monitor.start() ? monitor : null };
+    extras = { local, quality, monitor: monitor.start() ? monitor : null, size: captureSizeOf(local), resizedAt: -Infinity };
+}
+
+/** A janela capturada mudou de tamanho ha pouco (ou mudou e o tick ainda nao viu): a reducao ainda esta sendo reaplicada. */
+function resizing(local: LocalCapture): boolean {
+    if (extras?.local !== local) return false;
+    const now = captureSizeOf(local);
+    return now.width !== extras.size.width || now.height !== extras.size.height || performance.now() - extras.resizedAt < RESIZE_GRACE_MS;
+}
+
+/**
+ * A captura mudou de tamanho (janela redimensionada no meio): a reducao de resolucao de cada espectador e relativa ao
+ * tamanho (levels.encodingFor) e a antiga pode dar tamanho impar no novo (medido: 1904x1040 com a escala de 1798x1080
+ * = 1268x693, OpenH264). Se a escala de algum espectador muda, a qualidade automatica reaplica o degrau de todos.
+ */
+function checkCaptureSize(ex: CaptureExtras) {
+    const { local, quality } = ex;
+    const before = ex.size;
+    const now = captureSizeOf(local);
+    if (now.width === before.width && now.height === before.height) return;
+    ex.size = now;
+    ex.resizedAt = performance.now();
+    const changed = [...local.viewers].some(peerId => {
+        const level = quality.levelFor(peerId);
+        return encodingFor(level, before.width, before.height).scaleResolutionDownBy !== encodingFor(level, now.width, now.height).scaleResolutionDownBy;
+    });
+    if (!changed) return;
+    logThrottled("capture-resized", "info", `A captura mudou de ${before.width}x${before.height} para ${now.width}x${now.height}: recalculando a redução de resolução `
+        + "dos espectadores (em tamanho par, para a placa de vídeo continuar codificando H.264)", 10_000);
+    quality.captureResized();
 }
 
 function stopExtras(local: LocalCapture) {
@@ -816,8 +860,8 @@ async function applySenderParams(peerId: PeerId, local: LocalCapture, level: Qua
     }
 
     const send = sends.get(peerId);
-    const height = local.stream.getVideoTracks()[0]?.getSettings().height ?? local.info.height;
-    const target = encodingFor(level, height);
+    const capture = captureSizeOf(local);
+    const target = encodingFor(level, capture.width, capture.height);
     const build = (withDegradation: boolean) => {
         const params = sender.getParameters();
         if (!params.encodings?.length) params.encodings = [{}];
@@ -825,7 +869,9 @@ async function applySenderParams(peerId: PeerId, local: LocalCapture, level: Qua
         if (withDegradation) (params as any).degradationPreference = "maintain-framerate";
         return params;
     };
-    const desc = `${levelText(level)}, até ${Math.round(target.maxBitrate / 1000)} kbps${target.scaleResolutionDownBy > 1 ? ` (captura ÷${target.scaleResolutionDownBy})` : ""}`;
+    const scaled = scaledSize(capture.width, capture.height, target.scaleResolutionDownBy);
+    const desc = `${levelText(level)}, até ${Math.round(target.maxBitrate / 1000)} kbps`
+        + (target.scaleResolutionDownBy > 1 ? ` (captura ${capture.width}x${capture.height} ÷${target.scaleResolutionDownBy} = ${scaled.width}x${scaled.height})` : "");
 
     try {
         await sender.setParameters(build(!send?.noDegradation));
@@ -864,10 +910,21 @@ async function applySenderParams(peerId: PeerId, local: LocalCapture, level: Qua
  *   (banda ~0,5 Mbps + degrau 720p, OpenH264 18 s depois). Isso e de passagem e o espectador nao trava (no loopback:
  *   decodifica a 55+ fps, sem congelar nem pedir PLI). Por isso nao conta como queda (isTransientSoftwareH264): so loga;
  * - nao tiram da placa: o nosso scaleResolutionDownBy 1,5 sozinho (1080p→720p, com ou sem 12 Mbps), reconectar 3 vezes
- *   com 1,5 s de intervalo, 3 envios H.264 ao mesmo tempo.
+ *   com 1,5 s de intervalo, 3 envios H.264 ao mesmo tempo;
+ * - a captura nunca chega com tamanho impar (medido no mesmo dia com uma janela nossa capturada como o Telinha captura,
+ *   getDisplayMedia + id "window:..."): o capturador do Chromium alinha a saida em 2x2 e redimensiona a janela para
+ *   caber, ex.: 1001x701 → 1000x700, 1201x801 → 1200x800, 2001x1201 → 1798x1080, 641x361 → 640x360, tambem com a janela
+ *   mudando de tamanho no meio, sempre na placa. Por isso nao ha recorte de 1 px: um MediaStreamTrackProcessor/Generator
+ *   com visibleRect (num worker, +0,1 ms) passou 993 quadros sem recortar nenhum, e applyConstraints com um tamanho par
+ *   fixo reescala e nao acompanha a janela (1200x800 virou 952x634);
+ * - o tamanho impar vinha da NOSSA reducao: o degrau 720p com a escala altura/720 dava largura impar em metade das janelas,
+ *   ex.: 1798x1080 ÷1,5 = 1199x720 no OpenH264, com qualityLimitationReason "none" (contava como queda). Agora
+ *   levels.evenScale escolhe uma escala que da largura e altura pares (÷1,501 = 1198x720, na placa) e checkCaptureSize
+ *   reaplica quando a janela muda de tamanho (a escala antiga no tamanho novo: 1904x1040 → 1268x693, OpenH264; a
+ *   reaplicada, 1318x720, volta para a placa). Ate RESIZE_GRACE_MS depois da mudanca, OpenH264 e esse meio tempo: so loga.
  *
- * Queda de verdade (OpenH264 num tamanho que a placa aceita, ou com o WebRTC sem reduzir nada, ex.: janela capturada
- * com tamanho impar): so ESTE espectador passa para o codec que chooseCodec escolher sem a placa (VP9); os proximos
+ * Queda de verdade (OpenH264 num tamanho que a placa aceita, ou com o WebRTC sem reduzir nada, ex.: uma reducao nossa com
+ * tamanho impar, que evenScale evita): so ESTE espectador passa para o codec que chooseCodec escolher sem a placa (VP9); os proximos
  * ainda tentam a placa. Na 2a queda da sessao do Discord (noteH264Fallback), o H.264 automatico desliga para os
  * proximos. Uma vez por espectador (send.fellBack): nunca volta e repete. Codec fixado em H.264: continua H.264.
  */
@@ -880,6 +937,12 @@ function checkEncoder(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc
         logThrottled(`h264-transient:${peerId}`, "info", `O H.264 para ${label} passou para o OpenH264 (software) em ${size}: o WebRTC reduziu a resolução `
             + `por conta própria (${enc.limitation === "cpu" ? "CPU" : enc.limitation === "bandwidth" ? "banda" : enc.limitation}) e a placa de vídeo só codifica H.264 `
             + "em tamanho par a partir de 360p. Volta para a placa sozinho quando a resolução subir; não é queda.", 60_000);
+        return;
+    }
+    if (isSoftwareH264(enc) && resizing(local)) {
+        send.transientSoftware = true;
+        logThrottled(`h264-resize:${peerId}`, "info", `O H.264 para ${label} passou para o OpenH264 (software) em ${size} logo depois de a janela capturada `
+            + "mudar de tamanho: a redução de resolução está sendo recalculada em tamanho par e ele volta para a placa de vídeo. Não é queda.", 60_000);
         return;
     }
     if (send.transientSoftware && enc.powerEfficient === true) {
@@ -1001,8 +1064,8 @@ export function onRoomClosing(reason: string) {
 /**
  * Uma vez por segundo: confere que todo espectador ainda pode receber (defesa extra: expulso, recusado,
  * identidade duplicada ou fora da call nunca fica recebendo), loga o codec que o encoder realmente usa
- * por espectador (uma vez), confere se um envio H.264 caiu no encoder por software (checkEncoder) e, a cada
- * 2 s, roda a qualidade automatica.
+ * por espectador (uma vez), confere se um envio H.264 caiu no encoder por software (checkEncoder), se a captura mudou
+ * de tamanho (checkCaptureSize) e, a cada 2 s, roda a qualidade automatica.
  */
 export function tick() {
     const { local } = rt;
@@ -1018,6 +1081,7 @@ export function tick() {
         if (refusal !== "outsider") deny(peerId, refusal);
         removeFrom(peerId, refusal === "outsider" ? "não está mais admitido" : REFUSAL_TEXT[refusal]);
     }
+    if (extras?.local === local) checkCaptureSize(extras);
     if (++tickCount % 2 === 0) void qualityOf(local)?.evaluate();
     for (const peerId of local.viewers) {
         const send = sends.get(peerId);
