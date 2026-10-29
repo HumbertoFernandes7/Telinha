@@ -58,9 +58,9 @@ export const settings = definePluginSettings({
         displayName: "Qualidade padrão",
         description: "Qualidade padrão ao transmitir",
         options: [
-            { label: "1080p 60 fps (≈ 8 Mbps)", value: "1080p60", default: true },
-            { label: "720p 60 fps (≈ 5 Mbps)", value: "720p60" },
-            { label: "1080p 30 fps (≈ 5 Mbps)", value: "1080p30" }
+            { label: "1080p 60 fps (até 20 Mbps)", value: "1080p60", default: true },
+            { label: "720p 60 fps (até 12 Mbps)", value: "720p60" },
+            { label: "1080p 30 fps (até 12 Mbps)", value: "1080p30" }
         ]
     },
     autoQuality: {

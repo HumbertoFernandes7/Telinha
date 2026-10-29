@@ -145,7 +145,7 @@ Quem transmite clica em **"Ao vivo · N assistindo"**, na barra do Telinha, e v�
 
 ## Limitações
 
-- **Cada espectador recebe uma cópia separada** do vídeo, enviada pelo PC de quem transmite. O upload cresce com o número de espectadores; recomendamos **2 a 4 espectadores**. Em 1080p60, 1 ou 2 é o ideal.
+- **Cada espectador recebe uma cópia separada** do vídeo, enviada pelo PC de quem transmite. O upload cresce com o número de espectadores: em 1080p60 cada um pode usar até 20 Mbps (se a internet não aguentar, a qualidade automática baixa sozinha). Recomendamos **2 a 4 espectadores**. Em 1080p60, 1 ou 2 é o ideal.
 - Sem aceleração de hardware no Discord, o Telinha usa mais CPU.
 - Jogos em **tela cheia exclusiva** podem aparecer pretos. Use borderless.
 - Como só usamos STUN (sem servidor de retransmissão), em redes muito restritivas a conexão direta pode não se estabelecer.
