@@ -31,7 +31,8 @@ export function errorText(e: unknown): string {
     if (e instanceof Error) return e.message || e.name;
     if (typeof e === "string") return e;
     try {
-        return JSON.stringify(e);
+        // JSON.stringify gives undefined (not a string) for undefined, functions and symbols
+        return JSON.stringify(e) ?? String(e);
     } catch {
         return String(e);
     }
