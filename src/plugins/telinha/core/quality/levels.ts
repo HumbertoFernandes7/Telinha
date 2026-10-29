@@ -19,6 +19,17 @@ export interface LevelSpec {
     minKbps: number;
 }
 
+// espectador novo: a estimativa de banda oscila nos primeiros segundos (cai para ~0,5 Mbps e volta); nao desce por banda antes disto
+export const BW_GRACE_MS = 20_000;
+
+/**
+ * O espectador ainda esta na carencia de banda: `readyAt` e o instante (ms) em que o sender dele ficou
+ * pronto (Infinity = ainda nao ficou). Problemas de banda dele sao ignorados enquanto isto for true.
+ */
+export function inBandwidthGrace(readyAt: number, now: number): boolean {
+    return now - readyAt < BW_GRACE_MS;
+}
+
 export const LEVELS: Record<QualityLevel, LevelSpec> = {
     "1080p60": { height: 1080, fps: 60, maxKbps: 20000, minKbps: 4500 },
     "720p60": { height: 720, fps: 60, maxKbps: 12000, minKbps: 2500 },
