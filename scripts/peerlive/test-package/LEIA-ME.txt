@@ -35,13 +35,26 @@ Transmitir:
 2. No painel da conexão de voz (canto inferior esquerdo), clique em
    "Transmitir com PeerLive".
 3. Escolha uma tela ou uma janela. Janela = vai com o som daquela janela; tela
-   inteira = sem som por enquanto. Escolha a qualidade e clique em "Transmitir".
+   inteira = vai todo o som do PC, menos o do Discord (seus amigos não ouvem a
+   própria voz). Deixe "Compartilhar som" ligado, escolha a qualidade e clique
+   em "Transmitir".
 
 Assistir (qualquer um destes):
 - Clique na etiqueta PEERLIVE ao lado do nome da pessoa na lista do canal de voz.
 - Clique em "Assistir" na barra do PeerLive.
 - Menu da caixa de ferramentas do Vencord (topo do Discord) > "Quem está transmitindo".
 A transmissão abre numa janela própria (tela cheia, volume e "Parar de assistir").
+
+SOM DA TELA INTEIRA
+- Disponível no Windows 10 versão 2004 (maio/2020) ou mais novo, e no Windows 11.
+- Funciona por um pequeno programa que vem junto no pacote, o  peerlive-audio.exe
+  (fica ao lado do patcher.js, em  %APPDATA%\Vencord\dist). Ele ainda NÃO é
+  assinado digitalmente, então o antivírus ou o "Controle Inteligente de
+  Aplicativos" (Smart App Control) do Windows pode marcá-lo ou bloqueá-lo.
+- Se for bloqueado, a tela inteira é transmitida SEM som (a imagem segue normal)
+  e o seletor de tela mostra o motivo ao lado de "Compartilhar som". Para ter o
+  som, libere/restaure o  peerlive-audio.exe  no antivírus. Transmitir uma
+  janela (com o som dela) não depende desse programa.
 
 DICAS
 - Jogos: use o modo "Borderless / Sem bordas". Em tela cheia exclusiva a imagem

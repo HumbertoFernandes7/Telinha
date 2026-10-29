@@ -6,6 +6,7 @@
 
 // API do nucleo para a UI. Tudo aqui e seguro de importar no topo de um modulo: nada roda no carregamento.
 
+import { getScreenAudioStatus as fetchScreenAudioStatus } from "./core/audio/screenAudio";
 import { publish, rt, setLastError } from "./core/context";
 import { errorText, log } from "./core/log";
 import { getNative } from "./core/nativeApi";
@@ -16,10 +17,15 @@ import { getState } from "./store";
 import type { CaptureSource, PeerId, RemotePeer, StreamOptions } from "./types";
 
 /**
- * v1: a tela inteira e transmitida SEM audio (o audio do PC inteiro incluiria as vozes dos amigos
- * da call). Janelas tem audio so do processo da janela. Uma fase futura resolve a tela.
+ * O plugin sabe transmitir o audio da tela inteira (todo o som do PC, menos o do Discord, via
+ * peerlive-audio.exe). Se ESTE PC consegue, e outra pergunta: getScreenAudioStatus().
  */
-export const screenAudioSupported = false as const;
+export const screenAudioSupported = true as const;
+
+/** O ajudante de audio da tela inteira esta disponivel? Se nao, `reason` (pt-BR) explica por que a tela vai sem som. */
+export function getScreenAudioStatus(): Promise<{ available: boolean; reason?: string; }> {
+    return fetchScreenAudioStatus();
+}
 
 const THUMB_W = 320;
 const THUMB_H = 180;

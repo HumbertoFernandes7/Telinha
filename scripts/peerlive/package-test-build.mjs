@@ -7,11 +7,12 @@
 // Empacota o build de TESTE do PeerLive (teste 2: Vencord oficial + plugin PeerLive) para os amigos instalarem no Windows.
 //
 // 1. Roda o gate `smokeRenderer.mjs` em dist/renderer.js (aborta se falhar).
-// 2. Gera dist/test-package/PeerLive-teste-<hash>.zip com os arquivos de dist (patcher/preload/renderer + .map/.LEGAL),
-//    instalar.cmd, restaurar.cmd, peerlive-test.ps1 e LEIA-ME.txt.
+// 2. Gera dist/test-package/PeerLive-teste-<hash>.zip com os arquivos de dist (patcher/preload/renderer + .map/.LEGAL
+//    + peerlive-audio.exe, o ajudante do áudio da tela inteira), instalar.cmd, restaurar.cmd, peerlive-test.ps1 e LEIA-ME.txt.
 // 3. Imprime o caminho e o SHA-256 do zip.
 //
-// Não roda `pnpm build`: faça o build antes (pnpm build / pnpm buildStandalone).
+// Não roda `pnpm build` nem compila o ajudante de áudio: faça antes o build (pnpm build / pnpm buildStandalone) e
+// `native-audio\build.cmd --copy-to-dist` (o exe precisa estar em dist/ ao lado do patcher.js).
 //
 // Uso: node scripts/peerlive/package-test-build.mjs [--dist <pasta>] [--out <pasta>]
 //      (ou: pnpm package:test)   --dist e --out existem para testar o empacotador com uma dist falsa.
@@ -26,8 +27,10 @@ import { zipSync } from "fflate";
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..", "..");
 
+// Ajudante nativo do áudio da tela inteira (native-audio/): o main do Discord o procura ao lado do patcher.js.
+const AUDIO_HELPER = "peerlive-audio.exe";
 // Arquivos de dist que o build de teste substitui no Vencord instalado (manter em sincronia com $ManagedFiles do peerlive-test.ps1).
-const REQUIRED_DIST_FILES = ["patcher.js", "preload.js", "renderer.js", "renderer.css"];
+const REQUIRED_DIST_FILES = ["patcher.js", "preload.js", "renderer.js", "renderer.css", AUDIO_HELPER];
 const OPTIONAL_DIST_FILES = [
     "patcher.js.map", "patcher.js.LEGAL.txt",
     "preload.js.map",
@@ -89,6 +92,15 @@ const smoke = spawnSync(process.execPath, [join(here, "smokeRenderer.mjs"), rend
 if (smoke.status !== 0) fail("o smoke test do renderer falhou; nada foi empacotado");
 
 // ---- 2. arquivos de dist
+const helperPath = join(dist, AUDIO_HELPER);
+if (!existsSync(helperPath)) {
+    fail(`falta ${helperPath} (ajudante do áudio da tela inteira). Compile e copie com: native-audio\\build.cmd --copy-to-dist`);
+}
+const helperHead = readFileSync(helperPath).subarray(0, 2).toString("latin1");
+if (helperHead !== "MZ" || statSync(helperPath).size < 16 * 1024) {
+    fail(`${helperPath} não parece um .exe válido. Recompile com: native-audio\\build.cmd --copy-to-dist`);
+}
+
 const missing = REQUIRED_DIST_FILES.filter(f => !existsSync(join(dist, f)));
 if (missing.length) fail(`faltam arquivos em ${dist}: ${missing.join(", ")} (rode o build antes)`);
 

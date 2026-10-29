@@ -10,6 +10,7 @@ import { STREAM_KIND_SCREEN } from "@plugins/peerLive/protocol";
 import { type CodecSetting, settings } from "@plugins/peerLive/settings";
 import type { CaptureSource, PeerId, Quality, QualityLevel, StreamInfo, StreamOptions } from "@plugins/peerLive/types";
 
+import { startScreenAudioCapture } from "./audio/screenAudio";
 import { chooseCodec, type CodecDecision, getLocalCaps } from "./codec";
 import { getPc, type LocalCapture, peerLabel, publish, rt, setLastError } from "./context";
 import { errorText, log, logThrottled } from "./log";
@@ -109,13 +110,14 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
 
     const { source, profile } = validateOptions(opts);
     const kind = source.id.startsWith("screen:") ? "screen" : "window";
-    // v1: tela inteira nunca leva audio (o audio do PC incluiria as vozes da call)
+    // janela: audio so do processo da janela (getDisplayMedia); tela inteira: audio do PC sem o Discord (peerlive-audio.exe)
     const wantAudio = !!opts.withAudio && kind === "window";
+    const wantScreenAudio = !!opts.withAudio && kind === "screen";
     starting = true;
 
     try {
         const native = getNative();
-        log.info(`Iniciando transmissão: ${kind === "screen" ? "tela" : "janela"} "${source.name}" em ${opts.quality}${wantAudio ? " com áudio" : " sem áudio"}`);
+        log.info(`Iniciando transmissão: ${kind === "screen" ? "tela" : "janela"} "${source.name}" em ${opts.quality}${wantAudio || wantScreenAudio ? " com áudio" : " sem áudio"}`);
 
         // Nada de await longo entre o clique e o getDisplayMedia: a busca do PID para o audio roda no
         // main em paralelo e o handler espera por ela (ver native.ts).
@@ -141,19 +143,30 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
 
         const report = await native.finishDisplayMedia().catch(() => null);
         const [video] = stream.getVideoTracks();
-        const [audio] = stream.getAudioTracks();
         if (!video) {
             stream.getTracks().forEach(t => t.stop());
             throw new Error("A captura veio sem vídeo.");
+        }
+        if (wantScreenAudio) {
+            try {
+                const screenAudio = await startScreenAudioCapture({
+                    onEnded: reason => setLastError(`A transmissão continua, mas sem áudio: ${reason}.`)
+                });
+                stream.addTrack(screenAudio.track);
+            } catch (e) {
+                log.warn(`${e instanceof Error ? e.message : String(e)} Transmitindo a tela sem áudio.`);
+            }
         }
         if (!rt.room) {
             stream.getTracks().forEach(t => t.stop());
             throw new Error("Você saiu do canal de voz enquanto a transmissão começava.");
         }
+        const [audio] = stream.getAudioTracks();
 
         video.contentHint = "motion";
         if (audio) audio.contentHint = "music";
         if (wantAudio) log.info(`Áudio: ${audio ? "capturando" : "sem faixa de áudio"} — ${report?.audio?.reason ?? "sem decisão do handler"}`);
+        else if (wantScreenAudio) log.info(`Áudio da tela: ${audio ? "capturando o PC sem o Discord" : "sem faixa de áudio"}`);
 
         const s = video.getSettings();
         const info: StreamInfo = {

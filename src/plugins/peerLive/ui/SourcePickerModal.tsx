@@ -8,7 +8,7 @@ import { Button } from "@components/Button";
 import ErrorBoundary from "@components/ErrorBoundary";
 import { FormSwitch } from "@components/FormSwitch";
 import { Paragraph } from "@components/Paragraph";
-import { listSources, screenAudioSupported, startStreaming } from "@plugins/peerLive/actions";
+import { getScreenAudioStatus, listSources, screenAudioSupported, startStreaming } from "@plugins/peerLive/actions";
 import { getState } from "@plugins/peerLive/store";
 import type { CaptureSource, Quality } from "@plugins/peerLive/types";
 import { RenderModalProps } from "@vencord/discord-types";
@@ -18,7 +18,11 @@ import { cl, defaultQuality, errorText, inVoiceChannel, logger, QUALITY_OPTIONS,
 
 type Kind = CaptureSource["kind"];
 
-const SCREEN_AUDIO_NOTE = "O som da tela inteira chega numa próxima versão — escolha uma janela para transmitir com som";
+const WINDOW_AUDIO_NOTE = "Envia junto o som do aplicativo dessa janela.";
+const SCREEN_AUDIO_NOTE = "Vai todo o som do PC, menos o do Discord (seus amigos não ouvem a própria voz).";
+const SCREEN_AUDIO_CHECKING = "Verificando se este PC consegue compartilhar o som da tela inteira…";
+
+type ScreenAudioState = Awaited<ReturnType<typeof getScreenAudioStatus>>;
 
 function SourceCard({ source, selected, onSelect, onConfirm }: {
     source: CaptureSource;
@@ -54,6 +58,8 @@ function SourcePickerModal({ modalProps, switching, initialQuality }: { modalPro
     const [audio, setAudio] = useState(shareAudioByDefault);
     const [starting, setStarting] = useState(false);
     const [startError, setStartError] = useState<string | null>(null);
+    // null = ainda verificando; so a tela inteira depende disso (janela usa o som do proprio processo)
+    const [screenAudio, setScreenAudio] = useState<ScreenAudioState | null>(null);
 
     const load = async (first = false) => {
         setLoading(true);
@@ -75,20 +81,39 @@ function SourcePickerModal({ modalProps, switching, initialQuality }: { modalPro
 
     useEffect(() => void load(true), []);
 
+    useEffect(() => {
+        let cancelled = false;
+        getScreenAudioStatus()
+            .catch((e): ScreenAudioState => ({ available: false, reason: errorText(e) }))
+            .then(status => {
+                if (!cancelled) setScreenAudio(status);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, []);
+
     const screens = sources?.filter(s => s.kind === "screen") ?? [];
     const windows = sources?.filter(s => s.kind === "window") ?? [];
     const visible = tab === "screen" ? screens : windows;
     const selected = sources?.find(s => s.id === selectedId) ?? null;
 
     const audioKind: Kind = selected?.kind ?? tab;
-    const audioUnavailable = audioKind === "screen" && !screenAudioSupported;
+    const screenAudioReady = screenAudioSupported && screenAudio?.available === true;
+    const audioUnavailable = audioKind === "screen" && !screenAudioReady;
+    let audioDescription = WINDOW_AUDIO_NOTE;
+    if (audioKind === "screen") {
+        if (screenAudioReady) audioDescription = SCREEN_AUDIO_NOTE;
+        else if (!screenAudio) audioDescription = SCREEN_AUDIO_CHECKING;
+        else audioDescription = `Sem som na tela inteira: ${screenAudio.reason || "o ajudante de áudio não está disponível"}. A tela vai só com imagem.`;
+    }
 
     const start = async (source = selected) => {
         if (!source || starting) return;
         setStarting(true);
         setStartError(null);
         try {
-            await startStreaming({ source, quality, withAudio: audio && (source.kind !== "screen" || screenAudioSupported) });
+            await startStreaming({ source, quality, withAudio: audio && (source.kind !== "screen" || screenAudioReady) });
             modalProps.onClose();
             showToast({ text: switching ? "PeerLive: transmissão trocada" : "PeerLive: transmissão iniciada", variant: "success" });
         } catch (e) {
@@ -183,7 +208,7 @@ function SourcePickerModal({ modalProps, switching, initialQuality }: { modalPro
                     </div>
                     <FormSwitch
                         title="Compartilhar som"
-                        description={audioUnavailable ? SCREEN_AUDIO_NOTE : "Envia junto o som do aplicativo dessa janela."}
+                        description={audioDescription}
                         value={audio && !audioUnavailable}
                         disabled={audioUnavailable}
                         onChange={setAudio}

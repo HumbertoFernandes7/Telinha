@@ -11,6 +11,8 @@
 import { ConnectSrc, CspPolicies } from "@main/csp";
 import { desktopCapturer, type IpcMainInvokeEvent } from "electron";
 
+import { readScreenAudioMain, screenAudioStatusMain, startScreenAudioMain, stopScreenAudioMain } from "./core/audio/screenAudioMain";
+import type { ScreenAudioRead, ScreenAudioStart, ScreenAudioStatus } from "./core/audio/types";
 import { getWindowProcessInfo } from "./nativeWindowPid";
 import { RELAY_URLS } from "./protocol";
 
@@ -32,7 +34,7 @@ export interface NativeSourceList {
     error?: string;
 }
 
-/** Decisao de audio da captura (so janelas tem audio na v1). */
+/** Decisao de audio do getDisplayMedia (so janelas; o audio da tela inteira vem do peerlive-audio.exe, ver abaixo). */
 export interface AudioDecision {
     device: string | null;
     reason: string;
@@ -75,7 +77,7 @@ function isValidLoopbackDevice(device: string) {
 
 async function resolveWindowAudio(sourceId: string): Promise<AudioDecision> {
     if (!sourceId.startsWith("window:"))
-        return { device: null, reason: "tela inteira: sem áudio na v1 (o áudio do PC incluiria as vozes da call)" };
+        return { device: null, reason: "tela inteira: o áudio vem do ajudante peerlive-audio.exe, não do getDisplayMedia" };
 
     const info = await getWindowProcessInfo(sourceId);
     if (!info)
@@ -222,4 +224,26 @@ export function finishDisplayMedia(_: IpcMainInvokeEvent): CaptureReport | null 
 export function resetDisplayMedia(_: IpcMainInvokeEvent) {
     lastReport = null;
     uninstallHandlers();
+    stopScreenAudioMain();
 }
+
+// #region audio da tela inteira (peerlive-audio.exe; ver core/audio/)
+
+export function screenAudioStatus(_: IpcMainInvokeEvent): Promise<ScreenAudioStatus> {
+    return screenAudioStatusMain();
+}
+
+/** Excludes this process tree: Discord main + renderer (discord_voice) + Chromium audio service. */
+export function startScreenAudio(_: IpcMainInvokeEvent): Promise<ScreenAudioStart> {
+    return startScreenAudioMain(process.pid);
+}
+
+export function readScreenAudio(_: IpcMainInvokeEvent, id: number, maxWaitMs: number): Promise<ScreenAudioRead> {
+    return readScreenAudioMain(Number(id), Number(maxWaitMs));
+}
+
+export function stopScreenAudio(_: IpcMainInvokeEvent, id?: number): void {
+    stopScreenAudioMain(typeof id === "number" ? id : undefined);
+}
+
+// #endregion

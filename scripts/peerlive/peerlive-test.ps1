@@ -46,7 +46,8 @@ $ManagedFiles = @(
     'patcher.js', 'patcher.js.map', 'patcher.js.LEGAL.txt',
     'preload.js', 'preload.js.map',
     'renderer.js', 'renderer.js.map', 'renderer.js.LEGAL.txt',
-    'renderer.css', 'renderer.css.map'
+    'renderer.css', 'renderer.css.map',
+    'peerlive-audio.exe'     # ajudante do áudio da tela inteira (fica ao lado do patcher.js)
 )
 $RequiredFiles = @('patcher.js', 'preload.js', 'renderer.js', 'renderer.css')
 $MarkerName = 'peerlive-test-build.txt'      # gravado em dist; guarda o hash do build de teste instalado
