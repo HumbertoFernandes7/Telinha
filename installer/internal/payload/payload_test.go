@@ -262,7 +262,8 @@ func TestHashSources(t *testing.T) {
 	}
 }
 
-// fakeGitHub serves a release list and its assets.
+// fakeGitHub serves a release list (newest: a pre-release), GitHub's releases/latest (the newest normal release,
+// v0.1.0) and their assets.
 func fakeGitHub(t *testing.T, zipPath string, digest, sumFile string) *httptest.Server {
 	zipData := testutil.Read(t, zipPath)
 	name := filepath.Base(zipPath)
@@ -279,8 +280,16 @@ func fakeGitHub(t *testing.T, zipPath string, digest, sumFile string) *httptest.
 		}
 		json.NewEncoder(w).Encode([]map[string]any{
 			{"tag_name": "teste-3", "prerelease": true, "published_at": "2026-10-29T00:00:00Z", "body": "notes", "assets": assets},
+			{"tag_name": "v0.1.0", "prerelease": false, "published_at": "2026-10-25T00:00:00Z", "body": "notes", "assets": assets},
 			{"tag_name": "teste-2", "prerelease": true, "published_at": "2026-10-20T00:00:00Z", "assets": []map[string]any{{"name": "Telinha-teste-a.zip"}}},
 		})
+	})
+	mux.HandleFunc("/repos/"+RepoOwner+"/"+RepoName+"/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		assets := []map[string]any{{"name": name, "size": len(zipData), "digest": digest, "browser_download_url": srv.URL + "/dl/" + name}}
+		if sumFile != "" {
+			assets = append(assets, map[string]any{"name": name + ".sha256", "size": len(sumFile), "browser_download_url": srv.URL + "/dl/" + name + ".sha256"})
+		}
+		json.NewEncoder(w).Encode(map[string]any{"tag_name": "v0.1.0", "prerelease": false, "published_at": "2026-10-25T00:00:00Z", "body": "notes", "assets": assets})
 	})
 	mux.HandleFunc("/dl/"+name, func(w http.ResponseWriter, r *http.Request) { w.Write(zipData) })
 	mux.HandleFunc("/dl/"+name+".sha256", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, sumFile) })
@@ -302,9 +311,14 @@ func TestGitHubDownload(t *testing.T) {
 	c.APIBase = srv.URL
 	ctx := context.Background()
 	rel, asset, err := c.Latest(ctx)
-	if err != nil || rel.TagName != "teste-3" || asset.Name != "Telinha-addon-abcdef12.zip" {
-		t.Fatalf("Latest: %v %v %v", rel, asset, err)
+	if err != nil || rel.TagName != "v0.1.0" || rel.Prerelease || asset.Name != "Telinha-addon-abcdef12.zip" {
+		t.Fatalf("Latest (default: newest normal release): %v %v %v", rel, asset, err)
 	}
+	c.Prerelease = true
+	if pre, _, err := c.Latest(ctx); err != nil || pre.TagName != "teste-3" {
+		t.Fatalf("Latest with Prerelease: %v %v", pre, err)
+	}
+	c.Prerelease = false
 	checks, err := c.ReleaseChecks(ctx, rel, asset)
 	if err != nil || len(checks.Hashes) != 2 {
 		t.Fatalf("checks: %+v %v", checks, err)
@@ -326,11 +340,58 @@ func TestGitHubDownload(t *testing.T) {
 }
 
 func TestLatestNoRelease(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("[]")) }))
+	// GitHub answers releases/latest with 404 while only pre-releases (or nothing) are published
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/releases/latest") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte("[]"))
+	}))
 	defer srv.Close()
 	c := NewClient("test")
 	c.APIBase = srv.URL
 	if _, _, err := c.Latest(context.Background()); !errors.Is(err, ErrNoRelease) {
-		t.Fatalf("%v", err)
+		t.Fatalf("default: %v", err)
+	}
+	c.Prerelease = true
+	if _, _, err := c.Latest(context.Background()); !errors.Is(err, ErrNoRelease) {
+		t.Fatalf("prerelease: %v", err)
+	}
+}
+
+func TestLatestStableByDefault(t *testing.T) {
+	pre := map[string]any{"tag_name": "v0.2.0-beta.1", "prerelease": true, "published_at": "2026-11-02T00:00:00Z",
+		"assets": []map[string]any{{"name": "Telinha-addon-beta0001.zip", "browser_download_url": "https://x/b.zip"}}}
+	stable := map[string]any{"tag_name": "v0.1.1", "prerelease": false, "published_at": "2026-11-01T00:00:00Z",
+		"assets": []map[string]any{{"name": "TelinhaInstaller.exe"}, {"name": "Telinha-addon-stab0011.zip", "browser_download_url": "https://x/s.zip"}}}
+	latest := any(stable)
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		switch r.URL.Path {
+		case "/repos/" + RepoOwner + "/" + RepoName + "/releases/latest":
+			json.NewEncoder(w).Encode(latest)
+		case "/repos/" + RepoOwner + "/" + RepoName + "/releases":
+			json.NewEncoder(w).Encode([]any{pre, stable})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c := NewClient("test")
+	c.APIBase = srv.URL
+	ctx := context.Background()
+	if r, a, err := c.Latest(ctx); err != nil || r.TagName != "v0.1.1" || a.Name != "Telinha-addon-stab0011.zip" || paths[len(paths)-1] != "/repos/"+RepoOwner+"/"+RepoName+"/releases/latest" {
+		t.Fatalf("default must be releases/latest (normal release): %v %v %v %v", r, a, err, paths)
+	}
+	c.Prerelease = true
+	if r, a, err := c.Latest(ctx); err != nil || r.TagName != "v0.2.0-beta.1" || a.Name != "Telinha-addon-beta0001.zip" {
+		t.Fatalf("--prerelease must take the newest release, pre-releases included: %v %v %v", r, a, err)
+	}
+	c.Prerelease = false
+	latest = map[string]any{"tag_name": "v0.1.2", "prerelease": false, "assets": []map[string]any{{"name": "TelinhaInstaller.exe"}}}
+	if _, _, err := c.Latest(ctx); !errors.Is(err, ErrNoRelease) {
+		t.Fatalf("latest release without a payload asset: %v", err)
 	}
 }

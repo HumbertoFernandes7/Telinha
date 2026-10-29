@@ -13,7 +13,10 @@
 //
 //	TelinhaInstaller.exe --status [--json]
 //	TelinhaInstaller.exe --install | --repair | --uninstall [--purge] | --rollback  [--yes]
-//	    [--payload <zip|folder>] [--sha256 <hex>] [--discord-dir <dir>]... [--appdata <dir>]
+//	    [--payload <zip|folder>] [--sha256 <hex>] [--prerelease] [--discord-dir <dir>]... [--appdata <dir>]
+//
+// Without --payload it downloads the newest normal GitHub release (releases/latest, the same one the add-on's
+// automatic updater follows); --prerelease also accepts pre-releases (testing).
 package main
 
 import (
@@ -49,6 +52,7 @@ func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 type options struct {
 	install, uninstall, repair, status, rollback bool
 	yes, purge, json, showVersion, allowCustom   bool
+	prerelease                                   bool
 	payload, sha256, appdata                     string
 	discordDirs                                  multiFlag
 }
@@ -70,6 +74,7 @@ func parseFlags(args []string, out io.Writer) (*options, error) {
 	fs.BoolVar(&o.allowCustom, "allow-custom-vencord", false, "aceita um Vencord fora de %APPDATA%\\Vencord\\dist (desenvolvimento)")
 	fs.StringVar(&o.payload, "payload", "", "usa este zip ou pasta do add-on em vez de baixar do GitHub")
 	fs.StringVar(&o.sha256, "sha256", "", "SHA-256 esperado do zip passado em --payload")
+	fs.BoolVar(&o.prerelease, "prerelease", false, "aceita também versões de teste (pre-release) do GitHub")
 	fs.StringVar(&o.appdata, "appdata", "", "pasta Roaming a usar no lugar de %APPDATA% (testes)")
 	fs.Var(&o.discordDirs, "discord-dir", "pasta de instalação do Discord (com app-*); pode repetir (testes)")
 	if err := fs.Parse(args); err != nil {
@@ -143,6 +148,10 @@ func newApp(o *options, extraLog io.Writer) (*app, error) {
 		lf.Printf("discord: %s at %s", in.Name, in.Root)
 	}
 	gh := payload.NewClient("TelinhaInstaller/" + version + " (+" + projectURL + ")")
+	gh.Prerelease = o.prerelease
+	if o.prerelease {
+		lf.Printf("releases: pre-releases accepted (--prerelease)")
+	}
 	return &app{opt: o, cfg: cfg, log: lf, gh: gh}, nil
 }
 

@@ -24,8 +24,11 @@ func TestParseFlags(t *testing.T) {
 	if err != nil || !o.install || !o.yes || o.payload != `C:\p.zip` || len(o.discordDirs) != 2 || o.appdata != `C:\r` || !o.cli() {
 		t.Fatalf("%+v %v", o, err)
 	}
-	if o, _ := parseFlags(nil, io.Discard); o.cli() {
-		t.Fatal("no flags must mean GUI")
+	if o, _ := parseFlags(nil, io.Discard); o.cli() || o.prerelease {
+		t.Fatal("no flags must mean GUI, normal releases only")
+	}
+	if o, err := parseFlags([]string{"--install", "--prerelease"}, io.Discard); err != nil || !o.prerelease {
+		t.Fatalf("--prerelease: %+v %v", o, err)
 	}
 	if o, _ := parseFlags([]string{"--payload", "x"}, io.Discard); o.cli() {
 		t.Fatal("overrides alone keep the GUI (for testing it on fake trees)")
@@ -103,10 +106,10 @@ func TestGUIInstallPathWritesInstallerLog(t *testing.T) {
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/repos/HumbertoFernandes7/Telinha/releases":
-			json.NewEncoder(w).Encode([]map[string]any{{"tag_name": "teste-3", "prerelease": true, "published_at": "2026-10-29T00:00:00Z",
+		case "/repos/HumbertoFernandes7/Telinha/releases/latest":
+			json.NewEncoder(w).Encode(map[string]any{"tag_name": "v0.1.0", "prerelease": false, "published_at": "2026-10-29T00:00:00Z",
 				"body":   "SHA-256 (Telinha-addon-abcdef12.zip) = " + sum,
-				"assets": []map[string]any{{"name": "Telinha-addon-abcdef12.zip", "size": len(data), "digest": "sha256:" + sum, "browser_download_url": srv.URL + "/z"}}}})
+				"assets": []map[string]any{{"name": "Telinha-addon-abcdef12.zip", "size": len(data), "digest": "sha256:" + sum, "browser_download_url": srv.URL + "/z"}}})
 		case "/z":
 			w.Write(data)
 		default:
@@ -144,7 +147,7 @@ func TestGUIInstallPathWritesInstallerLog(t *testing.T) {
 	mustContain(t, f.log(t),
 		"TelinhaInstaller", "start (gui)", "discord: Discord at "+f.discordRoot,
 		"install: begin", "preflight: ready to install into Discord app-1.0.9266", "install: targets chosen: Discord",
-		"payload: release teste-3", "payload: expected sha256 "+sum, "payload: downloaded sha256="+sum, "payload: staged 0.1.0",
+		"payload: release v0.1.0 (prerelease=false)", "payload: expected sha256 "+sum, "payload: downloaded sha256="+sum, "payload: staged 0.1.0",
 		"apply: begin", "payload: activated 0.1.0", "backup: ", "stub: wrote ", "install.json: written",
 		"apply: done, Telinha 0.1.0 (abcdef12), 1 stub(s) written", "install: finished, Telinha 0.1.0",
 		"finished: exit code 0")

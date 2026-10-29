@@ -29,9 +29,6 @@ const (
 	// one inside the zip) or a small JSON with the zip's SHA-256. "<zip>.sha256" (sha256sum format) is
 	// also used when present.
 	ChecksumAsset = "version.json"
-	// IncludePrereleases: while Telinha is in test, its releases are marked pre-release. Set to false
-	// once stable releases exist.
-	IncludePrereleases = true
 
 	MaxZipSize = 64 << 20 // the payload is a few hundred KiB; anything this big is wrong
 	maxJSON    = 4 << 20
@@ -61,6 +58,10 @@ type Client struct {
 	HTTP      *http.Client
 	APIBase   string // default https://api.github.com
 	UserAgent string
+	// Prerelease also considers pre-releases (newest of all published releases, --prerelease, for testing).
+	// The default is the newest normal release (GitHub's releases/latest), the same one the add-on's automatic
+	// updater (addon/loader/updater.js) and the README's /releases/latest download link use.
+	Prerelease bool
 }
 
 func NewClient(userAgent string) *Client {
@@ -82,14 +83,26 @@ func (c *Client) get(ctx context.Context, url string, accept string) (*http.Resp
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
-		return nil, fmt.Errorf("GET %s: HTTP %d", url, resp.StatusCode)
+		return nil, &StatusError{URL: url, Code: resp.StatusCode}
 	}
 	return resp, nil
 }
 
-// Latest returns the newest release (drafts skipped, pre-releases per IncludePrereleases) that has a
-// payload asset, and that asset.
+// StatusError is a non-200 answer from GitHub.
+type StatusError struct {
+	URL  string
+	Code int
+}
+
+func (e *StatusError) Error() string { return fmt.Sprintf("GET %s: HTTP %d", e.URL, e.Code) }
+
+// Latest returns the release to install and its payload asset: by default the newest normal release
+// (GitHub's releases/latest: never a draft or a pre-release); with Prerelease, the newest release that has a
+// payload asset, pre-releases included.
 func (c *Client) Latest(ctx context.Context) (*Release, *Asset, error) {
+	if !c.Prerelease {
+		return c.latestStable(ctx)
+	}
 	url := fmt.Sprintf("%s/repos/%s/%s/releases?per_page=30", strings.TrimRight(c.APIBase, "/"), RepoOwner, RepoName)
 	resp, err := c.get(ctx, url, "application/vnd.github+json")
 	if err != nil {
@@ -100,14 +113,38 @@ func (c *Client) Latest(ctx context.Context) (*Release, *Asset, error) {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJSON)).Decode(&releases); err != nil {
 		return nil, nil, fmt.Errorf("reading release list: %w", err)
 	}
-	rel, asset := PickRelease(releases, IncludePrereleases)
+	rel, asset := PickRelease(releases, true)
 	if rel == nil {
 		return nil, nil, ErrNoRelease
 	}
 	return rel, asset, nil
 }
 
-// ErrNoRelease means no published release carries a payload asset yet.
+func (c *Client) latestStable(ctx context.Context) (*Release, *Asset, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/releases/latest", strings.TrimRight(c.APIBase, "/"), RepoOwner, RepoName)
+	resp, err := c.get(ctx, url, "application/vnd.github+json")
+	var se *StatusError
+	if errors.As(err, &se) && se.Code == http.StatusNotFound {
+		return nil, nil, ErrNoRelease // no normal release published yet
+	} else if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	var rel Release
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJSON)).Decode(&rel); err != nil {
+		return nil, nil, fmt.Errorf("reading the latest release: %w", err)
+	}
+	if rel.Draft || rel.Prerelease {
+		return nil, nil, ErrNoRelease
+	}
+	asset := payloadAsset(&rel)
+	if asset == nil {
+		return nil, nil, ErrNoRelease
+	}
+	return &rel, asset, nil
+}
+
+// ErrNoRelease means no published release (normal, unless Prerelease) carries a payload asset yet.
 var ErrNoRelease = errors.New("no release with a " + AssetPattern + " asset")
 
 // PickRelease chooses the newest eligible release that has an asset matching AssetPattern.
@@ -125,18 +162,23 @@ func PickRelease(releases []Release, includePre bool) (*Release, *Asset) {
 		if r.Draft || (r.Prerelease && !includePre) {
 			continue
 		}
-		var best *Asset
-		for j := range r.Assets {
-			a := &r.Assets[j]
-			if ok, _ := path.Match(AssetPattern, a.Name); ok && (best == nil || a.Name > best.Name) {
-				best = a
-			}
-		}
-		if best != nil {
+		if best := payloadAsset(r); best != nil {
 			return r, best
 		}
 	}
 	return nil, nil
+}
+
+// payloadAsset is the release's asset matching AssetPattern (the greatest name if several), or nil.
+func payloadAsset(r *Release) *Asset {
+	var best *Asset
+	for j := range r.Assets {
+		a := &r.Assets[j]
+		if ok, _ := path.Match(AssetPattern, a.Name); ok && (best == nil || a.Name > best.Name) {
+			best = a
+		}
+	}
+	return best
 }
 
 // Expected is one SHA-256 the payload must have, and where it came from.

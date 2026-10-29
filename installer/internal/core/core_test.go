@@ -465,10 +465,10 @@ func TestStageFromGitHub(t *testing.T) {
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/repos/HumbertoFernandes7/Telinha/releases":
-			json.NewEncoder(w).Encode([]map[string]any{{"tag_name": "v0.1.0", "prerelease": true, "published_at": "2026-10-29T00:00:00Z",
+		case "/repos/HumbertoFernandes7/Telinha/releases/latest":
+			json.NewEncoder(w).Encode(map[string]any{"tag_name": "v0.1.0", "prerelease": false, "published_at": "2026-10-29T00:00:00Z",
 				"body":   "SHA-256 (Telinha-addon-abcdef12.zip) = " + sum,
-				"assets": []map[string]any{{"name": "Telinha-addon-abcdef12.zip", "size": len(data), "digest": digest, "browser_download_url": srv.URL + "/z"}}}})
+				"assets": []map[string]any{{"name": "Telinha-addon-abcdef12.zip", "size": len(data), "digest": digest, "browser_download_url": srv.URL + "/z"}}})
 		case "/z":
 			w.Write(data)
 		default:
