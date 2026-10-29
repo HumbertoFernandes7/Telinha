@@ -5,6 +5,7 @@
  */
 
 import { definePluginSettings } from "@api/Settings";
+import { migrateAccessSetting } from "@plugins/telinha/core/access";
 import { isIdentityConfigured } from "@plugins/telinha/core/identity/config";
 import { onAdmissionSettingChanged, onPasswordChanged } from "@plugins/telinha/core/session";
 import { onApprovalPolicyChanged, onAutoQualitySettingChanged } from "@plugins/telinha/core/streaming";
@@ -31,17 +32,22 @@ export const settings = definePluginSettings({
         default: true,
         onChange: () => onAdmissionSettingChanged()
     },
-    approveViewers: {
-        type: OptionType.BOOLEAN,
-        displayName: "Aprovar quem vai assistir",
-        description: "Pedir minha aprovação antes de alguém começar a assistir. Cada pedido aparece na barra do Telinha com Permitir/Recusar e é recusado sozinho depois de 60 segundos; quem você permitir pode assistir até a transmissão acabar.",
-        default: false,
-        onChange: () => onApprovalPolicyChanged()
+    // substitui a opcao booleana approveViewers da v0.1.0 (migrada em migrateAccessSettings: true → "approval")
+    defaultAccess: {
+        type: OptionType.SELECT,
+        displayName: "Quem pode assistir (padrão)",
+        description: "O que já vem marcado em \"Quem pode assistir\" quando você transmite (dá para trocar a cada transmissão e também durante ela, na barra do Telinha). Todos da call: quem está no seu canal de voz. Só meus amigos do Discord: entra direto quem é seu amigo e provou a identidade; os outros não assistem. Só quem eu aprovar: cada pedido espera você clicar em Permitir ou Recusar (recusado sozinho em 60 segundos). Com senha: você cria uma senha a cada transmissão, que nunca fica salva.",
+        options: [
+            { label: "Todos da call", value: "all", default: true },
+            { label: "Só meus amigos do Discord", value: "friends" },
+            { label: "Só quem eu aprovar", value: "approval" },
+            { label: "Com senha", value: "password" }
+        ]
     },
     requireVerifiedIdentity: {
         type: OptionType.BOOLEAN,
         displayName: "Exigir identidade verificada",
-        description: "Recomendado. Quem não provou ser a conta do Discord que diz ser (aparece como \"não verificado\": não autorizou o Telinha ou usa uma versão antiga) continua vendo que você está na call, mas só assiste à sua transmissão depois que você clicar em Permitir, mesmo com \"Aprovar quem vai assistir\" desligado. Desligado: quem não está verificado assiste como antes. Uma identidade falsa nunca é aceita.",
+        description: "Recomendado. Vale para \"Todos da call\": quem não provou ser a conta do Discord que diz ser (aparece como \"não verificado\": não autorizou o Telinha ou usa uma versão antiga) continua vendo que você está na call, mas só assiste à sua transmissão depois que você clicar em Permitir. Desligado: quem não está verificado assiste como antes. (\"Só meus amigos do Discord\" sempre exige a identidade verificada; \"Com senha\" aceita quem acertar a senha.) Uma identidade falsa nunca é aceita.",
         default: true,
         // sem Client ID o recurso esta desligado e a opcao nao faria nada
         hidden: () => !isIdentityConfigured(),
@@ -89,3 +95,21 @@ export const settings = definePluginSettings({
         default: true
     }
 });
+
+/**
+ * v0.1.0 → v0.2.0: "Aprovar quem vai assistir" (approveViewers: true) vira "Quem pode assistir (padrão)" = "Só quem
+ * eu aprovar"; a chave antiga sai. Chamado no start() do plugin (as configuracoes so existem depois do registro).
+ * Nunca lanca.
+ */
+export function migrateAccessSettings(): void {
+    try {
+        const plain = settings.plain as Record<string, unknown> | undefined;
+        if (!plain) return;
+        const { defaultAccess, dropApproveViewers } = migrateAccessSetting(plain);
+        // apagar primeiro: a gravacao abaixo salva o objeto inteiro (ja sem a chave antiga)
+        if (dropApproveViewers) delete plain.approveViewers;
+        if (defaultAccess) settings.store.defaultAccess = defaultAccess;
+    } catch (e) {
+        console.warn("[Telinha] migração de \"Aprovar quem vai assistir\" falhou", e);
+    }
+}

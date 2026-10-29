@@ -112,6 +112,8 @@ let finds;
     check("settings UI source (Object.values(plugins)) lists it, with a settings cog", $(`Object.values(Vencord.Plugins.plugins).some(p => p.name === "Telinha") && Vencord.Plugins.hasAnyVisibleSettings(${P})`));
     check("settings defaults", $(`JSON.stringify([Vencord.Settings.plugins.Telinha.enabled, Vencord.Settings.plugins.Telinha.codec, Vencord.Settings.plugins.Telinha.rejectOutsiders, Vencord.Settings.plugins.Telinha.groupPassword])`) === '[true,"auto",true,""]');
     check("identity setting 'Exigir identidade verificada' defaults to on", $(`${P}.settings.store.requireVerifiedIdentity`) === true);
+    check("'Quem pode assistir (padrão)' defaults to 'Todos da call'; the old 'approveViewers' switch is gone",
+        $(`${P}.settings.store.defaultAccess`) === "all" && $(`!("approveViewers" in ${P}.settings.def) && ${P}.settings.def.defaultAccess.displayName`) === "Quem pode assistir (padrão)");
 
     $(SPIES);
     runScript(p.context, fakeWebpack(finds), "https://discord.com/assets/web.fake0001.js");
@@ -233,6 +235,30 @@ console.log("\nF updates, renderer side: boot report, automatic check, notice on
     await sleep(20);
     check("plugin disabled: the boot report still goes out (registered, not started)", calls.length === 1 && calls[0].enabled === false, calls);
     check("plugin disabled: no update check", p.$(`${P}.started`) !== true);
+}
+
+// ------------------------------------------------------------------------------------------- G: settings migration
+console.log("\nG v0.1.0 -> v0.2.0: 'Aprovar quem vai assistir' becomes 'Quem pode assistir (padrão)'");
+{
+    const cases = [
+        { name: "approveViewers: true", stored: { approveViewers: true }, expect: "approval" },
+        { name: "approveViewers: false", stored: { approveViewers: false }, expect: "all" },
+        { name: "approveViewers: true + a saved new choice", stored: { approveViewers: true, defaultAccess: "password" }, expect: "password" }
+    ];
+    for (const c of cases) {
+        const p = await boot(page0.code, { plugins: { Telinha: { enabled: true, ...c.stored } } });
+        check(`[${c.name}] before start the old key is still saved`, p.$(`JSON.stringify(Vencord.PlainSettings?.plugins?.Telinha?.approveViewers ?? ${P}.settings.plain.approveViewers)`) === JSON.stringify(c.stored.approveViewers));
+        p.$(`Vencord.Plugins.startPlugin(${P})`);
+        await sleep(30);
+        check(`[${c.name}] after start: defaultAccess = "${c.expect}" and approveViewers removed`,
+            p.$(`${P}.settings.store.defaultAccess`) === c.expect && p.$(`"approveViewers" in ${P}.settings.plain`) === false,
+            p.$(`JSON.stringify(${P}.settings.plain)`));
+        if (c.stored.approveViewers === true && !c.stored.defaultAccess) {
+            const last = p.savedSettings.at(-1)?.plain?.plugins?.Telinha;
+            check(`[${c.name}] migration persisted through VencordNative.settings.set`, last?.defaultAccess === "approval" && !("approveViewers" in last), last);
+        }
+        p.$(`Vencord.Plugins.stopPlugin(${P})`);
+    }
 }
 
 if (asyncErrors.length) console.log(`\n(async errors in the fake page: ${asyncErrors.map(e => String(e).split("\n")[0].slice(0, 140)).join(" | ")})`);

@@ -16,7 +16,7 @@ import { startSession, stopSession } from "./actions";
 import { localIdentityDiagnostics } from "./core/identity";
 import { peerIdentityDiagnostics } from "./core/session";
 import { refreshUpdateStatus, startUpdateChecks, stopUpdateChecks, updateDiagnostics } from "./core/update";
-import { settings } from "./settings";
+import { migrateAccessSettings, settings } from "./settings";
 import { formatDiagnostics } from "./store";
 import { callViewPatches, renderCallTileStream, stopCallView } from "./ui/callView";
 import { runAction } from "./ui/common";
@@ -111,6 +111,8 @@ export default definePlugin({
     toolboxActions: renderToolboxActions,
 
     start() {
+        // v0.1.0 → v0.2.0: "Aprovar quem vai assistir" vira "Quem pode assistir (padrão)"
+        migrateAccessSettings();
         startNotices();
         startUpdateNotices();
         startUpdateChecks();
