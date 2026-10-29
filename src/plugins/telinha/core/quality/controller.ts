@@ -67,6 +67,7 @@ const BUSY_FOR_CPU = 0.5;
 const NET_SATURATED = 0.85;
 const UP_MAX_BUSY = 0.75; // o detector de sobrecarga do WebRTC dispara por volta de 0,85
 const UP_AVAILABLE_RATIO = 0.9;
+const UP_HEADROOM = 1.5; // subir para um degrau exige banda estimada >= piso dele x isto (histerese com o minKbps da descida)
 const STATIC_SOURCE_FPS = 15;
 const MOTION_THRESHOLD = 0.35;
 
@@ -421,7 +422,7 @@ export class QualityController {
             } else if (v.bwLevel !== this.deps.ceiling && now - v.bwHold.calmSince >= v.bwHold.holdMs) {
                 const next = stepUp(v.bwLevel, this.deps.ceiling, preferMotion);
                 const avail = v.metrics.availableKbps;
-                if (next && (avail == null || avail >= LEVELS[current].maxKbps * UP_AVAILABLE_RATIO))
+                if (next && (avail == null || avail >= LEVELS[next].minKbps * UP_HEADROOM))
                     this.setViewerBw(v, next, now, `estável há ${Math.round((now - v.bwHold.calmSince) / 1000)} s`, "up");
             }
         }
@@ -449,7 +450,7 @@ export class QualityController {
         const up = this.uplinkFresh(now);
         if (up && n * LEVELS[next].minKbps > up.kbps) return false;
         if (this.globalReason === "upload" && active.some(v =>
-            v.metrics.availableKbps != null && v.metrics.availableKbps < LEVELS[this.levelFor(v.peerId)].maxKbps * UP_AVAILABLE_RATIO))
+            v.metrics.availableKbps != null && v.metrics.availableKbps < LEVELS[meet(next, v.bwLevel)].minKbps * UP_HEADROOM))
             return false;
         this.setGlobal(next, this.globalReason ?? "cpu", now, `estável há ${Math.round((now - this.globalHold.calmSince) / 1000)} s`, "up");
         return true;

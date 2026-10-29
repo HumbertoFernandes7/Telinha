@@ -51,11 +51,11 @@ export interface QualityProfile {
     startKbps: number;
 }
 
-/** Perfis de qualidade. startKbps ≈ 60% do teto: sobe direto para a resolucao cheia sem estourar links medianos. */
+/** Perfis de qualidade. startKbps ≈ 50% do teto: sobe direto para a resolucao cheia sem estourar links medianos. */
 export const QUALITY: Record<Quality, QualityProfile> = {
-    "1080p60": { width: 1920, height: 1080, fps: 60, maxKbps: 8000, startKbps: 5000 },
-    "720p60": { width: 1280, height: 720, fps: 60, maxKbps: 5000, startKbps: 3000 },
-    "1080p30": { width: 1920, height: 1080, fps: 30, maxKbps: 5000, startKbps: 3000 }
+    "1080p60": { width: 1920, height: 1080, fps: 60, maxKbps: 20000, startKbps: 10000 },
+    "720p60": { width: 1280, height: 720, fps: 60, maxKbps: 12000, startKbps: 6000 },
+    "1080p30": { width: 1920, height: 1080, fps: 30, maxKbps: 12000, startKbps: 6000 }
 };
 
 const SOURCE_ID_RE = /^(screen|window):-?\d{1,20}:-?\d{1,10}$/;
@@ -98,7 +98,7 @@ export function sendPlanFor(peerId: PeerId | null): SendPlan | null {
     // o x-google-max-bitrate fica no teto (a qualidade automatica pode subir depois sem renegociar);
     // a banda inicial acompanha o degrau atual
     const level = qualityOf(local)?.levelFor(peerId) ?? local.quality;
-    const startKbps = level === local.quality ? q.startKbps : Math.min(q.startKbps, Math.round(LEVELS[level].maxKbps * 0.6));
+    const startKbps = level === local.quality ? q.startKbps : Math.min(q.startKbps, Math.round(LEVELS[level].maxKbps * 0.5));
     return {
         codec: send?.decision.codec ?? null,
         bitrate: { startKbps, maxKbps: q.maxKbps },

@@ -20,10 +20,10 @@ export interface LevelSpec {
 }
 
 export const LEVELS: Record<QualityLevel, LevelSpec> = {
-    "1080p60": { height: 1080, fps: 60, maxKbps: 8000, minKbps: 4500 },
-    "720p60": { height: 720, fps: 60, maxKbps: 5000, minKbps: 2500 },
-    "1080p30": { height: 1080, fps: 30, maxKbps: 5000, minKbps: 2500 },
-    "720p30": { height: 720, fps: 30, maxKbps: 2500, minKbps: 0 }
+    "1080p60": { height: 1080, fps: 60, maxKbps: 20000, minKbps: 4500 },
+    "720p60": { height: 720, fps: 60, maxKbps: 12000, minKbps: 2500 },
+    "1080p30": { height: 1080, fps: 30, maxKbps: 12000, minKbps: 2500 },
+    "720p30": { height: 720, fps: 30, maxKbps: 6000, minKbps: 0 }
 };
 
 function levelOf(height: number, fps: number): QualityLevel {
