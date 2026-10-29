@@ -110,7 +110,7 @@ func (a *app) cliInstall(repair bool) int {
 	for _, u := range res.Unchanged {
 		fmt.Printf("  já estava em dia: %s\n", u)
 	}
-	fmt.Println("Pronto! Feche o Discord completamente e abra de novo. Depois ative o Telinha em Configurações → Vencord → Plugins.")
+	fmt.Println("Pronto! Feche o Discord completamente e abra de novo. O Telinha já vem ativado; se ele não aparecer, confira em Configurações → Vencord → Plugins.")
 	return exitOK
 }
 

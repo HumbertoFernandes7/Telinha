@@ -210,7 +210,7 @@ func (a *app) guiInstall() int {
 	}
 	ui.Show(ui.Dialog{Title: title, Icon: ui.IconApp, Common: ui.BtnClose,
 		Instruction: "Pronto!",
-		Content:     "Feche o Discord completamente e abra de novo. Depois ative o Telinha em Configurações → Vencord → Plugins." + extra,
+		Content:     "Feche o Discord completamente e abra de novo. O Telinha já vem ativado; se ele não aparecer, confira em Configurações → Vencord → Plugins." + extra,
 		Expanded:    fmt.Sprintf("Telinha %s instalado em: %s.\nRegistro: %s", res.Version, targetNames(chosen), a.log.Where())})
 	return exitOK
 }
