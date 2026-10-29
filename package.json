@@ -1,7 +1,7 @@
 {
     "name": "telinha",
     "private": true,
-    "version": "0.1.0",
+    "version": "0.2.0",
     "description": "Stream your screen to friends in the same Discord voice channel, peer to peer, and watch inside Discord (Vencord plugin, add-on loader and Windows installer)",
     "homepage": "https://github.com/HumbertoFernandes7/Telinha#readme",
     "repository": {
