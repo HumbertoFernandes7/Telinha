@@ -29,7 +29,7 @@ import vm from "vm";
 
 import { requirePinnedCheckout, VENCORD_DIR, VENCORD_DIST } from "../../scripts/vencord.mjs";
 
-const ADDON_VERSION = "0.2.0";
+const ADDON_VERSION = "0.2.1";
 const PLUGIN_DIR = "src/plugins/telinha";
 const PLUGIN_NAME = "Telinha";
 const HELPER = "telinha-audio.exe";

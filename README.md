@@ -6,7 +6,7 @@
 
 *(antigo nome: PeerLive)*
 
-> **Status: versão 0.2.0.** O Telinha já funciona e é uma versão oficial, mas ainda está em evolução (veja [Status](#status)). Quer usar? Vá para [Como instalar](#como-instalar).
+> **Status: versão 0.2.1.** O Telinha já funciona e é uma versão oficial, mas ainda está em evolução (veja [Status](#status)). Quer usar? Vá para [Como instalar](#como-instalar).
 
 ---
 
@@ -46,7 +46,7 @@ Os amigos precisam se achar uns aos outros e, depois disso, o vídeo segue por c
 
 ## Status
 
-Versão 0.2.0. O que já foi **verificado**:
+Versão 0.2.1. O que já foi **verificado**:
 
 - [x] Captura de tela e de janela dentro do Discord oficial, no Windows.
 - [x] Áudio da janela.
@@ -234,7 +234,7 @@ As primeiras versões de teste (`teste-1` e `teste-2`) eram um fork do Vencord 1
 
 **Telinha** lets friends in the same Discord voice channel stream their screen or a window to each other and watch **inside Discord**, directly between their PCs (peer-to-peer, WebRTC). It is free and there is no server of ours: public Nostr relays (through the Trystero library) are used only so peers can find each other, and the video goes straight PC to PC (STUN only). It supports up to 1080p at 60 fps, and captures audio: the sound of a single window, or, for whole-screen streams, all PC sound except Discord's (Windows 10 2004+; done by a small unsigned helper, `telinha-audio.exe`, which antivirus or Smart App Control may block, in which case the screen streams without sound).
 
-It is a plugin for [Vencord](https://github.com/Vendicated/Vencord) (a Discord client mod), currently at version **0.2.0**: early, but an official release. You keep the **official Vencord**: install Telinha with [**`TelinhaInstaller.exe`**](https://github.com/HumbertoFernandes7/Telinha/releases/latest/download/TelinhaInstaller.exe) (direct download of the latest release; notes on the [latest release page](https://github.com/HumbertoFernandes7/Telinha/releases/latest)). SmartScreen will warn because it is not code-signed yet: "More info" > "Run anyway". Click Install and reopen Discord; Telinha comes enabled. It does not modify Vencord's files; running the installer again and choosing Uninstall puts Vencord back exactly as before. Telinha updates itself: when Discord opens (and every 6 hours) it checks GitHub, downloads a new version in the background, verifies its SHA-256 and applies it on the next Discord restart, rolling back on its own if the new version fails to start ("Atualizar automaticamente" in the plugin settings turns this into a notice only). If you use the Vencord installer's "Repair", run the Telinha installer again. It needs official Vencord to be installed first.
+It is a plugin for [Vencord](https://github.com/Vendicated/Vencord) (a Discord client mod), currently at version **0.2.1**: early, but an official release. You keep the **official Vencord**: install Telinha with [**`TelinhaInstaller.exe`**](https://github.com/HumbertoFernandes7/Telinha/releases/latest/download/TelinhaInstaller.exe) (direct download of the latest release; notes on the [latest release page](https://github.com/HumbertoFernandes7/Telinha/releases/latest)). SmartScreen will warn because it is not code-signed yet: "More info" > "Run anyway". Click Install and reopen Discord; Telinha comes enabled. It does not modify Vencord's files; running the installer again and choosing Uninstall puts Vencord back exactly as before. Telinha updates itself: when Discord opens (and every 6 hours) it checks GitHub, downloads a new version in the background, verifies its SHA-256 and applies it on the next Discord restart, rolling back on its own if the new version fails to start ("Atualizar automaticamente" in the plugin settings turns this into a notice only). If you use the Vencord installer's "Repair", run the Telinha installer again. It needs official Vencord to be installed first.
 
 - **Requirements:** Windows 10 2004+/11, Discord desktop with official Vencord. Everyone who streams or watches needs Telinha.
 - **Verified so far:** screen/window capture in stock Discord on Windows, window audio, a direct connection between two homes (720p, ~57 fps, 0% loss), viewing in a separate Discord window, and the installer + add-on on top of the official Vencord on a real PC (streaming with whole-screen audio working).
