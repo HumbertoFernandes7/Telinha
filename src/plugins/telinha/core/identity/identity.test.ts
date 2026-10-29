@@ -11,12 +11,18 @@ import assert from "node:assert/strict";
 import { createHash, createSign, generateKeyPairSync, type KeyObject, randomBytes } from "node:crypto";
 import { describe, test } from "node:test";
 
-import { certificateNeedsRotation, isIdentityConfigured, tokenNeedsRenewal } from "./config";
+import { buildHello, HELLO_TYPE, isIdentityMessage, MAX_ID_TOKEN_CHARS, parseHello, PROTOCOL_VERSION } from "@plugins/telinha/protocol";
+
+import { certificateNeedsRotation, isIdentityConfigured, MAX_ID_TOKEN_LENGTH, tokenNeedsRenewal } from "./config";
 import { base64UrlDecode, base64UrlEncode, utf8 } from "./encoding";
 import { asNormalizedFingerprint, nonceForFingerprint, normalizeFingerprint, parseSdpFingerprints, singleSdpFingerprint } from "./fingerprint";
 import { JwksCache } from "./jwks";
 import type { Jwk, Jwks } from "./jwt";
 import { buildCodeExchangeBody, buildRefreshBody, OAuthError, parseAuthorizeLocation, pkceChallenge, requestToken } from "./oauth";
+import {
+    type DuplicateCandidate, findDuplicates, identityRequiresApproval, initialPeerIdentity, isAdmitted, nextPeerIdentity, type PeerIdentity,
+    watchNeedsApproval
+} from "./policy";
 import { getRemoteDtlsFingerprint } from "./remoteFingerprint";
 import { identityVerdict, verifyPeerIdentity, type VerifyPeerIdentityInput } from "./verify";
 
@@ -356,3 +362,206 @@ describe("encoding e politicas", () => {
         assert.equal(tokenNeedsRenewal(NOW + 60_000, NOW), true);
     });
 });
+
+// #region integracao com a sessao: admissao, aprovacao, duplicados e protocolo (partes puras)
+
+const IDENTITIES: PeerIdentity[] = ["pending", "verified", "unverified", "invalid"];
+const BOOLS = [false, true];
+
+/** As regras da v0.1.0, escritas de novo aqui de proposito (nao importar de policy.ts). */
+const v010 = {
+    admitted: (inVoice: boolean, rejectOutsiders: boolean) => inVoice || !rejectOutsiders,
+    needsApproval: (approveViewers: boolean) => approveViewers,
+    /** todas as conexoes vivas com o mesmo id ficam marcadas */
+    duplicates(peers: DuplicateCandidate[]) {
+        const live = peers.filter(p => p.live);
+        return live.filter(p => live.filter(q => q.discordUserId === p.discordUserId).length > 1).map(p => p.peerId).sort();
+    }
+};
+
+const flaggedOf = (peers: DuplicateCandidate[], configured: boolean) => findDuplicates(peers, configured).flatMap(g => g.flagged).sort();
+const cand = (peerId: string, identity: PeerIdentity, discordUserId = USER, live = true): DuplicateCandidate => ({ peerId, discordUserId, identity, live });
+
+describe("sem Client ID = comportamento da v0.1.0 (configured: false, nao pela constante)", () => {
+    test("o recurso so liga com um client id de verdade", () => {
+        assert.equal(isIdentityConfigured(""), false);
+        assert.equal(isIdentityConfigured("abc"), false);
+        assert.equal(isIdentityConfigured(CLIENT_ID), true);
+    });
+
+    test("hello sem token e byte a byte o hello da v0.1.0", () => {
+        const v010Hello = JSON.stringify({ type: HELLO_TYPE, v: PROTOCOL_VERSION, discordUserId: USER, username: "ana" });
+        assert.equal(JSON.stringify(buildHello(USER, "ana", null)), v010Hello);
+        assert.equal(JSON.stringify(buildHello(USER, "ana", undefined)), v010Hello);
+        assert.equal(JSON.stringify(buildHello(USER, "ana", "")), v010Hello);
+    });
+
+    test("ninguem e verificado nem falso: qualquer token vira not-configured / unverified", async () => {
+        for (const t of [await token(), await token({ sub: OTHER_USER }), "lixo", undefined]) {
+            const res = await verify(t, { clientId: "", remoteDtlsFingerprint: FP_B });
+            assert.deepEqual(res, { ok: false, reason: "not-configured" });
+            assert.equal(identityVerdict(res), "unverified");
+        }
+        assert.equal(initialPeerIdentity({ configured: false, hasToken: true }), "unverified");
+    });
+
+    test("admissao e aprovacao ignoram a identidade (todas as combinacoes)", () => {
+        for (const identity of IDENTITIES) for (const inVoice of BOOLS) for (const rejectOutsiders of BOOLS) {
+            assert.equal(isAdmitted({ configured: false, identity, inVoice, rejectOutsiders }), v010.admitted(inVoice, rejectOutsiders), `${identity} ${inVoice} ${rejectOutsiders}`);
+            for (const requireVerified of BOOLS) for (const approveViewers of BOOLS) {
+                assert.equal(watchNeedsApproval({ configured: false, identity, requireVerified, approveViewers }), v010.needsApproval(approveViewers));
+                assert.equal(identityRequiresApproval({ configured: false, identity, requireVerified }), false);
+            }
+        }
+    });
+
+    test("duplicados: todas as conexoes vivas com o mesmo id, mesmo as que se dizem verificadas", () => {
+        const scenarios: DuplicateCandidate[][] = [
+            [cand("a", "unverified"), cand("b", "unverified")],
+            [cand("a", "verified"), cand("b", "unverified")],
+            [cand("a", "verified"), cand("b", "verified"), cand("c", "unverified", OTHER_USER)],
+            [cand("a", "unverified"), cand("b", "unverified", USER, false)],
+            [cand("a", "invalid"), cand("b", "pending"), cand("c", "unverified")]
+        ];
+        for (const peers of scenarios) {
+            assert.deepEqual(flaggedOf(peers, false), v010.duplicates(peers));
+            assert.ok(findDuplicates(peers, false).every(g => g.verified.length === 0));
+        }
+    });
+});
+
+describe("admissao com Client ID", () => {
+    const admit = (identity: PeerIdentity, inVoice = true, rejectOutsiders = true) => isAdmitted({ configured: true, identity, inVoice, rejectOutsiders });
+    const approval = (identity: PeerIdentity, requireVerified: boolean, approveViewers = false) =>
+        watchNeedsApproval({ configured: true, identity, requireVerified, approveViewers });
+
+    test("verificado: admitido pelo canal de voz, assiste sem aprovacao (a nao ser com approveViewers)", () => {
+        assert.equal(admit("verified"), true);
+        assert.equal(admit("verified", false, true), false);
+        assert.equal(admit("verified", false, false), true);
+        assert.equal(approval("verified", true), false);
+        assert.equal(approval("verified", true, true), true);
+    });
+
+    test("nao verificado com a opcao LIGADA: ve a presenca, mas so assiste com Permitir (mesmo sem approveViewers)", () => {
+        assert.equal(admit("unverified"), true);
+        assert.equal(approval("unverified", true), true);
+        assert.equal(identityRequiresApproval({ configured: true, identity: "unverified", requireVerified: true }), true);
+        // fora do canal de voz continua de fora (rejectOutsiders)
+        assert.equal(admit("unverified", false, true), false);
+    });
+
+    test("nao verificado com a opcao DESLIGADA: como na v0.1.0", () => {
+        for (const inVoice of BOOLS) for (const rejectOutsiders of BOOLS) {
+            assert.equal(admit("unverified", inVoice, rejectOutsiders), v010.admitted(inVoice, rejectOutsiders));
+        }
+        assert.equal(approval("unverified", false), false);
+        assert.equal(approval("unverified", false, true), true);
+    });
+
+    test("identidade falsa: nunca admitida, com qualquer opcao", () => {
+        for (const inVoice of BOOLS) for (const rejectOutsiders of BOOLS) assert.equal(admit("invalid", inVoice, rejectOutsiders), false);
+    });
+
+    test("conferindo: ainda nao admitido; so quem mandou token precisa esperar", () => {
+        assert.equal(admit("pending"), false);
+        assert.equal(initialPeerIdentity({ configured: true, hasToken: true }), "pending");
+        assert.equal(initialPeerIdentity({ configured: true, hasToken: false }), "unverified");
+    });
+
+    test("verificado nao e rebaixado por renovacao ruim; falso nao vira confiavel", () => {
+        assert.equal(nextPeerIdentity("verified", "unverified"), "verified");
+        assert.equal(nextPeerIdentity("verified", "invalid"), "verified");
+        assert.equal(nextPeerIdentity("invalid", "verified"), "invalid");
+        assert.equal(nextPeerIdentity("pending", "verified"), "verified");
+        assert.equal(nextPeerIdentity("pending", "invalid"), "invalid");
+        assert.equal(nextPeerIdentity("unverified", "invalid"), "invalid");
+        assert.equal(nextPeerIdentity("unverified", "verified"), "verified");
+    });
+
+    test("ponta a ponta: token copiado / assinatura falsa / conta errada = falso, nunca admitido", async () => {
+        const fakes = [
+            await verify(await token(), { remoteDtlsFingerprint: FP_B }), // copiado de outra conexao
+            await verify(await token({}, { alg: "RS256", kid: "k1" }, K2.privateKey)), // assinatura falsa
+            await verify(await token({ sub: OTHER_USER })) // token de outra pessoa
+        ];
+        for (const res of fakes) {
+            const identity = nextPeerIdentity("pending", identityVerdict(res));
+            assert.equal(identity, "invalid");
+            for (const inVoice of BOOLS) for (const rejectOutsiders of BOOLS) assert.equal(admit(identity, inVoice, rejectOutsiders), false);
+        }
+        const good = nextPeerIdentity("pending", identityVerdict(await verify(await token())));
+        assert.equal(good, "verified");
+        assert.equal(admit(good), true);
+        assert.equal(approval(good, true), false);
+    });
+
+    test("verificacao que estoura o tempo = nao verificado (nunca falso)", () => {
+        assert.equal(identityVerdict({ ok: false, reason: "timeout" }), "unverified");
+    });
+});
+
+describe("identidade duplicada com Client ID", () => {
+    test("verificada + nao verificada: so a nao verificada e marcada (impostora)", () => {
+        const groups = findDuplicates([cand("a", "verified"), cand("b", "unverified")], true);
+        assert.deepEqual(groups, [{ discordUserId: USER, flagged: ["b"], verified: ["a"] }]);
+    });
+
+    test("verificada nunca e marcada; duas verificadas = a mesma pessoa em dois PCs", () => {
+        assert.deepEqual(findDuplicates([cand("a", "verified"), cand("b", "verified")], true), []);
+        const groups = findDuplicates([cand("a", "verified"), cand("b", "unverified"), cand("c", "unverified"), cand("d", "verified")], true);
+        assert.deepEqual(groups, [{ discordUserId: USER, flagged: ["b", "c"], verified: ["a", "d"] }]);
+    });
+
+    test("duas nao verificadas: as duas marcadas (como hoje)", () => {
+        assert.deepEqual(findDuplicates([cand("a", "unverified"), cand("b", "unverified")], true), [{ discordUserId: USER, flagged: ["a", "b"], verified: [] }]);
+    });
+
+    test("falsa e conferindo ficam de fora; conexao que caiu nao conta; ids diferentes nao se misturam", () => {
+        assert.deepEqual(findDuplicates([cand("a", "invalid"), cand("b", "unverified")], true), []);
+        assert.deepEqual(findDuplicates([cand("a", "invalid"), cand("b", "verified")], true), []);
+        assert.deepEqual(findDuplicates([cand("a", "pending"), cand("b", "unverified")], true), []);
+        assert.deepEqual(findDuplicates([cand("a", "unverified", USER, false), cand("b", "unverified")], true), []);
+        assert.deepEqual(findDuplicates([cand("a", "unverified"), cand("b", "unverified", OTHER_USER)], true), []);
+    });
+});
+
+describe("protocolo: hello com idToken opcional e acao identity", () => {
+    const base = { type: HELLO_TYPE, v: PROTOCOL_VERSION, discordUserId: USER, username: "ana" };
+
+    test("hello da v0.1.0 (sem idToken) continua valido e sem campo extra", () => {
+        const parsed = parseHello({ ...base });
+        assert.deepEqual(parsed, base);
+        assert.equal(parsed && "idToken" in parsed, false);
+    });
+
+    test("idToken valido e mantido; o resto do lixo e descartado", () => {
+        assert.deepEqual(parseHello({ ...base, idToken: "a.b.c", extra: { x: 1 } }), { ...base, idToken: "a.b.c" });
+    });
+
+    test("idToken ruim (tipo errado, vazio, enorme) sai do hello, que continua valido (= nao verificado)", () => {
+        for (const idToken of [42, "", null, { a: 1 }, ["x"], "x".repeat(MAX_ID_TOKEN_CHARS + 1)]) {
+            assert.deepEqual(parseHello({ ...base, idToken }), base, String(idToken).slice(0, 20));
+        }
+        assert.equal(MAX_ID_TOKEN_CHARS, MAX_ID_TOKEN_LENGTH);
+    });
+
+    test("hello invalido e nulo, sem lancar; nome truncado", () => {
+        for (const data of [null, undefined, 42, "hello", [], { ...base, discordUserId: "abc" }, { ...base, type: "outro" }, { ...base, username: 1 }]) {
+            assert.equal(parseHello(data), null);
+        }
+        assert.equal(parseHello({ ...base, username: "n".repeat(500) })?.username.length, 64);
+        // versao diferente passa no parse (a sessao confere `v` e marca como incompativel)
+        assert.equal(parseHello({ ...base, v: 2 })?.v, 2);
+    });
+
+    test("nosso hello com token; mensagem da acao identity", () => {
+        assert.deepEqual(buildHello(USER, "ana", "a.b.c"), { ...base, idToken: "a.b.c" });
+        assert.equal(isIdentityMessage({ idToken: "a.b.c" }), true);
+        for (const data of [null, {}, { idToken: 1 }, { idToken: "" }, { idToken: "x".repeat(MAX_ID_TOKEN_CHARS + 1) }, []]) {
+            assert.equal(isIdentityMessage(data), false);
+        }
+    });
+});
+
+// #endregion

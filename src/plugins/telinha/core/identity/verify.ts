@@ -35,7 +35,9 @@ export type IdentityFailure =
     /** nao foi possivel ler o fingerprint DTLS da conexao */
     | "no-fingerprint"
     /** token valido, mas amarrado a OUTRO certificado: copiado/reaproveitado */
-    | "fingerprint-mismatch";
+    | "fingerprint-mismatch"
+    /** a verificacao nao terminou a tempo (rede/JWKS lentos): nao provou, mas tambem nao e falso */
+    | "timeout";
 
 export type PeerIdentityResult =
     | { ok: true; userId: string; expiresAt: number; issuedAt: number; }
@@ -128,6 +130,7 @@ export function identityVerdict(result: PeerIdentityResult): IdentityVerdict {
         case "not-yet-valid":
         case "no-fingerprint":
         case "unknown-key":
+        case "timeout":
             return "unverified";
         default:
             return "invalid";

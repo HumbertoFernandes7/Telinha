@@ -37,9 +37,20 @@
 //                                   "duplicate" (outra conexao na sala diz ter o mesmo discordUserId).
 //                                   O espectador para de esperar e mostra o motivo.
 //    So e enviado a peers admitidos (quem esta fora do canal de voz continua sem resposta).
-//    Compatibilidade: isWatchMessage so aceita "start"/"stop", entao versoes antigas (e o amigo
-//    virtual em tools/telinha-peer/, que ainda nao trata a resposta) ignoram essas mensagens;
-//    o lado novo ignora "reason" desconhecido tratando como "declined".
+//    Compatibilidade: isWatchMessage so aceita "start"/"stop", entao versoes antigas ignoram essas
+//    mensagens (o amigo virtual em tools/telinha-peer/ ja trata pending/denied); o lado novo ignora
+//    "reason" desconhecido tratando como "declined".
+// 6. Prova de identidade do Discord (opcional, adicionada sem mudar PROTOCOL_VERSION; docs/identity.md):
+//    - o hello pode trazer `idToken`: id_token OIDC do Discord (JWT RS256, escopo openid) cujo `nonce`
+//      amarra o token ao certificado DTLS persistente de quem o envia (rtcConfig.certificates);
+//    - acao ACTION_IDENTITY ("identity") { idToken }: token novo/renovado durante a sala, enviado uma vez
+//      a cada peer compativel (quem autoriza no meio da call nao precisa reconectar);
+//    - quem recebe confere assinatura (JWKS do Discord), aud = nosso client id, sub = discordUserId
+//      anunciado e nonce = hash do fingerprint DTLS que o peer usou NESTA conexao, so depois do DTLS
+//      conectado. Peer sem token = "nao verificado"; prova falsa = ignorado (nunca admitido).
+//    Compatibilidade: versoes sem a prova (v0.1.0, amigo virtual) ignoram o campo; mensagens da acao
+//    "identity" para quem nao a registrou expiram sozinhas no Trystero (por isso sao raras: uma por
+//    token novo por peer). Hellos sem `idToken` continuam validos.
 // ============================================================================
 
 /** Versao do protocolo; vai no handshake (`v`) e na presenca (`v`). */
@@ -75,6 +86,7 @@ export const ICE_SERVERS: RTCIceServer[] = [
 /** Nomes das acoes do Trystero (maximo 32 bytes cada). */
 export const ACTION_PRESENCE = "presence";
 export const ACTION_WATCH = "watch";
+export const ACTION_IDENTITY = "identity";
 
 /** Marcador da mensagem de handshake (onPeerHandshake). */
 export const HELLO_TYPE = "telinha-hello";
@@ -91,12 +103,22 @@ export const H264_PROBE = {
     video: { contentType: "video/h264", width: 1920, height: 1080, bitrate: 8e6, framerate: 60 }
 } as const;
 
+/** Maior id_token aceito da rede (um do Discord tem ~1 KB); = MAX_ID_TOKEN_LENGTH em core/identity/config.ts. */
+export const MAX_ID_TOKEN_CHARS = 8192;
+
 /** Handshake (primeira e unica mensagem de cada lado no onPeerHandshake). */
 export type HelloMessage = {
     type: typeof HELLO_TYPE;
     v: number;
     discordUserId: string;
     username: string;
+    /** prova de identidade do Discord (passo 6); ausente em quem nao autorizou o Telinha e na v0.1.0 */
+    idToken?: string;
+};
+
+/** Acao "identity": id_token novo/renovado durante a sala (passo 6). */
+export type IdentityMessage = {
+    idToken: string;
 };
 
 export type PresenceStream = {
@@ -154,6 +176,34 @@ export function isHelloMessage(data: unknown): data is HelloMessage {
         && typeof data.v === "number"
         && typeof data.discordUserId === "string" && SNOWFLAKE_RE.test(data.discordUserId)
         && typeof data.username === "string";
+}
+
+const isIdTokenField = (t: unknown): t is string => typeof t === "string" && t.length > 0 && t.length <= MAX_ID_TOKEN_CHARS;
+
+/**
+ * Hello recebido no handshake, so com os campos conhecidos (o peer remoto nao e confiavel): nome truncado e
+ * `idToken` so se for texto de tamanho razoavel (senao fica de fora: "nao verificado"). null se invalido.
+ * A versao (`v`) e conferida por quem chama. Nunca lanca.
+ */
+export function parseHello(data: unknown): HelloMessage | null {
+    if (!isHelloMessage(data)) return null;
+    const { idToken } = data as Record<string, unknown>;
+    return {
+        type: HELLO_TYPE,
+        v: data.v,
+        discordUserId: data.discordUserId,
+        username: truncateName(data.username),
+        ...(isIdTokenField(idToken) ? { idToken } : {})
+    };
+}
+
+/** O nosso hello. Sem token (nao autorizou / recurso desligado) e exatamente o hello da v0.1.0. */
+export function buildHello(discordUserId: string, username: string, idToken?: string | null): HelloMessage {
+    return { type: HELLO_TYPE, v: PROTOCOL_VERSION, discordUserId, username, ...(idToken ? { idToken } : {}) };
+}
+
+export function isIdentityMessage(data: unknown): data is IdentityMessage {
+    return isObject(data) && isIdTokenField(data.idToken);
 }
 
 function isPresenceStream(data: unknown): data is PresenceStream {
