@@ -8,7 +8,8 @@
 //
 // Lado local:  prepareIdentity() antes do joinRoom (certificado fixo + token guardado),
 //              getLocalIdToken({ fingerprint }) para o hello, authorizeIdentity() no botao "Autorizar o
-//              Telinha no Discord", renewIdentity() ao entrar numa sala quando o token esta para vencer.
+//              Telinha no Discord", renewIdentity() ao entrar numa sala quando o token ja esta velho (a
+//              prova vale ate MAX_TOKEN_AGE_MS depois do `exp`; ver docs/identity.md).
 // Lado remoto: verifyRemoteIdentity({ pc, idToken, claimedUserId }) no onPeerJoin / acao "identity".
 //
 // Sem Client ID (isIdentityConfigured() false) nada disso faz efeito: estado "disabled", sem certificado
@@ -24,10 +25,11 @@ import { UserStore } from "@webpack/common";
 
 import { AuthorizationCancelled, openAuthorizeModal } from "./authorize";
 import { getLocalCertificate, type LocalCertificate } from "./certificate";
-import { DISCORD_CLIENT_ID, isIdentityConfigured, OAUTH_REDIRECT_URI, OAUTH_SCOPES, tokenNeedsRenewal } from "./config";
+import { DISCORD_CLIENT_ID, isIdentityConfigured, OAUTH_REDIRECT_URI, OAUTH_SCOPES, tokenAcceptedUntil, tokenNeedsRenewal } from "./config";
 import { randomUrlSafe } from "./encoding";
 import { nonceForFingerprint } from "./fingerprint";
 import { JwksCache, type StoredJwks } from "./jwks";
+import { decodeJwt } from "./jwt";
 import { buildCodeExchangeBody, buildRefreshBody, createPkcePair, parseAuthorizeLocation, requestToken, type TokenResponse } from "./oauth";
 import { getRemoteDtlsFingerprint } from "./remoteFingerprint";
 import { type IdentityVerdict, identityVerdict, type PeerIdentityResult, verifyPeerIdentity } from "./verify";
@@ -38,12 +40,13 @@ export type { IdentityFailure, IdentityVerdict, PeerIdentityResult } from "./ver
 const TOKEN_STORE_KEY = "telinha-identity-tokens-v1";
 const JWKS_STORE_KEY = "telinha-identity-jwks-v1";
 /** renovacao com modal (prompt "none") no maximo 1x neste intervalo: cancelar nao reabre a cada sala */
-const INTERACTIVE_RENEW_INTERVAL_MS = 6 * 60 * 60_000;
+const INTERACTIVE_RENEW_INTERVAL_MS = 24 * 60 * 60_000;
 /** refresh_token recusado: nao tenta de novo a cada sala antes disto */
 const REFRESH_RETRY_MS = 30 * 60_000;
 
 interface StoredIdentity {
     idToken: string;
+    /** `exp` do id_token (ms); o token ainda vale ate tokenAcceptedUntil(expiresAt) */
     expiresAt: number;
     /** fingerprint do certificado ao qual o token esta amarrado */
     fingerprint: string;
@@ -60,10 +63,11 @@ export type LocalIdentityState =
     | { status: "loading"; }
     /** nunca autorizou nesta conta/PC (ou desvinculou) */
     | { status: "unauthorized"; }
-    /** ja autorizou, mas o token venceu (ou o certificado mudou): renova sozinho ao entrar numa call */
+    /** ja autorizou, mas o token passou da carencia (ou o certificado mudou): renova sozinho ao entrar numa call */
     | { status: "expired"; }
     | { status: "authorizing"; }
-    | { status: "ready"; userId: string; expiresAt: number; }
+    /** `issuedAt` = quando o Discord emitiu o token; `expiresAt` = ate quando ele e aceito (exp + carencia) */
+    | { status: "ready"; userId: string; issuedAt: number; expiresAt: number; }
     | { status: "error"; error: string; };
 
 export type LocalIdentityStatus = LocalIdentityState["status"];
@@ -104,6 +108,15 @@ async function loadStored(userId: string): Promise<StoredIdentity | null> {
     }
 }
 
+/** `iat` do id_token guardado (ms); 0 se ilegivel (entao tokenNeedsRenewal manda renovar). */
+function issuedAtOf(value: StoredIdentity): number {
+    const iat = decodeJwt(value.idToken)?.payload.iat;
+    return typeof iat === "number" && Number.isFinite(iat) ? iat * 1000 : 0;
+}
+
+const readyState = (userId: string, value: StoredIdentity): LocalIdentityState =>
+    ({ status: "ready", userId, issuedAt: issuedAtOf(value), expiresAt: tokenAcceptedUntil(value.expiresAt) });
+
 async function saveStored(userId: string, value: StoredIdentity | null) {
     await DataStore.update<TokenStore>(TOKEN_STORE_KEY, all => {
         const next = { ...all };
@@ -125,12 +138,13 @@ export function subscribeLocalIdentity(listener: (s: LocalIdentityState) => void
 }
 
 /**
- * id_token para o hello / acao "identity"; null se nao ha um valido para a conta atual. Com `fingerprint`
+ * id_token para o hello / acao "identity"; null se nao ha um aceitavel (dentro da carencia pos-`exp`) para a
+ * conta atual: um token alem dela nunca e enviado. Com `fingerprint`
  * (o certificado que a sala atual usa), so devolve o token amarrado a ele: um token de outro certificado
  * faria os peers verem "identidade falsa".
  */
 export function getLocalIdToken({ fingerprint, now = Date.now() }: { fingerprint?: string | null; now?: number; } = {}): string | null {
-    if (!token || state.status !== "ready" || state.userId !== myId() || token.expiresAt <= now) return null;
+    if (!token || state.status !== "ready" || state.userId !== myId() || tokenAcceptedUntil(token.expiresAt) <= now) return null;
     if (fingerprint !== undefined && token.fingerprint !== fingerprint) return null;
     return token.idToken;
 }
@@ -166,9 +180,9 @@ export async function prepareIdentity(): Promise<PreparedIdentity> {
     const userId = myId();
     const stored = userId ? await loadStored(userId) : null;
     const now = Date.now();
-    if (stored && stored.fingerprint === cert.fingerprint && stored.expiresAt > now) {
+    if (stored && stored.fingerprint === cert.fingerprint && tokenAcceptedUntil(stored.expiresAt) > now) {
         token = stored;
-        setState({ status: "ready", userId, expiresAt: stored.expiresAt });
+        setState(readyState(userId, stored));
     } else if (state.status !== "authorizing") {
         token = null;
         setState(stored ? { status: "expired" } : { status: "unauthorized" });
@@ -201,7 +215,7 @@ async function acceptOwnTokens(tokens: TokenResponse, cert: LocalCertificate, us
     };
     await saveStored(userId, value);
     token = value;
-    setState({ status: "ready", userId, expiresAt: result.expiresAt });
+    setState(readyState(userId, value));
     const minutes = Math.round((result.expiresAt - Date.now()) / 60_000);
     log.info(`Identidade do Discord pronta (válida por ~${minutes} min)`);
 }
@@ -219,12 +233,15 @@ export function authorizeIdentity({ silent = false }: { silent?: boolean; } = {}
     return inflightAuth ??= (async () => {
         const previous = state;
         const userId = myId();
+        // renovacao silenciosa com o token antigo ainda aceito: segue "pronta" (o hello continua levando o token
+        // e uma falha do Discord nao derruba uma prova ainda boa)
+        const keepReady = silent && previous.status === "ready" && previous.userId === userId && previous.expiresAt > Date.now();
         try {
             if (!userId) throw new Error("usuário do Discord desconhecido");
             const cert = await getLocalCertificate();
             const [pkce, nonce] = await Promise.all([createPkcePair(), nonceForFingerprint(cert.fingerprint)]);
             const oauthState = randomUrlSafe(16);
-            setState({ status: "authorizing" });
+            if (!keepReady) setState({ status: "authorizing" });
 
             const location = await openAuthorizeModal({
                 clientId: DISCORD_CLIENT_ID,
@@ -252,7 +269,7 @@ export function authorizeIdentity({ silent = false }: { silent?: boolean; } = {}
             }
             log.warn("Identidade: falha ao autorizar o Telinha: " + errorText(e));
             lastError = { at: Date.now(), text: "autorizar: " + errorText(e) };
-            setState({ status: "error", error: errorText(e) });
+            setState(keepReady ? previous : { status: "error", error: errorText(e) });
             return false;
         } finally {
             inflightAuth = null;
@@ -261,13 +278,13 @@ export function authorizeIdentity({ silent = false }: { silent?: boolean; } = {}
 }
 
 /**
- * Renova o token proprio se esta para vencer: primeiro pelo refresh_token (sem UI); se o Discord nao
+ * Renova o token proprio se ja esta velho (tokenNeedsRenewal): primeiro pelo refresh_token (sem UI); se o Discord nao
  * devolver um id_token amarrado ao nosso certificado e `interactive`, reabre o modal com prompt "none".
  */
 export async function renewIdentity({ interactive = false }: { interactive?: boolean; } = {}): Promise<boolean> {
     if (!isIdentityConfigured()) return false;
     const now = Date.now();
-    if (state.status === "ready" && token && !tokenNeedsRenewal(token.expiresAt, now)) return true;
+    if (state.status === "ready" && token && !tokenNeedsRenewal(issuedAtOf(token), token.expiresAt, now)) return true;
 
     const userId = myId();
     const stored = userId ? await loadStored(userId) : null;
@@ -321,7 +338,7 @@ export function localIdentityDiagnostics(): string {
     if (!isIdentityConfigured()) return "identidade: desligada (sem Client ID)";
     const time = (at: number) => new Date(at).toISOString().slice(0, 16).replace("T", " ");
     const s = state;
-    const local = s.status === "ready" ? `pronta, válida até ${time(s.expiresAt)} UTC`
+    const local = s.status === "ready" ? `pronta (prova renovada em ${time(s.issuedAt)}, aceita até ${time(s.expiresAt)} UTC)`
         : s.status === "error" ? `erro (${s.error})`
             : LOCAL_STATUS_TEXT[s.status];
     return `identidade: configurada (app ${DISCORD_CLIENT_ID}); local: ${local}; renovação sem janela: ${token?.refreshToken ? "sim" : "não"}`

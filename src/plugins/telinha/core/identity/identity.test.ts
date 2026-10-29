@@ -13,7 +13,7 @@ import { describe, test } from "node:test";
 
 import { buildHello, HELLO_TYPE, isIdentityMessage, MAX_ID_TOKEN_CHARS, parseHello, PROTOCOL_VERSION } from "@plugins/telinha/protocol";
 
-import { certificateNeedsRotation, isIdentityConfigured, MAX_ID_TOKEN_LENGTH, tokenNeedsRenewal } from "./config";
+import { certificateNeedsRotation, CLOCK_SKEW_MS, isIdentityConfigured, MAX_ID_TOKEN_LENGTH, MAX_TOKEN_AGE_MS, tokenAcceptedUntil, tokenNeedsRenewal } from "./config";
 import { base64UrlDecode, base64UrlEncode, utf8 } from "./encoding";
 import { asNormalizedFingerprint, nonceForFingerprint, normalizeFingerprint, parseSdpFingerprints, singleSdpFingerprint } from "./fingerprint";
 import { JwksCache } from "./jwks";
@@ -108,11 +108,59 @@ describe("verifyPeerIdentity", () => {
         await expectFailure(await token(), "wrong-subject", { claimedUserId: OTHER_USER });
     });
 
-    test("vencido -> expired (unverified); dentro da tolerancia de relogio passa", async () => {
-        const expired = await token({ exp: NOW_S - 600 });
-        await expectFailure(expired, "expired");
-        assert.equal(identityVerdict(await verify(expired)), "unverified");
-        assert.equal((await verify(await token({ exp: NOW_S - 120 }))).ok, true);
+    describe("carencia depois do exp (token amarrado ao certificado)", () => {
+        const HOUR_S = 3600;
+        const DAY_S = 86_400;
+        /** token que venceu `secondsPastExp` segundos atras (emitido 1 h antes do exp, como o do Discord) */
+        const expiredFor = (secondsPastExp: number, over: Record<string, unknown> = {}) =>
+            token({ exp: NOW_S - secondsPastExp, iat: NOW_S - secondsPastExp - HOUR_S, ...over });
+
+        test("a carencia e de 7 dias", () => {
+            assert.equal(MAX_TOKEN_AGE_MS, 7 * DAY_S * 1000);
+        });
+
+        test("30 min depois do exp -> ok (verified)", async () => {
+            const res = await verify(await expiredFor(30 * 60));
+            assert.deepEqual(res, { ok: true, userId: USER, expiresAt: (NOW_S - 1800) * 1000, issuedAt: (NOW_S - 1800 - HOUR_S) * 1000 });
+            assert.equal(identityVerdict(res), "verified");
+        });
+
+        test("6 dias depois do exp -> ok (verified)", async () => {
+            const res = await verify(await expiredFor(6 * DAY_S));
+            assert.equal(res.ok, true);
+            assert.equal(identityVerdict(res), "verified");
+        });
+
+        test("8 dias depois do exp -> expired (unverified)", async () => {
+            const old = await expiredFor(8 * DAY_S);
+            await expectFailure(old, "expired");
+            assert.equal(identityVerdict(await verify(old)), "unverified");
+        });
+
+        test("limite: 7 dias + tolerancia de relogio", async () => {
+            const skewS = CLOCK_SKEW_MS / 1000;
+            assert.equal((await verify(await expiredFor(7 * DAY_S + skewS - 1))).ok, true);
+            await expectFailure(await expiredFor(7 * DAY_S + skewS), "expired");
+        });
+
+        test("copiado e 2 dias depois do exp -> fingerprint-mismatch (invalid), nao so vencido", async () => {
+            const res = await verify(await expiredFor(2 * DAY_S), { remoteDtlsFingerprint: FP_B });
+            assert.deepEqual(res, { ok: false, reason: "fingerprint-mismatch" });
+            assert.equal(identityVerdict(res), "invalid");
+        });
+
+        test("assinatura errada e depois do exp -> bad-signature (invalid)", async () => {
+            const forged = await token({ exp: NOW_S - 2 * DAY_S, iat: NOW_S - 2 * DAY_S - HOUR_S }, { alg: "RS256", kid: "k1" }, K2.privateKey);
+            const res = await verify(forged);
+            assert.deepEqual(res, { ok: false, reason: "bad-signature" });
+            assert.equal(identityVerdict(res), "invalid");
+        });
+
+        test("na carencia, outra pessoa ou outra conta continuam falhando", async () => {
+            await expectFailure(await expiredFor(2 * DAY_S, { sub: OTHER_USER }), "wrong-subject");
+            await expectFailure(await expiredFor(2 * DAY_S, { aud: "222222222222222222" }), "wrong-audience");
+            await expectFailure(await expiredFor(2 * DAY_S, { iss: "https://evil.example" }), "wrong-issuer");
+        });
     });
 
     test("iat/nbf no futuro alem da tolerancia -> not-yet-valid", async () => {
@@ -354,12 +402,33 @@ describe("encoding e politicas", () => {
         assert.equal(base64UrlDecode("abcde"), null);
     });
 
-    test("rotacao do certificado e renovacao do token", () => {
+    test("rotacao do certificado", () => {
         const day = 86_400_000;
         assert.equal(certificateNeedsRotation(NOW + 30 * day, NOW), false);
         assert.equal(certificateNeedsRotation(NOW + 13 * day, NOW), true);
-        assert.equal(tokenNeedsRenewal(NOW + 3_600_000, NOW), false);
-        assert.equal(tokenNeedsRenewal(NOW + 60_000, NOW), true);
+    });
+
+    test("fim da aceitacao do token: exp + 7 dias", () => {
+        assert.equal(tokenAcceptedUntil(NOW), NOW + 7 * 86_400_000);
+    });
+
+    test("renovacao do token: velho (>24 h desde a emissao) ou perto do fim da carencia", () => {
+        const hour = 3_600_000;
+        const day = 24 * hour;
+        // emitido agora, valido por 1 h: nao precisa
+        assert.equal(tokenNeedsRenewal(NOW, NOW + hour, NOW), false);
+        // ja passou do exp (1 h depois) mas esta na carencia e foi emitido ha 2 h: nao precisa
+        assert.equal(tokenNeedsRenewal(NOW - 2 * hour, NOW - hour, NOW), false);
+        // 23 h de idade: ainda nao; 25 h: sim
+        assert.equal(tokenNeedsRenewal(NOW - 23 * hour, NOW - 22 * hour, NOW), false);
+        assert.equal(tokenNeedsRenewal(NOW - 25 * hour, NOW - 24 * hour, NOW), true);
+        // a clausula do fim da carencia sozinha (token recente, mas com a carencia acabando em menos de 1 dia)
+        assert.equal(tokenNeedsRenewal(NOW, NOW - 5 * day, NOW), false);
+        assert.equal(tokenNeedsRenewal(NOW, NOW - 6.5 * day, NOW), true);
+        // dados ilegiveis: renova
+        assert.equal(tokenNeedsRenewal(NaN, NOW + hour, NOW), true);
+        assert.equal(tokenNeedsRenewal(NOW, NaN, NOW), true);
+        assert.equal(tokenNeedsRenewal(0, NOW + hour, NOW), true);
     });
 });
 

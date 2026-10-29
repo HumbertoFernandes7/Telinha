@@ -25,6 +25,18 @@ nonce = base64url( SHA-256( "telinha-dtls-v1|sha-256:" + hex_minúsculo(SHA-256(
 Sem janela de tempo no nonce: o `exp` do token já limita a validade, e uma janela só obrigaria a
 reautorizar mais vezes.
 
+### Carência depois do `exp` (7 dias)
+
+O id_token real do Discord dura **~60 min** (medido: "Identidade do Discord pronta (válida por ~60 min)"), e
+pela OIDC Core 12.2 um id_token renovado pelo `refresh_token` *não deveria* trazer o `nonce`, ou seja, a
+renovação sem janela pode não gerar uma prova amarrada; sobra o modal `prompt=none` (no máximo 1× a cada 24 h).
+Como o binding ao certificado é o que impede o replay (um token copiado falha em qualquer outro certificado
+com `fingerprint-mismatch`, antes de qualquer checagem de tempo), um token com assinatura, `iss`, `aud`, `sub` e
+`nonce`/fingerprint corretos continua valendo como prova até **`exp` + `MAX_TOKEN_AGE_MS` (7 dias)**, ±5 min de
+relógio; depois disso é `expired` (não verificado). Risco residual: uma conta que perdeu o acesso (revogou o
+app, trocou a senha) continua aparecendo como verificada por até 7 dias nesse PC, porque o id_token é um JWT sem
+estado e a verificação é offline.
+
 ## Respostas (com evidências)
 
 ### 1. Cliente público + PKCE + `nonce` pelo `OAuth2AuthorizeModal`? — **Sim**
@@ -56,12 +68,12 @@ reautorizar mais vezes.
   `http://127.0.0.1/telinha/callback` (mesmo padrão que a doc oficial do Social SDK recomenda para
   desktop: `http://127.0.0.1/callback`).
 - **Validade (`exp`) do id_token: não documentada** (nem na doc oficial nem na userdoccers; o
-  access token vale ~7 dias). Não dá para medir sem o app. O desenho não depende disso: o peer é
-  verificado **na conexão** e continua verificado enquanto a conexão durar (o binding DTLS garante
-  que do outro lado continua a mesma chave). O primeiro token real loga "válida por ~N min".
+  access token vale ~7 dias). **Medido com o app real: ~60 min.** O peer é verificado **na conexão** e
+  continua verificado enquanto a conexão durar (o binding DTLS garante que do outro lado continua a mesma
+  chave); e um token amarrado ao certificado ainda vale por 7 dias depois do `exp` (ver "Carência" acima).
 - **Consentimento**: `prompt=consent` (padrão) mostra a tela toda vez; `prompt=none` só na primeira
   vez (depois o modal pisca e fecha sozinho). O usuário pode revogar em Configurações → Apps
-  autorizados; isso não invalida um id_token já emitido (JWT sem estado) até o `exp`.
+  autorizados; isso não invalida um id_token já emitido (JWT sem estado), que vale até o `exp` + a carência.
 
 ### 2. Verificar RS256 no renderer com WebCrypto + JWKS — **Sim**
 
@@ -73,9 +85,9 @@ reautorizar mais vezes.
   1×/min; sem rede usa o último JWKS por até 30 dias; persiste no DataStore.
 - Claims conferidas (`verify.ts`): `alg === "RS256"` e sem `crit` (barra `none`/HS256); assinatura;
   `iss === "https://discord.com"`; `aud === client id` (lista: precisa de `azp` = client id);
-  `sub` = snowflake = id anunciado; `nonce` = hash do fingerprint remoto; `exp` (±5 min); `iat`/`nbf`
-  não no futuro (±5 min). As claims de **binding** (iss/aud/sub/nonce) vêm antes das de tempo: um
-  token copiado e vencido continua sendo "inválido", não só "não verificado".
+  `sub` = snowflake = id anunciado; `nonce` = hash do fingerprint remoto; `exp` + 7 dias de carência
+  (±5 min); `iat`/`nbf` não no futuro (±5 min). As claims de **binding** (iss/aud/sub/nonce) vêm antes
+  das de tempo: um token copiado e vencido continua sendo "inválido", não só "não verificado".
 
 ### 3. Binding DTLS com o Trystero 0.26 — **Sim**
 
@@ -114,7 +126,7 @@ Não impede:
   de membership de voz (`reevaluateAdmission`), que segue valendo junto com a identidade.
 - **Quem está legitimamente na call** gravando ou retransmitindo a sua tela.
 - **Cliente/PC comprometido**: malware que lê o IndexedDB do Discord leva certificado + token e se
-  passa pela vítima até o `exp`; quem controla a conta do Discord também.
+  passa pela vítima até o fim da carência (`exp` + 7 dias); quem controla a conta do Discord também.
 - O próprio Discord (é a autoridade que assina).
 - Privacidade: o id_token só tem o id (escopo `openid`), que o hello já anuncia; o fingerprint
   persistente é um identificador estável para quem conecta com você (que já vê o seu id).
@@ -126,9 +138,11 @@ Não impede:
   "Identidade no Discord" com **Autorizar o Telinha no Discord** / **Desvincular**. O fluxo é o modal do
   próprio Discord ("Telinha quer acessar sua conta: saber quem você é"). O aviso só aparece com Client ID e
   enquanto a conta não autorizou (ou a última tentativa falhou); autorização vencida não gera aviso.
-- **Renovação**: ao entrar numa sala, sem UI pelo `refresh_token` (falhou: só tenta de novo depois de 30 min;
-  o refresh_token novo que o Discord devolve é guardado mesmo se o id_token não servir); senão o modal com
-  `prompt=none` no máximo 1× a cada 6 h. Nunca no meio da call; nunca para quem nunca autorizou.
+- **Renovação**: ao entrar numa sala, quando o token tem mais de ~24 h desde a emissão (ou falta menos de 1 dia
+  para o fim da carência): sem UI pelo `refresh_token` (falhou: só tenta de novo depois de 30 min; o
+  refresh_token novo que o Discord devolve é guardado mesmo se o id_token não servir); senão o modal com
+  `prompt=none` no máximo 1× a cada 24 h. Nunca no meio da call; nunca para quem nunca autorizou. Enquanto
+  a renovação não dá certo, o token antigo continua sendo enviado até o fim da carência; passado esse fim, nunca.
 - **Selo por peer**: "✔ verificado", "não verificado" (sem token, versão antiga, vencido) ou "✖ identidade
   falsa", em "Quem está transmitindo", "Quem está assistindo" (assistindo, pedidos, suspeitos), no pedido de
   aprovação da barra e na dica da etiqueta TELINHA.
@@ -239,8 +253,9 @@ Dois PCs (ou duas contas) com este build, no mesmo canal de voz. Ter "Copiar dia
    como na v0.1.0. Religar.
 6. **Autorizar no meio da call**: B autoriza com os dois na call → em A, B passa de "não verificado" para
    "✔ verificado" sem reconectar (ação "identity").
-7. **Renovação**: esperar o token vencer (o `exp` do item 1) e entrar numa call → o selo volta a
-   "verificado" sem clicar em nada: ou pela renovação sem janela, ou pelo modal que pisca e fecha (`prompt=none`). Anotar
+7. **Renovação**: com o token emitido há mais de 24 h, entrar numa call → o selo continua "verificado" e o
+   token é renovado sem clicar em nada (o "Copiar diagnóstico" mostra a nova hora em "prova renovada em"): ou
+   pela renovação sem janela, ou pelo modal que pisca e fecha (`prompt=none`). Anotar
    se o `refresh_token` devolve id_token **com** o mesmo `nonce` (se não, o log mostra
    "fingerprint-mismatch"/"sem id_token" na renovação sem janela).
 8. **Mesmo id, verificado + não verificado**: precisa de um cliente modificado ou do amigo virtual anunciando o
@@ -257,6 +272,6 @@ Dois PCs (ou duas contas) com este build, no mesmo canal de voz. Ter "Copiar dia
 
 ## A medir com o app real
 
-- `exp` do id_token e se o `refresh_token` devolve um id_token com o mesmo `nonce` (itens 1 e 7 acima).
+- Se o `refresh_token` devolve um id_token com o mesmo `nonce` (item 7 acima); o `exp` já foi medido: ~60 min.
 - Se o Discord exige `identify` junto com `openid` (o build pede só `openid`).
 - Se `prompt=none` realmente fecha sozinho no modal do cliente desktop.

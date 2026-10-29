@@ -11,8 +11,11 @@
 // cliente pediu o `nonce` N". O Telinha sempre pede N = hash do fingerprint do proprio certificado
 // DTLS. Quem verifica compara N com o fingerprint do certificado que o peer USOU na conexao: copiar
 // o token de outra pessoa nao adianta sem a chave privada desse certificado.
+//
+// Por isso um token amarrado ao certificado continua valendo como prova ate MAX_TOKEN_AGE_MS depois do
+// `exp` (o id_token real dura ~60 min e o nonce nao sobrevive ao refresh): ver docs/identity.md.
 
-import { CLOCK_SKEW_MS, DISCORD_CLIENT_ID, DISCORD_ISSUER, isIdentityConfigured, isSnowflake, MAX_ID_TOKEN_LENGTH } from "./config";
+import { CLOCK_SKEW_MS, DISCORD_CLIENT_ID, DISCORD_ISSUER, isIdentityConfigured, isSnowflake, MAX_ID_TOKEN_LENGTH, MAX_TOKEN_AGE_MS } from "./config";
 import { asNormalizedFingerprint, nonceForFingerprint } from "./fingerprint";
 import { decodeJwt, type Jwks, selectRsaKeys, verifyRs256 } from "./jwt";
 
@@ -28,6 +31,7 @@ export type IdentityFailure =
     | "bad-signature"
     | "wrong-issuer"
     | "wrong-audience"
+    /** passou do `exp` + a carencia (MAX_TOKEN_AGE_MS) */
     | "expired"
     | "not-yet-valid"
     /** token valido, mas de OUTRA pessoa (sub diferente do id anunciado) */
@@ -107,14 +111,16 @@ export async function verifyPeerIdentity(input: VerifyPeerIdentityInput): Promis
     if (!signed) return fail("bad-signature");
 
     // a partir daqui as claims sao do Discord. Primeiro as que amarram o token a pessoa e a esta
-    // conexao (falha = impostor, mesmo que o token tambem esteja vencido); depois o tempo.
+    // conexao (falha = impostor, mesmo que o token tambem esteja vencido); depois o tempo: passado o `exp`, o
+    // token amarrado a este certificado ainda vale por MAX_TOKEN_AGE_MS (so um replay num certificado alheio
+    // seria perigoso, e esse ja falhou no nonce acima).
     const { iss, aud, azp, exp, iat, nbf, sub, nonce } = jwt.payload;
     if (iss !== issuer) return fail("wrong-issuer");
     if (!audienceMatches(aud, azp, clientId)) return fail("wrong-audience");
     if (!isSnowflake(sub) || sub !== claimedUserId) return fail("wrong-subject");
     if (typeof nonce !== "string" || nonce !== await nonceForFingerprint(fingerprint)) return fail("fingerprint-mismatch");
     if (!isNum(exp) || !isNum(iat)) return fail("malformed");
-    if (exp * 1000 + clockSkewMs <= now) return fail("expired");
+    if (exp * 1000 + MAX_TOKEN_AGE_MS + clockSkewMs <= now) return fail("expired");
     if (iat * 1000 - clockSkewMs > now || (isNum(nbf) && nbf * 1000 - clockSkewMs > now)) return fail("not-yet-valid");
 
     return { ok: true, userId: sub, expiresAt: exp * 1000, issuedAt: iat * 1000 };

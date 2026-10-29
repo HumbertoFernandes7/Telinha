@@ -35,10 +35,21 @@ export const CLOCK_SKEW_MS = 5 * 60_000;
 /** Um id_token do Discord tem ~1 KB; isto so barra lixo enorme vindo da rede. */
 export const MAX_ID_TOKEN_LENGTH = 8192;
 
-/** Renova o token proprio quando faltar menos que isto para expirar. */
-export const TOKEN_RENEW_BEFORE_MS = 30 * 60_000;
-
 const DAY_MS = 24 * 60 * 60_000;
+
+/**
+ * Carencia depois do `exp`: um token que passa em assinatura, iss, aud, sub e nonce/fingerprint continua
+ * valendo como prova ate `exp + MAX_TOKEN_AGE_MS`. O binding ao certificado e o que impede o replay (um token
+ * copiado falha em qualquer outro certificado), e o id_token real do Discord dura so ~60 min. Passou disso:
+ * "expired" (nao verificado).
+ */
+export const MAX_TOKEN_AGE_MS = 7 * DAY_MS;
+
+/** Renova o token proprio quando ja tem mais que isto desde a emissao (`iat`). */
+export const TOKEN_RENEW_AFTER_ISSUE_MS = DAY_MS;
+
+/** ...ou quando faltar menos que isto para o fim da carencia. */
+export const TOKEN_RENEW_BEFORE_GRACE_END_MS = DAY_MS;
 
 /** Validade pedida para o certificado DTLS persistente (o Chromium limita a ~1 ano). */
 export const CERT_LIFETIME_MS = 180 * DAY_MS;
@@ -61,6 +72,13 @@ export function certificateNeedsRotation(expiresAt: number, now: number): boolea
     return !Number.isFinite(expiresAt) || expiresAt - now < CERT_ROTATE_BEFORE_MS;
 }
 
-export function tokenNeedsRenewal(expiresAt: number, now: number): boolean {
-    return !Number.isFinite(expiresAt) || expiresAt - now < TOKEN_RENEW_BEFORE_MS;
+/** Ate quando um token com este `exp` (ms) e aceito/enviado: o fim da carencia. */
+export function tokenAcceptedUntil(expiresAt: number): number {
+    return expiresAt + MAX_TOKEN_AGE_MS;
+}
+
+/** Hora de renovar: emitido ha mais de ~24 h, ou a menos de 1 dia do fim da carencia. */
+export function tokenNeedsRenewal(issuedAt: number, expiresAt: number, now: number): boolean {
+    if (!Number.isFinite(issuedAt) || !Number.isFinite(expiresAt)) return true;
+    return now - issuedAt > TOKEN_RENEW_AFTER_ISSUE_MS || tokenAcceptedUntil(expiresAt) - now < TOKEN_RENEW_BEFORE_GRACE_END_MS;
 }
