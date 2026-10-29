@@ -230,7 +230,8 @@ export function authorizeIdentity({ silent = false }: { silent?: boolean; } = {}
         setState({ status: "disabled" });
         return Promise.resolve(false);
     }
-    return inflightAuth ??= (async () => {
+    if (inflightAuth) return inflightAuth;
+    const run = (async () => {
         const previous = state;
         const userId = myId();
         // renovacao silenciosa com o token antigo ainda aceito: segue "pronta" (o hello continua levando o token
@@ -271,10 +272,15 @@ export function authorizeIdentity({ silent = false }: { silent?: boolean; } = {}
             lastError = { at: Date.now(), text: "autorizar: " + errorText(e) };
             setState(keepReady ? previous : { status: "error", error: errorText(e) });
             return false;
-        } finally {
-            inflightAuth = null;
         }
     })();
+    inflightAuth = run;
+    // limpa so depois da atribuicao acima: sem usuario o corpo termina sem nenhum await, e um `finally` dentro dele
+    // rodaria ANTES dela (o pedido ficava "em andamento" para sempre e "Autorizar" nunca mais abria o modal)
+    void run.then(() => {
+        if (inflightAuth === run) inflightAuth = null;
+    });
+    return run;
 }
 
 /**
