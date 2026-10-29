@@ -5,7 +5,7 @@
  */
 
 import { errorText, log, logError, logWarn } from "./state";
-import type { CodecChoice, LoopbackInfo } from "./types";
+import type { CodecChoice, LoopbackInfo, ReceiverRealm } from "./types";
 
 type Codec = RTCRtpCapabilities["codecs"][number];
 
@@ -131,21 +131,38 @@ function describeCandidate(c: RTCIceCandidate) {
 }
 
 export interface LoopbackSession {
+    id: number;
+    /** Window whose JS realm created the RECEIVING RTCPeerConnection (main window or the pop-out) */
+    realm: Window;
+    realmName: ReceiverRealm;
     pcSend: RTCPeerConnection;
     pcRecv: RTCPeerConnection;
     videoSender: RTCRtpSender;
+    /** Belongs to `realm` (created by its RTCPeerConnection) */
     receivedVideoTrack: MediaStreamTrack;
     receivedAudioTrack: MediaStreamTrack | null;
     info: LoopbackInfo;
+    /** performance.now() (main window) when ICE connected */
+    connectedAt: number;
+    readonly closed: boolean;
     close(): void;
 }
 
 export interface LoopbackOptions {
+    id: number;
+    reason: string;
     maxBitrateBps: number;
     maxFramerate: number;
     codec: CodecChoice;
     startBitrateHint: boolean;
+    /**
+     * Window whose RTCPeerConnection constructor creates the receiver. Defaults to the main window.
+     * Signaling between the two realms is plain SDP/ICE data (toJSON), so nothing realm-bound crosses over.
+     */
+    recvRealm?: Window;
 }
+
+type RealmWindow = Window & typeof globalThis;
 
 function waitConnected(pc: RTCPeerConnection) {
     return new Promise<void>((resolve, reject) => {
@@ -186,7 +203,17 @@ export async function createLoopback(stream: MediaStream, opts: LoopbackOptions)
     videoTrack.contentHint = "motion";
     if (audioTrack) audioTrack.contentHint = "music";
 
+    const realm = (opts.recvRealm ?? window) as RealmWindow;
+    const realmName: ReceiverRealm = realm === window ? "janela principal" : "pop-out";
+    const RecvPeerConnection = realm.RTCPeerConnection;
+    if (typeof RecvPeerConnection !== "function") throw new Error(`RTCPeerConnection não existe no realm "${realmName}"`);
+
     const info: LoopbackInfo = {
+        id: opts.id,
+        reason: opts.reason,
+        receiverRealm: realmName,
+        codec: opts.codec,
+        startBitrateHint: opts.startBitrateHint,
         ok: false,
         error: null,
         connectMs: null,
@@ -201,24 +228,32 @@ export async function createLoopback(stream: MediaStream, opts: LoopbackOptions)
     };
 
     const pcSend = new RTCPeerConnection({ iceServers: [], bundlePolicy: "max-bundle" });
-    const pcRecv = new RTCPeerConnection({ iceServers: [], bundlePolicy: "max-bundle" });
+    const pcRecv: RTCPeerConnection = new RecvPeerConnection({ iceServers: [], bundlePolicy: "max-bundle" });
+    let closed = false;
     const close = () => {
-        pcSend.close();
-        pcRecv.close();
+        closed = true;
+        // the pop-out realm may already be gone (window closed): its PC is closed by Chromium then and close() may throw
+        try {
+            pcSend.close();
+        } catch { }
+        try {
+            pcRecv.close();
+        } catch { }
     };
 
     try {
+        // Plain init dictionaries (toJSON / {type, sdp}) so no object of one realm is handed to the other realm's PC
         pcSend.onicecandidate = e => {
             if (!e.candidate) return;
             info.iceCandidates.push("envio " + describeCandidate(e.candidate));
-            pcRecv.addIceCandidate(e.candidate).catch(err => logWarn("addIceCandidate (recepção)", errorText(err)));
+            pcRecv.addIceCandidate(e.candidate.toJSON()).catch(err => logWarn("addIceCandidate (recepção)", errorText(err)));
         };
         pcRecv.onicecandidate = e => {
             if (!e.candidate) return;
             info.iceCandidates.push("recepção " + describeCandidate(e.candidate));
-            pcSend.addIceCandidate(e.candidate).catch(err => logWarn("addIceCandidate (envio)", errorText(err)));
+            pcSend.addIceCandidate(e.candidate.toJSON()).catch(err => logWarn("addIceCandidate (envio)", errorText(err)));
         };
-        pcRecv.oniceconnectionstatechange = () => log(`Loopback: ICE ${pcRecv.iceConnectionState}`);
+        pcRecv.oniceconnectionstatechange = () => log(`Loopback #${opts.id} (${realmName}): ICE ${pcRecv.iceConnectionState}`);
 
         const received: { video: MediaStreamTrack | null; audio: MediaStreamTrack | null; } = { video: null, audio: null };
         pcRecv.ontrack = e => {
@@ -242,7 +277,7 @@ export async function createLoopback(stream: MediaStream, opts: LoopbackOptions)
 
         const t0 = performance.now();
         await pcSend.setLocalDescription(await pcSend.createOffer());
-        await pcRecv.setRemoteDescription(pcSend.localDescription!);
+        await pcRecv.setRemoteDescription({ type: "offer", sdp: pcSend.localDescription!.sdp });
         info.offeredVideoCodecs = [...(pcSend.localDescription?.sdp ?? "").matchAll(/^a=rtpmap:\d+ ([^\r\n]+)/gm)]
             .map(m => m[1])
             .filter(c => !/^(opus|red|telephone-event|CN|G722|PCMU|PCMA|ISAC|ILBC)\//i.test(c));
@@ -262,7 +297,8 @@ export async function createLoopback(stream: MediaStream, opts: LoopbackOptions)
         info.negotiatedVideoCodec = negotiatedVideoCodec(answerSdp);
 
         await waitConnected(pcRecv);
-        info.connectMs = Math.round(performance.now() - t0);
+        const connectedAt = performance.now();
+        info.connectMs = Math.round(connectedAt - t0);
 
         const videoSender = videoTx.sender;
         const params = videoSender.getParameters();
@@ -302,17 +338,24 @@ export async function createLoopback(stream: MediaStream, opts: LoopbackOptions)
         if (!received.video) throw new Error("O lado de recepção não recebeu faixa de vídeo (ontrack)");
 
         info.ok = true;
-        log(`Loopback conectado em ${info.connectMs} ms; codec negociado: ${info.negotiatedVideoCodec}; preferência: ${info.codecPreference}`);
+        log(`Loopback #${opts.id} conectado em ${info.connectMs} ms (receptor: ${realmName}; motivo: ${opts.reason}); codec negociado: ${info.negotiatedVideoCodec}; preferência: ${info.codecPreference}`);
         log(`Loopback: parâmetros do sender: ${info.senderParametersApplied}`, info.senderParameters);
         if (info.sdpMunging) log(`Loopback: SDP ajustado: ${info.sdpMunging}`);
 
         return {
+            id: opts.id,
+            realm,
+            realmName,
             pcSend,
             pcRecv,
             videoSender,
             receivedVideoTrack: received.video,
             receivedAudioTrack: received.audio,
             info,
+            connectedAt,
+            get closed() {
+                return closed;
+            },
             close
         };
     } catch (e) {

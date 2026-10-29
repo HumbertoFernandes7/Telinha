@@ -7,7 +7,7 @@
 import { PluginNative } from "@utils/types";
 import { useEffect, useReducer } from "@webpack/common";
 
-import type { AudioResolution, CaptureSourceInfo, PathAResult, PathBResult, PopoutResult, ResolutionChoice, StatsSample, StatsSummary, TestOptions } from "./types";
+import type { AudioResolution, CaptureSourceInfo, CodecProbeResult, DecodeStartup, PathAResult, PathBResult, PopoutStrategy, ResolutionChoice, StatsSample, StatsSummary, StrategyResult, TestAllResult, TestOptions } from "./types";
 
 export const LOG_PREFIX = "[PeerLive Test]";
 const MAX_LOG_LINES = 300;
@@ -37,6 +37,14 @@ export function errorText(e: unknown): string {
 
 export type Phase = "idle" | "starting" | "running" | "stopping";
 
+export interface SinkLive {
+    strategy: PopoutStrategy;
+    fps: number | null;
+    frames: number;
+    width: number;
+    height: number;
+}
+
 export interface TestState {
     phase: Phase;
     sources: CaptureSourceInfo[];
@@ -55,7 +63,17 @@ export interface TestState {
     pathA: PathAResult | null;
     pathB: PathBResult | null;
     pathBRunning: boolean;
-    popout: PopoutResult | null;
+    /** Latest strategy result (pop-out or floating panel) */
+    popout: StrategyResult | null;
+    strategyResults: StrategyResult[];
+    activeStrategy: PopoutStrategy | null;
+    sinkLive: SinkLive | null;
+    fullscreen: { ok: boolean; error: string | null; } | null;
+    decodeStartups: DecodeStartup[];
+    testAll: TestAllResult | null;
+    codecProbe: CodecProbeResult | null;
+    /** A multi-step test (all strategies / codec startup) is running; its current step */
+    longTest: { kind: "estratégias" | "codecs"; step: string; } | null;
     summary: StatsSummary | null;
     resultPath: string | null;
     resultError: string | null;
@@ -81,7 +99,8 @@ let state: TestState = {
         codec: "H264",
         durationSec: 20,
         startBitrateHint: true,
-        autoPopout: true
+        autoPopout: true,
+        popoutStrategy: "direct"
     },
     listenAudio: false,
     elapsedSec: 0,
@@ -90,6 +109,14 @@ let state: TestState = {
     pathB: null,
     pathBRunning: false,
     popout: null,
+    strategyResults: [],
+    activeStrategy: null,
+    sinkLive: null,
+    fullscreen: null,
+    decodeStartups: [],
+    testAll: null,
+    codecProbe: null,
+    longTest: null,
     summary: null,
     resultPath: null,
     resultError: null,

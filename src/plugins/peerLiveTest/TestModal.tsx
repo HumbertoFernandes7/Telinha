@@ -17,9 +17,10 @@ import { RenderModalProps } from "@vencord/discord-types";
 import { Modal, openModal, useEffect, useRef } from "@webpack/common";
 import type { ReactNode } from "react";
 
-import { openPopoutForRun, refreshSources, runPathBTest, selectSource, setListenAudio, setOptions, startRun, stopRun } from "./runner";
+import { openPopoutForRun, refreshSources, runPathBTest, selectSource, setListenAudio, setOptions, setPopoutStrategy, startRun, stopRun, testAllStrategies, testDecodeStartupByCodec } from "./runner";
 import { errorText, getNative, getState, logError, TestState, useTestState } from "./state";
-import type { CaptureSourceInfo, CodecChoice } from "./types";
+import { DEFAULT_STRATEGY, STRATEGY_LABELS, STRATEGY_SHORT, TEST_ALL_ORDER } from "./strategies";
+import type { CaptureSourceInfo, CodecChoice, PopoutStrategy, StrategyResult } from "./types";
 
 const cl = classNameFactory("vc-plt-");
 
@@ -120,6 +121,8 @@ function SourcePicker({ s }: { s: TestState; }) {
     );
 }
 
+const STRATEGY_ORDER: PopoutStrategy[] = ["direct", "realm", "canvas", "trackProcessor", "control"];
+
 const CODECS: { value: CodecChoice; label: string; }[] = [
     { value: "H264", label: "H.264" },
     { value: "VP8", label: "VP8" },
@@ -203,8 +206,21 @@ function OptionsPanel({ s }: { s: TestState; }) {
                 value={o.autoPopout}
                 disabled={locked}
                 onChange={autoPopout => setOptions({ autoPopout })}
-                hideBorder
             />
+            <Segmented
+                label="Estratégia da janela"
+                value={o.popoutStrategy}
+                disabled={!!s.longTest}
+                onChange={setPopoutStrategy}
+                options={STRATEGY_ORDER.map(value => ({
+                    value,
+                    label: value === DEFAULT_STRATEGY ? `${STRATEGY_SHORT[value]} (padrão)` : STRATEGY_SHORT[value],
+                    title: STRATEGY_LABELS[value]
+                }))}
+            />
+            <Paragraph className={cl("muted")}>
+                {STRATEGY_LABELS[o.popoutStrategy]}. Pode ser trocada durante o teste: vale ao clicar em "Abrir janela flutuante" de novo.
+            </Paragraph>
         </section>
     );
 }
@@ -216,6 +232,8 @@ function Controls({ s }: { s: TestState; }) {
         running: `rodando: ${s.elapsedSec} s${s.options.durationSec ? ` de ${s.options.durationSec} s` : ""}`,
         stopping: "finalizando (caminho alternativo + JSON)…"
     }[s.phase];
+    const busy = !!s.longTest;
+    const canSequence = !busy && (s.phase === "running" || (s.phase === "idle" && !!s.selectedSourceId && !s.resolvingAudio));
 
     return (
         <section className={cl("section")}>
@@ -230,13 +248,28 @@ function Controls({ s }: { s: TestState; }) {
                 <Button variant="dangerPrimary" disabled={s.phase !== "running" && s.phase !== "starting"} onClick={() => void stopRun()}>
                     Parar
                 </Button>
-                <Button variant="secondary" disabled={s.phase !== "running"} onClick={() => void openPopoutForRun()}>
+                <Button variant="secondary" disabled={s.phase !== "running" || busy} onClick={() => void openPopoutForRun()}>
                     Abrir janela flutuante
+                </Button>
+                <Button variant="primary" disabled={!canSequence} onClick={() => void testAllStrategies()}>
+                    Testar todas as estratégias de janela
+                </Button>
+                <Button variant="secondary" disabled={!canSequence} onClick={() => void testDecodeStartupByCodec()}>
+                    Testar início da decodificação por codec
                 </Button>
                 <Button variant="secondary" disabled={s.pathBRunning || !s.selectedSourceId || s.phase === "starting" || s.phase === "stopping"} onClick={() => void runPathBTest()}>
                     {s.pathBRunning ? "Testando caminho alternativo…" : "Testar caminho alternativo"}
                 </Button>
             </div>
+            {s.longTest && (
+                <Paragraph>
+                    Em andamento ({s.longTest.kind}): {s.longTest.step}
+                </Paragraph>
+            )}
+            <Paragraph className={cl("muted")}>
+                "Testar todas" mede {TEST_ALL_ORDER.map(x => STRATEGY_SHORT[x]).join(" → ")} por 8 s cada (depois do 1º quadro) na captura atual; se o teste estiver parado, inicia um com a fonte selecionada e salva o JSON no fim.
+                "Por codec" cria um receptor novo para VP8, VP9, AV1 e H.264 (com e sem bitrate inicial alto), sem player, e mede quanto o decodificador demora para soltar o 1º quadro.
+            </Paragraph>
             <FormSwitch
                 title="Ouvir áudio recebido"
                 description="Atenção: tocar o áudio capturado nos alto-falantes faz ele ser capturado de novo (eco/microfonia). Desligado por padrão; use fones."
@@ -266,7 +299,7 @@ function LiveStats({ s }: { s: TestState; }) {
                             {x.send ? `${x.send.encoderImplementation ?? "?"} (${hw(x.send.powerEfficientEncoder)}) · limitação: ${x.send.qualityLimitationReason ?? "?"} · ${x.send.avgEncodeMs ?? "?"} ms/quadro` : "?"}
                         </Row>
                         <Row label="Recebido">
-                            {x.recv ? `${res(x.recv.width, x.recv.height)} @ ${x.recv.fps ?? "?"} fps · ${mbps(x.recv.bitrateKbps)} · descartados ${x.recv.framesDropped ?? "?"} · congelamentos ${x.recv.freezeCount ?? "?"}` : "?"}
+                            {x.recv ? `${res(x.recv.width, x.recv.height)} @ ${x.recv.fps ?? "?"} fps${x.recv.decodeStalled ? " · SEM DECODIFICAR" : ""} · ${mbps(x.recv.bitrateKbps)} · decodificados ${x.recv.framesDecoded ?? "?"} · descartados ${x.recv.framesDropped ?? "?"} · PLIs ${x.recv.pliSent ?? "?"} · congelamentos ${x.recv.freezeCount ?? "?"}` : "?"}
                         </Row>
                         <Row label="Decoder">
                             {x.recv ? `${x.recv.decoderImplementation ?? "?"} (${hw(x.recv.powerEfficientDecoder)}) · ${x.recv.avgDecodeMs ?? "?"} ms/quadro · jitter buffer ${x.recv.jitterBufferMs ?? "?"} ms` : "?"}
@@ -281,14 +314,64 @@ function LiveStats({ s }: { s: TestState; }) {
                                 ? `${x.cpu.totalPercentCPU}% de 1 núcleo (${x.cpu.normalizedPercentCPU}% da máquina, ${x.cpu.cpuCount} núcleos) · ${Object.entries(x.cpu.byType).map(([k, v]) => `${k} ${v}%`).join(" · ")}`
                                 : "?"}
                         </Row>
+                        <Row label="Janela">
+                            {s.sinkLive ? `${s.sinkLive.strategy}: exibindo ${s.sinkLive.fps ?? "?"} fps (${s.sinkLive.width}x${s.sinkLive.height})` : s.activeStrategy ? `${s.activeStrategy}: aguardando quadros` : "fechada"}
+                        </Row>
                     </div>
                 )}
         </section>
     );
 }
 
+function strategyText(r: StrategyResult) {
+    const w = r.window;
+    const m = r.measurement;
+    return [
+        r.verdict,
+        r.host ? `em "${r.host}"` : null,
+        m?.missedFrames ? `${m.missedFrames} quadros perdidos pelo rVFC` : null,
+        m?.avgDrawMs != null ? `drawImage ${m.avgDrawMs} ms` : null,
+        w ? `recebido ${w.recvAvgFps ?? "?"} fps` : null,
+        w ? `CPU ${w.cpuAvgPercentOneCore ?? "?"}% de 1 núcleo` : null,
+        r.freshReceiver ? `receptor novo #${r.loopbackId} (${r.receiverRealm})` : null
+    ].filter(Boolean).join(" · ");
+}
+
+function StrategyRows({ s }: { s: TestState; }) {
+    const latest = new Map<PopoutStrategy, StrategyResult>();
+    for (const r of s.strategyResults) latest.set(r.strategy, r);
+    if (!latest.size) return <Row label="Estratégias de janela">nenhuma medida ainda</Row>;
+
+    return (
+        <>
+            {[...latest.values()].map(r => <Row key={r.strategy} label={`Janela: ${STRATEGY_SHORT[r.strategy]}`}>{strategyText(r)}</Row>)}
+            {s.testAll && <Row label="Melhor estratégia de pop-out">{s.testAll.best ?? "nenhuma confirmou reprodução"}</Row>}
+        </>
+    );
+}
+
+function DecodeRows({ s }: { s: TestState; }) {
+    return (
+        <>
+            {s.decodeStartups.map(d => (
+                <Row key={d.loopbackId} label={`Receptor #${d.loopbackId} (${d.receiverRealm})`}>
+                    {d.firstDecodedMs != null ? `1º quadro decodificado em ${d.firstDecodedMs} ms` : d.aborted ? "substituído antes de decodificar" : "não decodificou"}
+                    {` · ${d.decoderImplementation ?? "?"} · ${d.pliSent ?? "?"} PLIs · ${d.framesDropped ?? "?"} descartados · ${d.reason}`}
+                </Row>
+            ))}
+            {s.codecProbe?.entries.map((e, i) => (
+                <Row key={i} label={`Codec ${e.codec}${e.startBitrateHint ? "" : " (sem bitrate inicial)"}`}>
+                    {e.error
+                        ? `erro: ${e.error}`
+                        : `1º quadro ${e.startup?.firstDecodedMs ?? "nunca"} ms (${e.startup?.pliSent ?? "?"} PLIs) · ${e.window?.recvAvgFps ?? "?"} fps recebidos · ${e.window?.encoders.join(", ") || "?"} → ${e.window?.decoders.join(", ") || "?"} · CPU ${e.window?.cpuAvgPercentOneCore ?? "?"}% de 1 núcleo`}
+                </Row>
+            ))}
+        </>
+    );
+}
+
 function Results({ s }: { s: TestState; }) {
-    const { pathA, pathB, popout, summary } = s;
+    const { pathA, pathB, summary } = s;
     const videoSettings = pathA?.videoSettings as MediaTrackSettings | null | undefined;
 
     const showInFolder = async () => {
@@ -312,17 +395,16 @@ function Results({ s }: { s: TestState; }) {
                 <Row label="Caminho B (getUserMedia legado)">
                     {!pathB ? "não testado" : pathB.ok ? `OK em ${pathB.getUserMediaMs} ms · ${pathB.playback?.measuredFps ?? "?"} fps medidos` : `FALHOU: ${pathB.error}`}
                 </Row>
-                <Row label="Janela flutuante">
-                    {!popout ? "não aberta"
-                        : `${popout.host ?? "nada renderizou"} · reprodução: ${popout.playback?.ok ? `OK (${popout.playback.videoWidth}x${popout.playback.videoHeight}, ${popout.playback.measuredFps} fps)` : `FALHOU (${popout.playback?.error ?? "sem verificação"})`}${popout.fullscreen ? ` · tela cheia: ${popout.fullscreen.ok ? "OK" : popout.fullscreen.error}` : ""}`}
-                </Row>
+                <StrategyRows s={s} />
+                {s.fullscreen && <Row label="Tela cheia">{s.fullscreen.ok ? "OK" : s.fullscreen.error}</Row>}
+                <DecodeRows s={s} />
                 {summary && (
                     <>
                         <Row label="Resolução alvo atingida">{yesNo(summary.verdict.reachedTargetResolution)} ({Object.keys(summary.send.resolutions).join(", ") || "?"})</Row>
-                        <Row label="FPS alvo atingido">{yesNo(summary.verdict.reachedTargetFps)} (média {summary.send.avgFps ?? "?"} fps enviados, {summary.recv.avgFps ?? "?"} recebidos)</Row>
+                        <Row label="FPS alvo atingido">{yesNo(summary.verdict.reachedTargetFps)} (média {summary.send.avgFps ?? "?"} fps enviados, {summary.recv.avgFps ?? "?"} recebidos; {summary.recv.avgFpsWhileDecoding ?? "?"} só com o decodificador ativo)</Row>
                         <Row label="Encoder / decoder em hardware">{yesNo(summary.verdict.hardwareEncoder)} / {yesNo(summary.verdict.hardwareDecoder)} ({summary.send.encoderImplementations.join(", ") || "?"})</Row>
                         <Row label="Áudio com sinal">{yesNo(summary.verdict.audioSignalDetected)} ({summary.audio.secondsWithSignal} s, média {summary.audio.captureRmsAvgDb ?? "?"} dBFS)</Row>
-                        <Row label="CPU média do Discord">{summary.cpu.avgTotalPercent ?? "?"}% ({summary.cpu.avgNormalizedPercent ?? "?"}% da máquina)</Row>
+                        <Row label="CPU média do Discord">{summary.cpu.avgTotalPercent ?? "?"}% de 1 núcleo ({summary.cpu.avgNormalizedPercent ?? "?"}% da máquina)</Row>
                         {summary.verdict.notes.map((n, i) => <Row key={i} label="Observação">{n}</Row>)}
                     </>
                 )}

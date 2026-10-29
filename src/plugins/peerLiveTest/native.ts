@@ -246,19 +246,55 @@ export function uninstallDisplayMediaHandler() {
     return count;
 }
 
+/** pid -> last cumulativeCPUUsage reading, to turn CPU seconds into a rate */
+const lastCpuTime = new Map<number, { cpuSec: number; at: number; }>();
+
+/**
+ * Electron's percentCPUUsage is already divided by the number of logical cores
+ * (electron_api_app.cc: `cpu_dict.Set("percentCPUUsage", usagePercent / processor_count)`), i.e. % of the whole
+ * machine. Here every process is measured from cumulativeCPUUsage deltas instead, giving % of ONE core.
+ */
 export function getAppMetrics(): AppMetricsSnapshot {
     const metrics = app.getAppMetrics();
     const cpuCount = cpus().length || 1;
+    const now = performance.now();
     const byType: Record<string, number> = {};
+    const seen = new Set<number>();
     let total = 0;
+    let electronSum = 0;
     let workingSetKB = 0;
+    let viaCumulative = 0;
+    let viaPercent = 0;
 
     for (const m of metrics) {
-        const pct = m.cpu?.percentCPUUsage ?? 0;
+        seen.add(m.pid);
+        const reported = m.cpu?.percentCPUUsage ?? 0;
+        electronSum += reported;
+
+        let pct: number;
+        const cumulative = m.cpu?.cumulativeCPUUsage;
+        const prev = lastCpuTime.get(m.pid);
+        if (typeof cumulative === "number" && Number.isFinite(cumulative)) {
+            lastCpuTime.set(m.pid, { cpuSec: cumulative, at: now });
+            if (prev && now > prev.at && cumulative >= prev.cpuSec) {
+                pct = (cumulative - prev.cpuSec) / ((now - prev.at) / 1000) * 100;
+                viaCumulative++;
+            } else {
+                pct = reported * cpuCount;
+                viaPercent++;
+            }
+        } else {
+            pct = reported * cpuCount;
+            viaPercent++;
+        }
+
         total += pct;
-        byType[m.type] = Math.round(((byType[m.type] ?? 0) + pct) * 10) / 10;
+        byType[m.type] = (byType[m.type] ?? 0) + pct;
         workingSetKB += m.memory?.workingSetSize ?? 0;
     }
+
+    for (const pid of lastCpuTime.keys()) if (!seen.has(pid)) lastCpuTime.delete(pid);
+    for (const type in byType) byType[type] = Math.round(byType[type] * 10) / 10;
 
     return {
         at: Date.now(),
@@ -267,7 +303,9 @@ export function getAppMetrics(): AppMetricsSnapshot {
         cpuCount,
         byType,
         processCount: metrics.length,
-        workingSetMB: Math.round(workingSetKB / 1024)
+        workingSetMB: Math.round(workingSetKB / 1024),
+        method: !viaPercent ? "cumulativeCPUUsage" : !viaCumulative ? "percentCPUUsage×núcleos" : "misto",
+        electronPercentSum: Math.round(electronSum * 10) / 10
     };
 }
 

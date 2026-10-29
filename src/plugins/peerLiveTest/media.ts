@@ -31,17 +31,22 @@ export class AudioMeter {
     private count = 0;
     private peak = 0;
 
-    constructor(track: MediaStreamTrack, attachSink: boolean) {
-        const stream = new MediaStream([track]);
+    /**
+     * @param realm window whose constructors are used (the pop-out when the receiving RTCPeerConnection lives there),
+     *              so the track, MediaStream, <audio> and AudioContext all belong to the same document
+     */
+    constructor(track: MediaStreamTrack, attachSink: boolean, realm: Window = window) {
+        const W = realm as Window & typeof globalThis;
+        const stream = new W.MediaStream([track]);
 
         if (attachSink) {
-            this.sink = new Audio();
+            this.sink = W.document.createElement("audio");
             this.sink.muted = true;
             this.sink.srcObject = stream;
             this.sink.play().catch(() => { });
         }
 
-        this.ctx = new AudioContext();
+        this.ctx = new W.AudioContext();
         this.analyser = this.ctx.createAnalyser();
         this.analyser.fftSize = 2048;
         this.ctx.createMediaStreamSource(stream).connect(this.analyser);
@@ -85,11 +90,16 @@ export class AudioMeter {
 
     close() {
         clearInterval(this.timer);
-        this.ctx.close().catch(() => { });
-        if (this.sink) {
-            this.sink.pause();
-            this.sink.srcObject = null;
-        }
+        // may belong to a pop-out realm whose window is already gone
+        try {
+            this.ctx.close().catch(() => { });
+        } catch { }
+        try {
+            if (this.sink) {
+                this.sink.pause();
+                this.sink.srcObject = null;
+            }
+        } catch { }
     }
 }
 

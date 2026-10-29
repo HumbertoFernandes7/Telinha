@@ -64,14 +64,22 @@ export interface HandlerEvent {
 
 export interface AppMetricsSnapshot {
     at: number;
-    /** Sum of percentCPUUsage of every Discord process. 100 = one logical core fully busy */
+    /**
+     * CPU of every Discord process summed, in % of ONE logical core (100 = one core fully busy).
+     * Computed from cumulativeCPUUsage deltas (seconds of CPU time / seconds of wall time).
+     */
     totalPercentCPU: number;
     /** totalPercentCPU divided by the number of logical cores (0-100 = whole machine) */
     normalizedPercentCPU: number;
     cpuCount: number;
+    /** Same unit as totalPercentCPU (% of one core), per process type */
     byType: Record<string, number>;
     processCount: number;
     workingSetMB: number;
+    /** "cumulativeCPUUsage" when every process had it; otherwise percentCPUUsage × núcleos was used for some */
+    method: "cumulativeCPUUsage" | "percentCPUUsage×núcleos" | "misto";
+    /** Raw sum of Electron's percentCPUUsage. Electron already divides it by the core count, so this is % of the whole machine */
+    electronPercentSum: number;
 }
 
 export interface NativeEnvironment {
@@ -108,7 +116,20 @@ export interface TestOptions {
     /** Munge x-google-start/max-bitrate into the remote answer so the 20 s run is not spent ramping up */
     startBitrateHint: boolean;
     autoPopout: boolean;
+    /** How the received video is shown in the pop-out (see strategies.ts) */
+    popoutStrategy: PopoutStrategy;
 }
+
+/**
+ * - direct: main-window received stream set as srcObject of a <video> in the pop-out document
+ * - realm: the RECEIVING RTCPeerConnection is created with the pop-out's own constructor; <video> in the pop-out
+ * - canvas: hidden <video> in the main window, every new frame (rVFC) drawn into a <canvas> in the pop-out
+ * - trackProcessor: MediaStreamTrackProcessor in the main window, each VideoFrame drawn into a <canvas> in the pop-out
+ * - control: floating panel inside the main window (same document as the receiver); reference, not a pop-out
+ */
+export type PopoutStrategy = "direct" | "realm" | "canvas" | "trackProcessor" | "control";
+
+export type ReceiverRealm = "janela principal" | "pop-out";
 
 export interface PlaybackCheck {
     ok: boolean;
@@ -163,19 +184,145 @@ export interface PopoutAttempt {
     ms: number;
 }
 
-export interface PopoutResult {
+/** What happened to the frames shown by one strategy's sink (rVFC on <video> sinks, draw count on <canvas> sinks) */
+export interface SinkMeasurement {
+    ok: boolean;
+    /** From the sink being attached to its first presented/drawn frame */
+    firstFrameMs: number | null;
+    measureMs: number;
+    frames: number;
+    fps: number | null;
+    /** rVFC presentedFrames gaps: frames the compositor presented but no callback saw (<video>) or not drawn (canvas) */
+    missedFrames: number | null;
+    /** getVideoPlaybackQuality().droppedVideoFrames delta (only <video> sinks) */
+    sinkDroppedFrames: number | null;
+    width: number | null;
+    height: number | null;
+    /** canvas strategies: average drawImage time */
+    avgDrawMs: number | null;
+    errors: string[];
+    error: string | null;
+    /** Why the measurement stopped early (window closed, run stopped, another strategy opened) */
+    aborted: string | null;
+    /** Seconds since stats start (StatsSample.t) delimiting the measurement window */
+    windowStartT: number | null;
+    windowEndT: number | null;
+}
+
+/** getStats aggregates over the samples taken while one strategy was being measured */
+export interface WindowStats {
+    samples: number;
+    recvAvgFps: number | null;
+    recvMinFps: number | null;
+    recvStalledSamples: number;
+    recvFramesDropped: number;
+    recvPliSent: number;
+    sendAvgFps: number | null;
+    sourceAvgFps: number | null;
+    decoders: string[];
+    encoders: string[];
+    cpuAvgPercentOneCore: number | null;
+    cpuMaxPercentOneCore: number | null;
+    cpuAvgMachinePercent: number | null;
+    cpuAvgByType: Record<string, number>;
+}
+
+export interface StrategyResult {
+    strategy: PopoutStrategy;
+    label: string;
+    trigger: string;
     at: string;
-    popoutWindowComponentFound: boolean;
-    attempts: PopoutAttempt[];
-    /** Where the player finally rendered, null when nothing rendered */
     host: PlayerHost | null;
-    playback: PlaybackCheck | null;
-    fullscreen: { ok: boolean; error: string | null; } | null;
-    /** closePlayer() ran (run stopped / player reopened) before this finished */
-    cancelled: boolean;
+    hostReused: boolean;
+    hostAttempts: PopoutAttempt[];
+    popoutWindowComponentFound: boolean | null;
+    loopbackId: number | null;
+    receiverRealm: ReceiverRealm | null;
+    /** A new RTCPeerConnection pair had to be created for this strategy (e.g. realm) */
+    freshReceiver: boolean;
+    setupMs: number | null;
+    supported: boolean;
+    error: string | null;
+    measurement: SinkMeasurement | null;
+    window: WindowStats | null;
+    /** Decode startup of the receiver this strategy used (null while still waiting) */
+    receiverDecode: DecodeStartup | null;
+    /** framesDecoded of that receiver when the measurement ended (tells "sink failed" from "nothing decoded yet") */
+    receiverFramesDecodedAtEnd: number | null;
+    ok: boolean;
+    verdict: string;
+}
+
+export interface StrategyRanking {
+    strategy: PopoutStrategy;
+    ok: boolean;
+    sinkFps: number | null;
+    firstFrameMs: number | null;
+    cpuAvgPercentOneCore: number | null;
+}
+
+export interface TestAllResult {
+    startedAt: string;
+    finishedAt: string | null;
+    order: PopoutStrategy[];
+    completed: boolean;
+    firstFrameTimeoutMs: number;
+    measureMs: number;
+    /** First decoded frame of the main receiver before the strategies started (the sequence waits for it) */
+    initialDecode: DecodeStartup | null;
+    results: StrategyResult[];
+    ranking: StrategyRanking[];
+    /** Best pop-out strategy (control excluded): playback OK, highest fps, then lowest CPU */
+    best: PopoutStrategy | null;
+}
+
+/** How long a freshly created receiver took to output its first decoded frame */
+export interface DecodeStartup {
+    loopbackId: number;
+    receiverRealm: ReceiverRealm;
+    codec: string | null;
+    decoderImplementation: string | null;
+    reason: string;
+    /** What was attached to the received track when it started */
+    sinkAtStart: string;
+    /** From ICE connected to framesDecoded > 0 */
+    firstDecodedMs: number | null;
+    timedOut: boolean;
+    /** The loopback was replaced/closed before anything decoded */
+    aborted: boolean;
+    /** Counters when the first frame decoded (or when giving up) */
+    pliSent: number | null;
+    keyFramesEncoded: number | null;
+    framesDropped: number | null;
+    framesReceived: number | null;
+    bytesReceived: number | null;
+    error: string | null;
+}
+
+export interface CodecProbeEntry {
+    codec: CodecChoice;
+    startBitrateHint: boolean;
+    negotiated: string | null;
+    error: string | null;
+    startup: DecodeStartup | null;
+    window: WindowStats | null;
+}
+
+export interface CodecProbeResult {
+    startedAt: string;
+    finishedAt: string | null;
+    completed: boolean;
+    sink: string;
+    steadyMs: number;
+    entries: CodecProbeEntry[];
 }
 
 export interface LoopbackInfo {
+    id: number;
+    reason: string;
+    receiverRealm: ReceiverRealm;
+    codec: CodecChoice;
+    startBitrateHint: boolean;
     ok: boolean;
     error: string | null;
     connectMs: number | null;
@@ -210,12 +357,24 @@ export interface SendSample {
 export interface RecvSample {
     width: number | null;
     height: number | null;
+    /** Decoded fps from the framesDecoded delta since the previous sample (null on the first sample of a receiver) */
     fps: number | null;
+    /** inbound-rtp framesPerSecond exactly as reported (kept to compare with the delta-based fps) */
+    fpsReported: number | null;
     bitrateKbps: number | null;
     decoderImplementation: string | null;
     powerEfficientDecoder: boolean | null;
     framesDecoded: number | null;
+    framesDecodedDelta: number | null;
+    framesReceived: number | null;
+    keyFramesDecoded: number | null;
     framesDropped: number | null;
+    framesDroppedDelta: number | null;
+    /** PLIs this receiver sent (keyframe requests) */
+    pliSent: number | null;
+    pliSentDelta: number | null;
+    /** Bytes arrived since the previous sample but no frame was decoded */
+    decodeStalled: boolean | null;
     freezeCount: number | null;
     avgDecodeMs: number | null;
     jitterBufferMs: number | null;
@@ -240,6 +399,10 @@ export interface AudioSample {
 
 export interface StatsSample {
     t: number;
+    loopbackId: number | null;
+    receiverRealm: ReceiverRealm | null;
+    /** Strategy whose sink was attached when the sample was taken */
+    strategy: PopoutStrategy | null;
     source: { width: number | null; height: number | null; fps: number | null; } | null;
     send: SendSample | null;
     recv: RecvSample | null;
@@ -266,15 +429,24 @@ export interface StatsSummary {
         codecs: string[];
     };
     recv: {
+        /** Average over every steady sample, stalls (0 fps) included */
         avgFps: number | null;
+        /** Average over the samples where the receiver was actually decoding (stalled samples excluded) */
+        avgFpsWhileDecoding: number | null;
         minFps: number | null;
+        /** Steady samples with bytes arriving but nothing decoded */
+        stalledSamples: number;
+        /** t (s) of the first sample with a decoded frame on the first receiver, null if it never decoded */
+        firstDecodeSec: number | null;
         avgBitrateKbps: number | null;
         avgDecodeMs: number | null;
         avgJitterBufferMs: number | null;
         resolutions: Record<string, number>;
         decoderImplementations: string[];
         powerEfficientDecoder: (boolean | null)[];
-        framesDroppedTotal: number | null;
+        /** Sum over all receivers of the framesDropped deltas */
+        framesDroppedTotal: number;
+        pliSentTotal: number;
         freezeCount: number | null;
     };
     audio: {
@@ -294,6 +466,7 @@ export interface StatsSummary {
         avgNormalizedPercent: number | null;
         maxNormalizedPercent: number | null;
         avgByType: Record<string, number>;
+        methods: string[];
     };
     verdict: {
         reachedTargetResolution: boolean;
