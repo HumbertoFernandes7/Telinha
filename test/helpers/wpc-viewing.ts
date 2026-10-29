@@ -15,8 +15,8 @@
 //   room.sentOn("watch", "peerA")        // [{ op: "start" }]
 //   await viewerOf("peerA")              // the ViewerSession the UI sees (after the microtask that publishes it)
 
-import { clearAll } from "@plugins/telinha/core/viewing";
 import { type PeerEntry, rt } from "@plugins/telinha/core/context";
+import { clearAll } from "@plugins/telinha/core/viewing";
 import { buildHello, PROTOCOL_VERSION } from "@plugins/telinha/protocol";
 import { getEventLog, getState, resetState } from "@plugins/telinha/store";
 import type { ViewerSession } from "@plugins/telinha/types";
