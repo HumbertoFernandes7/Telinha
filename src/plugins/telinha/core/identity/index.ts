@@ -20,7 +20,7 @@
 // fica no DataStore do Vencord (IndexedDB), por conta do Discord, para renovar sem abrir o modal.
 
 import * as DataStore from "@api/DataStore";
-import { errorText, log, logThrottled } from "@plugins/telinha/core/log";
+import { errorMessage, errorText, log, logThrottled } from "@plugins/telinha/core/log";
 import { UserStore } from "@webpack/common";
 
 import { AuthorizationCancelled, openAuthorizeModal } from "./authorize";
@@ -230,7 +230,8 @@ export function authorizeIdentity({ silent = false }: { silent?: boolean; } = {}
         setState({ status: "disabled" });
         return Promise.resolve(false);
     }
-    return inflightAuth ??= (async () => {
+    if (inflightAuth) return inflightAuth;
+    const run = (async () => {
         const previous = state;
         const userId = myId();
         // renovacao silenciosa com o token antigo ainda aceito: segue "pronta" (o hello continua levando o token
@@ -269,12 +270,18 @@ export function authorizeIdentity({ silent = false }: { silent?: boolean; } = {}
             }
             log.warn("Identidade: falha ao autorizar o Telinha: " + errorText(e));
             lastError = { at: Date.now(), text: "autorizar: " + errorText(e) };
-            setState(keepReady ? previous : { status: "error", error: errorText(e) });
+            // o estado vai para a UI (toast, barra): so a mensagem; o log e o diagnostico ficam com o nome do erro
+            setState(keepReady ? previous : { status: "error", error: errorMessage(e) });
             return false;
-        } finally {
-            inflightAuth = null;
         }
     })();
+    inflightAuth = run;
+    // limpa so depois da atribuicao acima: sem usuario o corpo termina sem nenhum await, e um `finally` dentro dele
+    // rodaria ANTES dela (o pedido ficava "em andamento" para sempre e "Autorizar" nunca mais abria o modal)
+    void run.then(() => {
+        if (inflightAuth === run) inflightAuth = null;
+    });
+    return run;
 }
 
 /**
@@ -318,9 +325,11 @@ export async function renewIdentity({ interactive = false }: { interactive?: boo
 /** Esquece o token desta conta ("Desvincular"; o certificado continua). Quem ja verificou continua ate reconectar. */
 export async function forgetIdentity(): Promise<void> {
     const userId = myId();
+    // grava primeiro: se o DataStore falhar, nada muda (a UI avisa "não deu para desvincular" e continua coerente:
+    // autorizada, com o token ainda indo no hello)
+    if (userId) await saveStored(userId, null);
     token = null;
     lastInteractiveRenew = lastRefreshFailure = -Infinity;
-    if (userId) await saveStored(userId, null);
     setState(isIdentityConfigured() ? { status: "unauthorized" } : { status: "disabled" });
     log.info("Identidade: Telinha desvinculado desta conta neste PC");
 }
