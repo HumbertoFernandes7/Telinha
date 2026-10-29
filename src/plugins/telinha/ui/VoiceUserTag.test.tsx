@@ -97,6 +97,17 @@ describe("VoiceUserTag", () => {
         assert.equal(PopoutActions.opened.length, 1);
     });
 
+    test("um estado quebrado nao derruba a lista de voz do Discord: a etiqueta some e o erro fica registrado", t => {
+        t.mock.method(console, "error", () => { }); // o React conta o erro do desenho no console
+        show({ peers: [friend()] });
+        const { container } = render(<VoiceUserTag userId={FRIEND_ID} />);
+        screen.getByRole("button");
+        act(() => setState({ ...EMPTY, peers: null as never }));
+        assert.equal(container.innerHTML, "", "a etiqueta some em silencio");
+        assert.equal(caughtErrors.length, 1);
+        caughtErrors.length = 0;
+    });
+
     test("a barra de espaco tambem abre; outras teclas nao fazem nada", async () => {
         show({ peers: [friend()] });
         render(<VoiceUserTag userId={FRIEND_ID} />);

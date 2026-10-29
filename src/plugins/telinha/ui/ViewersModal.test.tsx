@@ -314,6 +314,7 @@ describe("ViewersModal (so com o estado do Telinha)", () => {
     });
 });
 
+// Uma unica sessao ao vivo: os testes deste bloco seguem a historia em ordem (pedem, Ana entra, beto e recusado...).
 describe("ViewersModal com o nucleo de verdade", () => {
     let scene: LiveScene;
 

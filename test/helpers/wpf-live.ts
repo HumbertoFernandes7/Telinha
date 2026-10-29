@@ -26,7 +26,7 @@ import { eventually } from "@test/fakes/clock";
 import { installNative, type NativeEnv } from "@test/fakes/native";
 import { act } from "@test/fakes/render";
 import { type FakeRoom, trystero } from "@test/fakes/trystero";
-import { FRIEND_ID, joinVoice, makeUser, modals, OTHER_ID, toasts, UserStore, VOICE_CHANNEL_ID } from "@test/fakes/vencord";
+import { clipboard, FRIEND_ID, joinVoice, makeUser, modals, OTHER_ID, toasts, UserStore, VOICE_CHANNEL_ID } from "@test/fakes/vencord";
 import { type FakeRTCPeerConnection, installWebRtc, type WebRtcEnv } from "@test/fakes/webrtc";
 
 export interface GoLiveOptions {
@@ -61,7 +61,7 @@ export interface LiveScene {
     goLive(opts?: GoLiveOptions): Promise<void>;
     /** The peer presses "Assistir": the request reaches the streamer (waits for Permitir in most modes). */
     askToWatch(peerId: string): void;
-    /** Empties the toasts and the open modals (what resetVencordFakes does for them, without touching the voice channel). */
+    /** Empties the toasts, the clipboard and the open modals (what resetVencordFakes does for them, without touching the voice channel). */
     resetUi(): void;
     /** Stops the stream, leaves the session, puts the fakes back. */
     close(): void;
@@ -108,6 +108,7 @@ export async function openLiveScene(): Promise<LiveScene> {
         },
         resetUi() {
             toasts.length = 0;
+            clipboard.length = 0;
             act(() => modals.reset()); // a mounted ModalHost re-renders
         },
         close() {

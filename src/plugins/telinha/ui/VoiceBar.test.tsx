@@ -91,6 +91,17 @@ describe("VoiceBar (so com o estado do Telinha)", () => {
             assert.equal(container.innerHTML, "", "saiu da call");
         });
 
+        test("um estado quebrado nao derruba o Discord: a barra some e o erro fica registrado", t => {
+            t.mock.method(console, "error", () => { }); // o React conta o erro do desenho no console
+            inVoice();
+            const { container } = render(<VoiceBar />);
+            assert.ok(bar());
+            act(() => setState({ ...EMPTY, peers: null as never }));
+            assert.equal(container.innerHTML, "", "a barra some em silencio");
+            assert.equal(caughtErrors.length, 1);
+            caughtErrors.length = 0;
+        });
+
         test("transmitindo, a barra fica mesmo sem canal de voz (para dar para parar)", () => {
             show({ local: mine() });
             render(<VoiceBar />);
@@ -431,6 +442,7 @@ describe("VoiceBar (so com o estado do Telinha)", () => {
     });
 });
 
+// Uma unica sessao ao vivo: os testes deste bloco seguem a historia em ordem (transmite, aprova, copia a senha, para).
 describe("VoiceBar com o nucleo de verdade", () => {
     let scene: LiveScene;
 

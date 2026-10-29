@@ -15,6 +15,15 @@ import { eventually } from "@test/fakes/clock";
 import { act, fireEvent, render, screen, within } from "@test/fakes/render";
 import { ModalHost } from "@test/fakes/vencord";
 
+// Workaround for a shared-fake issue (reported to the coordinator): the happy-dom bundle names its Text and Comment
+// classes "Text2" / "Comment2", so testing-library's pretty-format does not recognise those nodes and a FAILED query
+// (getByText...) dies with "PrettyFormatPluginError: Cannot destructure property 'tagName' of 'val' as it is null"
+// instead of printing the DOM. Giving the classes their real names restores the message. Idempotent.
+for (const key of ["Text", "Comment"] as const) {
+    const ctor = (globalThis as unknown as Record<string, { name: string; } | undefined>)[key];
+    if (ctor && ctor.name !== key) Object.defineProperty(ctor, "name", { value: key });
+}
+
 /**
  * Lets the core's async work (promises, setTimeout(0)) run inside act() until `check` holds, so the React updates it
  * causes land in the DOM without "not wrapped in act" warnings. Real timers only.

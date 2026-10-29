@@ -240,6 +240,7 @@ describe("AccessModal (so com o estado do Telinha)", () => {
     });
 });
 
+// Uma unica sessao ao vivo: os testes deste bloco seguem a historia em ordem (Todos da call → Com senha → so a senha → aprovacao).
 describe("AccessModal e a barra, com o nucleo de verdade", () => {
     let scene: LiveScene;
 
