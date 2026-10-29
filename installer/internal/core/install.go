@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/HumbertoFernandes7/Telinha/installer/internal/asar"
@@ -21,6 +22,7 @@ import (
 // (no Discord / no official Vencord) whose message explains what to do.
 func (c *Config) Preflight() ([]Target, error) {
 	targets := c.Scan()
+	c.logf("preflight: %d Discord target(s) found", len(targets))
 	if len(targets) == 0 {
 		return nil, problem(CodeNoDiscord, "Não encontramos o Discord neste computador. Instale o Discord (discord.com), abra-o uma vez e rode este instalador de novo.", nil)
 	}
@@ -48,6 +50,7 @@ func (c *Config) Preflight() ([]Target, error) {
 		}
 		return nil, problem(CodeNoVencord, msg, errors.New(details))
 	}
+	c.logf("preflight: ready to install into %s", targetList(ready))
 	return ready, nil
 }
 
@@ -186,7 +189,9 @@ type Result struct {
 // Apply activates a staged payload (nil = keep the installed one: repair) and writes the Telinha stub into
 // each chosen target (PAYLOAD.md 4.4-4.7). Discord must be closed.
 func (c *Config) Apply(st *Staged, chosen []Target) (*Result, error) {
+	c.logf("apply: begin, targets=%s, payload=%s", targetList(chosen), stagedState(st))
 	if err := c.ensureNotRunning(); err != nil {
+		c.logf("apply: refused: %v", err)
 		return nil, err
 	}
 	if st != nil && !st.UpToDate {
@@ -226,12 +231,36 @@ func (c *Config) Apply(st *Staged, chosen []Target) (*Result, error) {
 		rec.Targets = mergeTargets(rec.Targets, *rt)
 		if err := c.writeRecord(rec); err != nil {
 			c.logf("install.json: %v", err)
+		} else {
+			c.logf("install.json: written %s (%d target(s))", c.RecordPath(), len(rec.Targets))
 		}
 	}
 	if len(errs) > 0 {
 		return res, problem(CodeFailed, "Não foi possível ativar o Telinha em todos os Discords. Feche o Discord completamente e tente de novo.", errors.Join(errs...))
 	}
+	c.logf("apply: done, Telinha %s, %d stub(s) written, %d already up to date", res.Version, len(res.Targets), len(res.Unchanged))
 	return res, nil
+}
+
+func targetList(ts []Target) string {
+	var n []string
+	for _, t := range ts {
+		n = append(n, t.Name+" "+t.App)
+	}
+	if len(n) == 0 {
+		return "none"
+	}
+	return strings.Join(n, ", ")
+}
+
+func stagedState(st *Staged) string {
+	switch {
+	case st == nil:
+		return "keep the installed one"
+	case st.UpToDate:
+		return "staged, identical to the installed one"
+	}
+	return "staged " + st.Manifest.Label()
 }
 
 func (c *Config) recordFor(st *Staged, m *payload.Manifest) *Record {
@@ -309,7 +338,9 @@ type UninstallResult struct {
 // Uninstall puts Vencord's stub back wherever ours is (every app-* folder of every flavor) and removes
 // the add-on, backups and install.json (PAYLOAD.md 5). Logs stay; see Purge. Vencord is never touched.
 func (c *Config) Uninstall() (*UninstallResult, error) {
+	c.logf("uninstall: begin")
 	if err := c.ensureNotRunning(); err != nil {
+		c.logf("uninstall: refused: %v", err)
 		return nil, err
 	}
 	res := &UninstallResult{}
@@ -344,6 +375,7 @@ func (c *Config) Uninstall() (*UninstallResult, error) {
 	if len(errs) > 0 {
 		return res, problem(CodeFailed, "O Discord voltou ao Vencord original, mas alguns arquivos do Telinha não puderam ser apagados ("+c.Home()+").", errors.Join(errs...))
 	}
+	c.logf("uninstall: done, Vencord stub restored in %d app folder(s)", len(res.Restored))
 	return res, nil
 }
 

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -26,13 +27,13 @@ const (
 	idOne       = 201 // + index
 )
 
-func runGUI(o *options) int {
+func runGUI(o *options) (code int) {
 	a, err := newApp(o, nil)
 	if err != nil {
 		ui.Show(ui.Dialog{Title: title, Instruction: "Não foi possível iniciar o instalador", Content: err.Error(), Icon: ui.IconError, Common: ui.BtnClose})
 		return exitFailed
 	}
-	defer func() { a.log.Close() }()
+	defer func() { a.finish(code) }()
 	ui.Logf = a.log.Printf
 	// Self-driving smoke test (fake trees only: honoured only together with --appdata).
 	if ms, err := strconv.Atoi(os.Getenv("TELINHA_TEST_AUTOCLICK_MS")); err == nil && ms > 0 && o.appdata != "" {
@@ -77,8 +78,10 @@ func runGUI(o *options) int {
 	})
 	switch choice {
 	case idInstall:
+		a.log.Printf("gui: user chose install/update (already installed: %v)", installed)
 		return a.guiInstall()
 	case idUninstall:
+		a.log.Printf("gui: user chose uninstall")
 		return a.guiUninstall()
 	}
 	a.log.Printf("cancelled at the main dialog")
@@ -105,7 +108,7 @@ func (a *app) guiError(what string, err error) int {
 			Instruction: "Primeiro instale o Vencord",
 			Content:     p.Msg,
 			Buttons:     []ui.Button{{ID: idOpenSite, Text: "Abrir o site do Vencord\nvencord.dev/download: baixe e rode o instalador do Vencord."}},
-			Expanded:    detail(p, a.log.Path)})
+			Expanded:    detail(p, a.log.Where())})
 		if r == idOpenSite {
 			ui.OpenURL(vencordDownloadURL)
 		}
@@ -115,7 +118,7 @@ func (a *app) guiError(what string, err error) int {
 		return a.guiNoDiscord()
 	}
 	ui.Show(ui.Dialog{Title: title, Icon: ui.IconError, Common: ui.BtnClose,
-		Instruction: what, Content: p.Msg, Expanded: detail(p, a.log.Path)})
+		Instruction: what, Content: p.Msg, Expanded: detail(p, a.log.Where())})
 	if p.Code == core.CodeDiscordRunning {
 		return exitDiscordRunning
 	}
@@ -158,14 +161,16 @@ func (a *app) askCloseDiscord(verb string) (bool, error) {
 	if err != nil || len(ps) == 0 {
 		return true, err
 	}
-	a.log.Printf("discord running: %d process(es)", len(ps))
+	a.log.Printf("discord running: %d process(es), asking to close it to %s", len(ps), verb)
 	b, _ := ui.Show(ui.Dialog{Title: title, Icon: ui.IconWarning, Common: ui.BtnCancel, CommandLinks: true, Default: idProceed,
 		Instruction: "O Discord precisa ser fechado para " + verb + ". Fechar agora?",
 		Content:     "Se estiver no meio de uma conversa ou call, termine antes. Depois é só abrir o Discord de novo.",
 		Buttons:     []ui.Button{{ID: idProceed, Text: "Fechar o Discord e continuar"}}})
 	if b != idProceed {
+		a.log.Printf("user chose not to close Discord")
 		return false, nil
 	}
+	a.log.Printf("user agreed to close Discord")
 	return true, ui.Progress(title, "Fechando o Discord…", nil, func(set func(string)) error {
 		set("Aguarde um instante.")
 		return a.cfg.CloseDiscord(ps)
@@ -173,51 +178,22 @@ func (a *app) askCloseDiscord(verb string) (bool, error) {
 }
 
 func (a *app) guiInstall() int {
-	ready, err := a.cfg.Preflight()
-	if err != nil {
-		return a.guiError("Não foi possível instalar o Telinha", err)
-	}
-	chosen, ok := a.pickTargets(ready)
-	if !ok {
-		a.log.Printf("cancelled at target choice")
-		return exitOK
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var st *core.Staged
-	err = ui.Progress(title, "Instalando o Telinha", cancel, func(set func(string)) error {
-		var err error
-		st, err = a.cfg.Stage(ctx, a.source(), set)
-		return err
+	res, chosen, err := a.install(ctx, false, installUI{
+		pick: a.pickTargets,
+		busy: func(cancellable bool, work func(set func(string)) error) error {
+			var c func()
+			if cancellable {
+				c = cancel
+			}
+			return ui.Progress(title, "Instalando o Telinha", c, work)
+		},
+		closeDiscord: func() (bool, error) { return a.askCloseDiscord("instalar") },
 	})
-	if ctx.Err() != nil {
-		a.cfg.DiscardStaged()
-		a.log.Printf("cancelled during download")
+	if errors.Is(err, errCancelled) {
 		return exitOK
 	}
-	if err != nil {
-		return a.guiError("Não foi possível instalar o Telinha", err)
-	}
-
-	proceed, err := a.askCloseDiscord("instalar")
-	if !proceed {
-		a.cfg.DiscardStaged()
-		a.log.Printf("cancelled: user kept Discord open")
-		return exitOK
-	}
-	if err != nil {
-		a.cfg.DiscardStaged()
-		return a.guiError("Não foi possível instalar o Telinha", err)
-	}
-
-	var res *core.Result
-	err = ui.Progress(title, "Instalando o Telinha", nil, func(set func(string)) error {
-		set("Ativando o Telinha no Discord…")
-		var err error
-		res, err = a.cfg.Apply(st, chosen)
-		return err
-	})
 	if err != nil {
 		return a.guiError("Não foi possível instalar o Telinha", err)
 	}
@@ -235,7 +211,7 @@ func (a *app) guiInstall() int {
 	ui.Show(ui.Dialog{Title: title, Icon: ui.IconApp, Common: ui.BtnClose,
 		Instruction: "Pronto!",
 		Content:     "Feche o Discord completamente e abra de novo. Depois ative o Telinha em Configurações → Vencord → Plugins." + extra,
-		Expanded:    fmt.Sprintf("Telinha %s instalado em: %s.\nRegistro: %s", res.Version, targetNames(chosen), a.log.Path)})
+		Expanded:    fmt.Sprintf("Telinha %s instalado em: %s.\nRegistro: %s", res.Version, targetNames(chosen), a.log.Where())})
 	return exitOK
 }
 
@@ -261,6 +237,6 @@ func (a *app) guiUninstall() int {
 	ui.Show(ui.Dialog{Title: title, Icon: ui.IconApp, Common: ui.BtnClose,
 		Instruction: "O Telinha foi removido",
 		Content:     "O Vencord continua instalado normalmente. Pode abrir o Discord de novo.",
-		Expanded:    fmt.Sprintf("Stub do Vencord devolvido em: %s\nRegistro: %s", strings.Join(res.Restored, ", "), a.log.Path)})
+		Expanded:    fmt.Sprintf("Stub do Vencord devolvido em: %s\nRegistro: %s", strings.Join(res.Restored, ", "), a.log.Where())})
 	return exitOK
 }

@@ -880,25 +880,60 @@ function removeWatch(peerId, notify) {
     logEvent("info", "midia", `Parou de assistir ${peerName(peerId)}`);
 }
 
+// Todo stream recebido comeca MUDO. Testando no mesmo PC, o audio da tela inteira do streamer (o do PC
+// menos o Discord) incluiria o que esta pagina toca, e o que ela tocar voltaria na captura: eco infinito.
+// So se liga o som de proposito, por stream, no botao abaixo.
+const SOUND_ENABLE_LABEL = "Ativar som (cuidado: no mesmo PC causa eco)";
+const SOUND_DISABLE_LABEL = "Silenciar (som ligado)";
+const SOUND_ECHO_NOTE = "Som ligado: se o streamer capta o áudio deste PC, a transmissão volta aqui com eco.";
+const SOUND_NO_AUDIO_LABEL = "Sem áudio nesta transmissão";
+
 function makeCard(w) {
     const el = document.createElement("div");
     el.className = "watch-card";
-    el.innerHTML = `<h3 data-title></h3><video autoplay playsinline controls></video>
+    el.innerHTML = `<h3 data-title></h3><video autoplay playsinline muted controls></video>
+        <div class="row sound-row"><button class="secondary" type="button" data-sound aria-pressed="false"></button> <span class="muted" data-sound-note></span></div>
         <div data-stats></div>
         <div><button class="secondary" data-stop>Parar</button></div>`;
+    const video = el.querySelector("video");
+    video.muted = true; // o atributo so vale como valor inicial; garante tambem pela propriedade
     el.querySelector("[data-stop]").addEventListener("click", () => stopWatching(w.peerId));
+    el.querySelector("[data-sound]").addEventListener("click", () => { video.muted = !video.muted; });
     $("#watches").append(el);
-    w.card = { el, video: el.querySelector("video"), title: el.querySelector("[data-title]"), stats: el.querySelector("[data-stats]") };
+    w.card = {
+        el, video, title: el.querySelector("[data-title]"), stats: el.querySelector("[data-stats]"),
+        sound: el.querySelector("[data-sound]"), soundNote: el.querySelector("[data-sound-note]")
+    };
+    w.soundOn = false;
+    // volumechange dispara tanto pelo botao quanto pelos controles nativos do video
+    video.addEventListener("volumechange", () => {
+        if (!video.muted === w.soundOn) return;
+        w.soundOn = !video.muted;
+        if (w.soundOn) logEvent("warn", "midia", `Som ligado para ${peerName(w.peerId)} (no mesmo PC o áudio capturado volta para a transmissão: eco)`);
+        else logEvent("info", "midia", `Som de ${peerName(w.peerId)} silenciado`);
+        updateSoundButton(w);
+    });
+    updateSoundButton(w);
+}
+
+function updateSoundButton(w) {
+    const { video, sound, soundNote } = w.card;
+    // sem stream ainda o botao ja vale (liga de antemao); com stream, so se houver trilha de audio
+    const noAudio = !!w.stream && w.stream.getAudioTracks().length === 0;
+    sound.disabled = noAudio;
+    sound.setAttribute("aria-pressed", String(!video.muted));
+    sound.textContent = noAudio ? SOUND_NO_AUDIO_LABEL : video.muted ? SOUND_ENABLE_LABEL : SOUND_DISABLE_LABEL;
+    soundNote.textContent = !noAudio && !video.muted ? SOUND_ECHO_NOTE : "";
 }
 
 async function playVideo(video) {
     try {
         await video.play();
     } catch (e) {
-        // autoplay com som bloqueado: toca mudo (o usuario liga o som nos controles do video)
+        // so acontece se o som foi ligado antes do stream chegar e o navegador bloqueou: volta a mudo
         if (e?.name !== "NotAllowedError") return;
         video.muted = true;
-        logEvent("warn", "midia", "Autoplay com som bloqueado pelo navegador; vídeo iniciado mudo (use os controles para ligar o som)");
+        logEvent("warn", "midia", "Autoplay com som bloqueado pelo navegador; vídeo iniciado mudo (use o botão para ativar o som)");
         video.play().catch(() => { });
     }
 }
@@ -906,6 +941,9 @@ async function playVideo(video) {
 function attachVideo(w) {
     const video = w.card.video;
     video.srcObject = w.stream;
+    w.stream.addEventListener("addtrack", () => updateSoundButton(w));
+    w.stream.addEventListener("removetrack", () => updateSoundButton(w));
+    updateSoundButton(w);
     playVideo(video);
     const onFrame = () => {
         if (watches.get(w.peerId) !== w || w.renderedMs != null) return;

@@ -79,8 +79,15 @@ precisa pedir de novo.
 4. Para testar a escolha de codec do plugin, alterne a caixa `caps.h264HwDecode`, peça
    para assistir de novo e confira o codec mostrado (o plugin lê `caps` da presença).
 
-Se o navegador bloquear o autoplay com som, o vídeo inicia mudo (ligue o som nos
-controles do vídeo).
+**O som começa sempre desligado (cuidado com o eco).** Todo stream recebido inicia
+**mudo**; cada vídeo tem o botão **"Ativar som (cuidado: no mesmo PC causa eco)"** (volta a
+"Silenciar" quando ligado; vale também o botão de volume do próprio player). Motivo: ao
+testar **no mesmo PC**, a transmissão do plugin leva o áudio da tela inteira (o do PC menos
+o Discord); se esta página tocasse esse áudio com som, o que ela toca entraria de novo na
+captura do streamer e voltaria para cá, em eco infinito. Só ligue o som se o streamer e esta
+página estiverem em PCs diferentes (fones não resolvem: a captura pega tudo o que o PC
+reproduz, seja em caixa ou em fone). Um stream sem trilha de áudio mostra o botão
+desabilitado ("Sem áudio nesta transmissão").
 
 ## Teste com duas janelas (sem Discord)
 

@@ -134,7 +134,11 @@ func newApp(o *options, extraLog io.Writer) (*app, error) {
 	}
 	lf := logx.Open(cfg.Home()+`\logs`, extraLog)
 	cfg.Log = lf.Logger
-	lf.Printf("TelinhaInstaller %s start, args=%q appdata=%s installs=%d overridden=%v", version, os.Args[1:], appData, len(cfg.Installs), cfg.Overridden)
+	mode := "gui"
+	if o.cli() {
+		mode = "cli"
+	}
+	lf.Printf("TelinhaInstaller %s start (%s), pid=%d args=%q appdata=%s installs=%d overridden=%v log=%s", version, mode, os.Getpid(), os.Args[1:], appData, len(cfg.Installs), cfg.Overridden, lf.Where())
 	for _, in := range cfg.Installs {
 		lf.Printf("discord: %s at %s", in.Name, in.Root)
 	}

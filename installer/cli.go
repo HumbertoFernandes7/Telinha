@@ -23,7 +23,7 @@ const (
 	exitNoDiscord      = 5
 )
 
-func runCLI(o *options) int {
+func runCLI(o *options) (code int) {
 	if o.showVersion {
 		fmt.Println("TelinhaInstaller", version)
 		return exitOK
@@ -33,7 +33,7 @@ func runCLI(o *options) int {
 		fmt.Fprintln(os.Stderr, "erro:", err)
 		return exitFailed
 	}
-	defer func() { a.log.Close() }()
+	defer func() { a.finish(code) }()
 	if err := winver.Check(); err != nil && !o.status {
 		a.log.Printf("unsupported windows: %v", err)
 		fmt.Fprintln(os.Stderr, "erro: o Telinha precisa do Windows 10 versão 2004 ou mais recente ("+err.Error()+")")
@@ -58,7 +58,7 @@ func (a *app) fail(err error) int {
 	if p.Err != nil {
 		fmt.Fprintln(os.Stderr, "detalhes:", strings.TrimSpace(p.Err.Error()))
 	}
-	fmt.Fprintln(os.Stderr, "registro:", a.log.Path)
+	fmt.Fprintln(os.Stderr, "registro:", a.log.Where())
 	switch p.Code {
 	case core.CodeDiscordRunning:
 		return exitDiscordRunning
@@ -96,26 +96,14 @@ func (a *app) source() core.PayloadSource {
 }
 
 func (a *app) cliInstall(repair bool) int {
-	ready, err := a.cfg.Preflight()
+	res, chosen, err := a.install(context.Background(), repair, installUI{
+		say:          func(s string) { fmt.Println(s) },
+		closeDiscord: func() (bool, error) { return true, a.closeDiscordCLI("instalar") },
+	})
 	if err != nil {
 		return a.fail(err)
 	}
-	var st *core.Staged
-	if !repair || a.opt.payload != "" || !a.cfg.PayloadOK() {
-		st, err = a.cfg.Stage(context.Background(), a.source(), func(s string) { fmt.Println(s) })
-		if err != nil {
-			return a.fail(err)
-		}
-	}
-	if err := a.closeDiscordCLI("instalar"); err != nil {
-		a.cfg.DiscardStaged()
-		return a.fail(err)
-	}
-	res, err := a.cfg.Apply(st, ready)
-	if err != nil {
-		return a.fail(err)
-	}
-	fmt.Printf("Telinha %s ativo em: %s\n", res.Version, targetNames(ready))
+	fmt.Printf("Telinha %s ativo em: %s\n", res.Version, targetNames(chosen))
 	for _, t := range res.Targets {
 		fmt.Printf("  stub escrito: %s\\%s (antes: %s)\n", t.Flavor, t.App, t.Previous)
 	}
@@ -135,6 +123,7 @@ func targetNames(ts []core.Target) string {
 }
 
 func (a *app) cliUninstall() int {
+	a.log.Printf("uninstall: begin (purge=%v)", a.opt.purge)
 	if err := a.closeDiscordCLI("desinstalar"); err != nil {
 		return a.fail(err)
 	}
@@ -157,6 +146,7 @@ func (a *app) cliUninstall() int {
 }
 
 func (a *app) cliRollback() int {
+	a.log.Printf("rollback: begin")
 	if err := a.closeDiscordCLI("voltar a versão"); err != nil {
 		return a.fail(err)
 	}
