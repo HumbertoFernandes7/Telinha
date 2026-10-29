@@ -223,7 +223,7 @@ describe("crc32", () => {
         assert.equal(upd.crc32(Buffer.from("123456789")), 0xcbf43926);
         assert.equal(upd.crc32(Buffer.alloc(0)), 0);
         const big = Buffer.from(Array.from({ length: 5000 }, (_, i) => (i * 31) & 0xff));
-        assert.equal(upd.crc32(big), zlib.crc32(big) >>> 0);
+        if (typeof zlib.crc32 === "function") assert.equal(upd.crc32(big), zlib.crc32(big) >>> 0, "agrees with Node's own");
     });
 
     test("without zlib.crc32 (older Node): the table-driven fallback gives the same answers", () => {
@@ -237,7 +237,7 @@ describe("crc32", () => {
         } finally {
             zlib.crc32 = saved;
         }
-        assert.equal(typeof zlib.crc32, "function");
+        assert.equal(zlib.crc32, saved, "zlib is put back as it was");
     });
 });
 

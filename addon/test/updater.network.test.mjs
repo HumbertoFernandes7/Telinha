@@ -954,6 +954,14 @@ describe("apiBase and User-Agent", () => {
         assert.deepEqual(seen, [`${API}/repos/${REPO}/releases/latest`]);
     });
 
+    test("without a log function the updater is silent (nothing to call, nothing breaks)", async t => {
+        const h = makeHome({ installed: V010(), staged: NEW });
+        t.after(() => h.cleanup());
+        const u = upd.createUpdater({ addonDir: h.addonDir, fetch: fakeFetch(() => new TypeError("offline")) });
+        assert.equal(u.startup().kind, "swapped");
+        assert.equal((await u.check({})).phase, "error");
+    });
+
     test("the default `now` is the clock: install.json stamps come out in the current minute", async t => {
         const h = makeHome({ installed: V010(), staged: NEW });
         t.after(() => h.cleanup());

@@ -106,6 +106,20 @@ describe("boot(): the plain path and its safety nets", () => {
         assert.ok(logs.error.some(l => /addon: vencord failed/.test(l)));
     });
 
+    test("restoring the ipcMain hooks a second time is harmless (a second boot of the same loader module)", t => {
+        const { tree, loader, electron } = boot(t);
+        assert.equal(Object.hasOwn(electron.ipcMain, "on"), false, "restored by the first boot");
+        const broken = join(tree.root, "Vencord", "dist2", "patcher.js");
+        fs.mkdirSync(join(tree.root, "Vencord", "dist2"), { recursive: true });
+        fs.writeFileSync(broken, "throw new Error('second vencord is down');\n");
+        process.argv.push("--vanilla");
+        const vanilla = t.mock.fn();
+        loader.boot({ vencordPatcher: broken, vanilla });
+        assert.equal(vanilla.mock.callCount(), 1);
+        assert.equal(loader.state.vanillaFallback, true);
+        assert.equal(Object.hasOwn(electron.ipcMain, "on"), false);
+    });
+
     test("an error that happens AFTER Vencord re-pointed require.main (Discord itself threw) is not ours to hide", t => {
         const { thrown, vanilla, electron } = boot(t, { patcher: () => { process.mainModule.filename = "C:/discord/app.asar/main.js"; throw new Error("discord blew up"); } });
         assert.match(thrown?.message ?? "", /discord blew up/);

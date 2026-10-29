@@ -218,6 +218,19 @@ describe("the hooks around Vencord's two synchronous IPC channels", () => {
         assert.ok(logs.log.some(l => /Vencord IPC hooks not seen/.test(l)));
     });
 
+    test("the stand-in event hands back what the listener just set (a listener may read event.returnValue)", t => {
+        let readBack;
+        const patcher = electron => {
+            electron.ipcMain.on(CH_RENDERER, e => {
+                e.returnValue = VENCORD_JS;
+                readBack = e.returnValue;
+            });
+        };
+        const { electron } = boot(t, { patcher });
+        assert.match(electron.ipcMain.sendSync(CH_RENDERER), /__TelinhaAddonBoot/);
+        assert.equal(readBack, VENCORD_JS, "the listener saw its own answer, not ours");
+    });
+
     test("a listener that answers later (async) or never is left alone: no reply is forced", t => {
         const patcher = electron => {
             electron.ipcMain.on(CH_RENDERER, () => { });
