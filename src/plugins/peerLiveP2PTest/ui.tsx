@@ -31,12 +31,19 @@ const S = {
 };
 
 const LEVEL_COLOR = { info: "var(--text-default)", warn: "#f0b232", error: "#f23f43" };
-const ADMISSION_LABEL: Record<Admission, ReactNode> = {
-    "ok": <span style={{ color: "#23a55a" }}>✓ no canal</span>,
-    "fora-do-canal": <b style={{ color: "#f23f43" }}>⚠ FORA DO CANAL</b>,
-    "sem-id": <b style={{ color: "#f0b232" }}>? sem ID</b>,
-    "sem-verificacao": <span style={{ color: "#f0b232" }}>? não verificado</span>
+// Sem JSX no topo do modulo: o factory do JSX (VencordCreateElement) le Vencord.Webpack.Common.React na
+// primeira chamada, e durante a avaliacao do renderer.js o global Vencord ainda nao existe (o bundle quebra).
+const ADMISSION_LABEL: Record<Admission, { text: string; color: string; bold?: boolean; }> = {
+    "ok": { text: "✓ no canal", color: "#23a55a" },
+    "fora-do-canal": { text: "⚠ FORA DO CANAL", color: "#f23f43", bold: true },
+    "sem-id": { text: "? sem ID", color: "#f0b232", bold: true },
+    "sem-verificacao": { text: "? não verificado", color: "#f0b232" }
 };
+
+function AdmissionLabel({ admission }: { admission: Admission; }) {
+    const { text, color, bold } = ADMISSION_LABEL[admission];
+    return bold ? <b style={{ color }}>{text}</b> : <span style={{ color }}>{text}</span>;
+}
 
 const ms = (n: number | null | undefined) => (n == null ? "—" : `${Math.round(n)} ms`);
 const val = (n: number | string | null | undefined, suffix = "") => (n == null || n === "" ? "—" : `${n}${suffix}`);
@@ -171,7 +178,7 @@ function P2PPanelInner({ inSettings }: { inSettings?: boolean; }) {
                                                 <b>{p.presence?.username ?? p.hello?.username ?? "?"}</b>
                                                 <div style={S.muted}>discord {p.presence?.discordUserId ?? p.hello?.discordUserId ?? "?"} · peer {p.peerId.slice(0, 6)}</div>
                                             </td>
-                                            <td style={S.td}>{ADMISSION_LABEL[p.admission]}</td>
+                                            <td style={S.td}><AdmissionLabel admission={p.admission} /></td>
                                             <td style={S.td}>
                                                 <div>{pairLabel(p.pair)}</div>
                                                 <div style={S.muted}>visto {p.seenAfterMs} ms após entrar · ping {ms(p.pingMs)} · RTT ICE {ms(p.pair?.rttMs)}</div>
