@@ -8,11 +8,12 @@
 // so constantes e politicas, nada de Discord/Vencord/DOM em tempo de carga (os testes rodam no Node).
 
 /**
- * Client id do aplicativo "Telinha" no Discord Developer Portal.
- * PLACEHOLDER: vazio = recurso desligado (ninguem e verificado, ninguem e "falso").
- * Troque pelo Application ID real depois de criar o app (passo a passo em docs/identity.md).
+ * Client id (Application ID) do aplicativo "Telinha" no Discord Developer Portal (cliente publico, redirect
+ * OAUTH_REDIRECT_URI, sem bot nem client secret; passo a passo em docs/identity.md).
+ * Vazio = recurso desligado: ninguem e verificado nem "falso" e tudo funciona como na v0.1.0 (os testes
+ * cobrem esse caminho passando `configured: false` / clientId "" explicitamente, nao por esta constante).
  */
-export const DISCORD_CLIENT_ID: string = "";
+export const DISCORD_CLIENT_ID: string = "1565419793446862929";
 
 /** Redirect URI registrado no app. O modal do Discord nunca navega ate ela (o callback recebe a URL). */
 export const OAUTH_REDIRECT_URI = "http://127.0.0.1/telinha/callback";
