@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-// Empacota o build de TESTE do PeerLive (fase de viabilidade) para os amigos instalarem no Windows.
+// Empacota o build de TESTE do PeerLive (teste 2: Vencord oficial + plugin PeerLive) para os amigos instalarem no Windows.
 //
 // 1. Roda o gate `smokeRenderer.mjs` em dist/renderer.js (aborta se falhar).
 // 2. Gera dist/test-package/PeerLive-teste-<hash>.zip com os arquivos de dist (patcher/preload/renderer + .map/.LEGAL),
@@ -34,8 +34,11 @@ const OPTIONAL_DIST_FILES = [
     "renderer.js.map", "renderer.js.LEGAL.txt",
     "renderer.css.map"
 ];
-// Plugins que o teste precisa; se o renderer.js não os contém, o build está velho.
-const REQUIRED_PLUGINS = ["PeerLiveTest", "PeerLiveP2PTest"];
+// Plugin real que o teste precisa; se o renderer.js não o contém, o build está velho.
+const REQUIRED_PLUGINS = ["PeerLive"];
+// Plugins descartáveis do spike (só existem no histórico da branch spike/teste-viabilidade). Se ainda estiverem no
+// renderer.js, o build é antigo: eles instalam o mesmo handler de display-media e conflitam com o plugin real.
+const FORBIDDEN_PLUGINS = ["PeerLiveTest", "PeerLiveP2PTest"];
 
 // [arquivo em disco, caminho dentro do zip, tipo]. "ascii" = .cmd (só ASCII, CRLF); "utf8bom" = UTF-8 com BOM + CRLF.
 const SCRIPT_FILES = [
@@ -92,6 +95,8 @@ if (missing.length) fail(`faltam arquivos em ${dist}: ${missing.join(", ")} (rod
 const renderer = readFileSync(rendererPath, "utf8");
 const lostPlugins = REQUIRED_PLUGINS.filter(p => !new RegExp(`name:\\s*["']${p}["']`).test(renderer));
 if (lostPlugins.length) fail(`o renderer.js não contém o(s) plugin(s) ${lostPlugins.join(", ")} (build desatualizado? rode o build)`);
+const spikePlugins = FORBIDDEN_PLUGINS.filter(p => renderer.includes(p));
+if (spikePlugins.length) fail(`o renderer.js ainda contém o(s) plugin(s) descartável(is) do spike ${spikePlugins.join(", ")} (build desatualizado? rode o build a partir da branch feat/peerlive-v1)`);
 
 const patcherFirstLine = readFileSync(join(dist, "patcher.js"), "utf8").split(/\r?\n/, 1)[0];
 const shortHash = patcherFirstLine.match(/^\/\/\s*Vencord\s+([A-Za-z0-9._-]+)/)?.[1];

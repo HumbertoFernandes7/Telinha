@@ -332,9 +332,9 @@ function Invoke-Install {
     Write-Host ''
     Write-Host 'PRÓXIMOS PASSOS:' -ForegroundColor Cyan
     Show-QuitDiscordSteps
-    Write-Info '3. Vá em Configurações do usuário > Vencord > Plugins, pesquise "PeerLive" e ATIVE os dois'
-    Write-Info '   plugins: PeerLiveTest e PeerLiveP2PTest (se o Discord pedir para reiniciar, aceite).'
-    Write-Info '4. Siga o LEIA-ME.txt para fazer o teste P2P.'
+    Write-Info '3. Vá em Configurações do usuário > Vencord > Plugins, pesquise "PeerLive" e ATIVE o plugin'
+    Write-Info '   PeerLive (se o Discord pedir para reiniciar, aceite).'
+    Write-Info '4. Siga o LEIA-ME.txt para transmitir e assistir.'
     Write-Host ''
     Write-Info 'Para voltar ao Vencord oficial depois: feche o Discord por completo e rode restaurar.cmd.'
     Write-Info 'Suas configurações, temas e plugins do Vencord não foram tocados.'
@@ -403,7 +403,7 @@ function Invoke-Restore {
     Write-Host ''
     Write-Host 'PRÓXIMOS PASSOS:' -ForegroundColor Cyan
     Show-QuitDiscordSteps
-    Write-Info '3. Os plugins PeerLiveTest / PeerLiveP2PTest deixam de aparecer. Suas configurações,'
+    Write-Info '3. O plugin PeerLive deixa de aparecer. Suas configurações,'
     Write-Info '   temas e plugins do Vencord não foram tocados.'
     Write-Host ''
     Write-Info "O backup foi mantido em: $($backup.FullName)"
