@@ -36,12 +36,25 @@ export interface GoLiveOptions {
     kind?: "screen" | "window";
 }
 
+/** What a streaming peer announces in its presence (protocol.ts PresenceStream). */
+export interface PeerStreamAnnouncement {
+    kind: "screen" | "window";
+    title: string;
+    hasAudio: boolean;
+    width: number;
+    height: number;
+    fps: number;
+    access?: AccessMode;
+}
+
 export interface LiveScene {
     rtc: WebRtcEnv;
     native: NativeEnv;
     room: FakeRoom;
     /** A friend's connection arrives: handshake (no id_token: "não verificado") and a presence that says "not streaming". */
     connect(peerId: string, userId?: string, username?: string): Promise<RemotePeer>;
+    /** The peer starts (or, with `false`, stops) streaming: a presence with the stream's announcement reaches us. */
+    peerStreams(peerId: string, userId?: string, username?: string, stream?: false | Partial<PeerStreamAnnouncement>): void;
     /** The connection of a peer that connected (stats, senders...). */
     pc(peerId: string): FakeRTCPeerConnection;
     /** Starts streaming (the capture picker's "Transmitir"). */
@@ -75,6 +88,12 @@ export async function openLiveScene(): Promise<LiveScene> {
             await room.connectPeer(peerId, { hello: buildHello(userId, username) });
             room.receive("presence", { v: PROTOCOL_VERSION, discordUserId: userId, username, streaming: false, caps: { h264HwDecode: false } }, peerId);
             return eventually(() => getState().peers.find(p => p.peerId === peerId));
+        },
+        peerStreams(peerId, userId = FRIEND_ID, username = "amigo", stream = {}) {
+            const announced = stream === false ? undefined : { kind: "screen", title: "", hasAudio: true, width: 1920, height: 1080, fps: 60, ...stream };
+            room.receive("presence", {
+                v: PROTOCOL_VERSION, discordUserId: userId, username, streaming: !!announced, ...(announced ? { stream: announced } : {}), caps: { h264HwDecode: false }
+            }, peerId);
         },
         pc: pcOf,
         async goLive({ access = "all", password, quality = "1080p60", kind = "screen" }: GoLiveOptions = {}) {

@@ -53,7 +53,11 @@ export function openInHost(open: () => void): OpenModalView {
         const all = screen.getAllByRole("dialog");
         return all[all.length - 1];
     };
-    const find = (name: string | RegExp) => within(dialog()).queryByRole("button", { name }) as HTMLButtonElement | null;
+    // the fake Modal's own "×" is also named "Fechar": the visible action button wins over it
+    const find = (name: string | RegExp) => {
+        const all = within(dialog()).queryAllByRole("button", { name }) as HTMLButtonElement[];
+        return all.find(b => b.getAttribute("aria-label") === null) ?? all[0] ?? null;
+    };
     return {
         dialog,
         button(name) {
