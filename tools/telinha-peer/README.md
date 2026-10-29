@@ -89,6 +89,35 @@ página estiverem em PCs diferentes (fones não resolvem: a captura pega tudo o 
 reproduz, seja em caixa ou em fone). Um stream sem trilha de áudio mostra o botão
 desabilitado ("Sem áudio nesta transmissão").
 
+## Fluxo 3 — aprovação e expulsão (o Discord decide quem assiste)
+
+Testa o lado transmissor do plugin: a página é o espectador e o plugin aprova, recusa ou
+expulsa. O plugin responde na própria ação `watch` com `{ op: "pending" }` (esperando a
+aprovação) ou `{ op: "denied", reason }`; a página trata as duas (a validação é a mesma de
+`parseWatchReply` em `src/plugins/telinha/protocol.ts`; motivo desconhecido vira "recusou").
+
+1. No plugin Telinha, ligue **Aprovar quem vai assistir** e comece a transmitir no Discord.
+2. Aqui, entre na sala com o ID de uma conta que está na call (veja "Campos") e clique
+   **Assistir** no peer do plugin.
+3. O card de "Assistindo" mostra **Aguardando o transmissor aprovar…** (o plugin espera até
+   60 s; a página só desiste depois de 75 s). No Discord, o pedido aparece na barra do
+   Telinha. Resultados:
+   - **Permitir**: o vídeo chega normalmente e a linha de estado some.
+   - **Recusar**: o card mostra **O transmissor recusou**.
+   - **Expulsar** (no pedido pendente ou com a página já assistindo): **O transmissor te
+     expulsou**. Vale até o transmissor sair da call (ou usar **Liberar** na lista de
+     espectadores); pedir de novo antes disso volta a ser recusado.
+   - Não responder por 60 s: **O pedido expirou (pode pedir de novo)**.
+   - **Outra conexão diz ser a mesma conta do Discord**: com a primeira janela aguardando ou
+     assistindo, abra uma segunda janela da página com o *mesmo* ID falso (`?user=...` igual
+     nas duas) na mesma sala; o plugin nega às duas.
+4. Em qualquer recusa a página para de esperar, solta o vídeo, mostra o motivo em vermelho,
+   registra o evento no log e a linha do peer volta a mostrar **Assistir** (clique para pedir
+   de novo; **Parar** no card só fecha o card, sem avisar o transmissor, que já sabe).
+
+Sem aprovação ligada o plugin não manda `pending`: o card fica em **Conectando…** até o
+vídeo chegar (ou 30 s sem resposta); expulsar e duplicata continuam valendo.
+
 ## Teste com duas janelas (sem Discord)
 
 Abra a página em duas janelas **lado a lado** (de preferência não em abas: aba em segundo

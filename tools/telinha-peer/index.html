@@ -214,6 +214,18 @@
             margin: 6px 0;
         }
 
+        .watch-status {
+            margin: 6px 0;
+            font-weight: 600;
+        }
+
+        /* pedido negado pelo transmissor: so o motivo e o botao, sem video/stats vazios */
+        .watch-card.denied video,
+        .watch-card.denied .sound-row,
+        .watch-card.denied [data-stats] {
+            display: none;
+        }
+
         .watch-card:first-child {
             border-top: 0;
             padding-top: 0;

@@ -21,6 +21,10 @@ import { getRelaySockets, joinRoom, selfId } from "https://cdn.jsdelivr.net/npm/
 //   "presence" { v: 1, discordUserId, username, streaming, stream?: { kind: "screen" | "window",
 //                title, hasAudio, width, height, fps }, caps: { h264HwDecode } }
 //   "watch"    { op: "start" | "stop" }   (espectador -> transmissor)
+//   "watch"    { op: "pending" }          (transmissor -> espectador) o pedido espera a aprovacao
+//              { op: "denied", reason }   (transmissor -> espectador) reason = "kicked" | "declined" |
+//                                         "timeout" | "duplicate"; desconhecido vira "declined"
+//              (ver o passo 5 e parseWatchReply em protocol.ts)
 //   stream     room.addStream(stream, { target, metadata: { kind: "telinha-screen" } })
 //              (API do Trystero 0.26: o alvo e o metadado vao num objeto de opcoes)
 // ============================================================================
@@ -48,6 +52,19 @@ const STREAM_METADATA_KIND = "telinha-screen";
 // Parametros de envio aplicados a cada espectador (iguais aos do plugin).
 const MAX_BITRATE_BPS = 8_000_000;
 const MAX_FPS = 60;
+// Quanto o espectador espera por quadro (ou resposta) antes de desistir: 30 s normalmente; 75 s depois de um
+// "pending" (o plugin espera a aprovacao ate ~60 s, mais a folga de rede).
+const WATCH_TIMEOUT_MS = 30_000;
+const WATCH_PENDING_TIMEOUT_MS = 75_000;
+// Texto (pt-BR) de cada motivo de "denied" mostrado no card.
+const WATCH_DENIED_TEXT = {
+    kicked: "O transmissor te expulsou",
+    declined: "O transmissor recusou",
+    timeout: "O pedido expirou (pode pedir de novo)",
+    duplicate: "Outra conexão diz ser a mesma conta do Discord"
+};
+const WATCH_PENDING_TEXT = "Aguardando o transmissor aprovar…";
+const WATCH_CONNECTING_TEXT = "Conectando…";
 
 async function deriveRoomId(guildId, voiceChannelId) {
     const input = `${ROOM_PREFIX}|${guildId ?? "dm"}|${voiceChannelId}`;
@@ -57,6 +74,17 @@ async function deriveRoomId(guildId, voiceChannelId) {
 const isHelloMessage = d => !!d && typeof d === "object" && d.type === HELLO_TYPE && typeof d.discordUserId === "string";
 const isPresenceMessage = d => !!d && typeof d === "object" && d.v === PROTOCOL_VERSION && typeof d.discordUserId === "string" && typeof d.streaming === "boolean";
 const isWatchMessage = d => !!d && typeof d === "object" && (d.op === "start" || d.op === "stop");
+// Resposta do transmissor na acao "watch" (WatchReplyMessage). COPIA de parseWatchReply em protocol.ts:
+// "pending" e "denied" validam igual; motivo desconhecido (versao futura) vira "declined".
+const isObject = d => !!d && typeof d === "object" && !Array.isArray(d);
+const WATCH_DENIED_REASONS = ["kicked", "declined", "timeout", "duplicate"];
+function parseWatchReply(data) {
+    if (!isObject(data)) return null;
+    if (data.op === "pending") return { op: "pending" };
+    if (data.op !== "denied") return null;
+    const reason = WATCH_DENIED_REASONS.find(r => r === data.reason) ?? "declined";
+    return { op: "denied", reason };
+}
 // ============================================================================
 
 const TRYSTERO_VERSION = "0.26.0";
@@ -691,11 +719,17 @@ function describeStream(s) {
     return `${s.kind} “${s.title}” ${s.width}x${s.height}@${s.fps} · áudio ${yesNo(s.hasAudio)}`;
 }
 
-// ---- lado transmissor: espectador pede "watch start/stop"
+// ---- acao "watch": pedidos start/stop (lado transmissor) e respostas pending/denied (lado espectador)
 
 function onWatch(data, { peerId }) {
     const r = room;
-    if (!r || !isWatchMessage(data)) return;
+    if (!r) return;
+    if (!isWatchMessage(data)) {
+        const reply = parseWatchReply(data);
+        if (reply) onWatchReply(reply, peerId);
+        return;
+    }
+    // lado transmissor: espectador pede "watch start/stop"
     if (data.op === "start") {
         if (!source) {
             logEvent("warn", "midia", `${peerName(peerId)} pediu para assistir, mas não estou transmitindo`);
@@ -815,6 +849,9 @@ function onPeerStream(stream, peerId, metadata) {
         return;
     }
     if (metadata?.kind !== STREAM_METADATA_KIND) logEvent("warn", "midia", `Stream de ${peerName(peerId)} com metadado inesperado: ${JSON.stringify(metadata)}`);
+    if (w.pending) logEvent("info", "midia", `${peerName(peerId)} aprovou o pedido (${Math.round((performance.now() - w.pendingAt) / 1000)} s depois do “aguardando”)`);
+    w.pending = false;
+    w.timedOut = false;
     w.stream = stream;
     w.streamMs = performance.now() - w.requestedAt;
     stream.addEventListener("removetrack", () => logEvent("info", "midia", `Trilha removida do stream de ${peerName(peerId)}`));
@@ -832,7 +869,7 @@ function watch(peerId) {
     const r = room;
     if (!r) return;
     if (watches.has(peerId)) removeWatch(peerId, true);
-    const w = { peerId, requestedAt: performance.now(), stream: null, sampler: new StatsSampler(), poll: null };
+    const w = { peerId, requestedAt: performance.now(), stream: null, sampler: new StatsSampler(), poll: null, timeoutMs: WATCH_TIMEOUT_MS, pending: false, timedOut: false, denied: null, iceCleanup: null };
     makeCard(w);
     watches.set(peerId, w);
     logEvent("info", "midia", `Assistir ${peerName(peerId)}: pedido enviado`);
@@ -852,6 +889,7 @@ function watch(peerId) {
             }
         };
         pc.addEventListener("iceconnectionstatechange", onIce);
+        w.iceCleanup = () => pc.removeEventListener("iceconnectionstatechange", onIce);
     }
     watchAction?.send({ op: "start" }, { target: peerId }).catch(e => logEvent("error", "midia", "Falha ao pedir stream: " + e));
     startFirstFramePoll(w);
@@ -869,11 +907,67 @@ function endWatch(w, why) {
     logEvent("info", "midia", `Transmissão de ${peerName(w.peerId)} encerrada: ${why}`);
 }
 
+// Resposta do transmissor na acao "watch" (so vale para um pedido meu em andamento).
+function onWatchReply(reply, peerId) {
+    const w = watches.get(peerId);
+    if (!w || w.ended) {
+        logEvent("warn", "midia", `Resposta "${reply.op}" de ${peerName(peerId)} ignorada (não estou pedindo para assistir)`);
+        return;
+    }
+    if (reply.op === "denied") return denyWatch(w, reply.reason);
+    // "pending": o transmissor espera a aprovacao dele. Depois que o stream chegou, nao significa mais nada.
+    if (w.stream) {
+        logEvent("warn", "midia", `“pending” de ${peerName(peerId)} ignorado (o stream já chegou)`);
+        return;
+    }
+    if (!w.pending) {
+        w.pending = true;
+        w.pendingAt = performance.now();
+        logEvent("info", "midia", `${peerName(peerId)} está esperando a aprovação do transmissor para eu assistir (aguardo até ${WATCH_PENDING_TIMEOUT_MS / 1000} s)`);
+    }
+    w.timedOut = false;
+    w.timeoutMs = WATCH_PENDING_TIMEOUT_MS;
+    if (!w.poll) startFirstFramePoll(w); // o prazo normal ja tinha estourado: volta a esperar ate o prazo maior
+    render();
+}
+
+// "denied": o transmissor nao manda (ou parou de mandar) o stream. Para de esperar, mostra o motivo, solta o
+// video e a espera; o card fica ate "Parar" e o botao "Assistir" volta (pode pedir de novo). Nao manda "stop":
+// o transmissor ja sabe.
+function denyWatch(w, reason) {
+    const text = WATCH_DENIED_TEXT[reason];
+    logEvent("warn", "midia", `${peerName(w.peerId)} negou o pedido para assistir (${reason}): ${text}`);
+    w.pending = false;
+    w.timedOut = false;
+    w.denied = reason;
+    w.ended = text;
+    releaseWatch(w);
+    w.stream = null;
+    w.card.video.srcObject = null;
+    render();
+}
+
+// Para a espera de um pedido: poll do primeiro quadro e listener do ICE.
+function releaseWatch(w) {
+    stopFirstFramePoll(w);
+    w.iceCleanup?.();
+    w.iceCleanup = null;
+}
+
+// Linha de estado do card: o que o espectador esta esperando.
+function watchStatus(w) {
+    if (w.denied) return { cls: "err", text: WATCH_DENIED_TEXT[w.denied] };
+    if (w.stream || w.ended) return { cls: "", text: "" };
+    if (w.timedOut) return { cls: "err", text: `Sem resposta do transmissor em ${w.timeoutMs / 1000} s${w.pending ? " (ele não aprovou nem recusou)" : ""}` };
+    if (w.pending) return { cls: "warn", text: WATCH_PENDING_TEXT };
+    return { cls: "muted", text: WATCH_CONNECTING_TEXT };
+}
+
 function removeWatch(peerId, notify) {
     const w = watches.get(peerId);
     if (!w) return;
     watches.delete(peerId);
-    stopFirstFramePoll(w);
+    releaseWatch(w);
     w.card.video.srcObject = null;
     w.card.el.remove();
     if (notify && !w.ended) watchAction?.send({ op: "stop" }, { target: peerId }).catch(() => { });
@@ -891,7 +985,7 @@ const SOUND_NO_AUDIO_LABEL = "Sem áudio nesta transmissão";
 function makeCard(w) {
     const el = document.createElement("div");
     el.className = "watch-card";
-    el.innerHTML = `<h3 data-title></h3><video autoplay playsinline muted controls></video>
+    el.innerHTML = `<h3 data-title></h3><div class="watch-status muted" data-status role="status"></div><video autoplay playsinline muted controls></video>
         <div class="row sound-row"><button class="secondary" type="button" data-sound aria-pressed="false"></button> <span class="muted" data-sound-note></span></div>
         <div data-stats></div>
         <div><button class="secondary" data-stop>Parar</button></div>`;
@@ -901,7 +995,7 @@ function makeCard(w) {
     el.querySelector("[data-sound]").addEventListener("click", () => { video.muted = !video.muted; });
     $("#watches").append(el);
     w.card = {
-        el, video, title: el.querySelector("[data-title]"), stats: el.querySelector("[data-stats]"),
+        el, video, title: el.querySelector("[data-title]"), status: el.querySelector("[data-status]"), stats: el.querySelector("[data-stats]"),
         sound: el.querySelector("[data-sound]"), soundNote: el.querySelector("[data-sound-note]")
     };
     w.soundOn = false;
@@ -958,10 +1052,15 @@ function startFirstFramePoll(w) {
     stopFirstFramePoll(w);
     w.poll = setInterval(async () => {
         if (watches.get(w.peerId) !== w) return stopFirstFramePoll(w);
-        if (performance.now() - w.requestedAt > 30000) {
+        if (performance.now() - w.requestedAt > w.timeoutMs) {
             stopFirstFramePoll(w);
-            logEvent("error", "midia", `Nenhum quadro decodificado em 30 s vindo de ${peerName(w.peerId)}`);
-            recordTiming("Assistir → primeiro quadro decodificado", null, w.peerId, "timeout 30 s");
+            w.timedOut = true;
+            const secs = w.timeoutMs / 1000;
+            logEvent("error", "midia", w.pending
+                ? `${peerName(w.peerId)} não aprovou nem recusou em ${secs} s`
+                : `Nenhum quadro decodificado em ${secs} s vindo de ${peerName(w.peerId)}`);
+            recordTiming("Assistir → primeiro quadro decodificado", null, w.peerId, `timeout ${secs} s`);
+            render();
             return;
         }
         const pc = room?.getPeers()[w.peerId];
@@ -1134,7 +1233,12 @@ function renderNow() {
     for (const w of watches.values()) {
         const s = w.last ?? {};
         const peer = peers.get(w.peerId);
-        w.card.title.textContent = `${peer?.presence?.username ?? short(w.peerId)}` + (w.ended ? ` — encerrado: ${w.ended}` : "");
+        w.card.title.textContent = `${peer?.presence?.username ?? short(w.peerId)}` + (w.denied ? " — encerrado" : w.ended ? ` — encerrado: ${w.ended}` : "");
+        const st = watchStatus(w);
+        w.card.status.className = `watch-status ${st.cls}`;
+        w.card.status.textContent = st.text;
+        w.card.status.hidden = !st.text;
+        w.card.el.classList.toggle("denied", !!w.denied);
         w.card.stats.innerHTML = grid([
             ["Resolução", s.width ? `${s.width}x${s.height}` : "—"],
             ["FPS recebido", val(s.fps)],
@@ -1300,7 +1404,7 @@ window.telinha = {
         viewers: [...viewers],
         outbound: { ...outbound },
         watching: [...watches.values()].map(w => ({
-            peerId: w.peerId, ended: w.ended, hasStream: !!w.stream, last: w.last,
+            peerId: w.peerId, ended: w.ended, pending: w.pending, denied: w.denied, timedOut: w.timedOut, hasStream: !!w.stream, last: w.last,
             streamMs: w.streamMs, firstFrameMs: w.firstFrameMs, renderedMs: w.renderedMs,
             video: { width: w.card.video.videoWidth, height: w.card.video.videoHeight, paused: w.card.video.paused, muted: w.card.video.muted }
         }))
