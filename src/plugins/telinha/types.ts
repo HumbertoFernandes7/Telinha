@@ -7,7 +7,16 @@
 // Contrato entre o nucleo (core/, store.ts, actions.ts) e a UI (index.tsx, ui/**).
 // Mudancas aqui quebram a UI: combine antes.
 
+import type { StreamAccess } from "./protocol";
+
 export type PeerId = string;
+
+/**
+ * "Quem pode assistir" a uma transmissao (core/access.ts): "all" = todos da call (regra do canal de voz; com
+ * "Exigir identidade verificada", quem nao esta verificado precisa de Permitir); "friends" = so amigos do Discord
+ * com identidade verificada; "approval" = cada pedido espera Permitir/Recusar; "password" = com senha.
+ */
+export type AccessMode = StreamAccess;
 
 /**
  * Prova de identidade do Discord desta conexao (docs/identity.md):
@@ -23,6 +32,8 @@ export interface StreamInfo {
     width: number;
     height: number;
     fps: number;
+    /** so em RemotePeer.stream: o modo que o transmissor anuncia (ausente = "all" ou versao antiga) */
+    access?: AccessMode;
 }
 
 export interface RemotePeer {
@@ -48,10 +59,13 @@ export interface RemotePeer {
     identity?: PeerIdentityStatus;
 }
 
-/** "kicked" = expulso (vale ate voce sair da call); "declined" = recusado (vale ate a transmissao acabar) */
-export type BlockReason = "kicked" | "declined";
+/**
+ * "kicked" = expulso (vale ate voce sair da call); "declined" = recusado (vale ate a transmissao acabar);
+ * "tooManyAttempts" = errou a senha 5 vezes (vale ate a transmissao acabar)
+ */
+export type BlockReason = "kicked" | "declined" | "tooManyAttempts";
 
-/** Pedido para assistir esperando a sua aprovacao (opcao approveViewers). */
+/** Pedido para assistir esperando a sua aprovacao (modo "Só quem eu aprovar", ou não verificado em "Todos da call"). */
 export interface PendingViewer {
     peerId: PeerId;
     discordUserId: string;
@@ -86,7 +100,7 @@ export interface IdentityAlert {
 }
 
 /** Por que o transmissor nao manda (ou parou de mandar) a transmissao para voce. */
-export type ViewDeniedReason = "kicked" | "declined" | "timeout" | "duplicate";
+export type ViewDeniedReason = "kicked" | "declined" | "timeout" | "duplicate" | "friendsOnly" | "notVerified" | "tooManyAttempts";
 
 export interface CaptureSource {
     id: string;
@@ -101,6 +115,10 @@ export interface StreamOptions {
     source: CaptureSource;
     withAudio: boolean;
     quality: Quality;
+    /** quem pode assistir; ausente = "all" (trocando de fonte com a transmissao no ar: mantem o atual) */
+    access?: AccessMode;
+    /** com access "password": a senha desta transmissao (so na memoria; esquecida quando ela acaba) */
+    password?: string;
 }
 
 export type ViewerStatus = "connecting" | "waiting-first-frame" | "playing" | "ended" | "error";
@@ -115,6 +133,13 @@ export interface ViewerSession {
     awaitingApproval?: boolean;
     /** status "error": o transmissor encerrou/recusou a sua visualizacao (error traz a frase pronta) */
     denied?: ViewDeniedReason;
+    /**
+     * status "connecting": a transmissao e com senha e o transmissor pediu a senha (responda com
+     * submitWatchPassword). wrong = a ultima senha estava errada; attemptsLeft = tentativas que ainda restam.
+     */
+    passwordPrompt?: { attemptsLeft: number | null; wrong: boolean; };
+    /** status "connecting": a senha foi enviada e o transmissor esta conferindo */
+    checkingPassword?: boolean;
 }
 
 /** Degrau da qualidade automatica. A qualidade escolhida e o teto; 720p30 so existe como degrau automatico. */
@@ -149,8 +174,10 @@ export interface LocalStream {
     autoQuality?: AutoQualityState | null;
     /** Aviso sobre a captura em pt-BR (imagem preta / janela congelada). Ausente/null = captura ok. */
     captureWarning?: string | null;
-    /** pedidos esperando a sua aprovacao (opcao approveViewers), mais antigo primeiro */
+    /** pedidos esperando a sua aprovacao (Permitir/Recusar), mais antigo primeiro */
     pendingViewers?: PendingViewer[];
+    /** quem pode assistir agora (a senha nunca vem aqui: getStreamPassword) */
+    access: AccessMode;
 }
 
 export interface TelinhaState {

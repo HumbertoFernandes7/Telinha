@@ -51,6 +51,25 @@
 //    Compatibilidade: versoes sem a prova (v0.1.0, amigo virtual) ignoram o campo; mensagens da acao
 //    "identity" para quem nao a registrou expiram sozinhas no Trystero (por isso sao raras: uma por
 //    token novo por peer). Hellos sem `idToken` continuam validos.
+// 7. "Quem pode assistir" (v0.2.0, adicionado sem mudar PROTOCOL_VERSION; regras em core/access.ts):
+//    - a presenca anuncia o modo da transmissao em `stream.access`: "all" (todos da call), "friends" (so
+//      amigos do Discord com identidade verificada), "approval" (cada pedido espera Permitir/Recusar) ou
+//      "password" (com senha). Ausente = "all" (v0.1.0); valor desconhecido e descartado.
+//    - com senha, desafio-resposta na propria acao "watch" (a senha nunca trafega):
+//        espectador → { op: "start" }
+//        transmissor → { op: "password", nonce, attemptsLeft?, wrong? }   nonce aleatorio (16 bytes,
+//                     base64url), de uso unico, vale ~2 min; wrong = a ultima prova estava errada
+//        espectador → { op: "start", proof }
+//          proof = base64url(HMAC-SHA256(chave = UTF-8 da senha (NFC, sem espacos nas pontas),
+//                  msg = "telinha-pw-v1|" + nonce + "|" + discordUserId do transmissor + "|" + discordUserId do espectador))
+//        prova certa → o stream vem; errada → novo { op: "password", wrong: true, attemptsLeft }; nonce
+//        vencido/ja usado → novo { op: "password" } (nao conta como erro); 5 erros → { op: "denied",
+//        reason: "tooManyAttempts" } e a conexao e o discordUserId ficam bloqueados ate a transmissao acabar.
+//    - novos motivos de "denied": "friendsOnly" (verificado, mas nao e amigo), "notVerified" (modo
+//      "friends" e o espectador nao provou a identidade), "tooManyAttempts".
+//    Compatibilidade: a v0.1.0 ignora `stream.access` e { op: "password" } (parseWatchReply dela so conhece
+//    pending/denied): como espectadora de uma transmissao com senha, o pedido dela expira sem resposta; os
+//    motivos novos viram "declined" nela.
 // ============================================================================
 
 /** Versao do protocolo; vai no handshake (`v`) e na presenca (`v`). */
@@ -121,6 +140,14 @@ export type IdentityMessage = {
     idToken: string;
 };
 
+/** Quem pode assistir a uma transmissao (passo 7). */
+export const STREAM_ACCESS_MODES = ["all", "friends", "approval", "password"] as const;
+export type StreamAccess = typeof STREAM_ACCESS_MODES[number];
+
+export function isStreamAccess(value: unknown): value is StreamAccess {
+    return STREAM_ACCESS_MODES.some(m => m === value);
+}
+
 export type PresenceStream = {
     kind: "screen" | "window";
     title: string;
@@ -128,6 +155,8 @@ export type PresenceStream = {
     width: number;
     height: number;
     fps: number;
+    /** quem pode assistir (passo 7); ausente = "all" (v0.1.0) */
+    access?: StreamAccess;
 };
 
 /** Presenca: enviada a cada peer novo ao entrar e a todos em qualquer mudanca. */
@@ -140,18 +169,22 @@ export type PresenceMessage = {
     caps: { h264HwDecode: boolean; };
 };
 
-/** Pedido do espectador para o transmissor: comecar/parar de mandar o stream so para ele. */
-export type WatchMessage = {
-    op: "start" | "stop";
-};
+/**
+ * Pedido do espectador para o transmissor: comecar/parar de mandar o stream so para ele. `proof` responde a um
+ * { op: "password" } (passo 7).
+ */
+export type WatchMessage =
+    | { op: "start"; proof?: string; }
+    | { op: "stop"; };
 
 /** Motivo de uma recusa do transmissor (WatchReplyMessage "denied"). */
-export type WatchDeniedReason = "kicked" | "declined" | "timeout" | "duplicate";
+export type WatchDeniedReason = "kicked" | "declined" | "timeout" | "duplicate" | "friendsOnly" | "notVerified" | "tooManyAttempts";
 
-/** Resposta do transmissor para o espectador, na mesma acao "watch" (ver o passo 5 no topo). */
+/** Resposta do transmissor para o espectador, na mesma acao "watch" (ver os passos 5 e 7 no topo). */
 export type WatchReplyMessage =
     | { op: "pending"; }
-    | { op: "denied"; reason: WatchDeniedReason; };
+    | { op: "denied"; reason: WatchDeniedReason; }
+    | { op: "password"; nonce: string; attemptsLeft?: number; wrong?: boolean; };
 
 /** Tudo o que trafega na acao "watch". */
 export type WatchActionMessage = WatchMessage | WatchReplyMessage;
@@ -159,6 +192,12 @@ export type WatchActionMessage = WatchMessage | WatchReplyMessage;
 const SNOWFLAKE_RE = /^\d{1,25}$/;
 const MAX_NAME = 64;
 const MAX_TITLE = 200;
+/** nonce do desafio de senha: base64url, 16 bytes = 22 caracteres (aceita ate 64) */
+export const PASSWORD_NONCE_RE = /^[A-Za-z0-9_-]{16,64}$/;
+/** prova da senha: HMAC-SHA256 em base64url sem padding = 43 caracteres */
+export const PASSWORD_PROOF_RE = /^[A-Za-z0-9_-]{43}$/;
+/** maior numero de tentativas que um { op: "password" } pode anunciar */
+const MAX_ATTEMPTS_FIELD = 99;
 
 const isObject = (d: unknown): d is Record<string, unknown> => !!d && typeof d === "object" && !Array.isArray(d);
 const finiteNonNeg = (n: unknown) => typeof n === "number" && Number.isFinite(n) && n >= 0;
@@ -233,7 +272,9 @@ export function sanitizePresence(data: PresenceMessage): PresenceMessage {
             hasAudio: data.stream.hasAudio,
             width: Math.round(data.stream.width),
             height: Math.round(data.stream.height),
-            fps: Math.round(data.stream.fps)
+            fps: Math.round(data.stream.fps),
+            // modo desconhecido (versao futura) fica de fora: sem etiqueta
+            ...(isStreamAccess(data.stream.access) ? { access: data.stream.access } : {})
         }
         : undefined;
     return {
@@ -250,12 +291,37 @@ export function isWatchMessage(data: unknown): data is WatchMessage {
     return isObject(data) && (data.op === "start" || data.op === "stop");
 }
 
-const DENIED_REASONS: readonly WatchDeniedReason[] = ["kicked", "declined", "timeout", "duplicate"];
+/**
+ * Pedido do espectador, so com os campos conhecidos (o peer remoto nao e confiavel). `proof` so passa no formato
+ * exato (43 caracteres base64url); fora dele e descartado e o pedido vira um "start" simples (recebe um desafio
+ * novo). null se nao for start/stop. Nunca lanca.
+ */
+export function parseWatchRequest(data: unknown): WatchMessage | null {
+    if (!isWatchMessage(data)) return null;
+    if (data.op === "stop") return { op: "stop" };
+    const { proof } = data as Record<string, unknown>;
+    return typeof proof === "string" && PASSWORD_PROOF_RE.test(proof) ? { op: "start", proof } : { op: "start" };
+}
 
-/** Valida a resposta do transmissor; motivo desconhecido (versao futura) vira "declined". */
+const DENIED_REASONS: readonly WatchDeniedReason[] = ["kicked", "declined", "timeout", "duplicate", "friendsOnly", "notVerified", "tooManyAttempts"];
+
+/**
+ * Valida a resposta do transmissor; motivo desconhecido (versao futura) vira "declined". { op: "password" } sem
+ * nonce valido e ignorado (null); attemptsLeft fora de 0..99 ou nao inteiro e descartado.
+ */
 export function parseWatchReply(data: unknown): WatchReplyMessage | null {
     if (!isObject(data)) return null;
     if (data.op === "pending") return { op: "pending" };
+    if (data.op === "password") {
+        if (typeof data.nonce !== "string" || !PASSWORD_NONCE_RE.test(data.nonce)) return null;
+        const left = data.attemptsLeft;
+        return {
+            op: "password",
+            nonce: data.nonce,
+            ...(Number.isInteger(left) && (left as number) >= 0 && (left as number) <= MAX_ATTEMPTS_FIELD ? { attemptsLeft: left as number } : {}),
+            ...(data.wrong === true ? { wrong: true } : {})
+        };
+    }
     if (data.op !== "denied") return null;
     const reason = DENIED_REASONS.find(r => r === data.reason) ?? "declined";
     return { op: "denied", reason };
