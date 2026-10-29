@@ -29,7 +29,7 @@ import {
     type ProofState, verifyPasswordProof, type WatchAccessInput, type WatchDecision
 } from "./access";
 import { startScreenAudioCapture } from "./audio/screenAudio";
-import { chooseCodec, type CodecDecision, getLocalCaps } from "./codec";
+import { chooseCodec, type CodecDecision, disableH264HwEncode, type EncoderReport, getLocalCaps, pickNegotiatedCodec, softwareFallback } from "./codec";
 import { blockOf, getPc, type LocalCapture, peerLabel, publish, rt, setLastError } from "./context";
 import { isIdentityConfigured } from "./identity/config";
 import { type ApprovalInput, identityRequiresApproval } from "./identity/policy";
@@ -71,6 +71,8 @@ interface ViewerSend {
     applied?: boolean;
     /** o Chromium recusou degradationPreference neste sender: nao tenta de novo */
     noDegradation?: boolean;
+    /** a checagem do encoder ja agiu neste espectador (H.264 por software): nunca de novo */
+    fellBack?: boolean;
 }
 
 /** Qualidade automatica (core/quality/controller.ts) e monitor de imagem preta/congelada da captura atual. */
@@ -101,6 +103,7 @@ export function sendPlanFor(peerId: PeerId | null): SendPlan | null {
     const startKbps = level === local.quality ? q.startKbps : Math.min(q.startKbps, Math.round(LEVELS[level].maxKbps * 0.6));
     return {
         codec: send?.decision.codec ?? null,
+        h264Profile: send?.decision.h264Profile ?? null,
         bitrate: { startKbps, maxKbps: q.maxKbps },
         label: peerLabel(peerId)
     };
@@ -843,6 +846,65 @@ async function applySenderParams(peerId: PeerId, local: LocalCapture, level: Qua
     return true;
 }
 
+/**
+ * Checagem do encoder no ar (tick): se o H.264 para este espectador esta no encoder por software (OpenH264, que trava
+ * a imagem), desliga o H.264 automatico no resto da sessao (os proximos espectadores recebem VP9) e passa ESTE
+ * espectador para o codec que chooseCodec escolher agora. Uma vez por espectador (send.fellBack): nunca volta e repete.
+ */
+function checkEncoder(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: EncoderReport) {
+    const next = softwareFallback(enc, !!send.fellBack, rt.peers.get(peerId)?.presence?.caps, settings.store.codec as CodecSetting, getLocalCaps());
+    if (!next) return;
+    send.fellBack = true;
+    const name = next.codec.toUpperCase();
+    const others = disableH264HwEncode() ? ` Os próximos espectadores vão receber ${name}.` : "";
+    const why = `O H.264 para ${peerLabel(peerId)} está sendo codificado por software (${enc.implementation || "sem aceleração"}), não pela placa de vídeo, e a imagem pode travar`;
+    if (next.codec === send.decision.codec) {
+        log.warn(`${why}. Continua em H.264 porque o codec está fixado nas configurações.`);
+        return;
+    }
+    log.warn(`${why}: trocando para ${name}.${others}`);
+    void switchSendCodec(peerId, local, send, next);
+}
+
+/**
+ * Troca o codec de um envio no ar sem renegociar e sem reconectar o espectador: setParameters com encodings[0].codec,
+ * escolhido entre os codecs ja negociados com ele (a negociacao sempre leva todos; so a ordem muda). Conferido num
+ * loopback no Chromium 152: H.264 → VP9 na hora, o receiver continua decodificando a mesma faixa e o codec fica nos
+ * setParameters seguintes (qualidade automatica). Se o Chromium recusar (ex.: colidiu com um setParameters da
+ * qualidade automatica), tenta mais uma vez; falhando de novo, so avisa.
+ */
+async function switchSendCodec(peerId: PeerId, local: LocalCapture, send: ViewerSend, next: CodecDecision) {
+    const label = peerLabel(peerId);
+    const name = next.codec.toUpperCase();
+    // renegociacoes futuras (sendPlanFor) ja vao com o codec novo
+    send.decision = next;
+    let error = "";
+    for (let attempt = 0; attempt < 2; attempt++) {
+        if (attempt) await new Promise(resolve => setTimeout(resolve, 500));
+        const sender = videoSender(peerId, local);
+        if (sends.get(peerId) !== send || !sender) return;
+        try {
+            const params = sender.getParameters();
+            const codec = pickNegotiatedCodec(params.codecs ?? [], next);
+            if (!codec || !params.encodings?.length) {
+                error = `${name} não foi negociado com ele`;
+                break;
+            }
+            (params.encodings[0] as RTCRtpEncodingParameters & { codec?: RTCRtpCodec; }).codec = codec;
+            await sender.setParameters(params);
+            log.info(`${label} agora recebe ${name} (trocado sem reconectar)`);
+            // o tick loga o encoder novo (depois de o Chromium trocar de fato)
+            setTimeout(() => {
+                if (sends.get(peerId) === send) send.reportedCodec = undefined;
+            }, 2000);
+            return;
+        } catch (e) {
+            error = errorText(e);
+        }
+    }
+    log.warn(`Não deu para trocar ${label} para ${name} (${error}). Peça para ele parar de assistir e assistir de novo: vai receber ${name}.`);
+}
+
 // #region eventos vindos da sessao
 
 export function onWatchRequest(peerId: PeerId, request: WatchMessage) {
@@ -900,7 +962,8 @@ export function onRoomClosing(reason: string) {
 /**
  * Uma vez por segundo: confere que todo espectador ainda pode receber (defesa extra: expulso, recusado,
  * identidade duplicada ou fora da call nunca fica recebendo), loga o codec que o encoder realmente usa
- * por espectador (uma vez) e, a cada 2 s, roda a qualidade automatica.
+ * por espectador (uma vez), confere se um envio H.264 caiu no encoder por software (checkEncoder) e, a cada
+ * 2 s, roda a qualidade automatica.
  */
 export function tick() {
     const { local } = rt;
@@ -919,27 +982,27 @@ export function tick() {
     if (++tickCount % 2 === 0) void qualityOf(local)?.evaluate();
     for (const peerId of local.viewers) {
         const send = sends.get(peerId);
-        if (!send || send.reportedCodec) continue;
+        // depois de logar o codec real, so o envio que esta de fato em H.264 continua sendo conferido (o Chromium pode
+        // trocar o encoder da placa de video pelo OpenH264 no meio, ex.: ao mudar a resolucao)
+        if (!send || (send.reportedCodec && (!/^video\/h264$/i.test(send.reportedCodec) || send.fellBack))) continue;
         const sender = videoSender(peerId, local);
         if (!sender) continue;
         sender.getStats().then(report => {
-            let codecId: string | undefined;
-            let encoder: string | undefined;
-            let powerEfficient: boolean | undefined;
+            let out: any;
             report.forEach((s: any) => {
-                if (s.type === "outbound-rtp" && s.kind === "video") {
-                    codecId = s.codecId;
-                    encoder = s.encoderImplementation;
-                    powerEfficient = s.powerEfficientEncoder;
-                }
+                if (s.type === "outbound-rtp" && s.kind === "video") out = s;
             });
-            const codec = codecId ? (report.get(codecId) as any)?.mimeType : undefined;
-            if (!codec || send.reportedCodec || sends.get(peerId) !== send) return;
-            send.reportedCodec = codec;
-            const expected = `video/${send.decision.codec}`.toLowerCase();
-            const msg = `Codificando para ${peerLabel(peerId)}: ${codec}${encoder ? ` (${encoder}${powerEfficient ? ", hardware" : ""})` : ""}`;
-            if (codec.toLowerCase() === expected) log.info(msg);
-            else log.warn(`${msg} — esperado ${send.decision.codec.toUpperCase()}`);
+            const codec = out?.codecId ? (report.get(out.codecId) as any)?.mimeType : undefined;
+            if (!codec || sends.get(peerId) !== send) return;
+            const enc: EncoderReport = { mimeType: codec, implementation: out.encoderImplementation, powerEfficient: out.powerEfficientEncoder, framesEncoded: out.framesEncoded };
+            if (!send.reportedCodec) {
+                send.reportedCodec = codec;
+                const expected = `video/${send.decision.codec}`.toLowerCase();
+                const msg = `Codificando para ${peerLabel(peerId)}: ${codec}${enc.implementation ? ` (${enc.implementation}${enc.powerEfficient ? ", hardware" : ""})` : ""}`;
+                if (codec.toLowerCase() === expected) log.info(msg);
+                else log.warn(`${msg} — esperado ${send.decision.codec.toUpperCase()}`);
+            }
+            checkEncoder(peerId, local, send, enc);
         }).catch(() => { });
     }
 }

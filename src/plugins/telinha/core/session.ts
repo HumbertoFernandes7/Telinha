@@ -684,7 +684,7 @@ export function startSession() {
     }
 
     setPcHooks({ planFor: pc => streaming.sendPlanFor(peerIdOfPc(pc)) });
-    void probeLocalCaps().then(() => {
+    void probeLocalCaps(line => log.info(line)).then(() => {
         if (active) sendPresence();
     });
 

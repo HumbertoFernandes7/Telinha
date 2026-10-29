@@ -17,6 +17,27 @@ export const CODEC_RTP_NAME: Record<VideoCodecName, string> = { h264: "H264", vp
 
 const NON_MEDIA_CODECS = /^(rtx|red|ulpfec|flexfec)$/i;
 
+/** profile-level-id (minusculo) de um fmtp H.264, ou null. Aceita so os parametros ou a linha a=fmtp inteira. */
+export function h264ProfileLevelId(fmtp: string): string | null {
+    const m = /profile-level-id=([0-9a-f]{6})/i.exec(fmtp);
+    return m ? m[1].toLowerCase() : null;
+}
+
+/** H.264 packetization-mode=1 (o Chromium nunca codifica packetization-mode=0 por hardware). */
+export function isPacketizationMode1(fmtp: string): boolean {
+    return /packetization-mode=1(?!\d)/.test(fmtp);
+}
+
+/**
+ * Ordem das variantes H.264 (menor vai antes): 0 = o perfil por hardware deste PC com packetization-mode=1 (mesmo perfil
+ * = mesmos profile_idc e profile_iop, os 4 primeiros digitos do profile-level-id; o nivel nao importa); 1 = outro
+ * packetization-mode=1; 2 = o resto. Sem perfil por hardware, so packetization-mode=1 na frente.
+ */
+export function h264Rank(fmtp: string, hwProfile: string | null | undefined): number {
+    if (!isPacketizationMode1(fmtp)) return 2;
+    return hwProfile && h264ProfileLevelId(fmtp)?.slice(0, 4) === hwProfile.slice(0, 4).toLowerCase() ? 0 : 1;
+}
+
 export interface RemoteSdpPlan {
     /** mids das m-sections de video em que enviamos para este peer */
     videoMids: Set<string>;
@@ -24,6 +45,8 @@ export interface RemoteSdpPlan {
     audioMids: Set<string>;
     /** codec de video que queremos ENVIAR (vai para o inicio da lista) */
     codec: VideoCodecName | null;
+    /** H.264: perfil por hardware deste PC (profile-level-id), na frente das outras variantes H.264 */
+    h264Profile?: string | null;
     /** x-google-start/max-bitrate em kbps nos codecs de video reais */
     bitrate: { startKbps: number; maxKbps: number; } | null;
 }
@@ -55,8 +78,11 @@ function fmtpIndex(lines: string[], pt: string) {
     return lines.findIndex(l => l.startsWith(`a=fmtp:${pt} `));
 }
 
-/** Poe as variantes do codec escolhido no inicio da linha m= (H.264 packetization-mode=1 e VP9 perfil 0 primeiro). */
-function reorderVideoCodecs(lines: string[], codec: VideoCodecName, notes: string[]): string | null {
+/**
+ * Poe as variantes do codec escolhido no inicio da linha m= (H.264: o perfil por hardware, depois packetization-mode=1;
+ * VP9 perfil 0 primeiro). Ex.: o outro lado lista 42e01f (OpenH264 aqui) antes de 42001f (placa de video): 42001f vai na frente.
+ */
+function reorderVideoCodecs(lines: string[], codec: VideoCodecName, h264Profile: string | null | undefined, notes: string[]): string | null {
     const parts = lines[0].split(" ");
     if (parts.length < 4) return null;
     const pts = parts.slice(3);
@@ -65,7 +91,7 @@ function reorderVideoCodecs(lines: string[], codec: VideoCodecName, notes: strin
     const fmtp = (pt: string) => lines[fmtpIndex(lines, pt)] ?? "";
 
     const rank = (pt: string) => {
-        if (codec === "h264") return /packetization-mode=1/.test(fmtp(pt)) ? 0 : 1;
+        if (codec === "h264") return h264Rank(fmtp(pt), h264Profile);
         if (codec === "vp9") return /profile-id=[1-3]/.test(fmtp(pt)) ? 1 : 0;
         return 0;
     };
@@ -75,12 +101,14 @@ function reorderVideoCodecs(lines: string[], codec: VideoCodecName, notes: strin
         notes.push(`${wantedName} ausente no SDP do outro lado; fica o codec padrão`);
         return null;
     }
+    const hwFirst = codec === "h264" && !!h264Profile && rank(wanted[0]) === 0;
+    if (codec === "h264" && h264Profile && !hwFirst) notes.push(`perfil H.264 ${h264Profile} (placa de vídeo) ausente no SDP do outro lado; fica outra variante H.264`);
 
     const next = [...wanted, ...pts.filter(pt => !wanted.includes(pt))];
     if (next.every((pt, i) => pt === pts[i])) return null;
 
     lines[0] = [...parts.slice(0, 3), ...next].join(" ");
-    return `${wantedName} primeiro`;
+    return `${wantedName}${hwFirst ? ` (perfil ${h264Profile})` : ""} primeiro`;
 }
 
 function addVideoBitrate(lines: string[], startKbps: number, maxKbps: number): string | null {
@@ -139,7 +167,7 @@ export function mungeRemoteSdp(sdp: string, plan: RemoteSdpPlan): MungeResult {
 
         if (kind === "video" && plan.videoMids.has(mid)) {
             if (plan.codec) {
-                const c = reorderVideoCodecs(lines, plan.codec, notes);
+                const c = reorderVideoCodecs(lines, plan.codec, plan.h264Profile, notes);
                 if (c) changes.push(`mid ${mid}: ${c}`);
             }
             if (plan.bitrate) {

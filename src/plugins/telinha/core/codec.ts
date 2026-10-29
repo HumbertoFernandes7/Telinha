@@ -4,54 +4,113 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+// Codec de video de envio: a sonda de H.264 por hardware, a decisao por espectador (chooseCodec) e a ordem dos codecs
+// na negociacao. Sem Discord/Vencord/log (as APIs do navegador so sao lidas dentro das funcoes): os testes
+// (codec.test.ts) rodam no Node com RTCRtpSender/navigator.mediaCapabilities falsos. Quem chama loga.
+//
+// H.264 por hardware depende do PERFIL. Medido numa RTX 3070 (encodingInfo "video/H264;<fmtp>", 1080p60, 8 Mbps):
+// powerEfficient em 42001f, 4d001f e 640032 com packetization-mode=1; nao em 42e01f (Constrained Baseline, o que um
+// "video/h264" puro consulta) nem em packetization-mode=0. Negociado em 42e01f, o envio cai no OpenH264 (software) e
+// trava. Por isso a sonda guarda o primeiro perfil por hardware, a negociacao poe ESSE perfil na frente (sortCodecs
+// aqui, sdp.ts no SDP remoto) e o streaming.ts confere o encoder real no ar (softwareFallback).
+
 import { H264_PROBE } from "@plugins/telinha/protocol";
 import type { CodecSetting } from "@plugins/telinha/settings";
 
-import { errorText, log } from "./log";
-import { CODEC_RTP_NAME, type VideoCodecName } from "./sdp";
+import { CODEC_RTP_NAME, h264ProfileLevelId, h264Rank, isPacketizationMode1, type VideoCodecName } from "./sdp";
 
-type Codec = RTCRtpCapabilities["codecs"][number];
+type Codec = RTCRtpCodec;
 
 export interface LocalCodecCaps {
     /** decodificacao H.264 eficiente (hardware); vai na presenca como caps.h264HwDecode */
     h264HwDecode: boolean;
-    /** codificacao H.264 eficiente (hardware) neste PC */
+    /** codificacao H.264 eficiente (hardware) neste PC; desligada no resto da sessao se o encoder cair para software no ar */
     h264HwEncode: boolean;
+    /** profile-level-id (minusculo) do primeiro perfil H.264 que este PC codifica por hardware, ex.: "42001f"; null = nenhum */
+    h264HwProfile: string | null;
     /** codecs de video que este cliente sabe enviar (vazio = desconhecido) */
     sendable: Set<VideoCodecName>;
 }
 
 export interface CodecDecision {
     codec: VideoCodecName;
+    /** H.264: perfil que vai na frente na negociacao (o por hardware); null/ausente = so packetization-mode=1 na frente */
+    h264Profile?: string | null;
     reason: string;
 }
 
-let localCaps: LocalCodecCaps = { h264HwDecode: false, h264HwEncode: false, sendable: new Set() };
+/** Limites da sonda: cada consulta ao mediaCapabilities e a sonda inteira (os perfis vao um de cada vez). */
+export interface ProbeTiming {
+    callMs: number;
+    totalMs: number;
+}
+
+export const PROBE_TIMING: ProbeTiming = { callMs: 3000, totalMs: 6000 };
+
+let localCaps: LocalCodecCaps = { h264HwDecode: false, h264HwEncode: false, h264HwProfile: null, sendable: new Set() };
 let probing: Promise<LocalCodecCaps> | null = null;
 
 export function getLocalCaps(): LocalCodecCaps {
     return localCaps;
 }
 
-function sleep(ms: number) {
-    return new Promise<null>(resolve => setTimeout(() => resolve(null), ms));
+/** Espera `promise` no maximo `ms` (null se estourar) sem deixar o timer pendurado. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<null>(resolve => {
+        timer = setTimeout(() => resolve(null), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-async function probePowerEfficient(kind: "decodingInfo" | "encodingInfo"): Promise<boolean> {
+function videoCodecs(side: "sender" | "receiver"): Codec[] {
     try {
-        const mc = navigator.mediaCapabilities as any;
-        if (typeof mc?.[kind] !== "function") return false;
-        const res = await Promise.race([mc[kind]({ ...H264_PROBE, video: { ...H264_PROBE.video } }), sleep(3000)]);
-        return res?.powerEfficient === true;
+        const api = side === "sender" ? globalThis.RTCRtpSender : globalThis.RTCRtpReceiver;
+        return api?.getCapabilities("video")?.codecs ?? [];
     } catch {
-        return false;
+        return [];
     }
 }
 
-function sendableCodecs() {
+/** fmtp das variantes H.264 packetization-mode=1, na ordem do Chromium, uma por profile-level-id. */
+export function h264Candidates(codecs: readonly Codec[]): string[] {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const c of codecs) {
+        const fmtp = c.sdpFmtpLine ?? "";
+        const profile = h264ProfileLevelId(fmtp);
+        if (!/^video\/h264$/i.test(c.mimeType) || !isPacketizationMode1(fmtp) || !profile || seen.has(profile)) continue;
+        seen.add(profile);
+        out.push(fmtp);
+    }
+    return out;
+}
+
+/**
+ * Primeiro fmtp de `fmtps` (na ordem) que o mediaCapabilities diz ser eficiente (hardware), ou null. Uma consulta por
+ * vez ("video/H264;<fmtp>", 1080p60, 8 Mbps), cada uma com ate timing.callMs, e todas juntas com ate timing.totalMs.
+ * Erro ou estouro = nao.
+ */
+async function firstPowerEfficient(kind: "decodingInfo" | "encodingInfo", fmtps: readonly string[], timing: ProbeTiming): Promise<string | null> {
+    const mc = (globalThis.navigator as any)?.mediaCapabilities;
+    if (typeof mc?.[kind] !== "function") return null;
+    const deadline = Date.now() + timing.totalMs;
+    for (const fmtp of fmtps) {
+        const left = deadline - Date.now();
+        if (left <= 0) break;
+        try {
+            const config = { ...H264_PROBE, video: { ...H264_PROBE.video, contentType: `video/H264;${fmtp}` } };
+            const res = await withTimeout(Promise.resolve(mc[kind](config)), Math.min(timing.callMs, left));
+            if (res?.powerEfficient === true) return fmtp;
+        } catch { }
+    }
+    return null;
+}
+
+function sendableCodecs(codecs: readonly Codec[]) {
     const out = new Set<VideoCodecName>();
     try {
-        for (const c of RTCRtpSender.getCapabilities("video")?.codecs ?? []) {
+        for (const c of codecs) {
             const name = c.mimeType.replace(/^video\//i, "").toUpperCase();
             for (const [key, rtp] of Object.entries(CODEC_RTP_NAME)) if (rtp === name) out.add(key as VideoCodecName);
         }
@@ -59,50 +118,88 @@ function sendableCodecs() {
     return out;
 }
 
-/** Mede uma vez por sessao do Discord (H.264 por hardware para decodificar/codificar + codecs de envio). */
-export function probeLocalCaps(): Promise<LocalCodecCaps> {
-    return probing ??= (async () => {
-        const [h264HwDecode, h264HwEncode] = await Promise.all([probePowerEfficient("decodingInfo"), probePowerEfficient("encodingInfo")]);
-        localCaps = { h264HwDecode, h264HwEncode, sendable: sendableCodecs() };
-        log.info(`Capacidades locais: H.264 por hardware — decodifica: ${h264HwDecode ? "sim" : "não"}, codifica: ${h264HwEncode ? "sim" : "não"}; envia: ${[...localCaps.sendable].join(", ") || "?"}`);
-        return localCaps;
-    })();
+/**
+ * Mede as capacidades (sem memorizar). Codifica: o primeiro perfil H.264 packetization-mode=1 do sender que o
+ * encodingInfo diz ser por hardware. Decodifica: o primeiro perfil packetization-mode=1 do receiver (o que o Chromium
+ * lista primeiro, em geral 42001f, o mesmo que uma placa NVIDIA codifica).
+ */
+export async function measureLocalCaps(timing: ProbeTiming = PROBE_TIMING): Promise<LocalCodecCaps> {
+    const senderCodecs = videoCodecs("sender");
+    const [decodeFmtp, encodeFmtp] = await Promise.all([
+        firstPowerEfficient("decodingInfo", h264Candidates(videoCodecs("receiver")).slice(0, 1), timing),
+        firstPowerEfficient("encodingInfo", h264Candidates(senderCodecs), timing)
+    ]);
+    const h264HwProfile = encodeFmtp ? h264ProfileLevelId(encodeFmtp) : null;
+    return { h264HwDecode: decodeFmtp !== null, h264HwEncode: h264HwProfile !== null, h264HwProfile, sendable: sendableCodecs(senderCodecs) };
+}
+
+/** Linha do log de inicio (ex.: "... codifica: sim (perfil 42001f); envia: h264, vp8, vp9, av1"). */
+export function describeLocalCaps(caps: LocalCodecCaps): string {
+    const encode = caps.h264HwEncode ? `sim${caps.h264HwProfile ? ` (perfil ${caps.h264HwProfile})` : ""}` : "não";
+    return `Capacidades locais: H.264 por hardware — decodifica: ${caps.h264HwDecode ? "sim" : "não"}, codifica: ${encode}; envia: ${[...caps.sendable].join(", ") || "?"}`;
+}
+
+/** Mede uma vez por sessao do Discord. `report` recebe a linha de log da medicao (so na primeira chamada). */
+export function probeLocalCaps(report?: (line: string) => void): Promise<LocalCodecCaps> {
+    return probing ??= measureLocalCaps().then(caps => {
+        localCaps = caps;
+        report?.(describeLocalCaps(caps));
+        return caps;
+    });
 }
 
 /**
- * Codec de video para enviar a UM espectador. Unico ponto de decisao (ajustar aqui com dados de teste).
+ * O encoder H.264 caiu para software no ar (streaming.ts): o resto desta sessao do Discord fica sem H.264 automatico
+ * (chooseCodec passa a escolher VP9). Devolve true se mudou agora.
+ */
+export function disableH264HwEncode(): boolean {
+    if (!localCaps.h264HwEncode) return false;
+    localCaps = { ...localCaps, h264HwEncode: false };
+    return true;
+}
+
+/**
+ * Codec de video para enviar a UM espectador. Unico ponto de decisao (ajustar aqui com dados de teste): o envio
+ * (streaming.ts → sendTo) e a troca no ar quando o H.264 cai para software (softwareFallback) passam por aqui.
  *
  * Medido no Discord com aceleracao de GPU desligada (1080p60, receptor novo por codec):
  * VP9 264 ms ate o 1o quadro / 58 fps / CPU 182% (melhor); VP8 327 ms / 56 fps / 249%; AV1 280 ms /
  * 52 fps / 283%; H.264 por software (OpenH264 → FFmpeg) 17,6 s e 106 PLIs (trava). Com GPU ligada,
- * H.264 NVIDIA → D3D11 nao trava e custa ~7x menos. Por isso "auto" = H.264 SO quando o espectador
- * decodifica e este PC codifica H.264 por hardware; senao VP9.
+ * H.264 NVIDIA → D3D11 nao trava e custa bem menos (3 espectadores 1080p60: 91% de um nucleo contra 420% do VP9).
+ * Por isso "auto" = H.264 SO quando o espectador decodifica e este PC codifica H.264 por hardware; senao VP9.
+ * "Codifica por hardware" = a sonda achou um perfil por hardware e o encoder real nao caiu para software no ar
+ * (h264HwEncode). Com H.264, a decisao leva esse perfil (h264Profile), que vai na frente na negociacao: so o
+ * packetization-mode=1 nao basta, porque 42e01f tambem e packetization-mode=1 e cai no OpenH264.
  */
 export function chooseCodec(viewerCaps: { h264HwDecode: boolean; } | undefined, setting: CodecSetting, local: LocalCodecCaps = localCaps): CodecDecision {
     const canSend = (c: VideoCodecName) => local.sendable.size === 0 || local.sendable.has(c);
     const fallback = (why: string): CodecDecision => canSend("vp9")
         ? { codec: "vp9", reason: `${why} → VP9` }
         : { codec: "vp8", reason: `${why}; VP9 indisponível → VP8` };
+    const h264 = (reason: string): CodecDecision => ({ codec: "h264", h264Profile: local.h264HwProfile, reason });
 
     if (setting && setting !== "auto") {
-        if (canSend(setting)) return { codec: setting, reason: "fixado nas configurações" };
+        if (canSend(setting)) return setting === "h264" ? h264("fixado nas configurações") : { codec: setting, reason: "fixado nas configurações" };
         return fallback(`${setting.toUpperCase()} (configurações) indisponível neste cliente`);
     }
 
     const viewerHw = viewerCaps?.h264HwDecode === true;
     if (viewerHw && local.h264HwEncode && canSend("h264"))
-        return { codec: "h264", reason: "automático: H.264 por hardware nos dois lados" };
+        return h264(`automático: H.264 por hardware nos dois lados${local.h264HwProfile ? ` (perfil ${local.h264HwProfile})` : ""}`);
 
     return fallback(`automático: ${!viewerHw ? "o espectador não decodifica H.264 por hardware" : "este PC não codifica H.264 por hardware"}`);
 }
 
-/** Variantes do codec escolhido primeiro (H.264 packetization-mode=1 e VP9 perfil 0 na frente); o resto fica como alternativa. */
-function sortCodecs(codecs: Codec[], codec: VideoCodecName) {
+/**
+ * Variantes do codec escolhido primeiro; o resto fica como alternativa (ordem original nos empates). H.264: o perfil por
+ * hardware (h264Profile), depois os outros packetization-mode=1, depois o resto (sdp.ts → h264Rank). VP9: perfil 0 na frente.
+ */
+export function sortCodecs<C extends Codec>(codecs: readonly C[], codec: VideoCodecName, h264Profile?: string | null) {
     const wanted = `video/${CODEC_RTP_NAME[codec]}`.toLowerCase();
-    const isWanted = (c: Codec) => c.mimeType.toLowerCase() === wanted;
-    const rank = (c: Codec) => {
+    const isWanted = (c: C) => c.mimeType.toLowerCase() === wanted;
+    const rank = (c: C) => {
         const fmtp = c.sdpFmtpLine ?? "";
-        if (codec === "h264") return /packetization-mode=1/.test(fmtp) ? 0 : 1;
+        if (codec === "h264") return h264Rank(fmtp, h264Profile);
         if (codec === "vp9") return /profile-id=[1-3]/.test(fmtp) ? 1 : 0;
         return 0;
     };
@@ -110,11 +207,13 @@ function sortCodecs(codecs: Codec[], codec: VideoCodecName) {
     return { sorted: [...preferred, ...codecs.filter(c => !isWanted(c))], matched: preferred.length };
 }
 
+const describeError = (e: unknown) => (e instanceof Error ? `${e.name}: ${e.message}` : String(e));
+
 /**
  * setCodecPreferences no transceiver de envio (antes da oferta/resposta). Tenta as capacidades do
  * sender e depois as do receiver (o Chromium ja aceitou so as do receiver). Devolve uma descricao.
  */
-export function applyCodecPreferences(transceiver: RTCRtpTransceiver, codec: VideoCodecName): string {
+export function applyCodecPreferences(transceiver: RTCRtpTransceiver, codec: VideoCodecName, h264Profile?: string | null): string {
     const sources = [
         ["sender", () => RTCRtpSender.getCapabilities("video")?.codecs],
         ["receiver", () => RTCRtpReceiver.getCapabilities("video")?.codecs]
@@ -124,17 +223,65 @@ export function applyCodecPreferences(transceiver: RTCRtpTransceiver, codec: Vid
     for (const [name, get] of sources) {
         const caps = get();
         if (!caps?.length) continue;
-        const { sorted, matched } = sortCodecs(caps, codec);
+        const { sorted, matched } = sortCodecs(caps, codec, h264Profile);
         if (!matched) {
             lastError = `${CODEC_RTP_NAME[codec]} ausente em ${name}.getCapabilities`;
             continue;
         }
         try {
             transceiver.setCodecPreferences(sorted);
-            return `${CODEC_RTP_NAME[codec]} primeiro (${matched} variante(s), capacidades do ${name})`;
+            const profile = codec === "h264" && h264Profile && h264Rank(sorted[0].sdpFmtpLine ?? "", h264Profile) === 0 ? ` (perfil ${h264Profile})` : "";
+            return `${CODEC_RTP_NAME[codec]}${profile} primeiro (${matched} variante(s), capacidades do ${name})`;
         } catch (e) {
-            lastError = errorText(e);
+            lastError = describeError(e);
         }
     }
     return `setCodecPreferences não aplicado (${lastError || "sem capacidades"})`;
+}
+
+/**
+ * Codec para RTCRtpEncodingParameters.codec (troca no ar, sem renegociar): a melhor variante do codec da decisao entre
+ * os ja negociados com o espectador (sender.getParameters().codecs), so com os campos de RTCRtpCodec. null se nao foi
+ * negociado.
+ */
+export function pickNegotiatedCodec(negotiated: readonly Codec[], decision: CodecDecision): RTCRtpCodec | null {
+    const { sorted, matched } = sortCodecs(negotiated, decision.codec, decision.h264Profile);
+    if (!matched) return null;
+    const { mimeType, clockRate, channels, sdpFmtpLine } = sorted[0];
+    return { mimeType, clockRate, ...(channels !== undefined ? { channels } : {}), ...(sdpFmtpLine !== undefined ? { sdpFmtpLine } : {}) };
+}
+
+/** O que o getStats diz do encoder de UM envio de video (outbound-rtp e o codec dele). */
+export interface EncoderReport {
+    /** mimeType do codec em uso, ex.: "video/H264" */
+    mimeType: string;
+    /** encoderImplementation, ex.: "OpenH264" ou "MediaFoundationVideoEncodeAccelerator (NVIDIA H.264 Encoder MFT)" */
+    implementation?: string;
+    /** powerEfficientEncoder */
+    powerEfficient?: boolean;
+    framesEncoded?: number;
+}
+
+/**
+ * O envio esta em H.264 codificado por software? So com evidencia: o encoder ja produziu quadros e diz
+ * powerEfficientEncoder false, ou (sem esse campo) se chama OpenH264. O Chromium so expoe os dois campos com uma
+ * captura no ar; sem eles nao da para saber (false).
+ */
+export function isSoftwareH264(r: EncoderReport): boolean {
+    if (!/^video\/h264$/i.test(r.mimeType) || (r.framesEncoded ?? 0) <= 0) return false;
+    if (typeof r.powerEfficient === "boolean") return !r.powerEfficient;
+    return /openh264/i.test(r.implementation ?? "");
+}
+
+/**
+ * Checagem no ar de UM envio (streaming.ts → tick), no maximo uma vez por espectador (`alreadyChecked`): se o H.264
+ * caiu para software, o codec que chooseCodec escolhe agora com este PC sem H.264 por hardware (VP9; continua H.264
+ * so se estiver fixado nas configuracoes). null = nada a fazer (sem evidencia, outro codec ou ja tratado).
+ */
+export function softwareFallback(
+    report: EncoderReport, alreadyChecked: boolean, viewerCaps: { h264HwDecode: boolean; } | undefined, setting: CodecSetting,
+    local: LocalCodecCaps = localCaps
+): CodecDecision | null {
+    if (alreadyChecked || !isSoftwareH264(report)) return null;
+    return chooseCodec(viewerCaps, setting, { ...local, h264HwEncode: false });
 }

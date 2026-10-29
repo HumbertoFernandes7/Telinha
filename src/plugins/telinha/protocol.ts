@@ -116,6 +116,9 @@ export const STREAM_KIND_SCREEN = "telinha-screen";
 /**
  * Sonda de `caps.h264HwDecode`: navigator.mediaCapabilities.decodingInfo(H264_PROBE).powerEfficient
  * (false em erro). A mesma configuracao com encodingInfo diz se o envio em H.264 e por hardware.
+ * Desde a v0.2.1 o contentType vai com o perfil: "video/H264;" + sdpFmtpLine de uma variante packetization-mode=1
+ * (core/codec.ts). O "video/h264" puro abaixo o Chromium le como 42e01f, perfil que a placa de video pode nao codificar.
+ * So muda a sonda local: o campo da presenca continua o mesmo booleano.
  */
 export const H264_PROBE = {
     type: "webrtc",

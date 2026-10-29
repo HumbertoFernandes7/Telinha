@@ -9,7 +9,8 @@
 //
 // - setLocalDescription() implicito (o Trystero sempre chama sem argumento, tanto para oferta quanto
 //   para resposta): antes de deixar o Chromium gerar o SDP, aplica setCodecPreferences nos
-//   transceivers em que ENVIAMOS video para esse peer (codec escolhido por chooseCodec).
+//   transceivers em que ENVIAMOS video para esse peer (codec escolhido por chooseCodec; H.264: o perfil que
+//   este PC codifica por hardware na frente das outras variantes).
 // - setRemoteDescription(): reordena o codec escolhido para o inicio das m-sections em que enviamos e
 //   injeta x-google-start/max-bitrate + opus estereo (ver sdp.ts). Isso garante o codec mesmo quando
 //   quem oferta e o outro lado (ex.: os dois transmitindo um para o outro, transceiver reaproveitado)
@@ -24,6 +25,8 @@ import { mungeRemoteSdp, type VideoCodecName } from "./sdp";
 export interface SendPlan {
     /** codec de video que queremos ENVIAR para o peer desta conexao */
     codec: VideoCodecName | null;
+    /** H.264: perfil por hardware que vai na frente das outras variantes (CodecDecision.h264Profile) */
+    h264Profile?: string | null;
     bitrate: { startKbps: number; maxKbps: number; } | null;
     /** nome do peer para os logs */
     label: string;
@@ -36,7 +39,8 @@ export interface PcHooks {
 
 let hooks: PcHooks | null = null;
 let PeerConnectionClass: typeof RTCPeerConnection | null = null;
-const appliedPrefs = new WeakMap<RTCRtpTransceiver, VideoCodecName>();
+/** transceiver → "codec:perfil" ja aplicado com setCodecPreferences */
+const appliedPrefs = new WeakMap<RTCRtpTransceiver, string>();
 const loggedMunge = new WeakMap<RTCPeerConnection, string>();
 
 export function setPcHooks(next: PcHooks | null) {
@@ -54,10 +58,11 @@ function sendingTransceivers(pc: RTCPeerConnection, kind: "audio" | "video") {
 function prepareLocalDescription(pc: RTCPeerConnection) {
     const plan = hooks?.planFor(pc);
     if (!plan?.codec) return;
+    const key = `${plan.codec}:${plan.h264Profile ?? ""}`;
     for (const t of sendingTransceivers(pc, "video")) {
-        if (appliedPrefs.get(t) === plan.codec) continue;
-        appliedPrefs.set(t, plan.codec);
-        log.info(`${plan.label}: preferência de codec ${applyCodecPreferences(t, plan.codec)}`);
+        if (appliedPrefs.get(t) === key) continue;
+        appliedPrefs.set(t, key);
+        log.info(`${plan.label}: preferência de codec ${applyCodecPreferences(t, plan.codec, plan.h264Profile)}`);
     }
 }
 
@@ -71,7 +76,7 @@ function mungeRemoteDescription(pc: RTCPeerConnection, description: RTCSessionDe
     const audioMids = mids("audio");
     if (!videoMids.size && !audioMids.size) return description;
 
-    const result = mungeRemoteSdp(description.sdp, { videoMids, audioMids, codec: plan.codec, bitrate: plan.bitrate });
+    const result = mungeRemoteSdp(description.sdp, { videoMids, audioMids, codec: plan.codec, h264Profile: plan.h264Profile, bitrate: plan.bitrate });
     const summary = [...result.changes, ...result.notes].join("; ");
     if (summary && loggedMunge.get(pc) !== summary) {
         loggedMunge.set(pc, summary);
