@@ -12,7 +12,9 @@
 // powerEfficient em 42001f, 4d001f e 640032 com packetization-mode=1; nao em 42e01f (Constrained Baseline, o que um
 // "video/h264" puro consulta) nem em packetization-mode=0. Negociado em 42e01f, o envio cai no OpenH264 (software) e
 // trava. Por isso a sonda guarda o primeiro perfil por hardware, a negociacao poe ESSE perfil na frente (sortCodecs
-// aqui, sdp.ts no SDP remoto) e o streaming.ts confere o encoder real no ar (softwareFallback).
+// aqui, sdp.ts no SDP remoto) e o streaming.ts confere o encoder real no ar (softwareFallback). No ar, o Chromium
+// tambem troca a placa pelo OpenH264 DE PROPOSITO em quadros de tamanho impar ou abaixo de 360p (ver
+// isTransientSoftwareH264): isso e passageiro e nao conta como queda.
 
 import { H264_PROBE } from "@plugins/telinha/protocol";
 import type { CodecSetting } from "@plugins/telinha/settings";
@@ -24,7 +26,7 @@ type Codec = RTCRtpCodec;
 export interface LocalCodecCaps {
     /** decodificacao H.264 eficiente (hardware); vai na presenca como caps.h264HwDecode */
     h264HwDecode: boolean;
-    /** codificacao H.264 eficiente (hardware) neste PC; desligada no resto da sessao se o encoder cair para software no ar */
+    /** codificacao H.264 eficiente (hardware) neste PC; desligada no resto da sessao na 2a queda do encoder para software no ar */
     h264HwEncode: boolean;
     /** profile-level-id (minusculo) do primeiro perfil H.264 que este PC codifica por hardware, ex.: "42001f"; null = nenhum */
     h264HwProfile: string | null;
@@ -148,14 +150,32 @@ export function probeLocalCaps(report?: (line: string) => void): Promise<LocalCo
     });
 }
 
+/** Na N-esima queda do H.264 para software numa sessao do Discord, o H.264 automatico desliga (noteH264Fallback). */
+export const H264_FALLBACKS_TO_DISABLE = 2;
+
+let h264Fallbacks = 0;
+
+export interface H264FallbackTally {
+    /** quedas nesta sessao do Discord, contando esta */
+    count: number;
+    /** esta queda desligou o H.264 automatico (os proximos espectadores recebem VP9) */
+    disabledNow: boolean;
+}
+
 /**
- * O encoder H.264 caiu para software no ar (streaming.ts): o resto desta sessao do Discord fica sem H.264 automatico
- * (chooseCodec passa a escolher VP9). Devolve true se mudou agora.
+ * Registra uma queda de verdade do encoder H.264 para software no ar (streaming.ts → checkEncoder). Uma queda so tira
+ * do H.264 o espectador que caiu: os proximos ainda tentam a placa de video (pode ter sido algo daquele envio). Na
+ * H264_FALLBACKS_TO_DISABLE-esima queda da sessao, desliga o H.264 automatico (h264HwEncode; chooseCodec passa a
+ * escolher VP9) no resto da sessao do Discord.
  */
-export function disableH264HwEncode(): boolean {
-    if (!localCaps.h264HwEncode) return false;
-    localCaps = { ...localCaps, h264HwEncode: false };
-    return true;
+export function noteH264Fallback(): H264FallbackTally {
+    h264Fallbacks++;
+    let disabledNow = false;
+    if (h264Fallbacks >= H264_FALLBACKS_TO_DISABLE && localCaps.h264HwEncode) {
+        localCaps = { ...localCaps, h264HwEncode: false };
+        disabledNow = true;
+    }
+    return { count: h264Fallbacks, disabledNow };
 }
 
 /**
@@ -168,7 +188,7 @@ export function disableH264HwEncode(): boolean {
  * H.264 NVIDIA → D3D11 nao trava e custa bem menos (3 espectadores 1080p60: 91% de um nucleo contra 420% do VP9).
  * Por isso "auto" = H.264 SO quando o espectador decodifica e este PC codifica H.264 por hardware; senao VP9.
  * "Codifica por hardware" = a sonda achou um perfil por hardware e o encoder real nao caiu para software no ar
- * (h264HwEncode). Com H.264, a decisao leva esse perfil (h264Profile), que vai na frente na negociacao: so o
+ * H264_FALLBACKS_TO_DISABLE vezes nesta sessao (h264HwEncode, noteH264Fallback). Com H.264, a decisao leva esse perfil (h264Profile), que vai na frente na negociacao: so o
  * packetization-mode=1 nao basta, porque 42e01f tambem e packetization-mode=1 e cai no OpenH264.
  */
 export function chooseCodec(viewerCaps: { h264HwDecode: boolean; } | undefined, setting: CodecSetting, local: LocalCodecCaps = localCaps): CodecDecision {
@@ -260,6 +280,23 @@ export interface EncoderReport {
     /** powerEfficientEncoder */
     powerEfficient?: boolean;
     framesEncoded?: number;
+    /** frameWidth/frameHeight do ultimo quadro codificado */
+    width?: number;
+    height?: number;
+    /** qualityLimitationReason ("none", "bandwidth", "cpu", "other"): o WebRTC esta reduzindo a resolucao por conta propria? */
+    limitation?: string;
+}
+
+/**
+ * Menor altura que o Chromium codifica H.264 na placa de video (RTCVideoEncoder::UseSoftwareForLowResolution, feature
+ * kForceSoftwareForRtcLowResolutions; 270 para AV1). Abaixo disso, ou com largura/altura impar ("hardware H.264 encoder
+ * only supports even sized frames"), o InitEncode pede WEBRTC_VIDEO_CODEC_FALLBACK_SOFTWARE e o WebRTC usa o OpenH264.
+ */
+export const H264_HW_MIN_HEIGHT = 360;
+
+/** O RTCVideoEncoder do Chromium aceita codificar H.264 na placa de video um quadro deste tamanho? */
+export function h264HwAcceptsSize(width: number, height: number): boolean {
+    return width % 2 === 0 && height % 2 === 0 && height >= H264_HW_MIN_HEIGHT;
 }
 
 /**
@@ -274,14 +311,29 @@ export function isSoftwareH264(r: EncoderReport): boolean {
 }
 
 /**
+ * H.264 em software DE PROPOSITO e de passagem: o proprio WebRTC esta reduzindo a resolucao (qualityLimitationReason
+ * diferente de "none", ex.: banda baixa com degradationPreference "maintain-framerate") e chegou num tamanho que a placa
+ * de video nao aceita (h264HwAcceptsSize). Medido no Chromium 152 (RTX 3070): o OpenH264 assume nesse quadro e a placa
+ * volta sozinha na proxima reconfiguracao com um tamanho valido, sem o espectador travar. Nao e queda.
+ * Com o WebRTC sem reduzir nada (ex.: janela capturada com tamanho impar), o tamanho e o nosso e nao muda sozinho: conta
+ * como queda (softwareFallback).
+ */
+export function isTransientSoftwareH264(r: EncoderReport): boolean {
+    if (!isSoftwareH264(r) || !r.limitation || r.limitation === "none" || !r.width || !r.height) return false;
+    return !h264HwAcceptsSize(r.width, r.height);
+}
+
+/**
  * Checagem no ar de UM envio (streaming.ts → tick), no maximo uma vez por espectador (`alreadyChecked`): se o H.264
- * caiu para software, o codec que chooseCodec escolhe agora com este PC sem H.264 por hardware (VP9; continua H.264
- * so se estiver fixado nas configuracoes). null = nada a fazer (sem evidencia, outro codec ou ja tratado).
+ * caiu para software de verdade (nao de passagem, ver isTransientSoftwareH264), o codec para ESTE espectador, o que
+ * chooseCodec escolhe com este PC sem H.264 por hardware (VP9; continua H.264 so se estiver fixado nas configuracoes).
+ * Nao mexe na sessao: quem chama registra a queda (noteH264Fallback). null = nada a fazer (sem evidencia, de passagem,
+ * outro codec ou ja tratado).
  */
 export function softwareFallback(
     report: EncoderReport, alreadyChecked: boolean, viewerCaps: { h264HwDecode: boolean; } | undefined, setting: CodecSetting,
     local: LocalCodecCaps = localCaps
 ): CodecDecision | null {
-    if (alreadyChecked || !isSoftwareH264(report)) return null;
+    if (alreadyChecked || !isSoftwareH264(report) || isTransientSoftwareH264(report)) return null;
     return chooseCodec(viewerCaps, setting, { ...local, h264HwEncode: false });
 }

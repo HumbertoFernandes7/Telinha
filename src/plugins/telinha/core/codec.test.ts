@@ -13,8 +13,9 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import {
-    applyCodecPreferences, chooseCodec, type CodecDecision, describeLocalCaps, disableH264HwEncode, type EncoderReport, getLocalCaps, h264Candidates,
-    isSoftwareH264, type LocalCodecCaps, measureLocalCaps, pickNegotiatedCodec, probeLocalCaps, softwareFallback, sortCodecs
+    applyCodecPreferences, chooseCodec, type CodecDecision, describeLocalCaps, type EncoderReport, getLocalCaps, h264Candidates, h264HwAcceptsSize,
+    isSoftwareH264, isTransientSoftwareH264, type LocalCodecCaps, measureLocalCaps, noteH264Fallback, pickNegotiatedCodec, probeLocalCaps,
+    softwareFallback, sortCodecs
 } from "./codec";
 import { h264ProfileLevelId, h264Rank, mungeRemoteSdp } from "./sdp";
 
@@ -371,6 +372,32 @@ describe("checagem do encoder no ar", () => {
         assert.deepEqual(softwareFallback(OPENH264, false, HW, "h264", caps()), { codec: "h264", h264Profile: "42001f", reason: "fixado nas configurações" });
     });
 
+    test("tamanhos que a placa de video aceita para H.264 (medidos no Chromium 152, RTX 3070)", () => {
+        for (const [w, h] of [[1920, 1080], [1280, 720], [960, 540], [800, 450], [768, 432], [714, 500], [640, 360], [1000, 700]])
+            assert.equal(h264HwAcceptsSize(w, h), true, `${w}x${h} na placa`);
+        for (const [w, h] of [[853, 480], [1136, 639], [1001, 701], [480, 270], [427, 240], [320, 180], [640, 358]])
+            assert.equal(h264HwAcceptsSize(w, h), false, `${w}x${h} no OpenH264`);
+    });
+
+    test("OpenH264 de passagem: o WebRTC reduziu a resolucao para um tamanho que a placa nao aceita", () => {
+        const sw = (width: number, height: number, limitation?: string): EncoderReport => ({ ...OPENH264, width, height, limitation });
+        // log de 29/10: banda ~0,5 Mbps + degrau 720p → 853x480 (largura impar), depois 427x240 / 320x180 (abaixo de 360p)
+        assert.equal(isTransientSoftwareH264(sw(853, 480, "bandwidth")), true);
+        assert.equal(isTransientSoftwareH264(sw(480, 270, "bandwidth")), true);
+        assert.equal(isTransientSoftwareH264(sw(427, 240, "cpu")), true);
+        assert.equal(softwareFallback(sw(853, 480, "bandwidth"), false, HW, "auto", caps()), null, "nao e queda: nao troca o codec");
+        assert.equal(softwareFallback(sw(320, 180, "bandwidth"), false, HW, "h264", caps()), null);
+
+        // queda de verdade: tamanho que a placa aceita, ou o tamanho e o nosso (o WebRTC nao esta reduzindo nada)
+        assert.equal(isTransientSoftwareH264(sw(1280, 720, "bandwidth")), false, "1280x720 a placa aceita");
+        assert.equal(isTransientSoftwareH264(sw(1001, 701, "none")), false, "janela de tamanho impar: nao muda sozinho");
+        assert.equal(isTransientSoftwareH264(sw(853, 480)), false, "sem qualityLimitationReason: como antes");
+        assert.equal(isTransientSoftwareH264({ ...OPENH264, limitation: "bandwidth" }), false, "sem tamanho: como antes");
+        assert.equal(isTransientSoftwareH264({ ...NVIDIA, width: 427, height: 240, limitation: "bandwidth" }), false, "na placa nao e software");
+        assert.equal(softwareFallback(sw(1280, 720, "bandwidth"), false, HW, "auto", caps())?.codec, "vp9");
+        assert.equal(softwareFallback(sw(1001, 701, "none"), false, HW, "auto", caps())?.codec, "vp9");
+    });
+
     test("pickNegotiatedCodec: variante certa entre os ja negociados, so os campos de RTCRtpCodec", () => {
         const negotiated: RTCRtpCodecParameters[] = [
             { payloadType: 108, ...h264(1, "42e01f") },
@@ -383,7 +410,7 @@ describe("checagem do encoder no ar", () => {
         assert.equal(pickNegotiatedCodec(negotiated, { codec: "av1", reason: "" }), null);
     });
 
-    test("sessao: probeLocalCaps mede uma vez; disableH264HwEncode desliga o H.264 automatico", async () => {
+    test("sessao: 1a queda tira so aquele espectador do H.264; a 2a desliga o H.264 automatico; fixado continua H.264", async () => {
         setCaps(CHROMIUM_CAPS);
         setMediaCapabilities(RTX_3070);
         const lines: string[] = [];
@@ -393,12 +420,26 @@ describe("checagem do encoder no ar", () => {
         assert.deepEqual(lines, ["Capacidades locais: H.264 por hardware — decodifica: sim, codifica: sim (perfil 42001f); envia: h264, vp8, av1, vp9"]);
 
         const viewer = { h264HwDecode: true };
-        assert.equal(chooseCodec(viewer, "auto").codec, "h264");
-        assert.equal(disableH264HwEncode(), true);
-        assert.equal(disableH264HwEncode(), false, "so a primeira vez muda");
+        const hwH264 = { codec: "h264", h264Profile: "42001f", reason: "automático: H.264 por hardware nos dois lados (perfil 42001f)" };
+        assert.deepEqual(chooseCodec(viewer, "auto"), hwH264);
+
+        // 1a queda (espectador A): so A vai para VP9; quem entra depois (B) ainda recebe H.264 pela placa
+        assert.equal(softwareFallback(OPENH264, false, viewer, "auto")?.codec, "vp9", "A sai do H.264");
+        assert.deepEqual(noteH264Fallback(), { count: 1, disabledNow: false });
+        assert.equal(getLocalCaps().h264HwEncode, true, "a sessao continua com H.264 automatico");
+        assert.deepEqual(chooseCodec(viewer, "auto"), hwH264, "B: H.264 pela placa");
+        assert.equal(softwareFallback(OPENH264, true, viewer, "auto"), null, "A: uma vez por espectador");
+
+        // 2a queda (espectador B): B vai para VP9 e o H.264 automatico desliga no resto da sessao
+        assert.equal(softwareFallback(OPENH264, false, viewer, "auto")?.codec, "vp9", "B sai do H.264");
+        assert.deepEqual(noteH264Fallback(), { count: 2, disabledNow: true });
         assert.equal(getLocalCaps().h264HwEncode, false);
         assert.equal(getLocalCaps().h264HwProfile, "42001f");
-        assert.equal(chooseCodec(viewer, "auto").codec, "vp9", "proximos espectadores: VP9");
-        assert.equal(softwareFallback(OPENH264, false, viewer, "auto")?.codec, "vp9");
+        assert.equal(chooseCodec(viewer, "auto").codec, "vp9", "C, que entra depois: VP9");
+        assert.deepEqual(noteH264Fallback(), { count: 3, disabledNow: false }, "ja desligado: nao muda de novo");
+
+        // codec fixado em H.264: nao troca (nem depois de desligado o automatico)
+        assert.equal(chooseCodec(viewer, "h264").codec, "h264");
+        assert.deepEqual(softwareFallback(OPENH264, false, viewer, "h264"), { codec: "h264", h264Profile: "42001f", reason: "fixado nas configurações" });
     });
 });

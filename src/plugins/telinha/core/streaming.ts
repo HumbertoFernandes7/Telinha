@@ -29,7 +29,7 @@ import {
     type ProofState, verifyPasswordProof, type WatchAccessInput, type WatchDecision
 } from "./access";
 import { startScreenAudioCapture } from "./audio/screenAudio";
-import { chooseCodec, type CodecDecision, disableH264HwEncode, type EncoderReport, getLocalCaps, pickNegotiatedCodec, softwareFallback } from "./codec";
+import { chooseCodec, type CodecDecision, type EncoderReport, getLocalCaps, isTransientSoftwareH264, noteH264Fallback, pickNegotiatedCodec, softwareFallback } from "./codec";
 import { blockOf, getPc, type LocalCapture, peerLabel, publish, rt, setLastError } from "./context";
 import { isIdentityConfigured } from "./identity/config";
 import { type ApprovalInput, identityRequiresApproval } from "./identity/policy";
@@ -73,6 +73,8 @@ interface ViewerSend {
     noDegradation?: boolean;
     /** a checagem do encoder ja agiu neste espectador (H.264 por software): nunca de novo */
     fellBack?: boolean;
+    /** o H.264 esta no OpenH264 de passagem (o WebRTC reduziu a resolucao para um tamanho que a placa nao aceita) */
+    transientSoftware?: boolean;
 }
 
 /** Qualidade automatica (core/quality/controller.ts) e monitor de imagem preta/congelada da captura atual. */
@@ -847,22 +849,59 @@ async function applySenderParams(peerId: PeerId, local: LocalCapture, level: Qua
 }
 
 /**
- * Checagem do encoder no ar (tick): se o H.264 para este espectador esta no encoder por software (OpenH264, que trava
- * a imagem), desliga o H.264 automatico no resto da sessao (os proximos espectadores recebem VP9) e passa ESTE
- * espectador para o codec que chooseCodec escolher agora. Uma vez por espectador (send.fellBack): nunca volta e repete.
+ * Checagem do encoder no ar (tick) de um envio H.264.
+ *
+ * O que tira o H.264 da placa de video no meio. Medido em 29/10/2026 no Electron 44.9.3 (Chromium 152), RTX 3070 com
+ * driver 617.42, loopback com 42001f, quadros de 1080p60, getStats a cada 500 ms:
+ * - o RTCVideoEncoder do Chromium so usa a placa para H.264 com largura E altura pares e altura >= 360
+ *   (codec.ts → h264HwAcceptsSize); fora disso o WebRTC usa o OpenH264. Ex.: 480x270, 320x180, 853x480 e 1136x639 no
+ *   OpenH264; 640x360, 800x450, 768x432 e 714x500 na placa. Volta para a placa sozinho na proxima reconfiguracao com um
+ *   tamanho valido;
+ * - com a banda baixa (~0,5 Mbps) o proprio WebRTC reduz a resolucao (degradationPreference "maintain-framerate",
+ *   qualityLimitationReason "bandwidth"), um degrau a cada ~5 s: de 1920x1080 vai a 1280x720, 960x540, 640x360 (placa)
+ *   e 480x270 (OpenH264). Em cima do nosso degrau 720p (scaleResolutionDownBy 1,5 = 1280x720) vai a 853x480 (largura
+ *   impar: OpenH264), 640x360 (placa de novo), 427x240 e 320x180 (OpenH264). Foi o que aconteceu no log de 29/10
+ *   (banda ~0,5 Mbps + degrau 720p, OpenH264 18 s depois). Isso e de passagem e o espectador nao trava (no loopback:
+ *   decodifica a 55+ fps, sem congelar nem pedir PLI). Por isso nao conta como queda (isTransientSoftwareH264): so loga;
+ * - nao tiram da placa: o nosso scaleResolutionDownBy 1,5 sozinho (1080p→720p, com ou sem 12 Mbps), reconectar 3 vezes
+ *   com 1,5 s de intervalo, 3 envios H.264 ao mesmo tempo.
+ *
+ * Queda de verdade (OpenH264 num tamanho que a placa aceita, ou com o WebRTC sem reduzir nada, ex.: janela capturada
+ * com tamanho impar): so ESTE espectador passa para o codec que chooseCodec escolher sem a placa (VP9); os proximos
+ * ainda tentam a placa. Na 2a queda da sessao do Discord (noteH264Fallback), o H.264 automatico desliga para os
+ * proximos. Uma vez por espectador (send.fellBack): nunca volta e repete. Codec fixado em H.264: continua H.264.
  */
 function checkEncoder(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: EncoderReport) {
-    const next = softwareFallback(enc, !!send.fellBack, rt.peers.get(peerId)?.presence?.caps, settings.store.codec as CodecSetting, getLocalCaps());
+    if (send.fellBack) return;
+    const label = peerLabel(peerId);
+    const size = enc.width && enc.height ? `${enc.width}x${enc.height}` : "tamanho desconhecido";
+    if (isTransientSoftwareH264(enc)) {
+        send.transientSoftware = true;
+        logThrottled(`h264-transient:${peerId}`, "info", `O H.264 para ${label} passou para o OpenH264 (software) em ${size}: o WebRTC reduziu a resolução `
+            + `por conta própria (${enc.limitation === "cpu" ? "CPU" : enc.limitation === "bandwidth" ? "banda" : enc.limitation}) e a placa de vídeo só codifica H.264 `
+            + "em tamanho par a partir de 360p. Volta para a placa sozinho quando a resolução subir; não é queda.", 60_000);
+        return;
+    }
+    if (send.transientSoftware && enc.powerEfficient === true) {
+        send.transientSoftware = false;
+        logThrottled(`h264-back:${peerId}`, "info", `O H.264 para ${label} voltou para a placa de vídeo (${size})`, 60_000);
+    }
+
+    const next = softwareFallback(enc, false, rt.peers.get(peerId)?.presence?.caps, settings.store.codec as CodecSetting, getLocalCaps());
     if (!next) return;
     send.fellBack = true;
     const name = next.codec.toUpperCase();
-    const others = disableH264HwEncode() ? ` Os próximos espectadores vão receber ${name}.` : "";
-    const why = `O H.264 para ${peerLabel(peerId)} está sendo codificado por software (${enc.implementation || "sem aceleração"}), não pela placa de vídeo, e a imagem pode travar`;
+    const { count, disabledNow } = noteH264Fallback();
+    const why = `O H.264 para ${label} está sendo codificado por software (${enc.implementation || "sem aceleração"}, ${size}), não pela placa de vídeo, e a imagem pode travar`;
     if (next.codec === send.decision.codec) {
-        log.warn(`${why}. Continua em H.264 porque o codec está fixado nas configurações.`);
+        const session = disabledNow ? ` Foi a ${count}ª queda nesta sessão: o H.264 automático fica desligado.` : "";
+        log.warn(`${why}. Continua em H.264 porque o codec está fixado nas configurações.${session}`);
         return;
     }
-    log.warn(`${why}: trocando para ${name}.${others}`);
+    const others = disabledNow
+        ? ` Foi a ${count}ª queda nesta sessão: os próximos espectadores vão receber ${name}.`
+        : getLocalCaps().h264HwEncode ? " Os próximos espectadores ainda tentam a placa de vídeo." : "";
+    log.warn(`${why}: trocando para ${name} só para ${label}.${others}`);
     void switchSendCodec(peerId, local, send, next);
 }
 
@@ -983,7 +1022,7 @@ export function tick() {
     for (const peerId of local.viewers) {
         const send = sends.get(peerId);
         // depois de logar o codec real, so o envio que esta de fato em H.264 continua sendo conferido (o Chromium pode
-        // trocar o encoder da placa de video pelo OpenH264 no meio, ex.: ao mudar a resolucao)
+        // trocar o encoder da placa de video pelo OpenH264 no meio, ex.: quando o WebRTC reduz a resolucao; ver checkEncoder)
         if (!send || (send.reportedCodec && (!/^video\/h264$/i.test(send.reportedCodec) || send.fellBack))) continue;
         const sender = videoSender(peerId, local);
         if (!sender) continue;
@@ -994,7 +1033,10 @@ export function tick() {
             });
             const codec = out?.codecId ? (report.get(out.codecId) as any)?.mimeType : undefined;
             if (!codec || sends.get(peerId) !== send) return;
-            const enc: EncoderReport = { mimeType: codec, implementation: out.encoderImplementation, powerEfficient: out.powerEfficientEncoder, framesEncoded: out.framesEncoded };
+            const enc: EncoderReport = {
+                mimeType: codec, implementation: out.encoderImplementation, powerEfficient: out.powerEfficientEncoder, framesEncoded: out.framesEncoded,
+                width: out.frameWidth, height: out.frameHeight, limitation: out.qualityLimitationReason
+            };
             if (!send.reportedCodec) {
                 send.reportedCodec = codec;
                 const expected = `video/${send.decision.codec}`.toLowerCase();
