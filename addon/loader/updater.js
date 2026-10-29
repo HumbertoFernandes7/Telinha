@@ -890,16 +890,25 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
 
     const rt = { phase: "idle", latest: null, error: null, checkedAt: null, skipped: null, inflight: null, rateLimitedUntil: 0 };
 
-    async function request(url, { accept, etag, timeoutMs = HTTP_TIMEOUT_MS } = {}) {
+    /**
+     * One HTTP request; returns what `use(res)` returns. The time limit covers the whole exchange, body included: `use`
+     * reads the response while the timer still runs, so a connection that goes quiet in the middle of the body is aborted
+     * too (the timer used to be cleared as soon as the headers arrived, and a stalled download then hung the check forever).
+     */
+    async function request(url, { accept, etag, timeoutMs = HTTP_TIMEOUT_MS } = {}, use) {
         if (typeof fetchImpl !== "function") throw new UpdateError("offline", "sem acesso à rede neste Discord", { quiet: true });
         const ctrl = new AbortController();
         const timer = setTimeout(() => ctrl.abort(), timeoutMs);
         try {
-            const headers = { "User-Agent": ua, Accept: accept ?? "application/octet-stream" };
-            if (etag) headers["If-None-Match"] = etag;
-            return await fetchImpl(url, { headers, redirect: "follow", signal: ctrl.signal, cache: "no-store" });
-        } catch (err) {
-            throw new UpdateError("offline", "sem conexão com o GitHub; tento de novo mais tarde", { quiet: true, detail: `${url}: ${err?.message ?? err}` });
+            let res;
+            try {
+                const headers = { "User-Agent": ua, Accept: accept ?? "application/octet-stream" };
+                if (etag) headers["If-None-Match"] = etag;
+                res = await fetchImpl(url, { headers, redirect: "follow", signal: ctrl.signal, cache: "no-store" });
+            } catch (err) {
+                throw new UpdateError("offline", "sem conexão com o GitHub; tento de novo mais tarde", { quiet: true, detail: `${url}: ${err?.message ?? err}` });
+            }
+            return await use(res);
         } finally {
             clearTimeout(timer);
         }
@@ -954,26 +963,28 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
 
     async function getAsset(url, limit, timeoutMs) {
         if (!allowedDownload(url)) throw new UpdateError("invalid", "a release aponta para um download fora do GitHub do Telinha", { detail: url });
-        const res = await request(url, { timeoutMs });
-        if (!res.ok) throw httpError(res, url);
-        return readBody(res, limit, url);
+        return request(url, { timeoutMs }, async res => {
+            if (!res.ok) throw httpError(res, url);
+            return readBody(res, limit, url);
+        });
     }
 
     async function fetchLatest(s) {
         const url = `${base}/repos/${REPO}/releases/latest`;
         const cached = s.lastCheck?.etag && s.lastCheck?.release ? s.lastCheck : null;
-        const res = await request(url, { accept: "application/vnd.github+json", etag: cached?.etag });
-        if (res.status === 304 && cached) return { release: cached.release, etag: cached.etag, notModified: true };
-        if (res.status === 404) throw new UpdateError("no-release", "nenhuma versão publicada ainda", { quiet: true, detail: `${url}: HTTP 404` });
-        if (!res.ok) throw httpError(res, url);
-        let json;
-        try {
-            json = JSON.parse((await readBody(res, MAX_SMALL, url)).toString("utf8"));
-        } catch (err) {
-            if (err instanceof UpdateError) throw err;
-            throw new UpdateError("http", "resposta inválida do GitHub; tento de novo mais tarde", { quiet: true, detail: String(err?.message ?? err) });
-        }
-        return { release: slimRelease(json), etag: res.headers.get("etag") ?? null, notModified: false };
+        return request(url, { accept: "application/vnd.github+json", etag: cached?.etag }, async res => {
+            if (res.status === 304 && cached) return { release: cached.release, etag: cached.etag, notModified: true };
+            if (res.status === 404) throw new UpdateError("no-release", "nenhuma versão publicada ainda", { quiet: true, detail: `${url}: HTTP 404` });
+            if (!res.ok) throw httpError(res, url);
+            let json;
+            try {
+                json = JSON.parse((await readBody(res, MAX_SMALL, url)).toString("utf8"));
+            } catch (err) {
+                if (err instanceof UpdateError) throw err;
+                throw new UpdateError("http", "resposta inválida do GitHub; tento de novo mais tarde", { quiet: true, detail: String(err?.message ?? err) });
+            }
+            return { release: slimRelease(json), etag: res.headers.get("etag") ?? null, notModified: false };
+        });
     }
 
     function candidate(release) {
