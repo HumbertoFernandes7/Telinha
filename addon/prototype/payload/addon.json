@@ -1,0 +1,17 @@
+{
+    "pluginName": "PeerLiveAddonHello",
+    "main": "hello.main.js",
+    "renderer": "hello.renderer.js",
+    "meta": { "folderName": "peerlive-addon", "userPlugin": true },
+    "preloadFallback": true,
+    "csp": {
+        "wss://relay.nostr.dev.br": ["connect-src"],
+        "wss://cdn.satellite.earth": ["connect-src"],
+        "wss://nostr.red5d.dev": ["connect-src"],
+        "wss://nostrcity-club.fly.dev": ["connect-src"],
+        "wss://relay.snort.social": ["connect-src"],
+        "wss://nostr-pub.wellorder.net": ["connect-src"],
+        "wss://nos.lol": ["connect-src"],
+        "wss://relay.primal.net": ["connect-src"]
+    }
+}
