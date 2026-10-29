@@ -1,0 +1,293 @@
+<!doctype html>
+<!--
+    Vencord, a Discord client mod
+    Copyright (c) 2026 Vendicated and contributors
+    SPDX-License-Identifier: GPL-3.0-or-later
+
+    Telinha - "amigo virtual": pagina que fala o protocolo P2P v1 do plugin Telinha
+    (src/plugins/telinha/protocol.ts), para testar o plugin do Discord sem uma segunda pessoa.
+    Sirva com um servidor HTTP local (veja README.md); file:// nao funciona com modulos ES.
+-->
+<html lang="pt-BR">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Telinha — amigo virtual</title>
+    <style>
+        :root {
+            color-scheme: light dark;
+            --bg: #f6f6f8;
+            --fg: #1e1f22;
+            --muted: #6d6f78;
+            --card: #fff;
+            --line: #e0e1e5;
+            --ok: #1a8d4a;
+            --warn: #b7791f;
+            --err: #d22d39;
+            --accent: #5865f2;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #1e1f22;
+                --fg: #dbdee1;
+                --muted: #949ba4;
+                --card: #2b2d31;
+                --line: #3f4147;
+                --ok: #23a55a;
+                --warn: #f0b232;
+                --err: #f23f43;
+            }
+        }
+
+        body {
+            margin: 0;
+            padding: 16px;
+            background: var(--bg);
+            color: var(--fg);
+            font: 14px/1.45 system-ui, sans-serif;
+        }
+
+        h1 {
+            font-size: 20px;
+            margin: 0 0 4px;
+        }
+
+        h2 {
+            font-size: 15px;
+            margin: 0 0 8px;
+        }
+
+        h3 {
+            font-size: 14px;
+            margin: 0 0 6px;
+        }
+
+        section {
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 12px;
+        }
+
+        .cols {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+            gap: 12px;
+        }
+
+        @media (max-width: 900px) {
+            .cols {
+                grid-template-columns: minmax(0, 1fr);
+            }
+        }
+
+        label {
+            display: block;
+            font-size: 12px;
+            color: var(--muted);
+        }
+
+        label.check {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+            font-size: 13px;
+            color: var(--fg);
+        }
+
+        input,
+        textarea {
+            width: 100%;
+            box-sizing: border-box;
+            padding: 6px 8px;
+            border: 1px solid var(--line);
+            border-radius: 4px;
+            background: var(--bg);
+            color: var(--fg);
+            font: inherit;
+        }
+
+        input[type="checkbox"] {
+            width: auto;
+        }
+
+        .form {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .row {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        button {
+            padding: 6px 12px;
+            border: 0;
+            border-radius: 4px;
+            background: var(--accent);
+            color: #fff;
+            font: inherit;
+            cursor: pointer;
+        }
+
+        button.positive {
+            background: var(--ok);
+        }
+
+        button.danger {
+            background: var(--err);
+        }
+
+        button.secondary {
+            background: var(--muted);
+        }
+
+        button.small {
+            padding: 2px 8px;
+            font-size: 12px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        td {
+            padding: 4px 6px;
+            border-bottom: 1px solid var(--line);
+            vertical-align: top;
+        }
+
+        .mono,
+        #events {
+            font-family: Consolas, "Courier New", monospace;
+            font-size: 12px;
+        }
+
+        .muted {
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .ok {
+            color: var(--ok);
+        }
+
+        .warn {
+            color: var(--warn);
+        }
+
+        .err {
+            color: var(--err);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            gap: 6px;
+            margin: 6px 0;
+        }
+
+        video,
+        #preview canvas {
+            width: 100%;
+            background: #000;
+            border-radius: 6px;
+        }
+
+        .watch-card {
+            border-top: 1px solid var(--line);
+            padding-top: 8px;
+            margin-top: 8px;
+        }
+
+        .watch-card:first-child {
+            border-top: 0;
+            padding-top: 0;
+            margin-top: 0;
+        }
+
+        #events {
+            max-height: 260px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Telinha — amigo virtual</h1>
+    <div class="muted">Fala o protocolo P2P v1 do plugin <code>Telinha</code> (Trystero 0.26.0 via Nostr + WebRTC direto, só STUN) para testar o plugin do Discord sem uma segunda pessoa.</div>
+
+    <section>
+        <div class="form">
+            <div><label for="userId">ID do Discord (falso)</label><input id="userId" autocomplete="off"></div>
+            <div><label for="username">Nome</label><input id="username" autocomplete="off"></div>
+            <div><label for="guildId">guildId (vazio ou "dm" = DM)</label><input id="guildId" autocomplete="off"></div>
+            <div><label for="channelId">channelId do canal de voz</label><input id="channelId" autocomplete="off"></div>
+            <div><label for="password">Senha do grupo (vazio = sem senha)</label><input id="password" type="password" autocomplete="off"></div>
+            <div><label for="members">IDs "no canal de voz" (simula a admissão; vazio = não verifica)</label><input id="members" autocomplete="off"></div>
+        </div>
+        <div class="row" style="margin-bottom:8px">
+            <label class="check"><input id="enforce" type="checkbox"> Rejeitar de verdade quem não está na lista</label>
+            <label class="check"><input id="h264" type="checkbox" disabled> Anunciar <code>caps.h264HwDecode</code> <span class="muted">(detectado: <span id="h264-detected">detectando…</span>)</span></label>
+            <button id="h264-reset" class="secondary small" type="button">usar o detectado</button>
+        </div>
+        <div class="row">
+            <button id="join">Entrar na sala</button>
+            <button id="stream-pattern" class="positive">Transmitir padrão de teste</button>
+            <button id="stream-display" class="positive">Transmitir uma tela/aba do navegador</button>
+            <button id="stream-stop" class="danger" hidden>Parar transmissão</button>
+            <button id="download" class="secondary">Baixar log</button>
+        </div>
+        <div id="status" style="margin-top:8px"></div>
+    </section>
+
+    <div class="cols">
+        <div>
+            <section>
+                <h2 id="peers-title">Peers na sala</h2>
+                <table><tbody id="peers"></tbody></table>
+            </section>
+
+            <section id="watch" hidden>
+                <h2 id="watch-title">Assistindo</h2>
+                <div id="watches"></div>
+            </section>
+
+            <section id="out" hidden>
+                <h2 id="out-title">Minha transmissão</h2>
+                <div id="preview"></div>
+                <div id="out-stats"></div>
+            </section>
+        </div>
+
+        <div>
+            <section>
+                <h2>Relays Nostr</h2>
+                <table><tbody id="relays"></tbody></table>
+            </section>
+            <section>
+                <h2>Tempos medidos</h2>
+                <table><tbody id="timings"></tbody></table>
+            </section>
+            <section>
+                <h2>Eventos (mais recentes primeiro)</h2>
+                <div id="events"></div>
+            </section>
+        </div>
+    </div>
+
+    <script type="module" src="./telinha-peer.js"></script>
+</body>
+
+</html>

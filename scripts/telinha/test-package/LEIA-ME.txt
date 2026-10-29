@@ -1,0 +1,82 @@
+TELINHA - VERSÃO DE TESTE 2
+===========================
+
+O QUE É ISTO
+O Telinha deixa quem está no mesmo canal de voz do Discord transmitir a tela
+(ou uma janela) para os outros, direto de um PC para o outro (P2P), até 1080p60,
+sem servidor no meio.
+
+Este pacote é o Vencord OFICIAL 1.15.13 + o plugin Telinha. Ele só troca os
+arquivos da pasta  %APPDATA%\Vencord\dist  (guardando uma cópia dos oficiais antes).
+Suas configurações, temas e outros plugins do Vencord não são tocados.
+
+O QUE VOCÊ PRECISA
+- Windows, com o Discord e o Vencord OFICIAL já instalados
+  (https://vencord.dev/download/). Sem o Vencord, o instalar.cmd avisa e não faz nada.
+- Quem transmite E quem assiste precisa ter o Telinha instalado.
+
+COMO INSTALAR
+0. Se o Windows reclamar (SmartScreen/antivírus), ANTES de extrair: botão direito no
+   ZIP > Propriedades > marque "Desbloquear" > OK. Se o aviso aparecer mesmo assim:
+   "Mais informações" > "Executar assim mesmo". Os scripts são texto puro; pode abrir
+   no Bloco de Notas para conferir.
+1. Botão direito no ZIP > Extrair tudo. (Não rode de dentro do ZIP.)
+2. Dê dois cliques em  instalar.cmd  e espere aparecer "Instalação concluída".
+3. Feche o Discord POR COMPLETO: botão direito no ícone dele na bandeja do sistema
+   (perto do relógio, talvez dentro da seta "^") > "Sair do Discord". Abra de novo.
+4. Vá em Configurações do usuário > Vencord > Plugins, pesquise "Telinha" e ATIVE
+   o plugin  Telinha.
+   (Se você testou uma versão anterior: o projeto se chamava PeerLive e o plugin
+   agora é o Telinha; ative-o de novo e confira as configurações.)
+   Se aparecerem PeerLiveTest ou PeerLiveP2PTest (plugins das versões de teste
+   anteriores), eles não existem mais nesta versão; pode ignorar.
+
+COMO USAR
+Transmitir:
+1. Entre no mesmo canal de voz que os amigos.
+2. No painel da conexão de voz (canto inferior esquerdo), clique em
+   "Transmitir com Telinha".
+3. Escolha uma tela ou uma janela. Janela = vai com o som daquela janela; tela
+   inteira = vai todo o som do PC, menos o do Discord (seus amigos não ouvem a
+   própria voz). Deixe "Compartilhar som" ligado, escolha a qualidade e clique
+   em "Transmitir".
+
+Assistir (qualquer um destes):
+- Clique na etiqueta TELINHA ao lado do nome da pessoa na lista do canal de voz.
+- Clique em "Assistir" na barra do Telinha.
+- Menu da caixa de ferramentas do Vencord (topo do Discord) > "Quem está transmitindo".
+A transmissão abre numa janela própria (tela cheia, volume e "Parar de assistir").
+
+SOM DA TELA INTEIRA
+- Disponível no Windows 10 versão 2004 (maio/2020) ou mais novo, e no Windows 11.
+- Funciona por um pequeno programa que vem junto no pacote, o  telinha-audio.exe
+  (fica ao lado do patcher.js, em  %APPDATA%\Vencord\dist). Ele ainda NÃO é
+  assinado digitalmente, então o antivírus ou o "Controle Inteligente de
+  Aplicativos" (Smart App Control) do Windows pode marcá-lo ou bloqueá-lo.
+- Se for bloqueado, a tela inteira é transmitida SEM som (a imagem segue normal)
+  e o seletor de tela mostra o motivo ao lado de "Compartilhar som". Para ter o
+  som, libere/restaure o  telinha-audio.exe  no antivírus. Transmitir uma
+  janela (com o som dela) não depende desse programa.
+
+DICAS
+- Jogos: use o modo "Borderless / Sem bordas". Em tela cheia exclusiva a imagem
+  pode aparecer preta.
+- Com a aceleração de hardware do Discord DESLIGADA, o Telinha usa mais a CPU
+  (funciona bem). Em 1080p60, recomendamos 1 ou 2 espectadores.
+
+PRIVACIDADE
+- A conexão é direta: cada pessoa consegue ver o endereço IP das outras. Só use
+  com quem você confia.
+- Só assiste quem está no mesmo canal de voz E tem o Telinha (configuração
+  "Rejeitar quem não está na call", ligada por padrão).
+- Opcional: nas configurações do plugin dá para definir uma senha do grupo
+  (todo mundo precisa usar a mesma).
+
+DEU PROBLEMA?
+- Nas configurações do Telinha, clique em "Copiar diagnóstico" e me envie o texto.
+- Para desfazer tudo (voltar ao Vencord oficial): feche o Discord POR COMPLETO
+  (inclusive o ícone da bandeja), dê dois cliques em  restaurar.cmd  e abra o
+  Discord de novo. O backup do oficial fica em  %APPDATA%\Vencord\dist.backup-oficial-...
+  (não apague essa pasta até terminar os testes).
+- Se o Discord não abrir ou o Vencord sumir: rode o restaurar.cmd. Se nem isso
+  resolver, reinstale o Vencord oficial (https://vencord.dev/download/ > "Reinstalar").

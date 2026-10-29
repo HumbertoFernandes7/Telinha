@@ -1,6 +1,6 @@
-// Uso: node native-audio/test/tone-test.mjs <caminho\peerlive-audio.exe> <pasta para os .wav de teste>
+// Uso: node native-audio/test/tone-test.mjs <caminho\telinha-audio.exe> <pasta para os .wav de teste>
 // Toca dois tons baixos (617 Hz e 1373 Hz, -34 dBFS) por ~15 s e confere include/exclude/arvore/--parent.
-// Standalone test of peerlive-audio.exe: two quiet tone players (A direct, B as child of cmd.exe),
+// Standalone test of telinha-audio.exe: two quiet tone players (A direct, B as child of cmd.exe),
 // capture with include/exclude and measure each tone with Goertzel. PCM stays in memory (not saved).
 import { spawn } from "child_process";
 import { writeFileSync } from "fs";

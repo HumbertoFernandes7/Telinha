@@ -1,5 +1,5 @@
 @echo off
-rem Compila native-audio\bin\peerlive-audio.exe (x64, CRT estatico, sem dependencias alem do Windows).
+rem Compila native-audio\bin\telinha-audio.exe (x64, CRT estatico, sem dependencias alem do Windows).
 rem Requer Visual Studio 2019+ ou Build Tools com "Desenvolvimento para desktop com C++" (MSVC x64 + Windows SDK).
 rem Uso: native-audio\build.cmd [--copy-to-dist]   (--copy-to-dist copia o exe para dist\ ao lado do patcher.js)
 setlocal EnableExtensions
@@ -23,23 +23,23 @@ if errorlevel 1 exit /b 1
 if not exist "%ROOT%bin" mkdir "%ROOT%bin"
 if not exist "%ROOT%obj" mkdir "%ROOT%obj"
 
-rc /nologo /fo "%ROOT%obj\peerlive-audio.res" "%ROOT%src\peerlive-audio.rc"
+rc /nologo /fo "%ROOT%obj\telinha-audio.res" "%ROOT%src\telinha-audio.rc"
 if errorlevel 1 exit /b 1
 
 rem /Brepro: build reproduzivel (sem timestamp no PE). /guard:cf /CETCOMPAT /DYNAMICBASE /NXCOMPAT: mitigacoes padrao.
 cl /nologo /std:c++17 /O2 /MT /W4 /WX /EHsc /permissive- /GS /guard:cf /sdl /DUNICODE /D_UNICODE /Brepro ^
-   /Fo"%ROOT%obj\\" "%ROOT%src\peerlive-audio.cpp" "%ROOT%obj\peerlive-audio.res" ^
-   /Fe"%ROOT%bin\peerlive-audio.exe" ^
+   /Fo"%ROOT%obj\\" "%ROOT%src\telinha-audio.cpp" "%ROOT%obj\telinha-audio.res" ^
+   /Fe"%ROOT%bin\telinha-audio.exe" ^
    /link /SUBSYSTEM:CONSOLE /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA /GUARD:CF /CETCOMPAT /Brepro /OPT:REF /OPT:ICF /INCREMENTAL:NO
 if errorlevel 1 exit /b 1
 
-echo [native-audio] OK: %ROOT%bin\peerlive-audio.exe
-certutil -hashfile "%ROOT%bin\peerlive-audio.exe" SHA256 | findstr /v /c:"CertUtil"
+echo [native-audio] OK: %ROOT%bin\telinha-audio.exe
+certutil -hashfile "%ROOT%bin\telinha-audio.exe" SHA256 | findstr /v /c:"CertUtil"
 
 if /i "%~1"=="--copy-to-dist" (
     if not exist "%ROOT%..\dist" mkdir "%ROOT%..\dist"
-    copy /y "%ROOT%bin\peerlive-audio.exe" "%ROOT%..\dist\peerlive-audio.exe" >nul
+    copy /y "%ROOT%bin\telinha-audio.exe" "%ROOT%..\dist\telinha-audio.exe" >nul
     if errorlevel 1 exit /b 1
-    echo [native-audio] copiado para dist\peerlive-audio.exe
+    echo [native-audio] copiado para dist\telinha-audio.exe
 )
 exit /b 0

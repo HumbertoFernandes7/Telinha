@@ -2,7 +2,7 @@
 // Simulates the PCM player worklet: producer at 48 kHz * (1 + drift), 10 ms chunks, delivery batched by a
 // janky "renderer" (random 0-30 ms delays + a 150-250 ms stall every ~7 s). Consumer pulls 128 frames per
 // quantum at exactly 48 kHz. Checks underruns, fill convergence and output glitches (1 kHz sine continuity).
-import { PCM_PLAYER_SOURCE } from "../../src/plugins/peerLive/core/audio/worklet.ts";
+import { PCM_PLAYER_SOURCE } from "../../src/plugins/telinha/core/audio/worklet.ts";
 
 function run(driftPpm: number, seconds: number, stalls: boolean, seed = 1) {
     let rnd = seed;

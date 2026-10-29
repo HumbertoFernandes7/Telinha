@@ -1,13 +1,13 @@
 // Uso (depois do tone-test, que gera os .wav): com o tom B tocando FORA desta arvore, ex. no bash:
 //   powershell -Command "(New-Object Media.SoundPlayer '<pasta>/toneB.wav').PlayLooping(); Start-Sleep 30" &
-//   node_modules/.bin/tsx native-audio/test/main-test.mts <caminho\peerlive-audio.exe> <pasta>
+//   node_modules/.bin/tsx native-audio/test/main-test.mts <caminho\telinha-audio.exe> <pasta>
 // End-to-end test of screenAudioMain.ts outside Electron. This node process plays the role of Discord main:
 // it excludes ITS OWN process tree (process.pid), and its child A plays FA; tone B (FB) was started by the
 // outer shell (outside this tree). Expect FA absent and FB present. PCM stays in memory.
 import { spawn, spawnSync } from "child_process";
 import { join } from "path";
 
-import * as m from "../../src/plugins/peerLive/core/audio/screenAudioMain.ts";
+import * as m from "../../src/plugins/telinha/core/audio/screenAudioMain.ts";
 
 const EXE = process.argv[2];
 const DIR = process.argv[3];
@@ -64,7 +64,7 @@ try {
     // helper killed from outside mid-capture -> ended with reason
     if (s2.ok) {
         await pull(s2.id, 500);
-        spawnSync("taskkill", ["/im", "peerlive-audio.exe", "/f"], { windowsHide: true });
+        spawnSync("taskkill", ["/im", "telinha-audio.exe", "/f"], { windowsHide: true });
         const r = await pull(s2.id, 2000);
         console.log("after external kill:", r.ended);
     }
@@ -78,8 +78,8 @@ try {
     m.setScreenAudioHelperPathForTests(join(DIR, "nope.exe"));
     console.log("missing exe status:", await m.screenAudioStatusMain());
     console.log("missing exe start:", await m.startScreenAudioMain(process.pid));
-    const left = spawnSync("tasklist", ["/fi", "IMAGENAME eq peerlive-audio.exe", "/fo", "csv", "/nh"], { encoding: "utf8", windowsHide: true }).stdout.trim();
-    console.log("leftover helpers:", /peerlive-audio/i.test(left) ? left : "none");
+    const left = spawnSync("tasklist", ["/fi", "IMAGENAME eq telinha-audio.exe", "/fo", "csv", "/nh"], { encoding: "utf8", windowsHide: true }).stdout.trim();
+    console.log("leftover helpers:", /telinha-audio/i.test(left) ? left : "none");
 } finally {
     A.kill();
 }

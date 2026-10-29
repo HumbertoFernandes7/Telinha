@@ -1,0 +1,474 @@
+/* Telinha UI (main window only: pop-out viewers are styled inline) */
+
+/* #region voice panel bar */
+
+.vc-telinha-bar {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    border-bottom: 1px solid var(--border-subtle, var(--background-modifier-accent));
+}
+
+.vc-telinha-bar-main {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    width: 100%;
+    min-width: 0;
+    height: 32px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 8px;
+    background: #0b8a83;
+    color: #fff;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 120ms ease;
+}
+
+.vc-telinha-bar-main:hover {
+    background: #08716b;
+}
+
+.vc-telinha-bar-main-live {
+    background: var(--status-danger, #da373c);
+}
+
+.vc-telinha-bar-main-live:hover {
+    background: var(--button-danger-background-hover, #a12d2f);
+}
+
+.vc-telinha-bar-label,
+.vc-telinha-bar-row-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.vc-telinha-bar-row,
+.vc-telinha-bar-info,
+.vc-telinha-bar-error {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    min-width: 0;
+    min-height: 24px;
+    padding: 2px 6px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--interactive-normal, var(--text-muted));
+    font-size: 13px;
+    font-weight: 500;
+    text-align: left;
+}
+
+.vc-telinha-bar-row {
+    cursor: pointer;
+}
+
+.vc-telinha-bar-row:hover {
+    background: var(--background-modifier-hover, rgb(78 80 88 / 30%));
+    color: var(--interactive-hover, var(--text-default));
+}
+
+.vc-telinha-bar-row-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.vc-telinha-bar-row-icon {
+    color: #0b8a83;
+}
+
+.vc-telinha-bar-row-action {
+    flex-shrink: 0;
+    color: #13b3aa;
+    font-weight: 600;
+}
+
+.vc-telinha-bar-row-count {
+    flex-shrink: 0;
+    font-weight: 600;
+}
+
+.vc-telinha-bar-status {
+    color: var(--text-default, var(--interactive-active));
+    font-weight: 600;
+}
+
+.vc-telinha-bar-live-dot {
+    flex-shrink: 0;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #13b3aa;
+    box-shadow: 0 0 0 3px rgb(19 179 170 / 25%);
+}
+
+.vc-telinha-bar-error {
+    color: var(--status-warning, #f0b232);
+}
+
+.vc-telinha-bar-error .vc-telinha-bar-row-icon {
+    color: inherit;
+}
+
+/* streaming info lines (auto quality level, capture warning): read-only, compact */
+.vc-telinha-bar-info {
+    min-height: 20px;
+    font-size: 12px;
+    cursor: default;
+}
+
+.vc-telinha-bar-info-lowered {
+    color: var(--status-warning, #f0b232);
+}
+
+/* long capture warnings wrap instead of being cut off */
+.vc-telinha-bar-wrap .vc-telinha-bar-row-text {
+    white-space: normal;
+}
+
+.vc-telinha-bar-error-close {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--interactive-normal, var(--text-muted));
+    cursor: pointer;
+}
+
+.vc-telinha-bar-error-close:hover {
+    background: var(--background-modifier-hover, rgb(78 80 88 / 30%));
+    color: var(--interactive-hover, var(--text-default));
+}
+
+/* #endregion */
+
+/* #region voice user tag */
+
+.vc-telinha-tag {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 3px;
+    height: 16px;
+
+    /* Flex item of the voice row's content (gap: 8px), between the name and the mute/deafen icons */
+    margin: 0;
+    padding: 0 5px;
+    border-radius: 8px;
+    background: #0b8a83;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 16px;
+    letter-spacing: 0.02em;
+    vertical-align: middle;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.vc-telinha-tag:hover {
+    background: #08716b;
+}
+
+.vc-telinha-tag-self {
+    cursor: default;
+}
+
+/* #endregion */
+
+/* #region source picker */
+
+.vc-telinha-picker {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding-bottom: 4px;
+    color: var(--text-default, var(--text-normal));
+}
+
+.vc-telinha-picker-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.vc-telinha-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 3px;
+    border-radius: 8px;
+    background: var(--background-base-lower, var(--background-secondary));
+}
+
+.vc-telinha-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--interactive-normal, var(--text-muted));
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.vc-telinha-tab:hover {
+    color: var(--interactive-hover, var(--text-default));
+}
+
+.vc-telinha-tab-active {
+    background: var(--background-modifier-selected, rgb(78 80 88 / 60%));
+    color: var(--interactive-active, var(--text-default));
+}
+
+.vc-telinha-tab-count {
+    min-width: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    background: var(--background-modifier-accent, rgb(78 80 88 / 48%));
+    font-size: 12px;
+    text-align: center;
+}
+
+.vc-telinha-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+    gap: 10px;
+    max-height: 46vh;
+    padding: 2px;
+    overflow-y: auto;
+}
+
+.vc-telinha-source {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+    padding: 6px;
+    border: 2px solid transparent;
+    border-radius: 8px;
+    background: var(--background-base-lower, var(--background-secondary));
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.vc-telinha-source:hover {
+    border-color: var(--background-modifier-accent, rgb(78 80 88 / 48%));
+}
+
+.vc-telinha-source-selected,
+.vc-telinha-source-selected:hover {
+    border-color: #0b8a83;
+    background: rgb(11 138 131 / 14%);
+}
+
+.vc-telinha-thumb {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    aspect-ratio: 16 / 9;
+    overflow: hidden;
+    border-radius: 4px;
+    background: #000;
+}
+
+.vc-telinha-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+.vc-telinha-thumb-empty {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.vc-telinha-source-name {
+    overflow: hidden;
+    font-size: 13px;
+    font-weight: 500;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.vc-telinha-options {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+    border-radius: 8px;
+    background: var(--background-base-lower, var(--background-secondary));
+}
+
+.vc-telinha-option-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.vc-telinha-option-label {
+    font-size: 16px;
+    font-weight: 500;
+}
+
+.vc-telinha-option-control {
+    width: 220px;
+}
+
+.vc-telinha-empty {
+    padding: 24px 8px;
+    color: var(--text-muted);
+    text-align: center;
+}
+
+/* #endregion */
+
+/* #region streamers list */
+
+.vc-telinha-streamers {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-bottom: 4px;
+}
+
+.vc-telinha-streamer {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--background-base-lower, var(--background-secondary));
+}
+
+.vc-telinha-avatar {
+    width: 40px;
+    height: 40px;
+    flex-shrink: 0;
+    border-radius: 50%;
+}
+
+.vc-telinha-avatar-empty {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: #0b8a83;
+    color: #fff;
+}
+
+.vc-telinha-streamer-info {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.vc-telinha-streamer-name {
+    overflow: hidden;
+    color: var(--header-primary, var(--text-default));
+    font-size: 15px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.vc-telinha-streamer-actions {
+    display: flex;
+    flex-shrink: 0;
+    gap: 6px;
+}
+
+.vc-telinha-streamer-meta {
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: 13px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* #endregion */
+
+/* #region floating viewer (fallback when the pop-out window fails) */
+
+.vc-telinha-floating {
+    position: fixed;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    width: 560px;
+    height: 360px;
+    min-width: 280px;
+    min-height: 190px;
+    overflow: hidden;
+    resize: both;
+    border: 1px solid var(--border-subtle, rgb(78 80 88 / 48%));
+    border-radius: 8px;
+    background: #000;
+    box-shadow: 0 8px 24px rgb(0 0 0 / 50%);
+}
+
+.vc-telinha-floating-header {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    height: 30px;
+    padding: 0 4px 0 10px;
+    background: var(--background-base-lowest, #111214);
+    color: var(--text-default, #dbdee1);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: move;
+    touch-action: none;
+}
+
+.vc-telinha-floating-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.vc-telinha-floating-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+}
+
+.vc-telinha-floating-close:hover {
+    background: var(--background-modifier-hover, rgb(78 80 88 / 30%));
+}
+
+.vc-telinha-floating-body {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+}
+
+/* #endregion */
