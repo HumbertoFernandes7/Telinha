@@ -1,0 +1,3 @@
+Telinha, transmissão de tela P2P dentro do Discord
+Copyright (c) {year} Humberto Fernandes
+SPDX-License-Identifier: GPL-3.0-or-later

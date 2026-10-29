@@ -1,4 +1,13 @@
 /*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * Copyright (c) 2026 Humberto Fernandes
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * Adapted from Vencord (src/main/patcher.ts: the BrowserWindow subclass and require-cache swap), with changes by Telinha.
+ */
+
+/*
  * Telinha add-on - main-process loader (%APPDATA%\Telinha\addon\main.js).
  *
  * Required by our resources/app.asar stub, BEFORE the official Vencord patcher.js. Everything here only prepares

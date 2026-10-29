@@ -1,4 +1,13 @@
 /*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * Copyright (c) 2026 Humberto Fernandes
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * Adapted from Vencord (src/main/csp/index.ts: the CSP parse/stringify helpers), with changes by Telinha.
+ */
+
+/*
  * Telinha add-on - pure helpers shared by the main-process loader and the offline tests
  * (no electron import here, so tests can load this file directly).
  */

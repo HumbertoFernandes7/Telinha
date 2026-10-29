@@ -7,6 +7,7 @@ import react from "eslint-plugin-react";
 import header from "eslint-plugin-simple-header";
 import simpleImportSort from "eslint-plugin-simple-import-sort";
 import unusedImports from "eslint-plugin-unused-imports";
+import { join } from "node:path";
 import tseslint from "typescript-eslint";
 
 const SOURCES = ["src/**/*.{tsx,ts,mts,mjs,js,jsx}"];
@@ -46,13 +47,14 @@ export default tseslint.config(
             }
         },
         rules: {
-            // GPL header: the plugin files carry Vencord's header style; accept both of Vencord's templates (read from
-            // the pinned checkout, not copied here), any author.
+            // GPL header: every file under src/ is original Telinha code and carries Telinha's own header, from the
+            // template in scripts/header-template.txt (only the year is free). A missing or different header (e.g.
+            // Vencord's) is an error. Code adapted from Vencord would have to keep Vencord's attribution: add a second
+            // template file to `files` for it (the rule accepts a header that matches any of them; --fix uses the first).
             "simple-header/header": [
                 "error",
                 {
-                    "files": [".vencord/scripts/header-new.txt", ".vencord/scripts/header-old.txt"],
-                    "templates": { "author": [".*", "Vendicated and contributors"] }
+                    "files": [join(import.meta.dirname, "scripts", "header-template.txt")]
                 }
             ],
 

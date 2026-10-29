@@ -1,6 +1,6 @@
 /*
- * Vencord, a Discord client mod
- * Copyright (c) 2026 Vendicated and contributors
+ * Telinha, transmissão de tela P2P dentro do Discord
+ * Copyright (c) 2026 Humberto Fernandes
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
