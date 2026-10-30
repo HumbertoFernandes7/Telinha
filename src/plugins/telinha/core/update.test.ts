@@ -118,6 +118,9 @@ describe("sem o loader do add-on", () => {
         }
         native = installNative({}, { addon: { updateDownload: undefined as never } });
         assert.equal(updatesSupported(), false);
+        native.restore();
+        native = installNative({}, { addon: null }); // so os natives do plugin: Telinha instalado dentro de um Vencord, sem o loader
+        assert.equal(updatesSupported(), false);
     });
 });
 
