@@ -25,6 +25,7 @@ import { installFetch, jsonResponse } from "@test/fakes/fetch";
 import { act, fireEvent, render, screen, settle } from "@test/fakes/render";
 import { Modal, ModalHost, modals, pluginSettings, Select, toasts, webpackModules } from "@test/fakes/vencord";
 import { CspPolicies } from "@test/fakes/vencord/main/csp";
+import { type StatsEntry, videoSenderStats } from "@test/fakes/webrtc";
 import { findByCodeLazy, findStoreLazy } from "@webpack";
 import { openModal, showToast } from "@webpack/common";
 
@@ -189,6 +190,19 @@ describe("fakes", () => {
         await eventually(() => ready); // a fake setTimeout(1) here would never fire
         await assert.rejects(eventually(() => false, { timeoutMs: 20 }), /condition still false after 20 ms/);
         clock.restore();
+    });
+
+    test("webrtc stats: videoSenderStats({ omit }) leaves those outbound-rtp fields out and nothing else", () => {
+        const outbound = (stats: StatsEntry[]) => stats.find(e => e.type === "outbound-rtp")!;
+        const omit = ["encoderImplementation", "frameWidth", "codecId"] as const;
+        const full = videoSenderStats();
+        const cut = videoSenderStats({ omit });
+        for (const field of omit) {
+            assert.ok(field in outbound(full), field);
+            assert.equal(field in outbound(cut), false, field);
+        }
+        assert.deepEqual(Object.keys(outbound(cut)), Object.keys(outbound(full)).filter(k => !(omit as readonly string[]).includes(k)));
+        assert.equal(cut.length, full.length, "the other entries stay");
     });
 
     test("modals and toasts: openModal → ModalHost renders it; actions and onClose work", async () => {

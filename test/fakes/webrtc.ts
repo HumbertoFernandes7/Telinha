@@ -520,7 +520,13 @@ export class FakeRTCPeerConnection extends BaseEventTarget {
 
 // #region stats builders
 
+/** outbound-rtp fields a Chromium may not report (old versions, or no frame encoded yet): see VideoSenderStatsInit.omit */
+export type OutboundRtpField = "codecId" | "mediaSourceId" | "framesEncoded" | "totalEncodeTime" | "bytesSent" | "frameWidth" | "frameHeight"
+    | "framesPerSecond" | "qualityLimitationReason" | "qualityLimitationDurations" | "encoderImplementation" | "powerEfficientEncoder";
+
 export interface VideoSenderStatsInit {
+    /** outbound-rtp fields to leave out of the report (they are not there at all, not undefined), as an old Chromium would */
+    omit?: readonly OutboundRtpField[];
     framesEncoded?: number;
     /** seconds */
     totalEncodeTime?: number;
@@ -560,6 +566,7 @@ export function videoSenderStats(init: VideoSenderStatsInit = {}): StatsEntry[] 
         ...(durations ? { qualityLimitationDurations: { none: 0, cpu: 0, bandwidth: 0, other: 0, ...durations } } : {}),
         encoderImplementation: init.encoderImplementation ?? "libvpx", powerEfficientEncoder: init.powerEfficientEncoder ?? false
     };
+    for (const field of init.omit ?? []) delete out[field];
     const entries: StatsEntry[] = [
         out,
         { id: "COT01_96", type: "codec", mimeType: init.mimeType ?? "video/VP9", payloadType: 96, clockRate: 90000 },

@@ -40,12 +40,6 @@ const gpuStats = (over: Parameters<typeof videoSenderStats>[0] = {}) =>
 const softStats = (over: Parameters<typeof videoSenderStats>[0] = {}) =>
     videoSenderStats({ mimeType: "video/H264", encoderImplementation: "OpenH264", powerEfficientEncoder: false, framesEncoded: 600, ...over });
 
-/** As mesmas estatisticas sem alguns campos do outbound-rtp (Chromium que nao os reporta). */
-function without(stats: StatsEntry[], ...fields: string[]) {
-    for (const f of fields) delete stats[0][f];
-    return stats;
-}
-
 let rig: StreamingRig;
 let seq = 0;
 
@@ -210,7 +204,7 @@ describe("checagem do encoder H.264 no ar (tick)", () => {
         v.sender.setParametersImpl = params => {
             if ((params.encodings[0] as { codec?: unknown; }).codec) throw new DOMException("recusado", "InvalidModificationError");
         };
-        v.sender.stats = without(softStats(), "frameWidth", "frameHeight");
+        v.sender.stats = softStats({ omit: ["frameWidth", "frameHeight"] });
         const since = logMark();
         await seconds(rig, 1);
         rig.clock.tick(500);
@@ -228,7 +222,7 @@ describe("checagem do encoder H.264 no ar (tick)", () => {
     test("VP9 nao negociado com o espectador: nao da para trocar sem renegociar, e o aviso diz isso", async () => {
         const v = early.nocodec;
         v.sender.params.codecs = negotiatedCodecs(DEFAULT_VIDEO_CODECS.filter(c => c.mimeType !== "video/VP9"));
-        v.sender.stats = without(softStats(), "encoderImplementation");
+        v.sender.stats = softStats({ omit: ["encoderImplementation"] });
         const since = logMark();
         await seconds(rig, 1);
         assert.equal(v.sender.encoding.codec, undefined);
@@ -284,9 +278,9 @@ describe("checagem do encoder H.264 no ar (tick)", () => {
 
     test("estatisticas incompletas ou outro codec: o que da para logar, sem quebrar o tick", async () => {
         const vp8 = await watcher("vp8", { hw: false, stats: videoSenderStats({ mimeType: "video/VP8" }) });
-        const bare = await watcher("bare", { hw: false, stats: without(videoSenderStats(), "encoderImplementation") });
+        const bare = await watcher("bare", { hw: false, stats: videoSenderStats({ omit: ["encoderImplementation"] }) });
         const none = await watcher("none", { hw: false, stats: [] });
-        const nocid = await watcher("nocid", { hw: false, stats: without(videoSenderStats(), "codecId") });
+        const nocid = await watcher("nocid", { hw: false, stats: videoSenderStats({ omit: ["codecId"] }) });
         const broken = await watcher("broken", { hw: false });
         broken.sender.stats = () => Promise.reject(new Error("pc fechado"));
         const since = logMark();
