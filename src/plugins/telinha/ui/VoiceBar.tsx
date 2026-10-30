@@ -46,6 +46,7 @@ const ACCESS_SHORT: Record<AccessMode, string> = {
 
 const REASON_SHORT: Record<QualityReason, string> = {
     cpu: "processador",
+    gpu: "placa de vídeo",
     upload: "seu upload",
     bandwidth: "conexão de quem assiste"
 };

@@ -442,4 +442,69 @@ describe("checagem do encoder no ar", () => {
         assert.equal(chooseCodec(viewer, "h264").codec, "h264");
         assert.deepEqual(softwareFallback(OPENH264, false, viewer, "h264"), { codec: "h264", h264Profile: "42001f", reason: "fixado nas configurações" });
     });
+
+    test("sem framesEncoded relatado: sem evidencia, nao e software", () => {
+        assert.equal(isSoftwareH264({ ...OPENH264, framesEncoded: undefined }), false);
+    });
+});
+
+describe("casos de borda das capacidades e da ordem", () => {
+    test("getCapabilities que lanca ou nao tem video: como sem capacidades", async () => {
+        g.RTCRtpSender = { getCapabilities: () => { throw new Error("nao implementado"); } };
+        g.RTCRtpReceiver = { getCapabilities: () => null };
+        setMediaCapabilities(RTX_3070);
+        const local = await measureLocalCaps(FAST);
+        assert.deepEqual({ ...local, sendable: [...local.sendable] }, { h264HwDecode: false, h264HwEncode: false, h264HwProfile: null, sendable: [] });
+    });
+
+    test("uma entrada estragada na lista do sender nao derruba a sonda (fica o que ja foi lido)", async () => {
+        setCaps([plain("VP8"), { clockRate: 90000 } as unknown as Codec, plain("VP9", "profile-id=0"), h264(1, "42001f")]);
+        setMediaCapabilities(RTX_3070);
+        const local = await measureLocalCaps(FAST);
+        assert.deepEqual([...local.sendable], ["vp8"]);
+        assert.equal(local.h264HwProfile, "42001f");
+    });
+
+    test("linha de log sem perfil e sem lista de envio; motivo automatico sem perfil", () => {
+        assert.equal(
+            describeLocalCaps(caps({ h264HwDecode: false, h264HwProfile: null, sendable: new Set() })),
+            "Capacidades locais: H.264 por hardware — decodifica: não, codifica: sim; envia: ?"
+        );
+        assert.equal(chooseCodec({ h264HwDecode: true }, "auto", caps({ h264HwProfile: null })).reason, "automático: H.264 por hardware nos dois lados");
+    });
+
+    test("ordem: variantes sem fmtp, e codecs sem preferencia de perfil (VP8/AV1) ficam na ordem original", () => {
+        const list: Codec[] = [plain("VP8"), plain("H264"), h264(1, "42001f"), plain("VP9"), plain("VP8", "x=1")];
+        assert.deepEqual(sortCodecs(list, "h264", "42001f").sorted.map(c => c.sdpFmtpLine ?? "-"), [
+            "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f", "-", "-", "-", "x=1"
+        ]);
+        assert.deepEqual(sortCodecs(list, "vp9").sorted[0], plain("VP9"));
+        const vp8 = sortCodecs(list, "vp8");
+        assert.equal(vp8.matched, 2);
+        assert.deepEqual(vp8.sorted.slice(0, 2), [plain("VP8"), plain("VP8", "x=1")]);
+    });
+
+    test("applyCodecPreferences: lista vazia no sender, perfil ausente, erro que nao e Error, nenhuma capacidade", () => {
+        let applied: Codec[] = [];
+        const ok = { setCodecPreferences: (list: Codec[]) => { applied = list; } } as unknown as RTCRtpTransceiver;
+        setCaps([], [h264(1, "42e01f")]);
+        assert.equal(applyCodecPreferences(ok, "h264", "42001f"), "H264 primeiro (1 variante(s), capacidades do receiver)", "sem 42001f: sem '(perfil ...)'");
+        assert.equal(applied.length, 1);
+        setCaps([plain("H264")]);
+        assert.equal(applyCodecPreferences(ok, "h264", "42001f"), "H264 primeiro (1 variante(s), capacidades do sender)", "H.264 sem fmtp: sem perfil");
+
+        const throwsString = { setCodecPreferences: () => { throw "recusado"; } } as unknown as RTCRtpTransceiver;
+        setCaps([plain("VP9")]);
+        assert.equal(applyCodecPreferences(throwsString, "vp9"), "setCodecPreferences não aplicado (recusado)");
+
+        g.RTCRtpSender = g.RTCRtpReceiver = { getCapabilities: () => null };
+        assert.equal(applyCodecPreferences(ok, "vp9"), "setCodecPreferences não aplicado (sem capacidades)");
+        setCaps([]);
+        assert.equal(applyCodecPreferences(ok, "vp9"), "setCodecPreferences não aplicado (sem capacidades)");
+    });
+
+    test("pickNegotiatedCodec: leva channels quando existe e omite o fmtp ausente", () => {
+        const negotiated = [{ payloadType: 96, mimeType: "video/VP8", clockRate: 90000, channels: 1 }] as RTCRtpCodecParameters[];
+        assert.deepEqual(pickNegotiatedCodec(negotiated, { codec: "vp8", reason: "" }), { mimeType: "video/VP8", clockRate: 90000, channels: 1 });
+    });
 });

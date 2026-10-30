@@ -231,13 +231,14 @@ interface Challenge {
 
 /**
  * Desafios de senha pendentes, um por conexao: cada `issue` gera um nonce novo (substitui o anterior) e `take`
- * consome o nonce (uso unico) se ainda estiver valido. `now` e injetavel para os testes.
+ * consome o nonce (uso unico) se ainda estiver valido. `now` e injetavel para os testes; o padrao le Date.now a cada
+ * chamada (nao guarda a funcao de quando foi criado).
  */
 export class PasswordChallenges {
     private readonly map = new Map<string, Challenge>();
 
     constructor(
-        private readonly now: () => number = Date.now,
+        private readonly now: () => number = () => Date.now(),
         private readonly ttlMs = PASSWORD_NONCE_TTL_MS,
         private readonly makeNonce: () => string = newPasswordNonce
     ) { }
