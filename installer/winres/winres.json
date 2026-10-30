@@ -16,7 +16,7 @@
       "0409": {
         "identity": {
           "name": "Telinha.Installer",
-          "version": "0.2.4.0"
+          "version": "0.2.5.0"
         },
         "description": "Instalador do Telinha",
         "minimum-os": "win10",
@@ -40,20 +40,20 @@
     "#1": {
       "0000": {
         "fixed": {
-          "file_version": "0.2.4.0",
-          "product_version": "0.2.4.0"
+          "file_version": "0.2.5.0",
+          "product_version": "0.2.5.0"
         },
         "info": {
           "0416": {
             "Comments": "Instala o complemento Telinha no Discord com o Vencord oficial.",
             "CompanyName": "Telinha (software livre, GPL-3.0)",
             "FileDescription": "Instalador do Telinha",
-            "FileVersion": "0.2.4",
+            "FileVersion": "0.2.5",
             "InternalName": "TelinhaInstaller",
             "LegalCopyright": "GPL-3.0-or-later. Partes adaptadas do Vencord Installer (c) Vendicated e contribuidores.",
             "OriginalFilename": "TelinhaInstaller.exe",
             "ProductName": "Telinha",
-            "ProductVersion": "0.2.4"
+            "ProductVersion": "0.2.5"
           }
         }
       }
