@@ -24,8 +24,8 @@ file but shared by the tests inside it: stop what you start (`stopSession()`, `s
   fake with `as unknown as RTCRtpSender` where the plugin wants the real type).
 - `test/setup.ts` is preloaded in every test process: JSX globals (`VencordCreateElement` = React's), an empty
   `VencordNative`, `.css` imports as empty modules, **no network** (`fetch` rejects), and the core's
-  `[Telinha] ...` console lines silenced (read them with `getEventLog()` from `store.ts`; `TELINHA_TEST_ECHO=1`
-  prints them).
+  `[Telinha] ...` console lines (every call whose first argument starts with `[Telinha]`) silenced (read the core's with
+  `getEventLog()` from `store.ts`; `TELINHA_TEST_ECHO=1` prints them).
 - Tests import the controls from `@test/...` (the same module instances the plugin gets).
 
 ## The fakes
@@ -75,4 +75,7 @@ await settle();
 - Code that calls `document`/`window` at call time (session's CSP listener, viewer windows, update notices) needs
   `@test/fakes/dom` (or `render`) loaded; import order does not matter.
 - `stopSession()` / `stopStreaming()` at the end of a file; `closeAllViewers()` after UI tests that open viewers.
+- Never `assert.equal` / `deepEqual` / `notEqual` DOM nodes (or an object holding one): when they differ, node:assert
+  walks the whole happy-dom tree to build its message, which hangs for a minute and eats the process's memory. Compare
+  identity with `assert.ok(a === b)`, or compare what you mean (`id`, `textContent`, `tagName`).
 - `test/harness.test.ts` and `test/fakes.test.tsx` test the harness itself: keep them green when changing a fake.

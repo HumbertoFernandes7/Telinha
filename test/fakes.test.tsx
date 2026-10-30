@@ -122,6 +122,20 @@ describe("fakes", () => {
         await assert.rejects(anim.finished, { name: "AbortError" });
     });
 
+    test("setup: console lines starting with [Telinha] are dropped (with or without the text glued on), the rest print", { skip: !!process.env.TELINHA_TEST_ECHO && "the silencer is off" }, t => {
+        const written: string[] = [];
+        for (const stream of [process.stdout, process.stderr])
+            t.mock.method(stream, "write", (chunk: unknown) => !!written.push(String(chunk)));
+        console.log("[Telinha]", "separate");
+        console.warn("[Telinha] glued", new Error("x"));
+        console.error(new Error("not ours"));
+        console.info("other");
+        t.mock.restoreAll();
+        assert.equal(written.length, 2);
+        assert.match(written[0], /not ours/);
+        assert.match(written[1], /other/);
+    });
+
     test("modals and toasts: openModal → ModalHost renders it; actions and onClose work", async () => {
         let applied = 0;
         render(<ModalHost />);
