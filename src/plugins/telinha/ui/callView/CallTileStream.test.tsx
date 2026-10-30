@@ -17,6 +17,7 @@ import { after, afterEach, before, beforeEach, describe, test } from "node:test"
 import { type LocalCapture, rt } from "@plugins/telinha/core/context";
 import { resetState, setState } from "@plugins/telinha/store";
 import type { RemotePeer, TelinhaState, ViewerSession } from "@plugins/telinha/types";
+import { getVolume, setVolume } from "@plugins/telinha/ui/volumes";
 import { useFakeClock } from "@test/fakes/clock";
 import { fullscreen, media, resetMedia, resizeObservers } from "@test/fakes/dom";
 import { act, cleanup, fireEvent, render, screen, settle, within } from "@test/fakes/render";
@@ -26,7 +27,7 @@ import { animations, assertAbsent, installAnimate } from "@test/helpers/wpe-dom"
 import type { ReactNode } from "react";
 
 import { CallTileStream } from "./CallTileStream";
-import { getVolume, isLocalPreviewHidden, isTileOwned, resetTileState, setLocalPreviewHidden, setVolume } from "./tileState";
+import { isLocalPreviewHidden, isTileOwned, resetTileState, setLocalPreviewHidden } from "./tileState";
 
 const PEER = "peerA";
 const EMPTY: TelinhaState = { inRoom: true, channelId: "500000000000000005", peers: [], local: null, viewing: {}, lastError: null, blocked: [], identityAlerts: [] };

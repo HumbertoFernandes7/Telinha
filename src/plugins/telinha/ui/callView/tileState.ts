@@ -12,7 +12,7 @@
 //   graca (o Discord remonta tiles ao trocar de layout/foco; nao queremos derrubar o stream nisso).
 // - Audio: com o mesmo stream em varias tiles (ex.: call no pop-out do Discord e na janela principal), so a primeira
 //   tile montada toca o som; janela do visualizador aberta = o som fica so na janela.
-// - Volume por usuario do Discord, enquanto o Discord estiver aberto.
+// - O volume por usuario do Discord nao fica aqui: e um so para a tile e para a janela do visualizador (ui/volumes.ts).
 
 import { unwatch, watch } from "@plugins/telinha/actions";
 import { getState, subscribe as subscribeState } from "@plugins/telinha/store";
@@ -31,7 +31,6 @@ interface Owned {
 const tileOwned = new Map<PeerId, Owned>();
 const mounts = new Map<PeerId, symbol[]>();
 const graceTimers = new Map<PeerId, ReturnType<typeof setTimeout>>();
-const volumes = new Map<string, { volume: number; muted: boolean; }>();
 
 let version = 0;
 const listeners = new Set<() => void>();
@@ -141,14 +140,6 @@ export function unregisterTile(peerId: PeerId, token: symbol) {
 /** A primeira tile montada daquele amigo e a que toca o audio */
 export function isAudioOwner(peerId: PeerId, token: symbol | null) {
     return token != null && mounts.get(peerId)?.[0] === token;
-}
-
-export function getVolume(key: string) {
-    return volumes.get(key) ?? { volume: 1, muted: false };
-}
-
-export function setVolume(key: string, value: { volume: number; muted: boolean; }) {
-    volumes.set(key, value);
 }
 
 /** Preferencia "ocultar a previa da propria transmissao" (vale ate fechar o Discord) */

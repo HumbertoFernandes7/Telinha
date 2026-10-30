@@ -7,6 +7,7 @@
 // The player shown inside a viewer window (Discord pop-out) or the in-app floating panel. It plays the main
 // window's MediaStream directly in a <video> created by the host document ("direct" strategy from the spike:
 // 1080p at ~49 fps in the pop-out). Everything here is styled inline: pop-outs don't receive Vencord's CSS.
+// The volume (and mute) is the one in ui/volumes.ts, shared with the call tile: what is set in one shows in the other.
 
 import { useTelinhaState } from "@plugins/telinha/store";
 import type { PeerId, ViewerSession } from "@plugins/telinha/types";
@@ -15,12 +16,10 @@ import type { CSSProperties, ReactNode, RefObject } from "react";
 
 import { ACCENT, deniedTitle, errorText, findPeer, logger, peerName } from "./common";
 import { CloseIcon, FullscreenIcon, StopIcon, VolumeIcon } from "./icons";
+import { useVolume, volumeKeyFor } from "./volumes";
 import { AuthorizeToWatchButton, PasswordForm, passwordOverlayText } from "./WatchGate";
 
 export type ViewerMode = "popout" | "floating";
-
-/** Volume per Discord user, kept while Discord is open so reopening a friend's stream keeps the level */
-const volumes = new Map<string, { volume: number; muted: boolean; }>();
 
 const CONTROLS_IDLE_MS = 2500;
 
@@ -201,10 +200,8 @@ export function ViewerContent({ peerId, mode, onMounted, onUnmounted, onClose }:
     const hadSession = useRef(false);
     if (session) hadSession.current = true;
 
-    const volumeKey = peer?.discordUserId ?? peerId;
-    const saved = volumes.get(volumeKey) ?? { volume: 1, muted: false };
-    const [volume, setVolume] = useState(saved.volume);
-    const [muted, setMuted] = useState(saved.muted);
+    // What the user chose, not what the browser forces: autoplay refused mutes the <video> only (see autoplayBlocked)
+    const [{ volume, muted }, setVolume] = useVolume(volumeKeyFor(peerId, peer?.discordUserId));
     const [autoplayBlocked, setAutoplayBlocked] = useState(false);
     const [fullscreen, setFullscreen] = useState(false);
     const [active, setActive] = useState(true);
@@ -274,7 +271,6 @@ export function ViewerContent({ peerId, mode, onMounted, onUnmounted, onClose }:
         if (!video) return;
         video.volume = volume;
         video.muted = muted || autoplayBlocked;
-        volumes.set(volumeKey, { volume, muted });
     }, [volume, muted, autoplayBlocked, stream]);
 
     const hasAudio = (stream?.getAudioTracks().length ?? 0) > 0 || !!peer?.stream?.hasAudio;
@@ -297,7 +293,7 @@ export function ViewerContent({ peerId, mode, onMounted, onUnmounted, onClose }:
 
     const enableSound = () => {
         setAutoplayBlocked(false);
-        setMuted(false);
+        setVolume({ volume, muted: false });
         const video = videoRef.current;
         if (video) {
             video.muted = false;
@@ -325,7 +321,7 @@ export function ViewerContent({ peerId, mode, onMounted, onUnmounted, onClose }:
                     style={ghostButton}
                     title={muted ? "Ativar som" : "Silenciar"}
                     aria-label={muted ? "Ativar som" : "Silenciar"}
-                    onClick={() => setMuted(m => !m)}
+                    onClick={() => setVolume({ volume, muted: !muted })}
                 >
                     <VolumeIcon muted={muted || volume === 0} />
                 </button>
@@ -340,8 +336,7 @@ export function ViewerContent({ peerId, mode, onMounted, onUnmounted, onClose }:
                     style={{ width: 110, accentColor: ACCENT, cursor: "pointer" }}
                     onChange={e => {
                         const v = Number(e.currentTarget.value) / 100;
-                        setVolume(v);
-                        setMuted(v === 0);
+                        setVolume({ volume: v, muted: v === 0 });
                     }}
                 />
             </div>

@@ -5,7 +5,8 @@
  */
 
 // Testes do estado compartilhado das tiles da call (ui/callView/tileState.ts): quem e dono da sessao "Assistir na
-// call", quem toca o audio, a graca de 4 s ao desmontar, o volume por usuario e a previa da propria transmissao.
+// call", quem toca o audio, a graca de 4 s ao desmontar e a previa da propria transmissao (o volume por usuario e
+// de ui/volumes.ts).
 // O nucleo e o de verdade (sem sala: watch() falha e publica o erro, unwatch() limpa a sessao).
 // Rodar:  pnpm test:file src/plugins/telinha/ui/callView/tileState.test.ts
 
@@ -24,7 +25,6 @@ import { act, cleanup, renderHook, settle } from "@test/fakes/render";
 import { loggerLines, PopoutActions, resetVencordFakes, toasts } from "@test/fakes/vencord";
 
 import {
-    getVolume,
     isAudioOwner,
     isLocalPreviewHidden,
     isTileOwned,
@@ -32,7 +32,6 @@ import {
     releaseToWindow,
     resetTileState,
     setLocalPreviewHidden,
-    setVolume,
     startTileWatch,
     stopTileWatch,
     unregisterTile,
@@ -106,13 +105,6 @@ describe("tileState", () => {
         assert.equal(failure?.args[0], "Listener das tiles da call falhou");
         assert.match(String((failure?.args[1] as Error).message), /tile quebrada/);
         (off as (() => void) | null)?.();
-    });
-
-    test("volume e mudo ficam lembrados por usuario do Discord; sem registro vale o volume cheio", () => {
-        assert.deepEqual(getVolume("200000000000000002"), { volume: 1, muted: false });
-        setVolume("200000000000000002", { volume: 0.4, muted: true });
-        assert.deepEqual(getVolume("200000000000000002"), { volume: 0.4, muted: true });
-        assert.deepEqual(getVolume("outro"), { volume: 1, muted: false });
     });
 
     test("ocultar a previa da propria transmissao vale ate o Discord fechar", () => {
