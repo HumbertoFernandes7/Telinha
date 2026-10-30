@@ -5,7 +5,7 @@
  */
 /*
  * Offline test of automatic updates (addon/loader/updater.js + the loader's swap/rollback, PAYLOAD.md section 8), with a
- * fake GitHub release server on 127.0.0.1 and fake %APPDATA% trees under %TEMP%\tl-addon. Never touches the real
+ * fake GitHub release server on 127.0.0.1 and fake %APPDATA% trees under %TEMP%\tl-addon-<hash of the repo path>. Never touches the real
  * Discord, %APPDATA% or GitHub.
  *
  *   node addon/test/run-update-test.mjs [--vencord-dist <dir>] [--payload <dir>] [--installer <TelinhaInstaller-cli.exe>]

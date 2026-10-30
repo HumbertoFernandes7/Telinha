@@ -4,7 +4,7 @@
  *      one alphabetically. Each runs in its own process and gets the same arguments (--vencord-dist, --payload...).
  *   2. node:test unit tests of the loader, if any: addon/test/*.test.mjs and *.test.cjs (node --test).
  * A new test file is picked up by name: package.json never needs to change. Exit code 1 if anything failed.
- * Like the scripts it runs, it never touches the real Discord or %APPDATA% (fake trees under %TEMP%\tl-addon).
+ * Like the scripts it runs, it never touches the real Discord or %APPDATA% (fake trees under %TEMP%\tl-addon-<hash of the repo path>).
  */
 import { spawnSync } from "child_process";
 import { readdirSync } from "fs";

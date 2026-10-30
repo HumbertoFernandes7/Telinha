@@ -286,7 +286,7 @@ addon/
 ```
 
 Run (Vencord build defaults to `.vencord/dist`, the pinned official Vencord built by `pnpm bootstrap`, read-only;
-scratch is `%TEMP%\tl-addon`):
+scratch is `%TEMP%\tl-addon-<hash of the repo path>`, so two checkouts can run at once):
 
 ```
 node addon/build/build-addon.mjs        # optional; enables S5

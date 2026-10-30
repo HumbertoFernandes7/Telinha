@@ -88,7 +88,7 @@ export function loaderPayload({ version = "0.1.0", commit = "base0100", manifest
 /**
  * A scratch folder for loader trees that is emptied when the test FILE starts (not when it ends). scripts/coverage.mjs
  * maps the coverage of a loader copy back onto addon/loader/ only if the copy still exists when the report is made, so
- * these trees stay after the run, like the ones of the scenario scripts under %TEMP%\tl-addon. The name carries a hash of
+ * these trees stay after the run, like the ones of the scenario scripts under %TEMP%\tl-addon-<hash>. The name carries a hash of
  * the repo path so two worktrees running the tests at once never share a folder.
  */
 export function loaderScratch(name) {
