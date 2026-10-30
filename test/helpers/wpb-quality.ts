@@ -11,11 +11,22 @@
 
 import { QualityController, type QualityDeps } from "@plugins/telinha/core/quality/controller";
 import { encodingFor, scaledSize } from "@plugins/telinha/core/quality/levels";
+import { getEventLog, type TelinhaEvent } from "@plugins/telinha/store";
 import type { QualityLevel } from "@plugins/telinha/types";
 import type { FakeClock } from "@test/fakes/clock";
 import { type EncoderRates, EncoderSim, FakeRTCRtpSender, videoTrack } from "@test/fakes/webrtc";
 
 export const EVAL_MS = 2000;
+
+/** The Telinha log lines written while `fn` runs. */
+export async function logsDuring(fn: () => Promise<unknown> | unknown): Promise<string[]> {
+    const seen = new Set<TelinhaEvent>(getEventLog());
+    await fn();
+    return getEventLog().filter(e => !seen.has(e)).map(e => e.msg);
+}
+
+/** Only the auto quality's decisions ("Qualidade automática: ..."). */
+export const qualityLines = (lines: string[]) => lines.filter(l => l.startsWith("Qualidade automática:"));
 
 export interface AppliedLevel {
     peerId: string;

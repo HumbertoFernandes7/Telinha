@@ -14,21 +14,11 @@
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 
-import { getEventLog, type TelinhaEvent } from "@plugins/telinha/store";
 import { useFakeClock } from "@test/fakes/clock";
 import { EncoderSim, installWebRtc, type WebRtcEnv } from "@test/fakes/webrtc";
-import { EVAL_MS, GpuSim, measuredFrameMs, type QualityHarness, qualityHarness } from "@test/helpers/wpb-quality";
+import { EVAL_MS, GpuSim, logsDuring, measuredFrameMs, type QualityHarness, qualityHarness, qualityLines } from "@test/helpers/wpb-quality";
 
 import { BW_GRACE_MS } from "./levels";
-
-/** Linhas do log do Telinha escritas durante `fn`. */
-async function logsDuring(fn: () => Promise<void> | void): Promise<string[]> {
-    const seen = new Set<TelinhaEvent>(getEventLog());
-    await fn();
-    return getEventLog().filter(e => !seen.has(e)).map(e => e.msg);
-}
-
-const qualityLines = (lines: string[]) => lines.filter(l => l.startsWith("Qualidade automática:"));
 
 describe("qualidade automatica: carencia de banda do espectador novo (levels.BW_GRACE_MS)", () => {
     test("a carencia e de 20 s", () => {
@@ -240,6 +230,39 @@ describe("qualidade automatica: limite da placa de video (encoder por hardware)"
         assert.deepEqual(levels(h, 4), Array(4).fill("720p60"));
         assert.match(qualityLines(lines)[0] ?? "", /^Qualidade automática: 1080p 60 fps → 720p 60 fps para os 4 espectadores \(placa de vídeo: mais um espectador: previsão de 15\.5 ms/);
         assert.equal(h.controller.state?.reasonText, "720p 60 fps — a placa de vídeo não dá conta de 4 espectadores");
+    });
+
+    test("1 espectador numa placa 4x mais lenta (17,2 ms): desce, e o motivo fala de um encoder so", async t => {
+        const clock = useFakeClock(t);
+        const h = qualityHarness(clock);
+        const gpu = new GpuSim(h, { factor: 4 });
+        await gpu.join("P1");
+        const lines = await logsDuring(() => h.runUntil(8000));
+        assert.equal(h.controller.levelFor("P1"), "720p60");
+        assert.match(qualityLines(lines)[0] ?? "", /\(placa de vídeo: mediana de 17\.2 ms por quadro em 1 encoder da placa, o limite é 13\.3 ms\)/);
+        assert.equal(h.controller.state?.reasonText, "720p 60 fps — a placa de vídeo está sobrecarregada");
+    });
+
+    test("com a placa no limite (8 em 1080p60): um espectador novo por software (VP9) nao entra na conta dela; sem palpite, entra", async t => {
+        const clock = useFakeClock(t);
+        const h = qualityHarness(clock);
+        const gpu = new GpuSim(h);
+        await joinOneByOne(h, gpu, 1, 8);
+
+        // VP9 (o espectador nao decodifica H.264 por hardware): libvpx, na CPU
+        h.attach("S", new EncoderSim());
+        const lines = await logsDuring(async () => {
+            await h.join("S", false);
+            await h.runUntil(h.elapsed() + 30_000);
+        });
+        assert.deepEqual(qualityLines(lines), []);
+        assert.deepEqual([...levels(h, 8), h.controller.levelFor("S")], Array(9).fill("1080p60"));
+
+        // addViewer sem dizer o codec: conta como os ja medidos (placa de video), e 9 encoders nela nao cabem
+        gpu.add("P9");
+        h.controller.addViewer("P9");
+        assert.equal(h.controller.levelFor("P1"), "720p60");
+        assert.equal(h.controller.state?.reason, "gpu");
     });
 
     test("encoder por software com os mesmos tempos: a placa de video nao entra na conta", async t => {

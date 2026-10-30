@@ -232,6 +232,11 @@ describe("prova da senha (HMAC-SHA256)", () => {
         await assert.rejects(computePasswordProof({ ...V, password: "" }));
     });
 
+    test("WebCrypto falhando no meio da conferencia: falso, nunca lanca", async t => {
+        t.mock.method(crypto.subtle, "importKey", () => Promise.reject(new DOMException("operacao nao suportada", "NotSupportedError")));
+        assert.equal(await verifyPasswordProof({ ...V }), false);
+    });
+
     test("normalizacao: NFC e sem espacos nas pontas (os dois lados iguais)", async () => {
         const decomposed = "pão-42"; // "ã" como a + til combinante
         assert.notEqual(decomposed, V.password);
@@ -326,6 +331,17 @@ describe("desafios (nonce)", () => {
         ch.issue("x");
         ch.clear();
         assert.equal(ch.take("x"), null);
+    });
+
+    test("sem relogio injetado: le Date.now a cada chamada (um relogio trocado depois de criado vale)", t => {
+        const ch = new PasswordChallenges();
+        t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+        ch.issue("p1");
+        t.mock.timers.tick(PASSWORD_NONCE_TTL_MS - 1);
+        assert.equal(ch.has("p1"), true);
+        t.mock.timers.tick(1);
+        assert.equal(ch.has("p1"), false);
+        assert.deepEqual(ch.sweep(), ["p1"]);
     });
 });
 

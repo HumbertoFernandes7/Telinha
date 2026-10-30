@@ -4,10 +4,9 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-// Testes das partes PURAS da qualidade automatica (core/quality/levels.ts): a carencia de banda do espectador novo e a
-// reducao de resolucao em tamanho par (H.264 na placa de video).
-// O controller em si nao e testado aqui: controller.ts importa core/log -> store -> @webpack/common (Vencord), que nao carrega
-// no Node. Nao entra no build (nada importa este arquivo).
+// Testes das partes PURAS da qualidade automatica (core/quality/levels.ts): a carencia de banda do espectador novo, a
+// reducao de resolucao em tamanho par (H.264 na placa de video) e os degraus.
+// O controller tem os testes dele (controller*.test.ts). Nao entra no build (nada importa este arquivo).
 // Rodar:  pnpm test:file src/plugins/telinha/core/quality/quality.test.ts  (todos: pnpm test:unit)
 
 import assert from "node:assert/strict";
@@ -15,7 +14,7 @@ import { describe, test } from "node:test";
 
 import { h264HwAcceptsSize } from "@plugins/telinha/core/codec";
 
-import { BW_GRACE_MS, encodingFor, evenScale, inBandwidthGrace, LEVELS, pixelRate, scaledSide, scaledSize } from "./levels";
+import { BW_GRACE_MS, encodingFor, evenScale, inBandwidthGrace, isAtMost, LEVELS, levelText, meet, pixelRate, rank, scaledSide, scaledSize, stepDown, stepUp } from "./levels";
 
 describe("carencia de banda do espectador novo", () => {
     test("sao 20 s", () => {
@@ -147,5 +146,49 @@ describe("reducao de resolucao em tamanho par (evenScale / encodingFor)", () => 
     test("pixelRate usa a escala par", () => {
         assert.equal(pixelRate("720p60", 1798, 1080), (1798 / 1.501) * (1080 / 1.501) * 60);
         assert.equal(pixelRate("1080p60", 1920, 1080), 1920 * 1080 * 60);
+    });
+
+    test("sem largura par possivel (janela de 2 px de largura): fica a escala simples", () => {
+        assert.equal(evenScale(2, 1080, 720), 1.5);
+    });
+
+    test("tamanho absurdo, sem escala de 3 a 6 casas na faixa: usa o meio da faixa, ainda par", () => {
+        const s = evenScale(20_000_002, 20_000_002, 9_999_960);
+        assert.ok(String(s).split(".")[1].length > 6, `escala ${s}`);
+        const out = scaledSize(20_000_002, 20_000_002, s);
+        assert.equal(out.width % 2, 0);
+        assert.equal(out.height % 2, 0);
+    });
+});
+
+describe("degraus da qualidade automatica", () => {
+    test("descer: de 1080p60 mantem 60 fps com movimento (720p60) ou a nitidez parado (1080p30); o piso e 720p30", () => {
+        assert.equal(stepDown("1080p60", true), "720p60");
+        assert.equal(stepDown("1080p60", false), "1080p30");
+        assert.equal(stepDown("720p60", true), "720p30");
+        assert.equal(stepDown("1080p30", false), "720p30");
+        assert.equal(stepDown("720p30", true), null);
+    });
+
+    test("subir: um degrau por vez, sem passar da qualidade escolhida", () => {
+        assert.equal(stepUp("720p30", "1080p60", true), "720p60");
+        assert.equal(stepUp("720p30", "1080p60", false), "1080p30");
+        assert.equal(stepUp("720p30", "720p60", false), "720p60", "1080p30 passaria do teto de 720p60");
+        assert.equal(stepUp("720p30", "1080p30", true), "1080p30");
+        assert.equal(stepUp("720p60", "1080p60", true), "1080p60");
+        assert.equal(stepUp("1080p30", "1080p60", false), "1080p60");
+        assert.equal(stepUp("720p60", "720p60", true), null, "ja no teto");
+        assert.equal(stepUp("1080p60", "1080p60", true), null);
+    });
+
+    test("meet, isAtMost, rank e o texto de cada degrau", () => {
+        assert.equal(meet("720p60", "1080p30"), "720p30");
+        assert.equal(meet("1080p60", "1080p30"), "1080p30");
+        assert.equal(meet("1080p60", "720p60"), "720p60");
+        assert.equal(meet("1080p60", "1080p60"), "1080p60");
+        assert.equal(isAtMost("720p30", "1080p60"), true);
+        assert.equal(isAtMost("1080p30", "720p60"), false);
+        assert.deepEqual((["1080p60", "720p30", "1080p30", "720p60"] as const).slice().sort((a, b) => rank(a) - rank(b)), ["720p30", "720p60", "1080p30", "1080p60"]);
+        assert.deepEqual((["1080p60", "720p60", "1080p30", "720p30"] as const).map(levelText), ["1080p 60 fps", "720p 60 fps", "1080p 30 fps", "720p 30 fps"]);
     });
 });
