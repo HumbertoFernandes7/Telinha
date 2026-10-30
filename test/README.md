@@ -76,3 +76,32 @@ await settle();
   `@test/fakes/dom` (or `render`) loaded; import order does not matter.
 - `stopSession()` / `stopStreaming()` at the end of a file; `closeAllViewers()` after UI tests that open viewers.
 - `test/harness.test.ts` and `test/fakes.test.tsx` test the harness itself: keep them green when changing a fake.
+
+## Coverage floor
+
+CI fails when coverage falls below the numbers committed in `coverage-floor.json` (repo root), and the floor only ever
+goes up (a ratchet). `scripts/check-coverage.mjs` compares, and its own tests are `test/check-coverage.test.ts` (on
+the fixtures in `test/fixtures/`: a c8 summary and the `go test -cover` output of a green CI run).
+
+| Floor | Measured by |
+|---|---|
+| `js`: `lines`, `statements`, `functions`, `branches` of the whole run | `pnpm test:coverage`, total of `coverage/coverage-summary.json` |
+| `go`: statement coverage of each package that has tests | `go test -count=1 -cover ./...` in `installer/`, the `coverage: X% of statements` line of each package (not `internal/testutil`: it has no tests) |
+
+- A floor is the measured coverage rounded down to 0.1, minus 0.1 (noise margin). CI runs the check as its last gate
+  (step "Coverage floor") and puts the table of current against floor in the job summary.
+- **Check:** `pnpm test:coverage && pnpm coverage:check --only js` (TypeScript only: the Go numbers come from a plain
+  `go test -cover`, see below). It exits 1 when anything is below its floor, or when a package that has a floor has
+  no coverage line any more. It hints "raise the floor: pnpm coverage:ratchet" for whatever is more than 0.5 points
+  above its floor, and notes a Go package that has no floor yet.
+- **Ratchet:** when coverage went up (CI's hint, or after a test push): `pnpm test:coverage`, then
+  `pnpm coverage:ratchet`, and commit `coverage-floor.json` in the same PR. It raises every floor to the current
+  value (never lowers one) and adds new Go packages. For Go it reads the text of `go test -count=1 -cover ./...`
+  from `coverage/go-test.txt` (or `--go <file>`): run it with `go test -count=1 -cover ./... > ../coverage/go-test.txt`
+  in `installer/` where fresh test binaries run, or save the log of a green CI run (`gh run view <id> --log`; the
+  line prefixes are ignored). A side whose file is missing is skipped, so `pnpm coverage:ratchet --only js` raises
+  just the TypeScript floor.
+- Do not feed it `pnpm test:coverage:go`: that one counts code run by any package's tests, so its numbers are higher
+  than CI's per-package ones and would raise the floor out of CI's reach.
+- A deliberate drop (deleted code, a package removed): lower or delete that number in `coverage-floor.json` by hand
+  in the PR that causes it, so a reviewer sees it. The ratchet never does it for you.

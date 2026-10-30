@@ -203,6 +203,8 @@ pnpm test:addon        # testes offline do add-on (rode o build:addon antes)
 pnpm test              # test:unit + test:addon
 pnpm test:coverage     # cobertura (c8) do plugin e do carregador do add-on: coverage/lcov.info e coverage-summary.json
 pnpm test:coverage:go  # cobertura do instalador em Go: coverage/go/
+pnpm coverage:check    # compara a cobertura atual com o piso de coverage-floor.json (o CI falha abaixo dele)
+pnpm coverage:ratchet  # sobe o piso para a cobertura atual (nunca desce); ver "Coverage floor" em test/README.md
 pnpm build:installer   # dist/installer/TelinhaInstaller.exe e TelinhaInstaller-cli.exe (roda go vet e go test antes)
 pnpm check             # typecheck, lint, lint-styles, test:unit, build:addon e test:addon, nessa ordem
 ```

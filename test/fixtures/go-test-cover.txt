@@ -1,0 +1,12 @@
+ok  	github.com/HumbertoFernandes7/Telinha/installer	4.115s	coverage: 98.5% of statements
+ok  	github.com/HumbertoFernandes7/Telinha/installer/internal/asar	0.049s	coverage: 100.0% of statements
+ok  	github.com/HumbertoFernandes7/Telinha/installer/internal/core	2.002s	coverage: 98.9% of statements
+ok  	github.com/HumbertoFernandes7/Telinha/installer/internal/discord	0.080s	coverage: 100.0% of statements
+ok  	github.com/HumbertoFernandes7/Telinha/installer/internal/fsutil	0.338s	coverage: 98.1% of statements
+ok  	github.com/HumbertoFernandes7/Telinha/installer/internal/logx	1.255s	coverage: 100.0% of statements
+ok  	github.com/HumbertoFernandes7/Telinha/installer/internal/payload	1.009s	coverage: 99.3% of statements
+ok  	github.com/HumbertoFernandes7/Telinha/installer/internal/stub	0.042s	coverage: 100.0% of statements
+	github.com/HumbertoFernandes7/Telinha/installer/internal/testutil		coverage: 0.0% of statements
+ok  	github.com/HumbertoFernandes7/Telinha/installer/internal/ui	0.534s	coverage: 95.6% of statements
+ok  	github.com/HumbertoFernandes7/Telinha/installer/internal/winproc	0.680s	coverage: 93.2% of statements
+ok  	github.com/HumbertoFernandes7/Telinha/installer/internal/winver	0.038s	coverage: 100.0% of statements
