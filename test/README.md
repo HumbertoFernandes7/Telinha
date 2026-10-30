@@ -35,7 +35,7 @@ file but shared by the tests inside it: stop what you start (`stopSession()`, `s
 | `@test/fakes/vencord` | Stores (`UserStore`, `ChannelStore`, `SelectedChannelStore`, `VoiceStateStore`, `RelationshipStore`, `PopoutWindowStore`) with setters, `FluxDispatcher` (sync `dispatch`, `listenerCount`), `joinVoice()` / `setVoiceMembers()` (Discord's whole sequence), `pluginSettings` (`load`/`set`/`get`, `onChange` fires like Vencord's; `load(values, { lazy: true })` = Vencord's disk, `settings.plain` has only what was written and defaults show on read), `dataStoreData`/`dataStoreImpl`, `toasts`, `modals` + `ModalHost`, `notifications`, `clipboard`, `loggerLines`, `caughtErrors` (ErrorBoundary), `webpackModules.provide*` (what `find*`/`find*Lazy` return), `resetVencordFakes()`. Ids: `ME_ID`, `FRIEND_ID`, `OTHER_ID`, `GUILD_ID`, `VOICE_CHANNEL_ID`. |
 | `@test/fakes/webrtc` | `installWebRtc()` → `RTCPeerConnection` (+ senders/receivers/transceivers/DTLS, `addSendingTrack`, `setConnectionState`), `RTCCertificate`, `MediaStream`/`MediaStreamTrack` (`end()`, `setSettings()`, `emitRemoveTrack()`), `navigator.mediaDevices` (`getDisplayMediaImpl`), `navigator.mediaCapabilities` (`hwEncode`/`hwDecode`), `rtpCapabilities`. Stats: `videoSenderStats()`, `videoReceiverStats()`, and `EncoderSim` (cumulative encoder counters that follow the fake clock). |
 | `@test/fakes/trystero` | `trystero.lastRoom`: `connectPeer(id, { hello })` (handshake + join), `receive(action, data, from)`, `sentOn(action, to)`, `emitStream`, `disconnectPeer`, `addStreamMode` (resolve/reject/manual + `settleStreams`), `trystero.relaySockets`. |
-| `@test/fakes/clock` | `useFakeClock(t)`: mock timers + `performance.now()` in one clock (`tick`, `tickAsync`); `eventually(check)` for real-timer flows; `flushPromises()`. |
+| `@test/fakes/clock` | `useFakeClock(t)`: mock timers + `performance.now()` in one clock (`tick`, `tickAsync`); `eventually(check)` polls until truthy, with real timers or the fake clock on (the one wait to use: no `setImmediate` loops of your own); `flushPromises()`. |
 | `@test/fakes/native` | `installNative(overrides)`: `VencordNative.pluginHelpers.Telinha` (native.ts as the renderer sees it) and `TelinhaAddon` (updater); `calls`; `updateStatus()` builder. |
 | `@test/fakes/audio` | `installWebAudio()`: `AudioContext`, `AudioWorkletNode` (`port.posted`/`emit`), `MediaStreamTrackGenerator` + `AudioData` (`{ generator: true }`). |
 | `@test/fakes/dom` | happy-dom globals; `media` (`played`, `playImpl`, `setFrame`), `canvas2d` (`pixels`), `layout.setSize`, `resizeObservers.resize`, `fullscreen`, `resetMedia()`. |
@@ -72,6 +72,10 @@ fireEvent.click(screen.getByRole("button"));
 await settle();
 ```
 
+- A fake-clock `tick(2000)` moves the clock first and then runs the due timers: timers due at 500, 1000 and 1500 all read
+  `Date.now()` / `performance.now()` as the END of the tick (+2000). When the code measures time from inside a timer,
+  use `clock.tick(2000, { stepwise: true })` (1 ms at a time: each timer sees the instant it was due) or
+  `await clock.tickAsync(2000, 1)` (the same, flushing promises between steps).
 - Code that calls `document`/`window` at call time (session's CSP listener, viewer windows, update notices) needs
   `@test/fakes/dom` (or `render`) loaded; import order does not matter.
 - `stopSession()` / `stopStreaming()` at the end of a file; `closeAllViewers()` after UI tests that open viewers.

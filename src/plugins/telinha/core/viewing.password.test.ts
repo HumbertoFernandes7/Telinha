@@ -15,10 +15,10 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, test } from "node:test";
 
 import { rt } from "@plugins/telinha/core/context";
-import { flushPromises, useFakeClock } from "@test/fakes/clock";
+import { eventually, flushPromises, useFakeClock } from "@test/fakes/clock";
 import type { FakeRoom } from "@test/fakes/trystero";
 import { FRIEND_ID, ME_ID } from "@test/fakes/vencord";
-import { addStreamer, closeRoom, incomingStream, logMark, openRoom, receiveOn, until, viewerOf } from "@test/helpers/wpc-viewing";
+import { addStreamer, closeRoom, incomingStream, logMark, openRoom, receiveOn, viewerOf } from "@test/helpers/wpc-viewing";
 
 import { clearAll, onPeerGone, onPeerStream, onPresence, onWatchReply, submitPassword, unwatch, watch } from "./viewing";
 
@@ -99,7 +99,7 @@ describe("digitar a senha", () => {
     test("manda so a prova HMAC (nunca a senha), com a senha normalizada, e mostra 'conferindo'", async () => {
         challenged(N1);
         assert.equal(submitPassword("peerA", "  segredo-12  "), true);
-        await until(() => proofs().length === 1);
+        await eventually(() => proofs().length === 1);
 
         assert.deepEqual(proofs(), [await expectedProof("segredo-12", N1)]);
         assert.ok(!JSON.stringify(room.sentOn("watch")).includes("segredo"), "a senha nao trafega");
@@ -111,7 +111,7 @@ describe("digitar a senha", () => {
     test("acentos: a mesma senha digitada decomposta (a + acento) ou composta gera a mesma prova", async () => {
         challenged(N1);
         assert.equal(submitPassword("peerA", "senha-á"), true);
-        await until(() => proofs().length === 1);
+        await eventually(() => proofs().length === 1);
         assert.deepEqual(proofs(), [await expectedProof("senha-á", N1)]);
     });
 
@@ -142,7 +142,7 @@ describe("digitar a senha", () => {
         const lines = logMark();
         challenged(N1);
         submitPassword("peerA", "errada");
-        await until(() => proofs().length === 1);
+        await eventually(() => proofs().length === 1);
 
         onWatchReply("peerA", { op: "password", nonce: N2, wrong: true, attemptsLeft: 3 });
         const v = await viewerOf("peerA");
@@ -151,7 +151,7 @@ describe("digitar a senha", () => {
         assert.ok(lines().some(l => /senha incorreta \(restam 3\)/.test(l)));
 
         submitPassword("peerA", "certa-42");
-        await until(() => proofs().length === 2);
+        await eventually(() => proofs().length === 2);
         assert.equal(proofs()[1], await expectedProof("certa-42", N2));
     });
 
@@ -167,10 +167,10 @@ describe("digitar a senha", () => {
     test("desafio novo sem 'errada' (a prova chegou vencida): reenvia a mesma senha uma vez; na segunda pergunta de novo", async () => {
         challenged(N1);
         submitPassword("peerA", "segredo-12");
-        await until(() => proofs().length === 1);
+        await eventually(() => proofs().length === 1);
 
         onWatchReply("peerA", { op: "password", nonce: N2 });
-        await until(() => proofs().length === 2);
+        await eventually(() => proofs().length === 2);
         assert.equal(proofs()[1], await expectedProof("segredo-12", N2), "a mesma senha, para o desafio novo");
         assert.equal((await viewerOf("peerA"))?.checkingPassword, true, "a UI nem piscou");
 
@@ -218,7 +218,7 @@ describe("digitar a senha", () => {
         challenged();
         room.makeAction("watch").sendImpl = data => ((data as { proof?: string; }).proof ? Promise.reject(new Error("sem canal")) : Promise.resolve());
         submitPassword("peerA", "segredo-12");
-        await until(() => rt.viewing.get("peerA")?.status === "error");
+        await eventually(() => rt.viewing.get("peerA")?.status === "error");
         assert.equal((await viewerOf("peerA"))?.error, "Não foi possível enviar a senha: Error: sem canal");
     });
 
@@ -247,10 +247,10 @@ describe("digitar a senha", () => {
         onWatchReply("peerC", { op: "password", nonce: N2, wrong: true, attemptsLeft: 2 });
         submitPassword("peerC", "quatro");
 
-        await until(() => gates.length === 4);
+        await eventually(() => gates.length === 4);
         open = true; // daqui em diante o expectedProof do proprio teste tambem passa
         for (const release of gates) release();
-        await until(() => proofs().length === 1);
+        await eventually(() => proofs().length === 1);
         await flushPromises();
         assert.deepEqual(proofs(), [await expectedProof("quatro", N2)], "so a ultima senha digitada, para o desafio dela");
         assert.equal(room.sentOn("watch", "peerA").filter(m => (m.data as { proof?: string; }).proof).length, 0);
@@ -263,7 +263,7 @@ describe("a senha que deu certo fica lembrada para esta transmissao", () => {
     async function accepted(password = "segredo-12", peerId = "peerA") {
         const pc = challenged(N1, peerId);
         submitPassword(peerId, password);
-        await until(() => proofs().length >= 1);
+        await eventually(() => proofs().length >= 1);
         const incoming = incomingStream();
         receiveOn(pc, incoming.fake);
         onPeerStream(peerId, incoming.stream, undefined);
@@ -285,7 +285,7 @@ describe("a senha que deu certo fica lembrada para esta transmissao", () => {
         const v = await viewerOf("peerA");
         assert.equal(v?.passwordPrompt, undefined, "sem campo de senha");
         assert.equal(v?.checkingPassword, true);
-        await until(() => proofs().length === before + 1);
+        await eventually(() => proofs().length === before + 1);
         assert.equal(proofs().at(-1), await expectedProof("segredo-12", N2));
         assert.ok(lines().some(l => /usando a senha que já deu certo nela/.test(l)));
     });
@@ -295,7 +295,7 @@ describe("a senha que deu certo fica lembrada para esta transmissao", () => {
         unwatch("peerA");
         watch("peerA");
         onWatchReply("peerA", { op: "password", nonce: N2 });
-        await until(() => proofs().length === 2);
+        await eventually(() => proofs().length === 2);
 
         onWatchReply("peerA", { op: "password", nonce: N3, wrong: true, attemptsLeft: 4 });
         assert.deepEqual((await viewerOf("peerA"))?.passwordPrompt, { attemptsLeft: 4, wrong: true });
@@ -316,7 +316,7 @@ describe("a senha que deu certo fica lembrada para esta transmissao", () => {
         watch("peerA");
         onWatchReply("peerA", { op: "password", nonce: N2 });
         assert.equal((await viewerOf("peerA"))?.checkingPassword, true, "continua lembrada");
-        await until(() => proofs().length === 2);
+        await eventually(() => proofs().length === 2);
 
         // tooManyAttempts: esquecida, mesmo com a prova vinda da memoria
         onWatchReply("peerA", { op: "denied", reason: "tooManyAttempts" });
@@ -345,7 +345,7 @@ describe("a senha que deu certo fica lembrada para esta transmissao", () => {
         unwatch("peerA");
         watch("peerA");
         onWatchReply("peerA", { op: "password", nonce: N2 });
-        await until(() => proofs().length === 2);
+        await eventually(() => proofs().length === 2);
         onWatchReply("peerA", { op: "denied", reason: "kicked" });
 
         unwatch("peerA");

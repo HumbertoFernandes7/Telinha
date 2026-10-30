@@ -18,6 +18,7 @@ import { listSources } from "@plugins/telinha/native";
 import { settings } from "@plugins/telinha/settings";
 import { installWebAudio } from "@test/fakes/audio";
 import { mockSpawn } from "@test/fakes/childProcess";
+import { eventually, useFakeClock } from "@test/fakes/clock";
 import { canvas2d, resetMedia, resizeObservers } from "@test/fakes/dom";
 import { ipcEvent } from "@test/fakes/electron";
 import { installFetch, jsonResponse } from "@test/fakes/fetch";
@@ -152,6 +153,42 @@ describe("fakes", () => {
         pluginSettings.reset(); // back to eager
         assert.equal(settings.plain.groupPassword, "");
         assert.equal(settings.plain.defaultAccess, "all");
+    });
+
+    test("clock: a tick shows every due timer the end of it; stepwise shows each its own instant", t => {
+        const clock = useFakeClock(t);
+        const start = clock.now();
+        const seen: number[] = [];
+        const timers = (offset: number) => [500, 1000, 1500].forEach(delay => setTimeout(() => seen.push(clock.now() - start - offset), delay));
+
+        timers(0);
+        clock.tick(2000);
+        assert.deepEqual(seen, [2000, 2000, 2000]);
+
+        seen.length = 0;
+        timers(2000);
+        clock.tick(2000, { stepwise: true });
+        assert.deepEqual(seen, [500, 1000, 1500]);
+        assert.equal(clock.now() - start, 4000);
+
+        clock.tick(0, { stepwise: true }); // nothing to step: still runs what is due now, like tick(0)
+        let chained = 0;
+        setTimeout(() => void setTimeout(() => chained++, 0), 0);
+        clock.tick(2, { stepwise: true });
+        assert.equal(chained, 1, "a timer set by a timer runs in the next millisecond");
+    });
+
+    test("clock: eventually() polls with the real event loop, with or without the fake clock", async t => {
+        let ready = false;
+        setTimeout(() => void (ready = true), 5); // real timer: needs the 1 ms real waits
+        await eventually(() => ready);
+
+        const clock = useFakeClock(t);
+        ready = false;
+        setImmediate(() => void (ready = true));
+        await eventually(() => ready); // a fake setTimeout(1) here would never fire
+        await assert.rejects(eventually(() => false, { timeoutMs: 20 }), /condition still false after 20 ms/);
+        clock.restore();
     });
 
     test("modals and toasts: openModal → ModalHost renders it; actions and onClose work", async () => {

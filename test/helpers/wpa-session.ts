@@ -4,9 +4,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-// Ajudantes da WP-A para os testes da sessao (core/session.ts): mensagens dos peers, leitura do log do nucleo a
-// partir de uma marca e espera "ate que" que funciona com timers falsos (so setImmediate, que o relogio falso nao
-// substitui).
+// Ajudantes da WP-A para os testes da sessao (core/session.ts): mensagens dos peers e leitura do log do nucleo a
+// partir de uma marca. A espera "ate que" e o eventually() de @test/fakes/clock (vale tambem com o relogio falso).
 
 import { buildHello, type HelloMessage, type PresenceMessage, PROTOCOL_VERSION } from "@plugins/telinha/protocol";
 import { getEventLog, type TelinhaEvent } from "@plugins/telinha/store";
@@ -42,20 +41,6 @@ export function macrotask(): Promise<void> {
 }
 
 const immediate = () => new Promise<void>(resolve => setImmediate(resolve));
-
-/**
- * Espera (so com setImmediate: vale com o relogio falso ligado) ate `check()` ser verdadeiro. Para promessas que
- * dependem de trabalho fora do JS (crypto.subtle) e nao de timers.
- */
-export async function untilTrue<T>(check: () => T | null | undefined | false | 0 | "", maxMs = 2000): Promise<T> {
-    const deadline = process.hrtime.bigint() + BigInt(maxMs) * 1_000_000n;
-    for (;;) {
-        const value = check();
-        if (value) return value;
-        if (process.hrtime.bigint() > deadline) throw new Error(`untilTrue: ainda falso depois de ${maxMs} ms: ${check.toString().slice(0, 200)}`);
-        await immediate();
-    }
-}
 
 /** Deixa rodar `n` voltas de setImmediate (promessas e trabalho do crypto em andamento). */
 export async function settleImmediates(n = 20): Promise<void> {

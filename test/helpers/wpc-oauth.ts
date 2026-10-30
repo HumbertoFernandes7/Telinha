@@ -12,7 +12,7 @@
 //
 //   const discord = discordOAuth();                  // after @test/fakes/dom; discord.restore() in after()
 //   const done = authorizeTelinhaIdentity();         // opens the modal
-//   await until(() => modals.top());
+//   await eventually(() => modals.top());
 //   discord.approve();                               // the user clicks "Autorizar"
 //   assert.equal(await done, true);
 

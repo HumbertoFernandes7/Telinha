@@ -14,18 +14,29 @@
 //   });
 //
 // queueMicrotask, setImmediate and promises stay real: core/context.ts publish() runs in a microtask.
+//
+// One tick moves the clock first and then runs every due timer: inside tick(2000) the timers due at 500, 1000 and 1500
+// all read Date.now() / performance.now() = the END of the tick (+2000). Code that measures with the clock from inside a
+// timer (an interval's elapsed time, a deadline check) needs tick(ms, { stepwise: true }), or tickAsync(ms, 1).
 
 import { mock, type TestContext } from "node:test";
 
 type MockTracker = typeof mock;
+
+// the real setTimeout, taken before any useFakeClock replaces it: how eventually() tells that the fake clock is on
+const realSetTimeout = globalThis.setTimeout;
 
 export interface FakeClock {
     /** performance.now() right now (starts at `startPerf`) */
     now(): number;
     /** Date.now() right now (starts at `startEpoch`) */
     epoch(): number;
-    /** Advances synchronously: due timers run, their promises do not settle until the next await. */
-    tick(ms: number): void;
+    /**
+     * Advances synchronously: due timers run, their promises do not settle until the next await. Every timer due in
+     * the tick sees the clock at the end of it; `stepwise` advances 1 ms at a time instead, so each one sees the
+     * instant it was due (the same for setTimeout(0) chains: a timer set by a timer runs in its own ms).
+     */
+    tick(ms: number, opts?: { stepwise?: boolean; }): void;
     /** Advances in `stepMs` slices, flushing promises between them (timers that await, then set more timers). */
     tickAsync(ms: number, stepMs?: number): Promise<void>;
     /** Runs every pending timer (a setInterval would loop forever: avoid with intervals). */
@@ -53,8 +64,9 @@ export function useFakeClock(t?: TestContext, opts: { startEpoch?: number; start
     const clock: FakeClock = {
         now: () => performance.now(),
         epoch: () => Date.now(),
-        tick(ms) {
-            tracker.timers.tick(ms);
+        tick(ms, { stepwise = false } = {}) {
+            if (!stepwise || ms <= 1) return tracker.timers.tick(ms);
+            for (let left = ms; left > 0; left--) tracker.timers.tick(Math.min(1, left));
         },
         async tickAsync(ms, stepMs = 100) {
             let left = ms;
@@ -81,8 +93,10 @@ export function useFakeClock(t?: TestContext, opts: { startEpoch?: number; start
 
 /**
  * Waits (real time, one macrotask at a time) until `check()` returns something truthy, and returns it. For flows that
- * hop through promises and setTimeout(0) with REAL timers (with the fake clock, tick instead). Rejects after
- * `timeoutMs` of wall time (measured with hrtime, so a mocked Date cannot stall it).
+ * hop through promises, crypto.subtle and (real) setTimeout(0): it lets the event loop turn. It also works with the
+ * fake clock on: the code's timers are fake and only a tick runs them, so it polls with setImmediate alone (waiting on
+ * a timer would hang) and the test ticks the clock itself. Rejects after `timeoutMs` of wall time (measured with
+ * hrtime, so a mocked Date cannot stall it).
  */
 export async function eventually<T>(check: () => T | null | undefined | false | 0 | "", { timeoutMs = 3000 }: { timeoutMs?: number; } = {}): Promise<T> {
     const deadline = process.hrtime.bigint() + BigInt(timeoutMs) * 1_000_000n;
@@ -91,6 +105,7 @@ export async function eventually<T>(check: () => T | null | undefined | false | 
         if (value) return value;
         if (process.hrtime.bigint() > deadline) throw new Error(`eventually: condition still false after ${timeoutMs} ms: ${check.toString().slice(0, 200)}`);
         await new Promise(resolve => setImmediate(resolve));
-        await new Promise(resolve => setTimeout(resolve, 1));
+        // the REAL setTimeout (a fake one never fires by itself); only while no fake clock is replacing it
+        if (globalThis.setTimeout === realSetTimeout) await new Promise(resolve => realSetTimeout(resolve, 1));
     }
 }
