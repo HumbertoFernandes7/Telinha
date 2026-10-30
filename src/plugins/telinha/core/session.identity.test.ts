@@ -22,7 +22,7 @@ import { type FakeRoom, trystero } from "@test/fakes/trystero";
 import { dataStoreData, FRIEND_ID, joinVoice, ME_ID, modals, OTHER_ID, VOICE_CHANNEL_ID, VoiceStateStore } from "@test/fakes/vencord";
 import { FakeMediaStream, FakeRTCPeerConnection, installWebRtc, videoTrack, type WebRtcEnv } from "@test/fakes/webrtc";
 import { fakeDer, type FakeDiscord, installFakeDiscord, makeIdToken, makeRsaKey, type TestKey, tokenResponse } from "@test/helpers/wpa-identity";
-import { hello, logged, logMark, presence, settleImmediates, untilTrue } from "@test/helpers/wpa-session";
+import { hello, logged, logMark, presence, settleImmediates } from "@test/helpers/wpa-session";
 import type { ReactElement } from "react";
 
 import { rt } from "./context";
@@ -334,7 +334,7 @@ describe("sessao: prova de identidade dos peers", () => {
         async function enterRoom(t: Parameters<typeof useFakeClock>[0]) {
             const clock = useFakeClock(t, { startEpoch: Date.now() });
             startSession();
-            room = await untilTrue(() => rt.room) as unknown as FakeRoom;
+            room = await eventually(() => rt.room) as unknown as FakeRoom;
             return clock;
         }
 
@@ -352,13 +352,13 @@ describe("sessao: prova de identidade dos peers", () => {
             const idToken = await makeIdToken({ userId: FRIEND_ID, fingerprint, key: K1 });
             const mark = logMark();
             await room.connectPeer("peerLento1", { hello: hello(FRIEND_ID, "lento", idToken), pc: asPc(pc) });
-            await untilTrue(() => logged(/^Identidade: fingerprint DTLS do peer indisponível \(dtls-not-connected\)$/, mark).length === 1);
+            await eventually(() => logged(/^Identidade: fingerprint DTLS do peer indisponível \(dtls-not-connected\)$/, mark).length === 1);
             await settleImmediates();
             assert.equal(identityOf("peerLento1"), "pending", "ainda conferindo");
 
             pc.sctp!.transport.state = "connected";
             clock.tick(1500);
-            await untilTrue(() => identityOf("peerLento1") === "verified");
+            await eventually(() => identityOf("peerLento1") === "verified");
 
             // de novo sem fingerprint na segunda vez: fica nao verificado
             const other = newPc();
@@ -366,7 +366,7 @@ describe("sessao: prova de identidade dos peers", () => {
             await room.connectPeer("peerLento2", { hello: hello(OTHER_ID, "lento2", idToken), pc: asPc(other) });
             await settleImmediates();
             clock.tick(1500);
-            await untilTrue(() => identityOf("peerLento2") === "unverified");
+            await eventually(() => identityOf("peerLento2") === "unverified");
             assert.equal(rt.peers.get("peerLento2")?.identityReason, "no-fingerprint");
 
             // saiu antes da segunda conferencia: nada acontece
@@ -398,7 +398,7 @@ describe("sessao: prova de identidade dos peers", () => {
             assert.equal(identityOf("peerTravado"), "pending");
 
             clock.tick(1);
-            await untilTrue(() => identityOf("peerTravado") === "unverified");
+            await eventually(() => identityOf("peerTravado") === "unverified");
             assert.equal(rt.peers.get("peerTravado")?.identityReason, "timeout");
             assert.match(peerIdentityDiagnostics(), /travado \(peerTr\) não verificado \[timeout\]/);
             assert.equal(/saiu/.test(peerIdentityDiagnostics()), false);

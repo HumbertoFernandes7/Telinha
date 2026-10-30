@@ -10,8 +10,8 @@
 // encoder checks, the refusals and the auto quality (every 2 ticks) happen exactly when the test says. Real timers
 // would fire that ticker in the middle of a test.
 //
-// With the fake clock, `eventually()` cannot be used (it waits with setTimeout): `waitFor()` below waits with
-// setImmediate only (promises, crypto.subtle and the fakes' async methods settle in real macrotasks).
+// Waiting for async work (promises, crypto.subtle and the fakes' async methods settle in real macrotasks) is
+// `eventually()` from @test/fakes/clock, which also works with the fake clock on.
 
 import "@test/fakes/dom";
 
@@ -21,7 +21,7 @@ import { stopStreaming } from "@plugins/telinha/core/streaming";
 import { buildHello, PROTOCOL_VERSION } from "@plugins/telinha/protocol";
 import { getEventLog, type TelinhaEvent } from "@plugins/telinha/store";
 import type { StreamOptions } from "@plugins/telinha/types";
-import { type FakeClock, useFakeClock } from "@test/fakes/clock";
+import { eventually, type FakeClock, useFakeClock } from "@test/fakes/clock";
 import { installNative, type NativeEnv } from "@test/fakes/native";
 import { type FakeRoom, trystero } from "@test/fakes/trystero";
 import { joinVoice, ME_ID, setVoiceMembers, VOICE_CHANNEL_ID } from "@test/fakes/vencord";
@@ -34,17 +34,6 @@ export { canvas2d, media } from "@test/fakes/dom";
 /** Lets `n` real macrotask turns run (promise chains, crypto.subtle, the fakes' async methods). */
 export async function turns(n = 10): Promise<void> {
     for (let i = 0; i < n; i++) await new Promise(resolve => setImmediate(resolve));
-}
-
-/** Like eventually(), but waits with setImmediate only (works with the fake clock on). Rejects after `timeoutMs` of wall time. */
-export async function waitFor<T>(check: () => T | null | undefined | false | 0 | "", timeoutMs = 2000): Promise<T> {
-    const deadline = process.hrtime.bigint() + BigInt(timeoutMs) * 1_000_000n;
-    for (;;) {
-        const value = check();
-        if (value) return value;
-        if (process.hrtime.bigint() > deadline) throw new Error(`waitFor: condition still false after ${timeoutMs} ms: ${check.toString().slice(0, 200)}`);
-        await new Promise(resolve => setImmediate(resolve));
-    }
 }
 
 /** Log lines (getEventLog) written since this call: `const since = logMark(); ...; since()`. */
@@ -91,7 +80,7 @@ export async function enterCall(rig: StreamingRig, members: string[] = [...rig.m
     const before = trystero.rooms.length;
     joinVoice(VOICE_CHANNEL_ID, { users: [...rig.members] });
     rig.clock.tick(1); // the session reacts in a setTimeout(0)
-    rig.room = await waitFor(() => trystero.rooms.length > before && (rt.room as unknown) === trystero.lastRoom && trystero.lastRoom);
+    rig.room = await eventually(() => trystero.rooms.length > before && (rt.room as unknown) === trystero.lastRoom && trystero.lastRoom);
     return rig.room;
 }
 
@@ -99,7 +88,7 @@ export async function enterCall(rig: StreamingRig, members: string[] = [...rig.m
 export async function leaveCall(rig: StreamingRig) {
     joinVoice(null);
     rig.clock.tick(1);
-    await waitFor(() => !rt.room);
+    await eventually(() => !rt.room);
 }
 
 /** Who is in the voice channel now (besides ME_ID); the session re-evaluates admission in a setTimeout(0). */

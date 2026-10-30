@@ -1,6 +1,6 @@
 /*
  * Offline test of the main-process chain with the REAL Telinha payload (dist/addon/payload) and a REAL Vencord build
- * (patcher.js + preload.js + renderer.js), on fake Discord trees under %TEMP%\tl-addon. Never touches the real
+ * (patcher.js + preload.js + renderer.js), on fake Discord trees under %TEMP%\tl-addon-<hash of the repo path>. Never touches the real
  * Discord or %APPDATA%: the Vencord build and the payload are only READ (copied into the scratch trees).
  *
  *   node addon/test/run-main-test.mjs [--vencord-dist <dir>] [--payload <dir>] [--no-helper-probe] [--fork-dist <dir>]

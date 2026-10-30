@@ -7,6 +7,8 @@
 // Fake `@api/Settings`: definePluginSettings with an in-memory store. Like Vencord after the plugin registers,
 // `store` already holds the defaults (SELECT: the option marked default), and writing a value through `store` calls
 // the option's onChange(newValue) when it changed. `plain` is the raw object (no onChange), as in Vencord.
+// Vencord's `plain` is only what was written (on disk, or by the plugin), the defaults showing up through `store`:
+// pluginSettings.load(values, { lazy: true }) gives that (see there), to tell "never written" from "the default".
 // Test controls: pluginSettings in this module (re-exported by @test/fakes/vencord).
 
 import * as React from "react";
@@ -26,6 +28,8 @@ interface OptionDef {
 interface Registered {
     def: Record<string, OptionDef>;
     plain: Record<string, unknown>;
+    /** `plain` holds only what was written: `store` answers the defaults for the rest, without storing them */
+    lazy: boolean;
 }
 
 const registered: Registered[] = [];
@@ -46,20 +50,30 @@ function defaultsOf(def: Record<string, OptionDef>): Record<string, unknown> {
     return out;
 }
 
-function load(r: Registered, values: Record<string, unknown>) {
+function load(r: Registered, values: Record<string, unknown>, lazy = false) {
+    r.lazy = lazy;
     for (const key of Object.keys(r.plain)) delete r.plain[key];
-    Object.assign(r.plain, defaultsOf(r.def), values);
+    Object.assign(r.plain, lazy ? {} : defaultsOf(r.def), values);
+}
+
+/** What a read of `key` answers: the stored value, or (lazy mode, never written) the option's default. */
+function read(r: Registered, key: string) {
+    if (r.lazy && !(key in r.plain)) return defaultsOf(r.def)[key];
+    return r.plain[key];
 }
 
 export function definePluginSettings<D extends Record<string, any>>(def: D, checks?: Record<string, object>) {
     if (checks) for (const [name, check] of Object.entries(checks)) Object.assign(def[name], check);
-    const r: Registered = { def, plain: {} };
+    const r: Registered = { def, plain: {}, lazy: false };
     load(r, {});
     registered.push(r);
 
     const store = new Proxy(r.plain, {
+        get(target, key, receiver) {
+            return typeof key === "string" ? read(r, key) : Reflect.get(target, key, receiver);
+        },
         set(target, key, value) {
-            const before = target[key as string];
+            const before = read(r, key as string);
             target[key as string] = value;
             if (!Object.is(before, value)) {
                 changed();
@@ -119,21 +133,26 @@ function only(): Registered {
 
 /** Test controls for the plugin's settings (the last definePluginSettings call). */
 export const pluginSettings = {
-    /** Replaces every stored value: defaults + `values`, as if Vencord had loaded them from disk. No onChange. */
-    load(values: Record<string, unknown> = {}) {
-        load(only(), values);
+    /**
+     * Replaces every stored value: defaults + `values`, as if Vencord had loaded them from disk. No onChange.
+     * `{ lazy: true }`: `plain` holds just `values` and a default shows only when read (`store`, `get`), never stored, so
+     * a test can tell "never written" from "written with the default value" (settings.plain, `key in settings.plain`);
+     * it lasts until the next load() or reset(). (Vencord itself stores the default on the first read of an unset option.)
+     */
+    load(values: Record<string, unknown> = {}, options: { lazy?: boolean; } = {}) {
+        load(only(), values, options.lazy);
         changed();
     },
     /** Same as `settings.store[key] = value` in the plugin: calls the option's onChange when the value changes. */
     set(key: string, value: unknown) {
         const r = only();
-        const before = r.plain[key];
+        const before = read(r, key);
         r.plain[key] = value;
         changed();
         if (!Object.is(before, value)) r.def[key]?.onChange?.(value);
     },
     get(key: string): unknown {
-        return only().plain[key];
+        return read(only(), key);
     },
     defaults(): Record<string, unknown> {
         return defaultsOf(only().def);

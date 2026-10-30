@@ -5,6 +5,7 @@
  *                          (default: .vencord/dist = the pinned official Vencord built by `pnpm bootstrap`, read-only)
  *   --payload <dir>        built payload (default: dist/addon/payload, from `pnpm build:addon`)
  */
+import { createHash } from "crypto";
 import { existsSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join, resolve } from "path";
@@ -16,7 +17,9 @@ export const HERE = dirname(fileURLToPath(import.meta.url));
 export const ADDON = resolve(HERE, "..");
 export const REPO = resolve(ADDON, "..");
 // Short on purpose: Windows MAX_PATH and the fake trees nest a few levels deep. Never the real %APPDATA%.
-export const SCRATCH = join(tmpdir(), "tl-addon");
+// One folder per checkout (a short hash of the repo path): two worktrees running the tests at once would otherwise share,
+// and wipe, each other's fake trees.
+export const SCRATCH = join(tmpdir(), `tl-addon-${createHash("sha1").update(REPO).digest("hex").slice(0, 6)}`);
 
 export const argValue = name => (process.argv.includes(name) ? resolve(process.argv[process.argv.indexOf(name) + 1]) : null);
 

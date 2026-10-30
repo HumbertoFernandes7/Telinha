@@ -34,6 +34,32 @@ blockNetwork();
 // React: we drive updates with act() (testing-library does it for render/fireEvent)
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean; }).IS_REACT_ACT_ENVIRONMENT = true;
 
+// happy-dom comes pre-bundled (vendor.ts), and esbuild renamed its classes to avoid clashes: Text is "Text2", Comment
+// "Comment2", Event "_Event", Node "_Node"... Anything that reads constructor.name sees those: testing-library's
+// pretty-format only prints Text/Comment/DocumentFragment nodes and <select>/<form> when the class has the browser's
+// name, and a failed query dies with a PrettyFormatPluginError instead of printing the DOM. Give them the real names.
+for (const key of Object.getOwnPropertyNames(globalThis)) {
+    const ctor = Object.getOwnPropertyDescriptor(globalThis, key)?.value as { name?: unknown; } | undefined;
+    if (typeof ctor !== "function" || typeof ctor.name !== "string" || ctor.name === key) continue;
+    // only esbuild's renames ("_Node", "Text2"): an alias of another class ("AudioProcessingEvent" -> "_Event") stays
+    if (ctor.name.replace(/^_/, "").replace(/\d+$/, "") !== key) continue;
+    Object.defineProperty(ctor, "name", { configurable: true, value: key });
+}
+
+// Animation.cancel() rejects animation.finished with an AbortError. A browser marks that promise as handled, happy-dom
+// leaves it alone, so Node reports an unhandled rejection the moment a component cancels an animation it never awaited
+// (the spinners' cleanup). Handle it first: whoever awaits `finished` still gets the rejection.
+{
+    const animationProto = (globalThis as { Animation?: { prototype: Animation; }; }).Animation?.prototype;
+    if (animationProto) {
+        const { cancel } = animationProto;
+        animationProto.cancel = function (this: Animation) {
+            this.finished.catch(() => { });
+            cancel.call(this);
+        };
+    }
+}
+
 /** <video>/<audio> elements play() was called on, oldest first; set `playImpl` to make play() reject (autoplay). */
 export const media = {
     played: [] as HTMLMediaElement[],

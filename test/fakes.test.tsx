@@ -15,14 +15,17 @@ import { describe, test } from "node:test";
 
 import { screenAudioStatusMain, setScreenAudioHelperPathForTests } from "@plugins/telinha/core/audio/screenAudioMain";
 import { listSources } from "@plugins/telinha/native";
+import { settings } from "@plugins/telinha/settings";
 import { installWebAudio } from "@test/fakes/audio";
 import { mockSpawn } from "@test/fakes/childProcess";
+import { eventually, useFakeClock } from "@test/fakes/clock";
 import { canvas2d, resetMedia, resizeObservers } from "@test/fakes/dom";
 import { ipcEvent } from "@test/fakes/electron";
 import { installFetch, jsonResponse } from "@test/fakes/fetch";
 import { act, fireEvent, render, screen, settle } from "@test/fakes/render";
-import { Modal, ModalHost, modals, Select, toasts, webpackModules } from "@test/fakes/vencord";
+import { Modal, MODAL_CLOSE_LABEL, ModalHost, modals, pluginSettings, Select, toasts, Tooltip, webpackModules } from "@test/fakes/vencord";
 import { CspPolicies } from "@test/fakes/vencord/main/csp";
+import { type StatsEntry, videoSenderStats } from "@test/fakes/webrtc";
 import { findByCodeLazy, findStoreLazy } from "@webpack";
 import { openModal, showToast } from "@webpack/common";
 
@@ -108,6 +111,100 @@ describe("fakes", () => {
         resetMedia();
     });
 
+    test("dom: the classes have the browser's names, Animation.cancel() leaves no unhandled rejection", async () => {
+        const w = window as unknown as Record<string, { name: string; }>;
+        for (const name of ["Node", "Event", "Text", "Comment", "Document", "DocumentFragment", "HTMLSelectElement", "HTMLFormElement", "Range", "URL"])
+            assert.equal(w[name].name, name);
+        assert.equal(document.createTextNode("x").constructor.name, "Text");
+        assert.equal(document.createComment("x").constructor.name, "Comment");
+
+        const anim = document.createElement("div").animate([{ opacity: 0 }, { opacity: 1 }], 100);
+        anim.cancel();
+        // a rejection nobody handles fails the test run (node:test), as it did before the fake handled it
+        await new Promise(resolve => setImmediate(resolve));
+        await assert.rejects(anim.finished, { name: "AbortError" });
+    });
+
+    test("setup: console lines starting with [Telinha] are dropped (with or without the text glued on), the rest print", { skip: !!process.env.TELINHA_TEST_ECHO && "the silencer is off" }, t => {
+        const written: string[] = [];
+        for (const stream of [process.stdout, process.stderr])
+            t.mock.method(stream, "write", (chunk: unknown) => !!written.push(String(chunk)));
+        console.log("[Telinha]", "separate");
+        console.warn("[Telinha] glued", new Error("x"));
+        console.error(new Error("not ours"));
+        console.info("other");
+        t.mock.restoreAll();
+        assert.equal(written.length, 2);
+        assert.match(written[0], /not ours/);
+        assert.match(written[1], /other/);
+    });
+
+    test("settings: load() is eager by default; { lazy: true } keeps plain to what was written, defaults only on read", () => {
+        pluginSettings.load({ groupPassword: "x" });
+        assert.equal(settings.plain.rejectOutsiders, true, "eager: every default is in plain");
+
+        pluginSettings.load({ groupPassword: "x" }, { lazy: true });
+        assert.deepEqual(settings.plain, { groupPassword: "x" });
+        assert.equal(settings.store.rejectOutsiders, true, "the store answers the default...");
+        assert.equal(pluginSettings.get("defaultAccess"), "all", "...also a SELECT's");
+        assert.equal("rejectOutsiders" in settings.plain, false, "...without storing it");
+        settings.store.rejectOutsiders = true; // the same as the default: written, but no change to announce
+        assert.deepEqual(Object.keys(settings.plain), ["groupPassword", "rejectOutsiders"]);
+
+        pluginSettings.reset(); // back to eager
+        assert.equal(settings.plain.groupPassword, "");
+        assert.equal(settings.plain.defaultAccess, "all");
+    });
+
+    test("clock: a tick shows every due timer the end of it; stepwise shows each its own instant", t => {
+        const clock = useFakeClock(t);
+        const start = clock.now();
+        const seen: number[] = [];
+        const timers = (offset: number) => [500, 1000, 1500].forEach(delay => setTimeout(() => seen.push(clock.now() - start - offset), delay));
+
+        timers(0);
+        clock.tick(2000);
+        assert.deepEqual(seen, [2000, 2000, 2000]);
+
+        seen.length = 0;
+        timers(2000);
+        clock.tick(2000, { stepwise: true });
+        assert.deepEqual(seen, [500, 1000, 1500]);
+        assert.equal(clock.now() - start, 4000);
+
+        clock.tick(0, { stepwise: true }); // nothing to step: still runs what is due now, like tick(0)
+        let chained = 0;
+        setTimeout(() => void setTimeout(() => chained++, 0), 0);
+        clock.tick(2, { stepwise: true });
+        assert.equal(chained, 1, "a timer set by a timer runs in the next millisecond");
+    });
+
+    test("clock: eventually() polls with the real event loop, with or without the fake clock", async t => {
+        let ready = false;
+        setTimeout(() => void (ready = true), 5); // real timer: needs the 1 ms real waits
+        await eventually(() => ready);
+
+        const clock = useFakeClock(t);
+        ready = false;
+        setImmediate(() => void (ready = true));
+        await eventually(() => ready); // a fake setTimeout(1) here would never fire
+        await assert.rejects(eventually(() => false, { timeoutMs: 20 }), /condition still false after 20 ms/);
+        clock.restore();
+    });
+
+    test("webrtc stats: videoSenderStats({ omit }) leaves those outbound-rtp fields out and nothing else", () => {
+        const outbound = (stats: StatsEntry[]) => stats.find(e => e.type === "outbound-rtp")!;
+        const omit = ["encoderImplementation", "frameWidth", "codecId"] as const;
+        const full = videoSenderStats();
+        const cut = videoSenderStats({ omit });
+        for (const field of omit) {
+            assert.ok(field in outbound(full), field);
+            assert.equal(field in outbound(cut), false, field);
+        }
+        assert.deepEqual(Object.keys(outbound(cut)), Object.keys(outbound(full)).filter(k => !(omit as readonly string[]).includes(k)));
+        assert.equal(cut.length, full.length, "the other entries stay");
+    });
+
     test("modals and toasts: openModal → ModalHost renders it; actions and onClose work", async () => {
         let applied = 0;
         render(<ModalHost />);
@@ -122,9 +219,42 @@ describe("fakes", () => {
         fireEvent.change(screen.getByRole("combobox"), { target: { value: "password" } });
         assert.equal(applied, 1);
         assert.deepEqual(toasts.map(x => x.text), ["escolheu password"]);
-        fireEvent.click(screen.getByLabelText("Fechar"));
+        fireEvent.click(screen.getByLabelText(MODAL_CLOSE_LABEL));
         await settle();
         assert.equal(modals.list().length, 0);
         assert.equal(screen.queryByText("Quem pode assistir"), null);
+    });
+
+    test("modals: a \"Fechar\" action is the only button with that name, and two ModalHosts draw each modal once", async () => {
+        const hosts = render(<><ModalHost /><ModalHost /></>);
+        act(() => void openModal(props => <Modal {...props} title="Quem esta assistindo" actions={[{ text: "Fechar", variant: "secondary", onClick: props.onClose }]} />));
+        assert.equal(screen.getAllByRole("dialog").length, 1, "one modal layer");
+        assert.equal(screen.getAllByRole("button", { name: "Fechar" }).length, 1, "the × is \"Fechar janela\"");
+        assert.equal(screen.getAllByRole("button", { name: MODAL_CLOSE_LABEL }).length, 1);
+
+        // hosts in separate roots: the oldest draws; when it goes, the next one takes over
+        hosts.unmount();
+        act(() => modals.reset());
+        const first = render(<ModalHost />);
+        render(<ModalHost />);
+        act(() => void openModal(props => <Modal {...props} title="Outro" />));
+        assert.equal(screen.getAllByRole("dialog").length, 1);
+        assert.equal(first.container.querySelectorAll("[role=dialog]").length, 1);
+        first.unmount();
+        await settle();
+        assert.equal(screen.getAllByRole("dialog").length, 1);
+    });
+
+    test("Tooltip: the child gets aria-label = the aria-label prop, else the text when it is a string, else none", () => {
+        const labels: (string | undefined)[] = [];
+        const probe = (props: { "aria-label"?: string; }) => { labels.push(props["aria-label"]); return <i />; };
+        render(<>
+            <Tooltip text="Ninguém assistindo">{probe}</Tooltip>
+            <Tooltip text="Ninguém assistindo" aria-label="Estado da transmissão">{probe}</Tooltip>
+            <Tooltip text={<b>nó</b>}>{probe}</Tooltip>
+            <Tooltip text={<b>nó</b>} aria-label="Rótulo">{probe}</Tooltip>
+        </>);
+        assert.deepEqual(labels, ["Ninguém assistindo", "Estado da transmissão", undefined, "Rótulo"]);
+        assert.deepEqual([...document.querySelectorAll("[data-tooltip]")].map(e => e.getAttribute("data-tooltip")), ["Ninguém assistindo", "Ninguém assistindo", "", ""]);
     });
 });

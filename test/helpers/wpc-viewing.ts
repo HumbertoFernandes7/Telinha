@@ -115,17 +115,3 @@ export function receiveOn(pc: FakeRTCPeerConnection, stream: FakeMediaStream, in
     if (!video) throw new Error("receiveOn: the stream has no video track");
     return video;
 }
-
-/**
- * Waits, one real macrotask at a time (setImmediate: it keeps working under useFakeClock), until `check()` is truthy.
- * For flows that wait on crypto.subtle, which settles off the event loop.
- */
-export async function until<T>(check: () => T | null | undefined | false | 0 | "", ms = 3000): Promise<T> {
-    const deadline = process.hrtime.bigint() + BigInt(ms) * 1_000_000n;
-    for (;;) {
-        const value = check();
-        if (value) return value;
-        if (process.hrtime.bigint() > deadline) throw new Error(`until: still false after ${ms} ms: ${check.toString().slice(0, 160)}`);
-        await new Promise(resolve => setImmediate(resolve));
-    }
-}

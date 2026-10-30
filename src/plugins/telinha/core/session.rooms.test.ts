@@ -23,7 +23,7 @@ import {
     dataStoreImpl, FluxDispatcher, FRIEND_ID, GUILD_ID, joinVoice, ME_ID, pluginSettings, SelectedChannelStore, setVoiceMembers, VOICE_CHANNEL_ID
 } from "@test/fakes/vencord";
 import { type FakeRTCPeerConnection, installWebRtc, videoTrack, type WebRtcEnv } from "@test/fakes/webrtc";
-import { logged, logMark, macrotask, settleImmediates, untilTrue } from "@test/helpers/wpa-session";
+import { logged, logMark, macrotask, settleImmediates } from "@test/helpers/wpa-session";
 
 import { rt } from "./context";
 import { getLocalCertificate } from "./identity/certificate";
@@ -244,7 +244,7 @@ describe("sessao: sala do canal de voz", () => {
             startSession();
             joinVoice(VOICE_CHANNEL_ID, { users: [FRIEND_ID] });
             clock.tick(1);
-            const room1 = await untilTrue(() => rt.room);
+            const room1 = await eventually(() => rt.room);
             await startStreaming(SCREEN);
             const mark = logMark();
 
@@ -256,10 +256,10 @@ describe("sessao: sala do canal de voz", () => {
             assert.equal(rt.room, room1, "ainda digitando");
 
             clock.tick(1);
-            const room2 = await untilTrue(() => rt.room !== room1 && rt.room) as unknown as FakeRoom;
+            const room2 = await eventually(() => rt.room !== room1 && rt.room) as unknown as FakeRoom;
             assert.equal(room2.config.password, "dois");
             assert.equal(room2.roomId, (room1 as unknown as FakeRoom).roomId, "mesmo canal: o roomId e o mesmo, a senha vai para o Trystero");
-            await untilTrue(() => (room1 as unknown as FakeRoom).left);
+            await eventually(() => (room1 as unknown as FakeRoom).left);
             assert.equal(rt.local, null);
             assert.equal(rt.lastError, "A transmissão foi encerrada porque a sala mudou (senha do grupo alterada).");
             assert.equal(logged(/^Saindo da sala \(senha do grupo alterada\)$/, mark).length, 1);
@@ -268,7 +268,7 @@ describe("sessao: sala do canal de voz", () => {
             // senha apagada: sala sem senha
             pluginSettings.set("groupPassword", "");
             clock.tick(800);
-            const room3 = await untilTrue(() => (rt.room as unknown) !== room2 && rt.room) as unknown as FakeRoom;
+            const room3 = await eventually(() => (rt.room as unknown) !== room2 && rt.room) as unknown as FakeRoom;
             assert.equal(room3.config.password, undefined);
 
             // opcao sem valor (configuracao antiga): o mesmo que vazia, a sala nao muda
@@ -291,7 +291,7 @@ describe("sessao: sala do canal de voz", () => {
             startSession();
             joinVoice(VOICE_CHANNEL_ID);
             clock.tick(1);
-            const room1 = await untilTrue(() => rt.room);
+            const room1 = await eventually(() => rt.room);
             const mark = logMark();
             clock.tick(9_999);
             assert.equal(logged(/Relays de descoberta/, mark).length, 0);
@@ -303,7 +303,7 @@ describe("sessao: sala do canal de voz", () => {
             trystero.relaySockets = { a: { readyState: 0 }, b: null as unknown as { readyState: number; } };
             pluginSettings.set("groupPassword", "x");
             clock.tick(800);
-            const room2 = await untilTrue(() => rt.room !== room1 && rt.room);
+            const room2 = await eventually(() => rt.room !== room1 && rt.room);
             clock.tick(10_000);
             assert.equal(logged(/Relays de descoberta conectados: 0\//, mark).length, 1);
             assert.match(rt.lastError ?? "", /^Não foi possível falar com os servidores de descoberta\. Feche o Discord por completo/);
@@ -317,7 +317,7 @@ describe("sessao: sala do canal de voz", () => {
             });
             pluginSettings.set("groupPassword", "y");
             clock.tick(800);
-            const room3 = await untilTrue(() => rt.room !== room2 && rt.room);
+            const room3 = await eventually(() => rt.room !== room2 && rt.room);
             clock.tick(10_000);
             assert.equal(logged(/Relays de descoberta conectados: 0\//, mark).length, 2);
 
@@ -325,7 +325,7 @@ describe("sessao: sala do canal de voz", () => {
             trystero.relaySockets = null as unknown as typeof trystero.relaySockets;
             pluginSettings.set("groupPassword", "z");
             clock.tick(800);
-            await untilTrue(() => rt.room !== room3 && rt.room);
+            await eventually(() => rt.room !== room3 && rt.room);
             clock.tick(10_000);
             assert.equal(logged(/Relays de descoberta conectados: 0\//, mark).length, 3);
 
@@ -341,15 +341,15 @@ describe("sessao: sala do canal de voz", () => {
             const tokenReads = () => get.mock.calls.filter(c => c.arguments[0] === TOKENS_KEY).length;
             const before = trystero.lastRoom;
             startSession();
-            await untilTrue(() => tokenReads() >= 1);
+            await eventually(() => tokenReads() >= 1);
             joinVoice(VC2);
             clock.tick(1);
-            await untilTrue(() => tokenReads() >= 2);
+            await eventually(() => tokenReads() >= 2);
             await settleImmediates();
             assert.equal(trystero.lastRoom, before, "ainda esperando a identidade");
 
             clock.tick(3000);
-            const room = await untilTrue(() => trystero.lastRoom !== before && trystero.lastRoom);
+            const room = await eventually(() => trystero.lastRoom !== before && trystero.lastRoom);
             assert.equal("certificates" in room.config.rtcConfig, false, "sem certificado: o Chromium gera um por conexao");
             assert.equal(rt.certFingerprint, null);
             stopSession();

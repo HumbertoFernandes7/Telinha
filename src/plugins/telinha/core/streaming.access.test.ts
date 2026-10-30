@@ -18,10 +18,11 @@ import assert from "node:assert/strict";
 import { after, afterEach, before, describe, test } from "node:test";
 
 import { getState } from "@plugins/telinha/store";
+import { eventually } from "@test/fakes/clock";
 import { ME_ID, pluginSettings, RelationshipStore } from "@test/fakes/vencord";
 import {
     connectViewer, createRig, destroyRig, enterCall, logMark, removalsFrom, repliesTo, screenOptions, seconds, setMembers, type StreamingRig,
-    streamsTo, turns, waitFor, windowOptions
+    streamsTo, turns, windowOptions
 } from "@test/helpers/wpb-streaming";
 
 import { computePasswordProof } from "./access";
@@ -66,7 +67,7 @@ async function sendProof(v: Viewer, proof: string) {
     const replies = repliesTo(rig.room, v.peerId).length;
     const sent = streamsTo(rig.room, v.peerId).length;
     ask(v, proof);
-    await waitFor(() => repliesTo(rig.room, v.peerId).length > replies || streamsTo(rig.room, v.peerId).length > sent);
+    await eventually(() => repliesTo(rig.room, v.peerId).length > replies || streamsTo(rig.room, v.peerId).length > sent);
 }
 
 before(async () => {
@@ -366,7 +367,7 @@ describe("Com senha", () => {
         const replies = repliesTo(rig.room, rui.peerId).length;
         ask(rui, await proofFor(rui));
         setStreamAccess("password", "outra-senha");
-        await waitFor(() => repliesTo(rig.room, rui.peerId).length > replies);
+        await eventually(() => repliesTo(rig.room, rui.peerId).length > replies);
         assert.equal(watching(rui), false);
         assert.deepEqual({ ...lastReply(rui), nonce: undefined }, { op: "password", nonce: undefined, attemptsLeft: 5 });
         assert.equal(getStreamPassword(), "outra-senha");
@@ -377,7 +378,7 @@ describe("Com senha", () => {
         const solReplies = repliesTo(rig.room, sol.peerId).length;
         ask(sol, solProof);
         setStreamAccess("approval");
-        await waitFor(() => repliesTo(rig.room, sol.peerId).length > solReplies);
+        await eventually(() => repliesTo(rig.room, sol.peerId).length > solReplies);
         assert.deepEqual(lastReply(sol), { op: "pending" });
         assert.equal(getStreamPassword(), null, "sem modo senha, sem senha");
     });
@@ -458,7 +459,7 @@ describe("Com senha", () => {
         ask(zoe, proof);
         ask(zoe);
         ask(zoe, proof);
-        await waitFor(() => streamsTo(rig.room, zoe.peerId).length);
+        await eventually(() => streamsTo(rig.room, zoe.peerId).length);
         await turns(30);
         assert.equal(streamsTo(rig.room, zoe.peerId).length, 1);
         assert.ok(watching(zoe));

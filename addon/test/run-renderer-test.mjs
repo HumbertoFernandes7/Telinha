@@ -4,7 +4,7 @@
  *
  *   node addon/test/run-renderer-test.mjs [--vencord-dist <dir>] [--payload <dir>] [--rebuild]
  *
- * Uses the exact script the real Vencord preload executed in run-main-test.mjs (%TEMP%\tl-addon\served-renderer-s1.js)
+ * Uses the exact script the real Vencord preload executed in run-main-test.mjs (%TEMP%\tl-addon-<hash>\served-renderer-s1.js)
  * when present (and newer than the payload), otherwise builds it with the loader's own buildRendererPayload(). Then
  * loads a fake Discord webpack runtime (as https://discord.com/assets/...) whose modules are shaped like the Discord
  * code each Telinha patch targets, to show Vencord's patcher applies all of them to our `$self`.

@@ -25,7 +25,6 @@ import { FluxDispatcher, FRIEND_ID, modals, OTHER_ID, resetVencordFakes } from "
 import { videoSenderStats } from "@test/fakes/webrtc";
 import { discordOAuth } from "@test/helpers/wpc-oauth";
 import { type Call, friendArrives, goLive, joinCall } from "@test/helpers/wpc-session";
-import { until } from "@test/helpers/wpc-viewing";
 
 import {
     approveViewer, authorizeAndRewatch, authorizeTelinhaIdentity, clearLastError, declineViewer, findPeerByDiscordId, friendsAccessAvailable, generateStreamPassword,
@@ -343,7 +342,7 @@ describe("prova de identidade do Discord (Autorizar)", () => {
 
     test("cancelar o modal do Discord: nao autorizou e o estado volta", async () => {
         const done = authorizeTelinhaIdentity();
-        await until(() => modals.top());
+        await eventually(() => modals.top());
         assert.equal(status(), "authorizing");
         modals.close(modals.top()!.key);
         assert.equal(await done, false);
@@ -354,7 +353,7 @@ describe("prova de identidade do Discord (Autorizar)", () => {
         const seen: string[] = [];
         const off = subscribeLocalIdentityState(() => seen.push(status()));
         const done = authorizeTelinhaIdentity();
-        await until(() => modals.top());
+        await eventually(() => modals.top());
         discord.approve();
         assert.equal(await done, true);
 
@@ -378,11 +377,11 @@ describe("prova de identidade do Discord (Autorizar)", () => {
         const clock = useFakeClock(t);
         watch("peerA");
         call.room.receive("watch", { op: "denied", reason: "notVerified" }, "peerA");
-        await until(() => getState().viewing.peerA?.denied === "notVerified");
+        await eventually(() => getState().viewing.peerA?.denied === "notVerified");
         const before = starts();
 
         const done = authorizeAndRewatch("peerA");
-        await until(() => modals.top());
+        await eventually(() => modals.top());
         discord.approve();
         assert.equal(await done, true);
 
@@ -390,7 +389,7 @@ describe("prova de identidade do Discord (Autorizar)", () => {
         assert.equal(starts(), before, "ainda esperando o transmissor conferir a prova nova");
         clock.tick(1);
         assert.equal(starts(), before + 1, "pediu de novo");
-        await until(() => getState().viewing.peerA?.status === "connecting");
+        await eventually(() => getState().viewing.peerA?.status === "connecting");
         unwatch("peerA");
     });
 
@@ -398,11 +397,11 @@ describe("prova de identidade do Discord (Autorizar)", () => {
         const clock = useFakeClock(t);
         watch("peerA");
         call.room.receive("watch", { op: "denied", reason: "notVerified" }, "peerA");
-        await until(() => getState().viewing.peerA?.denied === "notVerified");
+        await eventually(() => getState().viewing.peerA?.denied === "notVerified");
         const before = starts();
 
         const done = authorizeAndRewatch("peerA");
-        await until(() => modals.top());
+        await eventually(() => modals.top());
         discord.approve();
         assert.equal(await done, true);
         unwatch("peerA");
@@ -415,11 +414,11 @@ describe("prova de identidade do Discord (Autorizar)", () => {
         const clock = useFakeClock(t);
         watch("peerA");
         call.room.receive("watch", { op: "denied", reason: "notVerified" }, "peerA");
-        await until(() => getState().viewing.peerA?.denied === "notVerified");
+        await eventually(() => getState().viewing.peerA?.denied === "notVerified");
         const before = starts();
 
         const done = authorizeAndRewatch("peerA");
-        await until(() => modals.top());
+        await eventually(() => modals.top());
         modals.close(modals.top()!.key);
         assert.equal(await done, false);
         clock.tick(5000);
@@ -432,7 +431,7 @@ describe("prova de identidade do Discord (Autorizar)", () => {
         assert.equal(status(), "unauthorized");
         discord.tokenStatus = 400;
         const done = authorizeTelinhaIdentity();
-        await until(() => modals.top());
+        await eventually(() => modals.top());
         discord.approve();
         assert.equal(await done, false);
         const state = getLocalIdentity();
@@ -443,7 +442,7 @@ describe("prova de identidade do Discord (Autorizar)", () => {
 
     test("desvincular: esquece o token desta conta neste PC", async () => {
         const done = authorizeTelinhaIdentity();
-        await until(() => modals.top());
+        await eventually(() => modals.top());
         discord.approve();
         assert.equal(await done, true);
         assert.equal(status(), "ready");

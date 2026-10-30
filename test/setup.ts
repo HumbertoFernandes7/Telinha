@@ -11,8 +11,8 @@
 // - VencordNative exists but has no plugin natives (= "the native part is not loaded"): @test/fakes/native adds them.
 // - `import "./x.css"` (index.tsx) loads as an empty module.
 // - No network: fetch rejects (route answers with installFetch from @test/fakes/fetch).
-// - The core's own log lines ("[Telinha] ..." on the console, core/log.ts) are dropped: tests read them from
-//   getEventLog() (store.ts). TELINHA_TEST_ECHO=1 prints them.
+// - The plugin's own console lines (anything starting with "[Telinha]": core/log.ts and the glued "[Telinha] x" ones in
+//   store/settings/update) are dropped: tests read the core's from getEventLog() (store.ts). TELINHA_TEST_ECHO=1 prints them.
 
 import { createRequire } from "node:module";
 
@@ -30,7 +30,8 @@ if (!process.env.TELINHA_TEST_ECHO) {
     for (const level of ["log", "info", "warn", "error"] as const) {
         const original = console[level].bind(console);
         console[level] = (...args: unknown[]) => {
-            if (args[0] === "[Telinha]") return;
+            // log.ts passes the prefix alone ("[Telinha]", msg); store/settings/update glue it to the text ("[Telinha] x")
+            if (String(args[0]).startsWith("[Telinha]")) return;
             original(...args);
         };
     }
