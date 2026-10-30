@@ -52,7 +52,7 @@ for (const key of Object.getOwnPropertyNames(globalThis)) {
 {
     const animationProto = (globalThis as { Animation?: { prototype: Animation; }; }).Animation?.prototype;
     if (animationProto) {
-        const cancel = animationProto.cancel;
+        const { cancel } = animationProto;
         animationProto.cancel = function (this: Animation) {
             this.finished.catch(() => { });
             cancel.call(this);
