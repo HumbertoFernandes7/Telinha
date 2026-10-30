@@ -246,6 +246,8 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
         const previous = rt.local;
         const keepViewers = previous ? [...previous.viewers] : [];
         const access: AccessChoice = chosenAccess ?? (previous ? { access: previous.access, password: previous.password } : { access: "all", password: null });
+        // escolha nova de "Quem pode assistir" ao trocar de fonte: vale como setStreamAccess (antes de stopCapture apagar a senha)
+        const accessChanged = !!previous && (access.access !== previous.access || access.password !== previous.password);
         if (previous) stopCapture(previous, "trocando de fonte");
 
         const local: LocalCapture = {
@@ -266,6 +268,7 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
         log.info(`Transmitindo ${info.width}x${info.height} @ ${info.fps} fps${info.hasAudio ? " com áudio" : ""} · quem pode assistir: ${ACCESS_LABEL[local.access]}`);
         sendPresence();
         for (const peerId of keepViewers) sendTo(peerId);
+        if (accessChanged) resetAccessGuards();
         publish();
     } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -717,15 +720,24 @@ export function setStreamAccess(mode: AccessMode, rawPassword?: string) {
     const passwordOnly = access === local.access;
     local.access = access;
     local.password = password;
-    accessGeneration++;
-    challenges.clear();
-    wrongAttempts.clear();
     log.info(passwordOnly
         ? "Senha da transmissão trocada (vale para novos pedidos; quem já assiste continua)"
         : `Quem pode assistir agora: ${ACCESS_LABEL[access]} (vale para novos pedidos; quem já assiste continua)`);
-    onApprovalPolicyChanged();
+    resetAccessGuards();
     sendPresence();
     publish();
+}
+
+/**
+ * O modo ou a senha mudaram com a transmissao no ar (setStreamAccess, ou trocando de fonte com uma escolha nova):
+ * desafios de senha em andamento deixam de valer (uma prova feita para eles vira um desafio novo, sem contar erro), os
+ * erros de senha zeram, quem ja assiste fica aprovado e os pedidos pendentes sao decididos de novo com a regra nova.
+ */
+function resetAccessGuards() {
+    accessGeneration++;
+    challenges.clear();
+    wrongAttempts.clear();
+    onApprovalPolicyChanged();
 }
 
 /** Conexoes que passaram a ter identidade duplicada (session.ts): param de receber agora, sem voltar sozinhas. */

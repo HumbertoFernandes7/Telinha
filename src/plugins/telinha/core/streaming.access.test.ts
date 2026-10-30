@@ -21,7 +21,7 @@ import { getState } from "@plugins/telinha/store";
 import { ME_ID, pluginSettings, RelationshipStore } from "@test/fakes/vencord";
 import {
     connectViewer, createRig, destroyRig, enterCall, logMark, removalsFrom, repliesTo, screenOptions, seconds, setMembers, type StreamingRig,
-streamsTo, turns, waitFor
+    streamsTo, turns, waitFor, windowOptions
 } from "@test/helpers/wpb-streaming";
 
 import { computePasswordProof } from "./access";
@@ -411,21 +411,37 @@ describe("Com senha", () => {
         assert.ok(since().includes(`${vivi.label} pediu para assistir, mas não está admitido: ignorado`));
     });
 
-    // BUG relatado ao coordenador (nao corrigido aqui): trocar de fonte com uma escolha nova de "Quem pode assistir"
-    // (startStreaming com `access` e uma transmissao no ar) troca o modo/senha sem fazer o que setStreamAccess faz
-    // (accessGeneration++, challenges.clear(), wrongAttempts.clear(), onApprovalPolicyChanged()). A prova feita com a
-    // senha antiga para um desafio antigo conta como ERRO na senha nova. A UI de hoje nao passa `access` ao trocar de
-    // fonte (SourcePickerModal), entao so a API chega aqui.
-    test("trocar de fonte com outra senha: a prova de um desafio antigo vira desafio novo, sem contar erro (como em setStreamAccess)", {
-        todo: "streaming.ts → startStreaming: uma escolha nova de acesso ao trocar de fonte deveria passar pelo mesmo caminho de setStreamAccess"
-    }, async () => {
+    // trocar de fonte com uma escolha nova de "Quem pode assistir" (startStreaming com `access` e uma transmissao no ar)
+    // vale como setStreamAccess. Antes da correcao a prova feita com a senha antiga para um desafio antigo contava como
+    // ERRO na senha nova, e os erros e pedidos pendentes atravessavam a troca. A UI de hoje nao passa `access` ao
+    // trocar de fonte (SourcePickerModal), entao so a API chegava aqui.
+    test("trocar de fonte com outra senha: a prova de um desafio antigo vira desafio novo, sem contar erro (como em setStreamAccess)", async () => {
         const ari = await viewer("ari");
         await startStreaming(screenOptions({ access: "password", password: PASSWORD }));
         ask(ari);
+        await sendProof(ari, await proofFor(ari, "errada-1")); // 1 erro com a senha antiga
+        assert.equal(lastReply(ari).attemptsLeft, 4);
         const proof = await proofFor(ari); // a senha antiga, para o desafio antigo
         await startStreaming(screenOptions({ access: "password", password: "senha-nova" }));
         await sendProof(ari, proof);
-        assert.deepEqual({ ...lastReply(ari), nonce: undefined }, { op: "password", nonce: undefined, attemptsLeft: 5 });
+        assert.deepEqual({ ...lastReply(ari), nonce: undefined }, { op: "password", nonce: undefined, attemptsLeft: 5 }, "desafio novo, erros zerados");
+        assert.equal(watching(ari), false);
+    });
+
+    test("trocar de fonte com outro modo: quem espera aprovacao e decidido de novo; quem assiste continua e fica aprovado", async () => {
+        const bela = await viewer("bela", { verified: true });
+        const davi = await viewer("davi", { verified: true });
+        await startStreaming(screenOptions({ access: "approval" }));
+        ask(davi);
+        approveViewer(davi.peerId);
+        ask(bela);
+        assert.deepEqual(pendingIds(), [bela.peerId]);
+
+        await startStreaming(windowOptions({ access: "all" }));
+        assert.deepEqual(pendingIds(), [], "verificada e 'Todos da call': nao precisa mais de Permitir");
+        assert.ok(watching(bela));
+        assert.ok(watching(davi));
+        assert.ok(rt.approved.has(davi.peerId));
     });
 
     test("a mesma senha chegando duas vezes (clique duplo): o stream vai uma vez so", async t => {
