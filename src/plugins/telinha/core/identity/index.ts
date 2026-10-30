@@ -277,10 +277,12 @@ export function authorizeIdentity({ silent = false }: { silent?: boolean; } = {}
     })();
     inflightAuth = run;
     // limpa so depois da atribuicao acima: sem usuario o corpo termina sem nenhum await, e um `finally` dentro dele
-    // rodaria ANTES dela (o pedido ficava "em andamento" para sempre e "Autorizar" nunca mais abria o modal)
-    void run.then(() => {
+    // rodaria ANTES dela (o pedido ficava "em andamento" para sempre e "Autorizar" nunca mais abria o modal).
+    // Limpa tambem se o pedido falhar de vez (ex.: o proprio log do erro lancar): quem chamou ainda recebe a rejeicao.
+    const done = () => {
         if (inflightAuth === run) inflightAuth = null;
-    });
+    };
+    void run.then(done, done);
     return run;
 }
 
