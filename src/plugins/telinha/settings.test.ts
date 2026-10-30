@@ -78,12 +78,10 @@ describe("as opcoes", () => {
 });
 
 describe("migracao de 'Aprovar quem vai assistir' (v0.1.0 -> v0.2.0)", () => {
-    // No Vencord de verdade os padroes sao preenchidos so quando alguem LE a opcao pelo store: settings.plain traz apenas o
-    // que foi gravado em disco (a v0.1.0 nao conhecia defaultAccess). O fake os poe todos em plain; aqui voltamos ao disco.
+    // No Vencord de verdade os padroes aparecem so quando alguem LE a opcao pelo store: settings.plain traz apenas o que
+    // foi gravado em disco (a v0.1.0 nao conhecia defaultAccess). O modo lazy do fake e isso.
     function onDisk(values: Record<string, unknown>) {
-        pluginSettings.load(values);
-        const plain = settings.plain as Record<string, unknown>;
-        for (const key of Object.keys(plain)) if (!(key in values)) delete plain[key];
+        pluginSettings.load(values, { lazy: true });
     }
 
     beforeEach(() => {

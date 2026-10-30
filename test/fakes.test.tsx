@@ -15,13 +15,14 @@ import { describe, test } from "node:test";
 
 import { screenAudioStatusMain, setScreenAudioHelperPathForTests } from "@plugins/telinha/core/audio/screenAudioMain";
 import { listSources } from "@plugins/telinha/native";
+import { settings } from "@plugins/telinha/settings";
 import { installWebAudio } from "@test/fakes/audio";
 import { mockSpawn } from "@test/fakes/childProcess";
 import { canvas2d, resetMedia, resizeObservers } from "@test/fakes/dom";
 import { ipcEvent } from "@test/fakes/electron";
 import { installFetch, jsonResponse } from "@test/fakes/fetch";
 import { act, fireEvent, render, screen, settle } from "@test/fakes/render";
-import { Modal, ModalHost, modals, Select, toasts, webpackModules } from "@test/fakes/vencord";
+import { Modal, ModalHost, modals, pluginSettings, Select, toasts, webpackModules } from "@test/fakes/vencord";
 import { CspPolicies } from "@test/fakes/vencord/main/csp";
 import { findByCodeLazy, findStoreLazy } from "@webpack";
 import { openModal, showToast } from "@webpack/common";
@@ -134,6 +135,23 @@ describe("fakes", () => {
         assert.equal(written.length, 2);
         assert.match(written[0], /not ours/);
         assert.match(written[1], /other/);
+    });
+
+    test("settings: load() is eager by default; { lazy: true } keeps plain to what was written, defaults only on read", () => {
+        pluginSettings.load({ groupPassword: "x" });
+        assert.equal(settings.plain.rejectOutsiders, true, "eager: every default is in plain");
+
+        pluginSettings.load({ groupPassword: "x" }, { lazy: true });
+        assert.deepEqual(settings.plain, { groupPassword: "x" });
+        assert.equal(settings.store.rejectOutsiders, true, "the store answers the default...");
+        assert.equal(pluginSettings.get("defaultAccess"), "all", "...also a SELECT's");
+        assert.equal("rejectOutsiders" in settings.plain, false, "...without storing it");
+        settings.store.rejectOutsiders = true; // the same as the default: written, but no change to announce
+        assert.deepEqual(Object.keys(settings.plain), ["groupPassword", "rejectOutsiders"]);
+
+        pluginSettings.reset(); // back to eager
+        assert.equal(settings.plain.groupPassword, "");
+        assert.equal(settings.plain.defaultAccess, "all");
     });
 
     test("modals and toasts: openModal → ModalHost renders it; actions and onClose work", async () => {

@@ -256,8 +256,7 @@ describe("start e stop do plugin", () => {
 
     test("start migra a opcao antiga e liga a sessao, os avisos, os sons, os avisos de atualizacao e as verificacoes; stop desliga tudo", async t => {
         const clock = useFakeClock(t);
-        pluginSettings.load({ approveViewers: true });
-        for (const key of Object.keys(settings.plain)) if (key !== "approveViewers") delete (settings.plain as Record<string, unknown>)[key];
+        pluginSettings.load({ approveViewers: true }, { lazy: true }); // so a opcao antiga esta em disco, como na v0.1.0
 
         plugin.start();
         await clock.tickAsync(0);
