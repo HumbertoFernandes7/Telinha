@@ -99,8 +99,14 @@ export const modals = {
     }
 };
 
+// Discord has ONE modal layer: with several ModalHosts mounted (a test's own plus a helper's), only the oldest draws
+// the modals, so none appears twice. When it unmounts the next one takes over.
+const mountedHosts: object[] = [];
+
 /** Renders every open modal and follows openModal/closeModal (render it once in a component test). */
 export function ModalHost() {
+    const self = React.useRef<object>(null);
+    self.current ??= {};
     React.useSyncExternalStore(
         fn => {
             modalListeners.add(fn);
@@ -108,6 +114,17 @@ export function ModalHost() {
         },
         () => modalsVersion
     );
+    React.useLayoutEffect(() => {
+        const me = self.current!;
+        mountedHosts.push(me);
+        modalsChanged();
+        return () => {
+            mountedHosts.splice(mountedHosts.indexOf(me), 1);
+            modalsChanged();
+        };
+    }, []);
+    // (in the render before its own effect has run, a host that nobody preceded draws: the effect then re-renders the rest)
+    if ((mountedHosts[0] ?? self.current) !== self.current) return null;
     return (
         <>
             {openModals.map(m => (
@@ -130,7 +147,13 @@ export interface FakeModalProps extends ModalRenderProps {
     notice?: { message: string; type: string; };
 }
 
-/** Discord's Modal: a dialog with heading, notice, content and one <button> per action. */
+/**
+ * The accessible name of the Modal's own "×". Discord's is "Fechar" too (pt-BR), but here it must not equal the plugin's
+ * own "Fechar" action buttons (StreamersModal, ViewersModal): getByRole("button", { name: "Fechar" }) finds just those.
+ */
+export const MODAL_CLOSE_LABEL = "Fechar janela";
+
+/** Discord's Modal: a dialog with heading, notice, content and one <button> per action (+ the "×", data-modal-close). */
 export function Modal({ size, role, title, subtitle, children, actions, actionBarInput, notice, onClose }: FakeModalProps) {
     return (
         <div role={role ?? "dialog"} aria-modal="true" data-size={size}>
@@ -144,7 +167,7 @@ export function Modal({ size, role, title, subtitle, children, actions, actionBa
                     {a.text}
                 </button>
             ))}
-            <button type="button" aria-label="Fechar" onClick={onClose}>×</button>
+            <button type="button" aria-label={MODAL_CLOSE_LABEL} data-modal-close="" onClick={onClose}>×</button>
         </div>
     );
 }
@@ -253,13 +276,16 @@ export interface FakeTooltipChildProps {
 
 /**
  * Discord's Tooltip: calls the render-prop child with the trigger props and wraps the result in
- * <span data-tooltip="text">, so tests can read the tooltip text without hovering.
+ * <span data-tooltip="text">, so tests can read the tooltip text without hovering. The child's `aria-label` is the
+ * Tooltip's own `aria-label` prop, else the text when it is a string (none for a node: nothing to read out); a child
+ * that spreads the props onto a button gets that name, as in Discord.
  */
-export function Tooltip({ text, children }: { text: ReactNode; children(props: FakeTooltipChildProps): ReactNode; [key: string]: unknown; }) {
+export function Tooltip({ text, children, "aria-label": ariaLabel }: { text: ReactNode; children(props: FakeTooltipChildProps): ReactNode; "aria-label"?: string; [key: string]: unknown; }) {
     const noop = () => { };
+    const label = ariaLabel ?? (typeof text === "string" ? text : undefined);
     const props: FakeTooltipChildProps = {
         onClick: noop, onMouseEnter: noop, onMouseLeave: noop, onContextMenu: noop, onFocus: noop, onBlur: noop,
-        ...(typeof text === "string" ? { "aria-label": text } : {})
+        ...(label !== undefined ? { "aria-label": label } : {})
     };
     return <span data-tooltip={typeof text === "string" ? text : ""}>{children(props)}</span>;
 }

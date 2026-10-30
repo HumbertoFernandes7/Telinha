@@ -40,7 +40,7 @@ export interface OpenModalView {
 
 let host: { container: HTMLElement; } | null = null;
 
-/** One ModalHost per test (the render fake unmounts it after each test): two hosts would draw every modal twice. */
+/** One ModalHost per test (the render fake unmounts it after each test); it also works next to a host the test rendered itself. */
 function ensureHost() {
     if (!host || !host.container.isConnected) host = render(<ModalHost />);
 }
@@ -53,10 +53,10 @@ export function openInHost(open: () => void): OpenModalView {
         const all = screen.getAllByRole("dialog");
         return all[all.length - 1];
     };
-    // the fake Modal's own "×" is also named "Fechar": the visible action button wins over it
+    // the fake Modal's own "×" ("Fechar janela") only matches a name that also fits it, /fechar/i: the action button wins
     const find = (name: string | RegExp) => {
         const all = within(dialog()).queryAllByRole("button", { name }) as HTMLButtonElement[];
-        return all.find(b => b.getAttribute("aria-label") === null) ?? all[0] ?? null;
+        return all.find(b => !b.hasAttribute("data-modal-close")) ?? all[0] ?? null;
     };
     return {
         dialog,

@@ -25,7 +25,7 @@ export { type NotificationRecord, notifications, notificationsImpl } from "./api
 export { pluginSettings } from "./api/Settings";
 export { type CaughtError, caughtErrors } from "./components/ErrorBoundary";
 export * from "./stores";
-export { Menu, Modal, ModalHost, modals, OAuth2AuthorizeModal, type OpenModal, Select, type ToastRecord, toasts, Tooltip } from "./ui";
+export { Menu, Modal, MODAL_CLOSE_LABEL, ModalHost, modals, OAuth2AuthorizeModal, type OpenModal, Select, type ToastRecord, toasts, Tooltip } from "./ui";
 export { clipboard, clipboardImpl } from "./utils/clipboard";
 export { type LoggerLine, loggerLines } from "./utils/Logger";
 export { webpackModules } from "./webpack";

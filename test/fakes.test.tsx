@@ -23,7 +23,7 @@ import { canvas2d, resetMedia, resizeObservers } from "@test/fakes/dom";
 import { ipcEvent } from "@test/fakes/electron";
 import { installFetch, jsonResponse } from "@test/fakes/fetch";
 import { act, fireEvent, render, screen, settle } from "@test/fakes/render";
-import { Modal, ModalHost, modals, pluginSettings, Select, toasts, webpackModules } from "@test/fakes/vencord";
+import { Modal, MODAL_CLOSE_LABEL, ModalHost, modals, pluginSettings, Select, toasts, Tooltip, webpackModules } from "@test/fakes/vencord";
 import { CspPolicies } from "@test/fakes/vencord/main/csp";
 import { type StatsEntry, videoSenderStats } from "@test/fakes/webrtc";
 import { findByCodeLazy, findStoreLazy } from "@webpack";
@@ -219,9 +219,42 @@ describe("fakes", () => {
         fireEvent.change(screen.getByRole("combobox"), { target: { value: "password" } });
         assert.equal(applied, 1);
         assert.deepEqual(toasts.map(x => x.text), ["escolheu password"]);
-        fireEvent.click(screen.getByLabelText("Fechar"));
+        fireEvent.click(screen.getByLabelText(MODAL_CLOSE_LABEL));
         await settle();
         assert.equal(modals.list().length, 0);
         assert.equal(screen.queryByText("Quem pode assistir"), null);
+    });
+
+    test("modals: a \"Fechar\" action is the only button with that name, and two ModalHosts draw each modal once", async () => {
+        const hosts = render(<><ModalHost /><ModalHost /></>);
+        act(() => void openModal(props => <Modal {...props} title="Quem esta assistindo" actions={[{ text: "Fechar", variant: "secondary", onClick: props.onClose }]} />));
+        assert.equal(screen.getAllByRole("dialog").length, 1, "one modal layer");
+        assert.equal(screen.getAllByRole("button", { name: "Fechar" }).length, 1, "the × is \"Fechar janela\"");
+        assert.equal(screen.getAllByRole("button", { name: MODAL_CLOSE_LABEL }).length, 1);
+
+        // hosts in separate roots: the oldest draws; when it goes, the next one takes over
+        hosts.unmount();
+        act(() => modals.reset());
+        const first = render(<ModalHost />);
+        render(<ModalHost />);
+        act(() => void openModal(props => <Modal {...props} title="Outro" />));
+        assert.equal(screen.getAllByRole("dialog").length, 1);
+        assert.equal(first.container.querySelectorAll("[role=dialog]").length, 1);
+        first.unmount();
+        await settle();
+        assert.equal(screen.getAllByRole("dialog").length, 1);
+    });
+
+    test("Tooltip: the child gets aria-label = the aria-label prop, else the text when it is a string, else none", () => {
+        const labels: (string | undefined)[] = [];
+        const probe = (props: { "aria-label"?: string; }) => { labels.push(props["aria-label"]); return <i />; };
+        render(<>
+            <Tooltip text="Ninguém assistindo">{probe}</Tooltip>
+            <Tooltip text="Ninguém assistindo" aria-label="Estado da transmissão">{probe}</Tooltip>
+            <Tooltip text={<b>nó</b>}>{probe}</Tooltip>
+            <Tooltip text={<b>nó</b>} aria-label="Rótulo">{probe}</Tooltip>
+        </>);
+        assert.deepEqual(labels, ["Ninguém assistindo", "Estado da transmissão", undefined, "Rótulo"]);
+        assert.deepEqual([...document.querySelectorAll("[data-tooltip]")].map(e => e.getAttribute("data-tooltip")), ["Ninguém assistindo", "Ninguém assistindo", "", ""]);
     });
 });
