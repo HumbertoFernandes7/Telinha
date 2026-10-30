@@ -87,6 +87,13 @@ describe("viewers of my stream", () => {
         assert.deepEqual(s.tick(10_000 + LEFT_DEBOUNCE_MS), ["stream_user_left"]);
     });
 
+    test("a viewer whose connection is not in the peer list yet counts once, by his connection id", () => {
+        const s = sim();
+        s.feed(input({ local: live(), peers: [] }), 0);
+        assert.deepEqual(s.feed(input({ local: live("ghost"), peers: [] }), 5000), ["stream_user_joined"]);
+        assert.deepEqual(s.feed(input({ local: live("ghost"), peers: [] }), 6000), [], "the same viewer again is not a new join");
+    });
+
     test("reconnect with a new peerId for the same Discord user inside the window is silent", () => {
         const s = sim();
         s.feed(input({ local: live("p1"), peers: [peer("p1", "u1")] }), 0);
@@ -354,5 +361,40 @@ describe("four events, four different sounds", () => {
         s.feed(input({ local: live(), peers: idle }), 70_000);
         assert.deepEqual(s.names(), ["stream_user_joined", "stream_user_left", "stream_started", "stream_ended"]);
         assert.equal(new Set(s.names().map(n => SOUND_DEFS[n].discord)).size, 4);
+    });
+});
+
+describe("the caller's timer (flushSounds) with several people waiting", () => {
+    const memory = (over: Partial<SoundMemory> = {}): SoundMemory => ({
+        live: true, viewers: new Set(), peers: new Map(), pendingLeft: new Map([["late", 2600], ["early", 2000]]), lastPlayedAt: Number.NEGATIVE_INFINITY, ...over
+    });
+
+    test("wakes at the EARLIEST due time whatever order they were stored in", () => {
+        const step = flushSounds(memory(), 1000);
+        assert.deepEqual(step.events, []);
+        assert.equal(step.wakeAt, 2000);
+    });
+
+    test("plays one left when the first is due and keeps waiting for the other", () => {
+        const step = flushSounds(memory(), 2500);
+        assert.deepEqual(step.events, ["stream_user_left"]);
+        assert.equal(step.wakeAt, 2600);
+        assert.deepEqual([...step.memory.pendingLeft.keys()], ["late"]);
+
+        const last = flushSounds({ ...step.memory, lastPlayedAt: 2500 }, 2600);
+        assert.deepEqual(last.events, [], "the second one is inside the rate limit and is dropped, not delayed");
+        assert.equal(last.wakeAt, null);
+    });
+
+    test("both due at once: a single sound", () => {
+        const step = flushSounds(memory(), 5000);
+        assert.deepEqual(step.events, ["stream_user_left"]);
+        assert.equal(step.wakeAt, null);
+    });
+
+    test("my stream is no longer live when the timer fires: nothing plays, the wait is dropped", () => {
+        const step = flushSounds(memory({ live: false }), 5000);
+        assert.deepEqual(step.events, []);
+        assert.equal(step.memory.pendingLeft.size, 0);
     });
 });

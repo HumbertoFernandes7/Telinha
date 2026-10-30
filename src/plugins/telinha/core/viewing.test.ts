@@ -411,6 +411,12 @@ describe("chegada do stream e primeiro quadro", () => {
         rx.stats = [{ id: "I1", type: "inbound-rtp", kind: "video", framesDecoded: 62 }];
         sampleStats();
         assert.deepEqual((await viewerOf("peerA"))?.stats, { width: 0, height: 0, fps: 30, kbps: 0 });
+
+        // um inbound-rtp vazio (nem quadros decodificados): conta como zero, sem quebrar
+        clock.tick(2000);
+        rx.stats = [{ id: "I1", type: "inbound-rtp", kind: "video" }];
+        sampleStats();
+        assert.deepEqual((await viewerOf("peerA"))?.stats, { width: 0, height: 0, fps: 0, kbps: 0 });
     });
 
     test("o track de video ainda nao esta na conexao: nao ha o que medir e a espera continua", async t => {

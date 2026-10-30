@@ -61,7 +61,7 @@ export function discordOAuth(): DiscordOAuth {
         }
     };
 
-    const net: FetchEnv = installFetch(async (url, init) => {
+    const net: FetchEnv = installFetch((url, init) => {
         if (url === DISCORD_JWKS_URL) return jsonResponse({ keys: [jwk] });
         if (url !== DISCORD_TOKEN_URL) return undefined;
         env.tokenRequests.push(new URLSearchParams(String(init?.body ?? "")));

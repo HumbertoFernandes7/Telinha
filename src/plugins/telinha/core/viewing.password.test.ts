@@ -326,6 +326,20 @@ describe("a senha que deu certo fica lembrada para esta transmissao", () => {
         assert.deepEqual((await viewerOf("peerA"))?.passwordPrompt, { attemptsLeft: null, wrong: false });
     });
 
+    test("'errou a senha vezes demais' logo no pedido (sem ter usado a lembrada) tambem a esquece", async () => {
+        await accepted();
+        unwatch("peerA");
+        watch("peerA");
+        onWatchReply("peerA", { op: "denied", reason: "tooManyAttempts" });
+        assert.equal((await viewerOf("peerA"))?.denied, "tooManyAttempts");
+
+        unwatch("peerA");
+        watch("peerA");
+        onWatchReply("peerA", { op: "password", nonce: N2 });
+        assert.deepEqual((await viewerOf("peerA"))?.passwordPrompt, { attemptsLeft: null, wrong: false }, "pergunta de novo");
+        assert.equal(proofs().length, 1, "nenhuma prova automatica");
+    });
+
     test("uma recusa qualquer depois de usar a senha lembrada tambem a esquece (ela pode nao valer mais)", async () => {
         await accepted();
         unwatch("peerA");
