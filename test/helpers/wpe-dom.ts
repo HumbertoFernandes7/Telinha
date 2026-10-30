@@ -6,10 +6,9 @@
 
 // Helpers de DOM do pacote WP-E.
 //
-// happy-dom: Animation.cancel() LANCA um AbortError na hora (no Chromium ele so rejeita animation.finished, sem
-// lancar). Os spinners da UI (ui/callView/CallTileStream.tsx, ui/ViewerContent.tsx) animam com a Web Animations API e
-// cancelam ao desmontar, entao o desmonte de qualquer aviso com spinner quebraria o teste. Aqui o animate() vira um
-// que guarda as chamadas e cancela sem lancar.
+// Os spinners da UI (ui/callView/CallTileStream.tsx, ui/ViewerContent.tsx) animam com a Web Animations API e cancelam
+// ao desmontar. O fake do DOM (@test/fakes/dom) ja faz o cancel() nao deixar rejeicao sem tratamento; aqui o animate()
+// vira um que guarda as chamadas (keyframes, opcoes, se foi cancelada) para o teste conferir.
 
 import assert from "node:assert/strict";
 

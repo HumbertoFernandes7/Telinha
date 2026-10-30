@@ -108,6 +108,20 @@ describe("fakes", () => {
         resetMedia();
     });
 
+    test("dom: the classes have the browser's names, Animation.cancel() leaves no unhandled rejection", async () => {
+        const w = window as unknown as Record<string, { name: string; }>;
+        for (const name of ["Node", "Event", "Text", "Comment", "Document", "DocumentFragment", "HTMLSelectElement", "HTMLFormElement", "Range", "URL"])
+            assert.equal(w[name].name, name);
+        assert.equal(document.createTextNode("x").constructor.name, "Text");
+        assert.equal(document.createComment("x").constructor.name, "Comment");
+
+        const anim = document.createElement("div").animate([{ opacity: 0 }, { opacity: 1 }], 100);
+        anim.cancel();
+        // a rejection nobody handles fails the test run (node:test), as it did before the fake handled it
+        await new Promise(resolve => setImmediate(resolve));
+        await assert.rejects(anim.finished, { name: "AbortError" });
+    });
+
     test("modals and toasts: openModal → ModalHost renders it; actions and onClose work", async () => {
         let applied = 0;
         render(<ModalHost />);
