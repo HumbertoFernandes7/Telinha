@@ -6,7 +6,7 @@
 
 // O que o Telinha desenha dentro da tile de um participante na tela da call (ver patches.ts):
 // - amigo transmitindo pelo Telinha: etiqueta "TELINHA · Assistir"; ao clicar, o stream toca DENTRO da tile, com
-//   status, volume, tela cheia, "Abrir em janela" e "Parar de assistir";
+//   status, volume, tela cheia, "Abrir em janela" e "Parar de assistir" (o volume e o mesmo da janela do visualizador);
 // - a sua propria tile, enquanto voce transmite: previa local (sempre muda), que da para ocultar.
 // Tudo com estilo inline (a call pode estar num pop-out do Discord, que nao recebe o CSS do Vencord). Cliques fora dos
 // nossos botoes seguem para o Discord (focar/ampliar a tile continua funcionando e o video cresce junto).
@@ -18,18 +18,17 @@ import type { PeerId, RemotePeer, ViewerSession } from "@plugins/telinha/types";
 import { ACCENT, accessBadge, currentUserId, deniedTitle, errorText, logger, peerName, watchersLabel } from "@plugins/telinha/ui/common";
 import { BroadcastIcon, CloseIcon, FullscreenIcon, StopIcon, VolumeIcon } from "@plugins/telinha/ui/icons";
 import { isViewerOpen, openViewer } from "@plugins/telinha/ui/viewerWindows";
+import { useVolume, volumeKeyFor } from "@plugins/telinha/ui/volumes";
 import { AuthorizeToWatchButton, PasswordForm, passwordOverlayText } from "@plugins/telinha/ui/WatchGate";
 import { PopoutWindowStore, useEffect, useRef, useState } from "@webpack/common";
 import type { CSSProperties, ReactNode, RefObject, SyntheticEvent } from "react";
 
 import {
-    getVolume,
     isAudioOwner,
     isLocalPreviewHidden,
     registerTile,
     releaseToWindow,
     setLocalPreviewHidden,
-    setVolume,
     startTileWatch,
     stopTileWatch,
     unregisterTile,
@@ -423,12 +422,8 @@ function TilePlayer({ peer, session }: { peer: RemotePeer; session: ViewerSessio
     const { active, poke, leave } = useActive();
     const { fullscreen, toggle: toggleFullscreen } = useFullscreen(rootRef);
 
-    const volumeKey = peer.discordUserId || peerId;
-    const [{ volume, muted }, setVolumeState] = useState(() => getVolume(volumeKey));
-    const updateVolume = (next: { volume: number; muted: boolean; }) => {
-        setVolumeState(next);
-        setVolume(volumeKey, next);
-    };
+    // O volume e o mudo escolhidos sao os mesmos da janela do visualizador (ui/volumes.ts), ao vivo
+    const [{ volume, muted }, updateVolume] = useVolume(volumeKeyFor(peerId, peer.discordUserId));
 
     // O som toca numa tile so (a primeira montada) e nunca junto com a janela do visualizador
     const audioHere = !viewerOpen && isAudioOwner(peerId, tokenRef.current);

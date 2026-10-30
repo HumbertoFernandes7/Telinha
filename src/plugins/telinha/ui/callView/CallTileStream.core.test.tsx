@@ -16,6 +16,7 @@ import { unwatch } from "@plugins/telinha/actions";
 import { buildHello, STREAM_KIND_SCREEN } from "@plugins/telinha/protocol";
 import { getState } from "@plugins/telinha/store";
 import { closeAllViewers, isViewerOpen } from "@plugins/telinha/ui/viewerWindows";
+import { getVolume, setVolume } from "@plugins/telinha/ui/volumes";
 import { useFakeClock } from "@test/fakes/clock";
 import { media, resetMedia, resizeObservers } from "@test/fakes/dom";
 import { act, cleanup, fireEvent, render, screen, settle, waitFor, within } from "@test/fakes/render";
@@ -23,6 +24,7 @@ import { caughtErrors, FRIEND_ID, loggerLines, PopoutActions, PopoutWindowStore,
 import { captureStream, type FakeRTCPeerConnection, type FakeRTCRtpTransceiver, videoReceiverStats } from "@test/fakes/webrtc";
 import { NONCE, startStreamer, type Streamer } from "@test/helpers/wpe-core";
 import { animations, assertAbsent, installAnimate } from "@test/helpers/wpe-dom";
+import type { ReactNode } from "react";
 
 import { CallTileStream } from "./CallTileStream";
 import { isTileOwned, resetTileState, setLocalPreviewHidden } from "./tileState";
@@ -55,6 +57,7 @@ describe("CallTileStream com o nucleo de verdade", () => {
         toasts.length = 0;
         loggerLines.length = 0;
         streamer.room.sent.length = 0;
+        setVolume(FRIEND_ID, { volume: 1, muted: false }); // o volume lembrado por amigo vive o processo inteiro
     });
 
     afterEach(async () => {
@@ -235,6 +238,34 @@ describe("CallTileStream com o nucleo de verdade", () => {
             await settle();
             assert.equal(PopoutActions.opened.length, 1, "nao abriu outra");
             assert.equal(PopoutWindowStore.getWindow(POPOUT_KEY)!.focused, 1);
+        });
+
+        test("o volume ajustado na tile vale na janela que abre; o que se ajusta na janela chega na tile que segue montada", async () => {
+            const { container } = await withStream(true);
+            const tileVideo = tile(container).querySelector("video")!;
+            fireEvent.change(screen.getByLabelText("Volume"), { target: { value: "30" } });
+            assert.equal(tileVideo.volume, 0.3);
+
+            fireEvent.click(screen.getByRole("button", { name: "Abrir em janela" }));
+            await settle();
+            const win = render(PopoutActions.opened[0].render() as ReactNode); // o conteudo que o Discord poe no pop-out
+            await settle();
+            const winVideo = win.container.querySelector("video")!;
+            const winSlider = within(win.container).getByLabelText("Volume") as HTMLInputElement;
+            assert.equal(winSlider.value, "30", "a janela nasce com o volume da tile");
+            assert.equal(winVideo.volume, 0.3);
+            assert.equal(winVideo.muted, false);
+            assert.equal(tileVideo.muted, true, "o som toca so na janela");
+
+            fireEvent.change(winSlider, { target: { value: "70" } });
+            assert.equal(winVideo.volume, 0.7);
+            assert.equal(tileVideo.volume, 0.7, "a tile segue montada, com o mesmo <video>, e ja tem o volume novo");
+            assert.ok(tile(container).querySelector("video") === tileVideo);
+            assert.equal(tileVideo.muted, true, "continua calada: nunca o mesmo som nos dois lugares");
+
+            fireEvent.click(within(win.container).getByRole("button", { name: "Silenciar" }));
+            assert.deepEqual(getVolume(FRIEND_ID), { volume: 0.7, muted: true });
+            assert.equal(winVideo.muted, true);
         });
 
         test("\"Parar de assistir\" na tile com a janela aberta fecha a janela e para de assistir (um unico stop)", async () => {
