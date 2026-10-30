@@ -8,7 +8,8 @@
  *      alone: Windows Smart App
  *      Control / WDAC on some PCs blocks freshly built test binaries at random ("An Application Control policy has
  *      blocked this file", "Access is denied" on fork/exec). A blocked package is retried up to --retries times
- *      (default 4); a real test failure is not retried.
+ *      (default 4), each retry linked with a random -buildid so the new test binary has another hash than the one
+ *      Windows just refused; a real test failure is not retried.
  *   2. merges the profiles into coverage/go/coverage.out (go tool cover -html=coverage/go/coverage.out to browse)
  *   3. prints coverage per package and per file plus the total; coverage/go/summary.json has the same numbers
  *
@@ -18,6 +19,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 import { spawnSync } from "child_process";
+import { randomBytes } from "crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
@@ -27,7 +29,7 @@ const INSTALLER = join(REPO, "installer");
 const OUT = join(REPO, "coverage", "go");
 const argv = process.argv.slice(2);
 const retries = argv.includes("--retries") ? Number(argv[argv.indexOf("--retries") + 1]) : 4;
-const BLOCKED_RE = /Application Control policy|blocked by group policy|blocked by your administrator|Access is denied|Acesso negado|The system cannot execute the specified program|Operation did not complete successfully because the file contains a virus/i;
+const BLOCKED_RE = /Application Control policy|pol[ií]tica de Controle de Aplicativo|blocked by group policy|blocked by your administrator|Access is denied|Acesso negado|The system cannot execute the specified program|Operation did not complete successfully because the file contains a virus/i;
 
 const log = msg => console.log(`[coverage:go] ${msg}`);
 
@@ -65,7 +67,9 @@ for (const pkg of packages) {
     let attempt = 0;
     for (;;) {
         attempt++;
-        r = go(["test", "-covermode=set", `-coverpkg=${coverpkg}`, `-coverprofile=${profile}`, pkg]);
+        // a retry relinks with a random build ID: the same binary again would be blocked again (Windows judges its hash)
+        const relink = attempt > 1 ? [`-ldflags=-buildid=${randomBytes(8).toString("hex")}`] : [];
+        r = go(["test", "-covermode=set", `-coverpkg=${coverpkg}`, `-coverprofile=${profile}`, ...relink, pkg]);
         const output = `${r.stdout}\n${r.stderr}`;
         if (r.status === 0 || !BLOCKED_RE.test(output) || attempt > retries) break;
         log(`${shortName(pkg)}: test binary blocked by Windows (attempt ${attempt}), retrying`);
