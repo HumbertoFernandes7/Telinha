@@ -70,9 +70,13 @@ func (f *FakeProcs) Set(ps ...winproc.Process) {
 	f.Procs = ps
 }
 
-// LockFile opens path without sharing (what a running program or an antivirus scan does): renames, deletes
-// and other opens fail with a sharing violation until the returned function is called (also done at the end
-// of the test).
+// LockFile opens path without sharing and locks all of its bytes (what a running program or an antivirus scan
+// does): renames, deletes and other opens fail with a sharing violation, and reading fails with a lock violation,
+// until the returned function is called (also done at the end of the test).
+//
+// The byte lock is what keeps reads out when the test runs with SeBackupPrivilege enabled (an elevated Git Bash
+// enables it for what it starts, as on the CI runner): Go opens a file for reading with FILE_FLAG_BACKUP_SEMANTICS,
+// and such an open gets past a share-0 handle that only reads. A byte-range lock holds whatever the privileges.
 func LockFile(t testing.TB, path string) (unlock func()) {
 	t.Helper()
 	name, err := windows.UTF16PtrFromString(path)
@@ -83,8 +87,19 @@ func LockFile(t testing.TB, path string) (unlock func()) {
 	if err != nil {
 		t.Fatalf("locking %s: %v", path, err)
 	}
+	// from offset 0 (the zeroed Overlapped), 2^64-1 bytes: the whole file, however it grows
+	all := new(windows.Overlapped)
+	if err := windows.LockFileEx(h, windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, ^uint32(0), ^uint32(0), all); err != nil {
+		windows.CloseHandle(h)
+		t.Fatalf("locking %s: %v", path, err)
+	}
 	var once sync.Once
-	unlock = func() { once.Do(func() { windows.CloseHandle(h) }) }
+	unlock = func() {
+		once.Do(func() {
+			windows.UnlockFileEx(h, 0, ^uint32(0), ^uint32(0), all)
+			windows.CloseHandle(h)
+		})
+	}
 	t.Cleanup(unlock)
 	return unlock
 }
