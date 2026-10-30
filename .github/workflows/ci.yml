@@ -6,6 +6,8 @@
 #   - pnpm check: typecheck, lint, stylelint, unit tests, build:addon + smoke, test:addon (fake Discord/GitHub trees)
 #   - pnpm test:coverage (when the script exists): coverage of every *.test.ts(x), uploaded as the "coverage" artifact
 #   - installer/: go vet, go test -cover, installer\build.cmd, then the update test's group G against that build
+#   - coverage floor: scripts/check-coverage.mjs fails the job when TypeScript coverage or a Go package's coverage is
+#     below coverage-floor.json (the last gate, so a drop does not hide the build and update test failures)
 # Nothing here touches a real Discord: every test runs on fake trees under %TEMP%.
 name: CI
 
@@ -141,6 +143,11 @@ jobs:
           node addon/test/run-update-test.mjs --installer dist/installer/TelinhaInstaller-cli.exe 2>&1 | tee "$RUNNER_TEMP/update-test.txt"
           grep -q '^G the installer' "$RUNNER_TEMP/update-test.txt" || { echo "::error::run-update-test.mjs skipped group G"; exit 1; }
 
+      # The ratchet: coverage may not fall below coverage-floor.json (raise it with `pnpm coverage:ratchet`). Last, so a
+      # drop does not hide the failures above; its table goes into the job summary below.
+      - name: Coverage floor (coverage-floor.json)
+        run: node scripts/check-coverage.mjs check --go "$RUNNER_TEMP/go-test.txt" --summary "$RUNNER_TEMP/coverage-floor.md"
+
       # ------------------------------------------------------------------ reports
       - name: Coverage summary
         if: ${{ !cancelled() }}
@@ -178,6 +185,10 @@ jobs:
               echo '```'
             else
               echo "_go test did not run._"
+            fi
+            if [ -s "$RUNNER_TEMP/coverage-floor.md" ]; then
+              echo
+              cat "$RUNNER_TEMP/coverage-floor.md"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 

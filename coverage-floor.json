@@ -1,0 +1,21 @@
+{
+    "js": {
+        "lines": 99.7,
+        "statements": 99.7,
+        "functions": 99.1,
+        "branches": 96.5
+    },
+    "go": {
+        "installer": 98.4,
+        "internal/asar": 99.9,
+        "internal/core": 98.8,
+        "internal/discord": 99.9,
+        "internal/fsutil": 98,
+        "internal/logx": 99.9,
+        "internal/payload": 99.2,
+        "internal/stub": 99.9,
+        "internal/ui": 95.5,
+        "internal/winproc": 93.1,
+        "internal/winver": 99.9
+    }
+}

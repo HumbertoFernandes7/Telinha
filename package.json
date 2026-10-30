@@ -22,6 +22,8 @@
         "test:addon": "node addon/test/run-all.mjs",
         "test:coverage": "node scripts/coverage.mjs",
         "test:coverage:go": "node scripts/coverage-go.mjs",
+        "coverage:check": "node scripts/check-coverage.mjs check",
+        "coverage:ratchet": "node scripts/check-coverage.mjs ratchet",
         "build:helper": "native-audio\\build.cmd --copy-to-dist",
         "build:addon": "node addon/build/build-addon.mjs",
         "build:installer": "installer\\build.cmd",
