@@ -1,26 +1,45 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# CI: the same gates a release is cut with, on a clean Windows runner.
+# CI: the gates every release is cut with, on a clean Windows runner, for main, develop and pull requests into them.
+#   - release plan (scripts/release.mjs plan): the version this commit is built as (TELINHA_VERSION: package.json's
+#     version or the last vX.Y.Z tag + 1 patch, whichever is greater) and whether it ships (product files changed
+#     since that tag); in the job summary
 #   - pnpm bootstrap: the official Vencord pinned in vencord.json, fetched and built into .vencord/
 #   - pnpm build:helper: native-audio\telinha-audio.exe (MSVC), which build:addon packs into the payload
-#   - pnpm check: typecheck, lint, stylelint, unit tests, build:addon + smoke, test:addon (fake Discord/GitHub trees)
+#   - pnpm check: typecheck, lint, stylelint, unit tests, build:addon + smoke, test:addon (fake Discord/GitHub trees,
+#     and run-release-test.mjs: the notes template + the zip just built through the updater's own checks)
 #   - pnpm test:coverage (when the script exists): coverage of every *.test.ts(x), uploaded as the "coverage" artifact
-#   - installer/: go vet, go test -cover, installer\build.cmd, then the update test's group G against that build
+#   - installer/: go vet, go test -cover, the version resource stamped with TELINHA_VERSION, installer\build.cmd, then
+#     the update test's group G against that build
 #   - coverage floor: scripts/check-coverage.mjs fails the job when TypeScript coverage or a Go package's coverage is
 #     below coverage-floor.json (the last gate, so a drop does not hide the build and update test failures)
 # Nothing here touches a real Discord: every test runs on fake trees under %TEMP%.
+#
+# Releases (docs/releases.md): on a push to main whose plan ships, the installer, add-on zip and .sha256 built and
+# tested above go to the "release" job (the only one that can write), which writes the notes, checks the whole release
+# with the add-on's updater and publishes GitHub release vX.Y.Z (tag on this commit, marked latest). A manual run
+# (workflow_dispatch, any branch) is a dry run: the same steps, but at most a DRAFT release, which neither
+# releases/latest nor the updater ever see.
 name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
   workflow_dispatch:
+    inputs:
+      draft:
+        description: "Dry run: also create a DRAFT release with the files and notes (never a public one; delete it afterwards)"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
+# One run per branch at a time. Pull requests cancel their older run; pushes (main publishes) queue instead, so a
+# release in progress is never cancelled. GitHub keeps one pending run per group: when several merges into main queue
+# up, the newest run releases them all (its notes gather the "## Novidades" of every merge since the last tag).
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -34,15 +53,31 @@ jobs:
     name: pnpm check + installer (Windows)
     runs-on: windows-latest
     timeout-minutes: 45
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      last_tag: ${{ steps.plan.outputs.last_tag }}
+      release: ${{ steps.assets.outcome == 'success' }}
+      zip: ${{ steps.assets.outputs.zip }}
+      zip_sha256: ${{ steps.assets.outputs.zip_sha256 }}
+      sum_sha256: ${{ steps.assets.outputs.sum_sha256 }}
+      installer_sha256: ${{ steps.assets.outputs.installer_sha256 }}
     steps:
+      # the whole history and the tags: the release plan compares with the last vX.Y.Z tag
       - uses: actions/checkout@v7
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       # package.json "engines" only says node >=22 (no .nvmrc): use the current LTS.
       - uses: actions/setup-node@v7
         with:
           node-version: 24
+
+      # The version every build below carries (TELINHA_VERSION in the environment of the next steps) and whether this
+      # commit ships (a push to main then publishes it, in the release job). Reasons in the job summary.
+      - name: Release plan
+        id: plan
+        run: node scripts/release.mjs plan --github-output "$GITHUB_OUTPUT" --github-env "$GITHUB_ENV" --summary "$GITHUB_STEP_SUMMARY"
 
       # pnpm version from package.json "packageManager".
       - uses: pnpm/action-setup@v6
@@ -118,6 +153,8 @@ jobs:
         run: pnpm build:helper
 
       # ------------------------------------------------------------------ gates
+      # build:addon makes dist/addon/Telinha-addon-<commit>.zip as TELINHA_VERSION, from the clean checkout (a changed
+      # or untracked file would name it <commit>-dirty, which the release job refuses).
       - name: pnpm check
         run: pnpm check
 
@@ -133,9 +170,15 @@ jobs:
         working-directory: installer
         run: go test -count=1 -cover ./... 2>&1 | tee "$RUNNER_TEMP/go-test.txt"
 
+      # TelinhaInstaller.exe's file properties (version resource) say TELINHA_VERSION: the rsrc_windows_*.syso are made
+      # again from winres/winres.json with the release version. Only on this runner, never committed.
+      - name: Stamp the installer's version resource
+        working-directory: installer
+        run: go run github.com/tc-hib/go-winres@v0.3.3 make --in winres/winres.json --arch amd64,arm64 --out rsrc --file-version "$TELINHA_VERSION" --product-version "$TELINHA_VERSION"
+
       - name: Build the installer
         shell: cmd
-        run: installer\build.cmd 0.0.0-ci fast
+        run: installer\build.cmd %TELINHA_VERSION% fast
 
       # pnpm check skipped group G (no installer yet): re-run the update test against the build above.
       - name: Update test with the built installer (group G)
@@ -147,6 +190,36 @@ jobs:
       # drop does not hide the failures above; its table goes into the job summary below.
       - name: Coverage floor (coverage-floor.json)
         run: node scripts/check-coverage.mjs check --go "$RUNNER_TEMP/go-test.txt" --summary "$RUNNER_TEMP/coverage-floor.md"
+
+      # ------------------------------------------------------------------ release files
+      # Only after every gate passed, and only when something will be released: a push to main that ships, or a manual
+      # dry run. The files that passed the gates above, byte for byte; their hashes go to the release job through the
+      # job outputs (not through the artifact), which checks them again before publishing.
+      - name: Stage the release files
+        id: assets
+        if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.plan.outputs.shippable == 'true') || github.event_name == 'workflow_dispatch' }}
+        run: |
+          dir="$RUNNER_TEMP/release-assets"
+          mkdir -p "$dir"
+          cp dist/installer/TelinhaInstaller.exe dist/addon/Telinha-addon-*.zip dist/addon/Telinha-addon-*.zip.sha256 "$dir/"
+          cd "$dir"
+          zip=$(ls Telinha-addon-*.zip)
+          sha256sum TelinhaInstaller.exe "$zip" "$zip.sha256"
+          {
+            echo "zip=$zip"
+            echo "zip_sha256=$(sha256sum "$zip" | cut -d' ' -f1)"
+            echo "sum_sha256=$(sha256sum "$zip.sha256" | cut -d' ' -f1)"
+            echo "installer_sha256=$(sha256sum TelinhaInstaller.exe | cut -d' ' -f1)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload the release files
+        if: steps.assets.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-files
+          path: ${{ runner.temp }}/release-assets/
+          if-no-files-found: error
+          retention-days: 14
 
       # ------------------------------------------------------------------ reports
       - name: Coverage summary
@@ -199,3 +272,122 @@ jobs:
           name: coverage
           path: coverage/
           if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------- release
+  # Runs only after every gate of `check` passed, with the files `check` built and tested (never rebuilt: two builds
+  # differ in their timestamps). Linux is enough: it only checks, writes notes and calls the GitHub API.
+  release:
+    name: Release ${{ needs.check.outputs.version }} (${{ github.event_name == 'push' && 'publish' || 'dry run' }})
+    needs: check
+    if: needs.check.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # the only job that can write: it creates the tag and the release (pull-requests: the notes read the merged PR)
+    permissions:
+      contents: write
+      pull-requests: read
+    # one release at a time, queued: a publish in progress is never cancelled
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      LAST_TAG: ${{ needs.check.outputs.last_tag }}
+      # publish (push to main), draft (manual run, default) or none (manual run without the draft)
+      MODE: ${{ github.event_name == 'push' && 'publish' || (inputs.draft && 'draft' || 'none') }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      # outside the checkout: TelinhaInstaller.exe, Telinha-addon-<commit>.zip and its .sha256
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-files
+          path: ${{ runner.temp }}/release-files
+
+      # The artifact must hold exactly the files `check` hashed after its gates, nothing else.
+      - name: Same files as built and tested
+        env:
+          ZIP: ${{ needs.check.outputs.zip }}
+          ZIP_SHA256: ${{ needs.check.outputs.zip_sha256 }}
+          SUM_SHA256: ${{ needs.check.outputs.sum_sha256 }}
+          INSTALLER_SHA256: ${{ needs.check.outputs.installer_sha256 }}
+        run: |
+          echo "FILES=$RUNNER_TEMP/release-files" >> "$GITHUB_ENV"
+          cd "$RUNNER_TEMP/release-files"
+          ls -l
+          [ "$(ls | wc -l)" -eq 3 ] || { echo "::error::expected 3 files"; exit 1; }
+          printf '%s  %s\n' "$INSTALLER_SHA256" TelinhaInstaller.exe "$ZIP_SHA256" "$ZIP" "$SUM_SHA256" "$ZIP.sha256" | sha256sum --check --strict
+
+      - name: Release notes
+        run: node scripts/release.mjs notes --version "$VERSION" --last-tag "$LAST_TAG" --assets "$FILES" --out "$RUNNER_TEMP/notes.md"
+
+      # Before anything is published: the release as installed copies will see it (every SHA-256, versions, download),
+      # an installed copy of the last release updating to it, files built from this very commit from a clean tree.
+      - name: Check the release with the add-on's updater
+        run: node scripts/release.mjs verify --version "$VERSION" --assets "$FILES" --notes "$RUNNER_TEMP/notes.md" --installed "${LAST_TAG#v}" --commit "$GITHUB_SHA"
+
+      - name: Notes in the job summary
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -f "$RUNNER_TEMP/notes.md" ]; then
+            { echo "## Release notes: Telinha $VERSION ($MODE)"; echo; cat "$RUNNER_TEMP/notes.md"; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # gh release create uploads the files to a draft first and publishes it only once all are there, so
+      # releases/latest never shows a release without its files. GitHub creates the tag on this commit when it publishes.
+      - name: Publish (${{ env.MODE }})
+        if: env.MODE != 'none'
+        run: |
+          tag="v$VERSION"
+          # never over an existing release or tag: an older run, or a dry-run draft left behind (delete it first)
+          existing=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate --jq ".[] | select(.tag_name == \"$tag\") | .html_url")
+          if [ -n "$existing" ]; then echo "::error::a release for $tag already exists: $existing"; exit 1; fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then echo "::error::tag $tag already exists"; exit 1; fi
+          cd "$FILES"
+          zip=$(ls Telinha-addon-*.zip)
+          if [ "$MODE" = publish ]; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest --title "Telinha $VERSION" \
+              --notes-file "$RUNNER_TEMP/notes.md" TelinhaInstaller.exe "$zip" "$zip.sha256"
+          else
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --title "Telinha $VERSION (dry run)" \
+              --notes-file "$RUNNER_TEMP/notes.md" TelinhaInstaller.exe "$zip" "$zip.sha256"
+          fi
+
+      # The release as GitHub serves it (its body and its own asset digests) through the same checks. A published
+      # release that fails is turned into a pre-release, so releases/latest, the installer and the updater go back to
+      # the previous version, and the job fails.
+      - name: Check the release as GitHub serves it
+        if: env.MODE != 'none'
+        run: |
+          tag="v$VERSION"
+          for attempt in 1 2 3 4 5 6; do
+            gh api "repos/$GITHUB_REPOSITORY/releases?per_page=30" --jq "map(select(.tag_name == \"$tag\")) | first" > "$RUNNER_TEMP/release.json"
+            [ "$(jq '[.assets[]? | select(.digest != null)] | length' "$RUNNER_TEMP/release.json")" -eq 3 ] && break
+            sleep 10
+          done
+          jq '{tag_name, draft, prerelease, html_url, assets: [.assets[] | {name, size, digest}]}' "$RUNNER_TEMP/release.json"
+          ok=true
+          node scripts/release.mjs verify --version "$VERSION" --assets "$FILES" --notes "$RUNNER_TEMP/notes.md" --installed "${LAST_TAG#v}" \
+            --commit "$GITHUB_SHA" --release-json "$RUNNER_TEMP/release.json" || ok=false
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name || true)
+          if [ "$MODE" = publish ]; then
+            [ "$latest" = "$tag" ] || { echo "::error::releases/latest is $latest, not $tag"; ok=false; }
+            if [ "$ok" != true ]; then
+              gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --prerelease
+              echo "::error::$tag failed the checks as published: turned into a pre-release (installed copies stay on $latest)"
+              exit 1
+            fi
+          else
+            # a draft must stay invisible to the updater and the installer
+            [ "$latest" != "$tag" ] || { echo "::error::the draft shows up as releases/latest"; ok=false; }
+            echo "Draft: $(jq -r .html_url "$RUNNER_TEMP/release.json"). Delete it when done: gh release delete $tag --yes" >> "$GITHUB_STEP_SUMMARY"
+            [ "$ok" = true ]
+          fi
