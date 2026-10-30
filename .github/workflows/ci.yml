@@ -9,8 +9,8 @@
 #   - pnpm check: typecheck, lint, stylelint, unit tests, build:addon + smoke, test:addon (fake Discord/GitHub trees,
 #     and run-release-test.mjs: the notes template + the zip just built through the updater's own checks)
 #   - pnpm test:coverage (when the script exists): coverage of every *.test.ts(x), uploaded as the "coverage" artifact
-#   - installer/: go vet, go test -cover, the version resource stamped with TELINHA_VERSION, installer\build.cmd, then
-#     the update test's group G against that build
+#   - installer/: go vet, go test -cover, the version resource stamped with TELINHA_VERSION, installer\build.cmd (both
+#     builds must then say that version), then the update test's group G against that build
 #   - coverage floor: scripts/check-coverage.mjs fails the job when TypeScript coverage or a Go package's coverage is
 #     below coverage-floor.json (the last gate, so a drop does not hide the build and update test failures)
 # Nothing here touches a real Discord: every test runs on fake trees under %TEMP%.
@@ -180,6 +180,18 @@ jobs:
         shell: cmd
         run: installer\build.cmd %TELINHA_VERSION% fast
 
+      # Both builds say TELINHA_VERSION: --version (main.version) and the file properties of the GUI exe users get.
+      - name: Installer version
+        shell: pwsh
+        run: |
+          $cli = (& dist\installer\TelinhaInstaller-cli.exe --version | Out-String).Trim()
+          $info = (Get-Item dist\installer\TelinhaInstaller.exe).VersionInfo
+          "$cli / TelinhaInstaller.exe: FileVersion $($info.FileVersion), ProductVersion $($info.ProductVersion)"
+          if ($cli -ne "TelinhaInstaller $env:TELINHA_VERSION" -or $info.FileVersion -ne $env:TELINHA_VERSION -or $info.ProductVersion -ne $env:TELINHA_VERSION) {
+            "::error::the installer does not say $env:TELINHA_VERSION"
+            exit 1
+          }
+
       # pnpm check skipped group G (no installer yet): re-run the update test against the build above.
       - name: Update test with the built installer (group G)
         run: |
@@ -277,7 +289,7 @@ jobs:
   # Runs only after every gate of `check` passed, with the files `check` built and tested (never rebuilt: two builds
   # differ in their timestamps). Linux is enough: it only checks, writes notes and calls the GitHub API.
   release:
-    name: Release ${{ needs.check.outputs.version }} (${{ github.event_name == 'push' && 'publish' || 'dry run' }})
+    name: Release (GitHub)
     needs: check
     if: needs.check.outputs.release == 'true'
     runs-on: ubuntu-latest
