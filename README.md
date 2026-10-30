@@ -8,7 +8,7 @@
 
 *(antigo nome: PeerLive)*
 
-> **Status: versão 0.2.5.** O Telinha já funciona e é uma versão oficial, mas ainda está em evolução (veja [Status](#status)). Quer usar? Vá para [Como instalar](#como-instalar).
+> **Status:** o Telinha já funciona e é uma versão oficial ([veja a mais recente](https://github.com/HumbertoFernandes7/Telinha/releases/latest)), mas ainda está em evolução (veja [Status](#status)). Quer usar? Vá para [Como instalar](#como-instalar).
 
 ---
 
@@ -48,7 +48,7 @@ Os amigos precisam se achar uns aos outros e, depois disso, o vídeo segue por c
 
 ## Status
 
-Versão 0.2.5. O que já foi **verificado**:
+Na [versão mais recente](https://github.com/HumbertoFernandes7/Telinha/releases/latest), o que já foi **verificado**:
 
 - [x] Captura de tela e de janela dentro do Discord oficial, no Windows.
 - [x] Áudio da janela.
@@ -213,6 +213,7 @@ pnpm check             # typecheck, lint, lint-styles, test:unit, build:addon e 
 - **Como o add-on é montado:** o plugin é compilado contra `.vencord/src`, mas **sem empacotar o Vencord**: cada import de `@api/*`, `@components/*`, `@utils/*` e `@webpack` vira uma referência ao `window.Vencord` do Vencord oficial que está rodando (só `@utils/types` é embutido). O build falha se alguma fonte do Vencord acabar dentro do pacote.
 - **O que o build:addon e os testes garantem:** carregam o pacote por cima do `renderer.js` do Vencord oficial (`.vencord/dist`) numa página simulada do Discord. Falham se o add-on lançar erro ao ser carregado (JSX, `Vencord.*` ou webpack usados no topo de um módulo, antes de o Discord carregar), se o plugin não se registrar ou se algum export do Vencord usado pelo pacote não existir no build oficial (checagem de ABI). Para testar contra outro build do Vencord: `--vencord-dist <pasta>`.
 - **Atualizar o Vencord:** mude `commit` e `version` em `vencord.json`, rode `pnpm bootstrap` e depois `pnpm check`.
+- **Versões (releases):** saem sozinhas pelo CI. O trabalho do dia a dia vai na branch `develop`; cada PR de `develop` para `main` que muda o produto vira uma versão nova no GitHub (instalador, pacote do add-on, SHA-256 e notas), e a seção `## Novidades` do PR vira as novidades da versão. Ninguém edita número de versão à mão. Detalhes em [`docs/releases.md`](docs/releases.md).
 - Onde fica cada coisa: o plugin em [`src/plugins/telinha/`](src/plugins/telinha/) (mesmo layout de plugin do Vencord, por isso os imports `@plugins/telinha/...`; o protocolo P2P está em `protocol.ts`), o carregador e o build do add-on em [`addon/`](addon/) (contrato do pacote em [`addon/PAYLOAD.md`](addon/PAYLOAD.md)), o instalador em Go em [`installer/`](installer/), o auxiliar de áudio em C++ em [`native-audio/`](native-audio/) e o desenho da prova de identidade em [`docs/identity.md`](docs/identity.md).
 - **Amigo virtual** para testar sozinho, sem uma segunda pessoa: uma página que fala o mesmo protocolo do plugin, em [`tools/telinha-peer/`](tools/telinha-peer/). Sirva com:
 
@@ -241,7 +242,7 @@ As primeiras versões de teste (`teste-1` e `teste-2`) eram um fork do Vencord 1
 
 **Telinha** lets friends in the same Discord voice channel stream their screen or a window to each other and watch **inside Discord**, directly between their PCs (peer-to-peer, WebRTC). It is free and there is no server of ours: public Nostr relays (through the Trystero library) are used only so peers can find each other, and the video goes straight PC to PC (STUN only). It supports up to 1080p at 60 fps, and captures audio: the sound of a single window, or, for whole-screen streams, all PC sound except Discord's (Windows 10 2004+; done by a small unsigned helper, `telinha-audio.exe`, which antivirus or Smart App Control may block, in which case the screen streams without sound).
 
-It is a plugin for [Vencord](https://github.com/Vendicated/Vencord) (a Discord client mod), currently at version **0.2.5**: early, but an official release. You keep the **official Vencord**: install Telinha with [**`TelinhaInstaller.exe`**](https://github.com/HumbertoFernandes7/Telinha/releases/latest/download/TelinhaInstaller.exe) (direct download of the latest release; notes on the [latest release page](https://github.com/HumbertoFernandes7/Telinha/releases/latest)). SmartScreen will warn because it is not code-signed yet: "More info" > "Run anyway". Click Install and reopen Discord; Telinha comes enabled. It does not modify Vencord's files; running the installer again and choosing Uninstall puts Vencord back exactly as before. Telinha updates itself: when Discord opens (and every 6 hours) it checks GitHub, downloads a new version in the background, verifies its SHA-256 and applies it on the next Discord restart, rolling back on its own if the new version fails to start ("Atualizar automaticamente" in the plugin settings turns this into a notice only). If you use the Vencord installer's "Repair", run the Telinha installer again. It needs official Vencord to be installed first.
+It is a plugin for [Vencord](https://github.com/Vendicated/Vencord) (a Discord client mod): early, but an official release ([latest version](https://github.com/HumbertoFernandes7/Telinha/releases/latest)). You keep the **official Vencord**: install Telinha with [**`TelinhaInstaller.exe`**](https://github.com/HumbertoFernandes7/Telinha/releases/latest/download/TelinhaInstaller.exe) (direct download of the latest release; notes on the [latest release page](https://github.com/HumbertoFernandes7/Telinha/releases/latest)). SmartScreen will warn because it is not code-signed yet: "More info" > "Run anyway". Click Install and reopen Discord; Telinha comes enabled. It does not modify Vencord's files; running the installer again and choosing Uninstall puts Vencord back exactly as before. Telinha updates itself: when Discord opens (and every 6 hours) it checks GitHub, downloads a new version in the background, verifies its SHA-256 and applies it on the next Discord restart, rolling back on its own if the new version fails to start ("Atualizar automaticamente" in the plugin settings turns this into a notice only). If you use the Vencord installer's "Repair", run the Telinha installer again. It needs official Vencord to be installed first.
 
 - **Requirements:** Windows 10 2004+/11, Discord desktop with official Vencord. Everyone who streams or watches needs Telinha.
 - **Verified so far:** screen/window capture in stock Discord on Windows, window audio, a direct connection between two homes (720p, ~57 fps, 0% loss), viewing in a separate Discord window, and the installer + add-on on top of the official Vencord on a real PC (streaming with whole-screen audio working).
