@@ -122,6 +122,9 @@ describe("releases (scripts/release.mjs)", () => {
             assert.equal(r.novidadesSection(BODY), "- **Volume:** igual na call e na janela.\n\n### Detalhe\n\nmais texto");
             assert.equal(r.novidadesSection("## Novidades da 0.2.6\n- a\n# Fim\n- b"), "- a");
             assert.equal(r.novidadesSection("## novidades\n- a"), "- a");
+            // a rule ends it too: a footer below it stays out
+            assert.equal(r.novidadesSection("## Novidades\n- a\n  - b\n\n---\n\nGenerated with Claude Code"), "- a\n  - b");
+            assert.equal(r.novidadesSection("## Novidades\n- a\n* * *\nfooter"), "- a");
         });
 
         test("no such heading, or an empty one: null", () => {

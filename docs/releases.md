@@ -16,7 +16,8 @@ installer, both from `releases/latest`.
 ## What to write in the `develop` → `main` pull request
 
 A `## Novidades` section, in Portuguese, for the people who use Telinha: it becomes "Novidades da X.Y.Z" in the release
-notes. Everything else in the description stays out of the notes. Include the short "**Da 0.2.x:**" recap lines of the
+notes. It ends at the next `#`/`##` heading or a `---` line; everything else in the description stays out of the notes
+(put a `---` before a footer such as "Generated with Claude Code"). Include the short "**Da 0.2.x:**" recap lines of the
 earlier versions there too, if you want them (copy them from the last release's notes and add one line).
 
 ```markdown

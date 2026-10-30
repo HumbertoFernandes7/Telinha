@@ -1,7 +1,8 @@
 <!--
   Release notes of every Telinha release, filled in by `node scripts/release.mjs notes` in CI (docs/releases.md).
   Placeholders: {{VERSION}} the version (0.2.6); {{NOVIDADES}} the "## Novidades" section of the pull request merged
-  into main (write it there, in Portuguese, for the people who use Telinha; "**Da 0.2.x:**" recap lines included);
+  into main, up to the next heading or --- line (write it there, in Portuguese, for the people who use Telinha;
+  "**Da 0.2.x:**" recap lines included);
   {{CHECKSUMS}} the SHA-256 lines of TelinhaInstaller.exe and the add-on zip, which the installer and the add-on's
   automatic updater read: generated, never write them here; {{COMMIT}} the commit the files were built from.
   Every placeholder must stay. This comment is not published. Edit the fixed text below freely: CI renders this file

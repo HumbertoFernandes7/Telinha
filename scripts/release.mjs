@@ -131,12 +131,15 @@ export function planRelease({ pkgVersion, tags, changed = [], descends = true })
 const stripComments = s => s.replace(/<!--[\s\S]*?-->[ \t]*\n?/g, "");
 const normalize = s => String(s ?? "").replace(/\r\n?/g, "\n");
 
-/** The text under a "## Novidades..." heading (up to the next # or ## heading), or null when there is none or it is empty. */
+/**
+ * The text under a "## Novidades..." heading, up to the next # or ## heading or a --- line (so a footer after a rule,
+ * like "Generated with...", stays out), or null when there is none or it is empty.
+ */
 export function novidadesSection(body) {
     const lines = stripComments(normalize(body)).split("\n");
     const start = lines.findIndex(l => /^ {0,3}##\s+Novidades\b/i.test(l));
     if (start === -1) return null;
-    let end = lines.findIndex((l, i) => i > start && /^ {0,3}#{1,2}\s/.test(l));
+    let end = lines.findIndex((l, i) => i > start && (/^ {0,3}#{1,2}\s/.test(l) || /^ {0,3}([-*_])( *\1){2,} *$/.test(l)));
     if (end === -1) end = lines.length;
     return lines.slice(start + 1, end).join("\n").trim() || null;
 }
