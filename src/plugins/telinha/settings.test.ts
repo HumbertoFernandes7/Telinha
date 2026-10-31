@@ -28,7 +28,7 @@ import { type Call, friendArrives, goLive, joinCall } from "@test/helpers/wpc-se
 import { migrateAccessSettings, settings } from "./settings";
 
 const STORED_KEYS = [
-    "groupPassword", "rejectOutsiders", "defaultAccess", "requireVerifiedIdentity", "defaultQuality", "autoQuality", "shareAudioByDefault",
+    "groupPassword", "rejectOutsiders", "defaultAccess", "requireVerifiedIdentity", "defaultQuality", "autoQuality", "jitterCushion", "shareAudioByDefault",
     "playSounds", "codec", "autoUpdate", "shareDiagnostics"
 ];
 
@@ -49,6 +49,7 @@ describe("as opcoes", () => {
             requireVerifiedIdentity: true,
             defaultQuality: "1080p60",
             autoQuality: true,
+            jitterCushion: 200,
             shareAudioByDefault: true,
             playSounds: true,
             codec: "auto",
@@ -71,6 +72,15 @@ describe("as opcoes", () => {
         assert.deepEqual(values("defaultQuality"), ["1080p60", "720p60", "1080p30"]);
         for (const quality of values("defaultQuality")) assert.ok(QUALITY[quality as keyof typeof QUALITY], `defaultQuality ${quality}`);
         assert.deepEqual(values("codec"), ["auto", "h264", "vp8", "vp9", "av1"]);
+    });
+
+    test("'Colchão contra engasgos': Desligado, 0,2 s (padrão) ou 0,4 s, com uma linha simples", () => {
+        const def = settings.def.jitterCushion;
+        assert.equal(def.displayName, "Colchão contra engasgos");
+        assert.equal(def.description, "Ao assistir: a imagem chega um pouco atrasada, mas não engasga em soluços da internet.");
+        assert.deepEqual(def.options.map(o => [o.label, o.value, !!(o as { default?: boolean; }).default]), [
+            ["Desligado", 0, false], ["0,2 s (padrão)", 200, true], ["0,4 s", 400, false]
+        ]);
     });
 
     test("'Exigir identidade verificada' aparece (o build tem Client ID do Discord)", () => {

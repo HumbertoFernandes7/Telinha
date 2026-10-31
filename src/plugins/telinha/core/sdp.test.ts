@@ -164,13 +164,18 @@ describe("mungeRemoteSdp: ordem dos codecs de video", () => {
 });
 
 describe("mungeRemoteSdp: o que nunca e mexido", () => {
-    test("m-section sem mid, rejeitada (porta 0) ou em que nao enviamos fica igual", () => {
+    test("m-section sem mid ou rejeitada (porta 0) fica igual; numa em que nao enviamos so entra a banda (o codec e o opus, nao)", () => {
         const noMid = videoSection("1").filter(l => !l.startsWith("a=mid:"));
         const rejected = videoSection("3", 0);
         const notOurs = videoSection("4");
         const sdp = sdpOf([noMid, rejected, notOurs, audioSection("5")]);
-        const res = mungeRemoteSdp(sdp, plan({ videoMids: new Set(["1", "3"]), audioMids: new Set(["0"]), codec: "h264", bitrate: { startKbps: 1, maxKbps: 2 } }));
-        assert.deepEqual(res, { sdp, changes: [], notes: [] });
+        const p = plan({ videoMids: new Set(["1", "3"]), audioMids: new Set(["0"]), codec: "h264", bitrate: { startKbps: 1, maxKbps: 2 } });
+        const res = mungeRemoteSdp(sdp, p);
+        assert.deepEqual(res.changes, ["mid 4: x-google-start-bitrate=1;x-google-max-bitrate=2 em VP8/H264/VP9"], "a banda inicial da conexao e uma so: vai em toda m-section de video");
+        const alone = mungeRemoteSdp(sdpOf([notOurs]), { ...p, codec: null }).sdp.split("\r\n").slice(HEAD.length, -1);
+        assert.ok(alone.some(l => l.includes("x-google-start-bitrate=1")));
+        assert.equal(res.sdp, sdpOf([noMid, rejected, alone, audioSection("5")]), "as outras ficam iguais");
+        assert.deepEqual(mungeRemoteSdp(sdp, { ...p, bitrate: null }), { sdp, changes: [], notes: [] }, "sem a banda: nada nelas");
     });
 
     test("sem codec nem bitrate: o video fica igual", () => {

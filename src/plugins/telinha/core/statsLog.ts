@@ -15,7 +15,8 @@ import type { QualityLevel } from "@plugins/telinha/types";
 
 import { errorText, logThrottled } from "./log";
 import { LEVELS } from "./quality/levels";
-import { diffSamples, type SenderLogCounters, type SenderSample, type WindowMetrics } from "./quality/stats";
+import { delta, diffSamples, linkWindow, NO_LINK_COUNTERS, ratio, type SenderSample, type WindowMetrics } from "./quality/stats";
+import { TEREDO_TEXT, type TeredoSide } from "./teredo";
 
 /** Intervalo das linhas periodicas (por envio e por transmissao assistida). */
 export const STATS_LOG_MS = 10_000;
@@ -39,6 +40,10 @@ export function guardStatsLog<T>(fn: () => T): T | undefined {
 const STATS_LOG_SLACK_MS = 1000;
 /** Janelas de ~2 s guardadas para as medianas do resumo (~11 h); depois disso as medianas ficam com as primeiras. */
 const MAX_MEDIAN_WINDOWS = 20_000;
+/** Trocas de nivel listadas no resumo (as primeiras; o resto so conta). */
+const MAX_LISTED_CHANGES = 6;
+/** Tamanhos e fps medidos listados no resumo (os de mais tempo; o resto vira "outros"). */
+const MAX_LISTED_SHARES = 4;
 
 /** As linhas deste modulo (os testes que conferem o log linha a linha as deixam de fora). */
 export const STATS_LINE_RE = /^(?:Envio p\/|Recepção de|Resumo do envio p\/|Resumo da recepção de) /;
@@ -90,16 +95,6 @@ function median(values: readonly number[]): number | null {
     return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
-/** Diferenca de um contador acumulado entre duas leituras; null sem um dos lados ou se ele voltou (reiniciado). */
-function delta(a: number | null, b: number | null): number | null {
-    return a != null && b != null && b >= a ? b - a : null;
-}
-
-/** a / b com b > 0; senao null. */
-function ratio(a: number | null, b: number | null): number | null {
-    return a != null && b ? a / b : null;
-}
-
 /** Soma que ignora o que falta (null + null = null). */
 const add = (acc: number | null, v: number | null) => (v == null ? acc : (acc ?? 0) + v);
 
@@ -110,15 +105,30 @@ function pushCapped(list: number[], v: number | null) {
 /** A janela do log comecou ha STATS_LOG_MS (com a folga da amostragem)? */
 const logDue = (base: { at: number; }, cur: { at: number; }) => cur.at - base.at >= STATS_LOG_MS - STATS_LOG_SLACK_MS;
 
+/** Soma `ms` na chave `key`. */
+function addTime<K>(map: Map<K, number>, key: K, ms: number) {
+    map.set(key, (map.get(key) ?? 0) + ms);
+}
+
+/** "1920x1080 92%, 1280x720 8%": as chaves de mais tempo primeiro, as demais somadas em "outros". */
+function shares<K>(map: Map<K, number>, label: (key: K) => string): string | null {
+    const total = [...map.values()].reduce((a, b) => a + b, 0);
+    if (!total) return null;
+    const sorted = [...map].sort((a, b) => b[1] - a[1]);
+    const shown = sorted.slice(0, MAX_LISTED_SHARES).map(([k, ms]) => `${label(k)} ${Math.round(ms / total * 100)}%`);
+    const rest = sorted.slice(MAX_LISTED_SHARES).reduce((a, [, ms]) => a + ms, 0);
+    return [...shown, ...(rest ? [`outros ${Math.round(rest / total * 100)}%`] : [])].join(", ");
+}
+
+/** "rota srflx/srflx via Teredo (este PC)": o tipo dos candidatos (se `route`) e o marcador do Teredo (se `teredo`). */
+function routeText(route: string | null, teredo: TeredoSide | null | undefined): string | null {
+    if (!route && !teredo) return null;
+    return `rota ${join([route, !!teredo && TEREDO_TEXT[teredo]])}`;
+}
+
 // #endregion
 
 // #region envio (quem transmite)
-
-const NO_SENDER_LOG: SenderLogCounters = {
-    mimeType: null, targetKbps: null, packetsSent: null, retransmittedPacketsSent: null, retransmittedBytesSent: null, packetSendDelay: null,
-    nackCount: null, pliCount: null, keyFramesEncoded: null, qpSum: null, packetsLost: null, fractionLost: null, rttMs: null, rttTotal: null,
-    rttCount: null, jitterMs: null, route: null
-};
 
 /** Degraus do espectador na hora da linha (quality/controller.ts). */
 export interface SenderLevels {
@@ -154,20 +164,19 @@ export interface SenderWindow {
     /** espera media de um pacote no pacer (ΔtotalPacketSendDelay / ΔpacketsSent) */
     pacerMs: number | null;
     route: string | null;
+    /** o par em uso passa pelo Teredo (core/teredo.ts) */
+    teredo: TeredoSide | null;
+    /** trocas de resolucao feitas pelo proprio WebRTC na janela (qualityLimitationResolutionChanges) */
+    resChanges: number | null;
 }
 
 /** A janela prev → cur (diffSamples + os contadores do log); null = curta demais ou contadores reiniciados. */
 export function senderWindow(prev: SenderSample, cur: SenderSample): SenderWindow | null {
     const m = diffSamples(prev, cur);
     if (!m) return null;
-    const a = prev.log ?? NO_SENDER_LOG;
-    const b = cur.log ?? NO_SENDER_LOG;
-    const packets = delta(a.packetsSent, b.packetsSent);
-    // packetsSent conta as retransmissoes; a perda e sobre os pacotes de midia
-    const media = opt(packets, p => Math.max(0, p - (delta(a.retransmittedPacketsSent, b.retransmittedPacketsSent) ?? 0)));
-    const lost = delta(a.packetsLost, b.packetsLost);
-    const loss = ratio(lost, media);
-    const rtt = ratio(delta(a.rttTotal, b.rttTotal), delta(a.rttCount, b.rttCount));
+    const a = prev.log ?? NO_LINK_COUNTERS;
+    const b = cur.log ?? NO_LINK_COUNTERS;
+    const link = linkWindow(a, b);
     return {
         m,
         mimeType: b.mimeType,
@@ -176,17 +185,19 @@ export function senderWindow(prev: SenderSample, cur: SenderSample): SenderWindo
         height: cur.frameHeight,
         targetKbps: b.targetKbps,
         rtxKbps: opt(delta(a.retransmittedBytesSent, b.retransmittedBytesSent), bytes => bytes * 8 / 1000 / m.dt),
-        lost: loss == null ? null : lost,
-        media: loss == null ? null : media,
-        lossPct: loss == null ? opt(b.fractionLost, f => f * 100) : Math.min(100, loss * 100),
-        rttMs: rtt == null ? b.rttMs : rtt * 1000,
+        lost: link.lost,
+        media: link.media,
+        lossPct: link.lossPct,
+        rttMs: link.rttMs,
         jitterMs: b.jitterMs,
         nacks: delta(a.nackCount, b.nackCount),
         plis: delta(a.pliCount, b.pliCount),
         keyframes: delta(a.keyFramesEncoded, b.keyFramesEncoded),
         qp: ratio(delta(a.qpSum, b.qpSum), cur.framesEncoded - prev.framesEncoded),
-        pacerMs: opt(ratio(delta(a.packetSendDelay, b.packetSendDelay), packets), s => s * 1000),
-        route: b.route
+        pacerMs: link.pacerMs,
+        route: b.route,
+        teredo: b.teredo ?? null,
+        resChanges: delta(a.resolutionChanges ?? null, b.resolutionChanges ?? null)
     };
 }
 
@@ -197,10 +208,11 @@ function levelsText(l: SenderLevels): string {
 
 /**
  * Linha de UM envio, ex.: "Envio p/ leo (abc123): VP9 libvpx 1280x720 29,8 fps (fonte 59) · alvo 1800 enviado 1650 rtx 40
- * est 2100 kbps · perda 0,8% rtt 34 ms jitter 6 ms · nack 12 pli 0 kf 0 · fila 3 ms · lim banda 20% cpu 0% · 9,2 ms/q qp 34
- * · nível 720p30". `route`: tipo dos candidatos, so quando muda.
+ * est 2100 kbps · perda 0,8% rtt 34 ms jitter 6 ms · nack 12 pli 0 kf 0 · fila 3 ms · lim banda 20% cpu 0% res WebRTC 0 ·
+ * 9,2 ms/q qp 34 · nível 720p30". `route`: tipo dos candidatos, so quando muda; o marcador do Teredo sai em toda linha.
+ * `change`: a troca de nivel que acabou de acontecer (a linha logo depois da decisao), ex.: "1080p60 (banda: perda)".
  */
-export function formatSenderLine(label: string, w: SenderWindow, levels: SenderLevels, route: string | null): string {
+export function formatSenderLine(label: string, w: SenderWindow, levels: SenderLevels, route: string | null, change: string | null = null): string {
     const { m } = w;
     return `Envio p/ ${label}: ` + join([
         join([coder(w.mimeType, w.implementation, m.hardware), size(w.width, w.height), `${dec(m.encodedFps)} fps`, opt(m.sourceFps, f => `(fonte ${int(f)})`)]),
@@ -208,10 +220,10 @@ export function formatSenderLine(label: string, w: SenderWindow, levels: SenderL
         join([opt(w.lossPct, p => `perda ${dec(p)}%`), opt(w.rttMs, v => `rtt ${int(v)} ms`), opt(w.jitterMs, v => `jitter ${int(v)} ms`)]),
         join([opt(w.nacks, n => `nack ${n}`), opt(w.plis, n => `pli ${n}`), opt(w.keyframes, n => `kf ${n}`)]),
         opt(w.pacerMs, v => `fila ${int(v)} ms`),
-        `lim banda ${pct(m.bandwidthFraction)} cpu ${pct(m.cpuFraction)}`,
+        join([`lim banda ${pct(m.bandwidthFraction)} cpu ${pct(m.cpuFraction)}`, opt(w.resChanges, n => `res WebRTC ${n}`)]),
         join([opt(m.encodeMsPerFrame, v => `${dec(v)} ms/q`), opt(w.qp, v => `qp ${int(v)}`)]),
-        `nível ${levelsText(levels)}`,
-        opt(route, r => `rota ${r}`)
+        `nível ${levelsText(levels)}` + (change ? `, antes ${change}` : ""),
+        routeText(route, w.teredo)
     ], " · ");
 }
 
@@ -229,6 +241,16 @@ export class SenderLog {
     private levelSince = 0;
     private readonly levelMs = new Map<QualityLevel, number>();
     private changes = 0;
+    /** as trocas de nivel para o resumo, ex.: "1080p60→720p60 (banda: perda) aos 45 s" (as MAX_LISTED_CHANGES primeiras) */
+    private readonly changeList: string[] = [];
+    /** a troca que a proxima linha forcada mostra, ex.: "1080p60 (banda: perda)" */
+    private lastChange: string | null = null;
+    /** tempo (ms) em cada tamanho codificado e em cada fps medido (arredondado a 5) */
+    private readonly sizeMs = new Map<string, number>();
+    private readonly fpsMs = new Map<number, number>();
+    /** trocas de resolucao do proprio WebRTC (null = o Chromium nao expos) */
+    private resChanges: number | null = null;
+    private teredo: TeredoSide | null = null;
     private windows = 0;
     private seconds = 0;
     private frames = 0;
@@ -253,6 +275,11 @@ export class SenderLog {
         this.windows++;
         this.seconds += w.m.dt;
         this.frames += w.m.encodedFps * w.m.dt;
+        const sized = size(w.width, w.height);
+        if (sized) addTime(this.sizeMs, sized, w.m.dt * 1000);
+        addTime(this.fpsMs, Math.round(w.m.encodedFps / 5) * 5, w.m.dt * 1000);
+        this.resChanges = add(this.resChanges, w.resChanges);
+        this.teredo = w.teredo ?? this.teredo;
         pushCapped(this.estKbps, w.m.availableKbps);
         pushCapped(this.sentKbps, w.m.sentKbps);
         this.lost = add(this.lost, w.lost);
@@ -272,20 +299,29 @@ export class SenderLog {
         if (!base || (!force && !logDue(base, cur))) return null;
         this.base = cur;
         const w = senderWindow(base, cur);
+        const change = force ? this.lastChange : null;
+        if (force) this.lastChange = null;
         if (!w) return null;
         const route = w.route !== this.loggedRoute ? w.route : null;
         if (route) this.loggedRoute = route;
-        return formatSenderLine(label, w, levels, route);
+        return formatSenderLine(label, w, levels, route, change);
     }
 
-    /** Degrau atual do espectador; true = mudou (conta a troca e o tempo no degrau anterior). */
-    trackLevel(level: QualityLevel, now: number): boolean {
+    /**
+     * Degrau atual do espectador; true = mudou (conta a troca, o motivo `why` e o tempo no degrau anterior). `why`: o
+     * motivo curto da troca (quality/controller.ts), ex.: "banda: perda", "CPU", "placa de vídeo: estável".
+     */
+    trackLevel(level: QualityLevel, now: number, why: string | null = null): boolean {
         if (level === this.level) return false;
-        const first = this.level === null;
+        const from = this.level;
         this.closeLevel(now);
         this.level = level;
-        if (!first) this.changes++;
-        return !first;
+        if (from === null) return false;
+        this.changes++;
+        this.lastChange = why ? `${from} (${why})` : from;
+        if (this.changeList.length < MAX_LISTED_CHANGES)
+            this.changeList.push(`${from}→${level}${why ? ` (${why})` : ""} aos ${formatDuration(now - this.startedAt)}`);
+        return true;
     }
 
     private closeLevel(now: number) {
@@ -294,10 +330,12 @@ export class SenderLog {
     }
 
     /**
-     * Resumo do envio quando o espectador para, ex.: "Resumo do envio p/ leo (abc123): 12 min 30 s · 2 trocas de nível ·
-     * 1080p60 70%, 720p60 30% · 60 fps 100%, 30 fps 0% · 58,7 fps em média · est mediana 9500 enviado mediana 8000 kbps ·
-     * perda média 0,4% rtt médio 35 ms · kf 4 · rota host/srflx". O tempo em 60/30 fps e pelo degrau; a media, a medida.
-     * null = nenhuma janela medida (nada a resumir).
+     * Resumo do envio quando o espectador para, ex.: "Resumo do envio p/ leo (abc123): 12 min 30 s · 2 trocas de nível:
+     * 1080p60→720p60 (banda: perda) aos 3 min 10 s, 720p60→1080p60 (banda: estável) aos 4 min 2 s · 1080p60 70%, 720p60 30% ·
+     * 60 fps 100%, 30 fps 0% · tamanho 1920x1080 70%, 1280x720 30% · fps medido 60 98%, 55 2% · res WebRTC 0 · 58,7 fps em
+     * média · est mediana 9500 enviado mediana 8000 kbps · perda média 0,4% rtt médio 35 ms · kf 4 · rota host/srflx". O
+     * tempo em 60/30 fps e pelo degrau; "tamanho" e "fps medido", o que o encoder de fato codificou. null = nenhuma janela
+     * medida (nada a resumir).
      */
     summary(label: string, now: number): string | null {
         if (!this.windows) return null;
@@ -308,14 +346,18 @@ export class SenderLog {
         const at60 = share(levels.filter(l => LEVELS[l].fps >= 60).reduce((acc, l) => acc + this.levelMs.get(l)!, 0));
         return `Resumo do envio p/ ${label}: ` + join([
             formatDuration(now - this.startedAt),
-            `${this.changes} ${this.changes === 1 ? "troca" : "trocas"} de nível`,
+            `${this.changes} ${this.changes === 1 ? "troca" : "trocas"} de nível`
+            + (this.changes ? `: ${this.changeList.join(", ")}${this.changes > this.changeList.length ? ` (+${this.changes - this.changeList.length})` : ""}` : ""),
             total > 0 && levels.map(l => `${l} ${share(this.levelMs.get(l)!)}%`).join(", "),
             total > 0 && `60 fps ${at60}%, 30 fps ${100 - at60}%`,
+            opt(shares(this.sizeMs, k => k), t => `tamanho ${t}`),
+            opt(shares(this.fpsMs, k => String(k)), t => `fps medido ${t}`),
+            opt(this.resChanges, n => `res WebRTC ${n}`),
             `${dec(this.frames / this.seconds)} fps em média`,
             join([opt(median(this.estKbps), k => `est mediana ${int(k)}`), `enviado mediana ${int(median(this.sentKbps)!)}`, "kbps"]),
             join([opt(ratio(this.lost, this.media), r => `perda média ${dec(r * 100)}%`), opt(ratio(this.rttSum, this.rttCount), v => `rtt médio ${int(v)} ms`)]),
             opt(this.keyframes, k => `kf ${k}`),
-            opt(this.route, r => `rota ${r}`)
+            routeText(this.route, this.teredo)
         ], " · ");
     }
 }
@@ -334,6 +376,8 @@ export interface ReceiverLogCounters {
     /** jitterBufferDelay (segundos, somado por quadro) e jitterBufferEmittedCount */
     jitterBufferDelay: number | null;
     jitterBufferEmitted: number | null;
+    /** jitterBufferTargetDelay (segundos, somado por quadro): o atraso que o jitter buffer mirou */
+    jitterBufferTarget: number | null;
     /** totalInterFrameDelay e totalSquaredInterFrameDelay (segundos), entre quadros decodificados */
     interFrameDelay: number | null;
     interFrameDelaySquared: number | null;
@@ -351,7 +395,7 @@ const num = (v: unknown): number | null => (typeof v === "number" && Number.isFi
 export function emptyReceiverCounters(): ReceiverLogCounters {
     return {
         framesReceived: null, framesDropped: null, freezeCount: null, freezeSeconds: null, jitterBufferDelay: null, jitterBufferEmitted: null,
-        interFrameDelay: null, interFrameDelaySquared: null, packetsLost: null, packetsReceived: null, nackCount: null, pliCount: null,
+        jitterBufferTarget: null, interFrameDelay: null, interFrameDelaySquared: null, packetsLost: null, packetsReceived: null, nackCount: null, pliCount: null,
         concealedSamples: null, audioSamples: null
     };
 }
@@ -364,6 +408,7 @@ export function readVideoInbound(c: ReceiverLogCounters, s: any) {
     c.freezeSeconds = num(s.totalFreezesDuration);
     c.jitterBufferDelay = num(s.jitterBufferDelay);
     c.jitterBufferEmitted = num(s.jitterBufferEmittedCount);
+    c.jitterBufferTarget = num(s.jitterBufferTargetDelay);
     c.interFrameDelay = num(s.totalInterFrameDelay);
     c.interFrameDelaySquared = num(s.totalSquaredInterFrameDelay);
     c.packetsLost = num(s.packetsLost);
@@ -391,6 +436,10 @@ export interface ReceiverSample {
     decoder: string | null;
     powerEfficient: boolean | null;
     log: ReceiverLogCounters;
+    /** "Colchão contra engasgos": o jitterBufferTarget pedido ao receiver de video (ms); null/ausente = desligado */
+    cushionMs?: number | null;
+    /** o par em uso passa pelo Teredo (core/teredo.ts) */
+    teredo?: TeredoSide | null;
 }
 
 /** Uma janela de recepcao entre duas leituras. */
@@ -401,8 +450,9 @@ export interface ReceiverWindow {
     dropped: number | null;
     freezes: number | null;
     freezeSeconds: number | null;
-    /** espera media de um quadro no jitter buffer */
+    /** espera media de um quadro no jitter buffer, e o atraso que ele mirou */
     bufferMs: number | null;
+    bufferTargetMs: number | null;
     /** desvio padrao do intervalo entre quadros decodificados */
     interFrameSigmaMs: number | null;
     /** pacotes perdidos e esperados (perdidos + recebidos); so com os dois */
@@ -435,6 +485,7 @@ export function receiverWindow(prev: ReceiverSample, cur: ReceiverSample): Recei
     const concealed = delta(a.concealedSamples, b.concealedSamples);
     const samples = delta(a.audioSamples, b.audioSamples);
     const concealedRatio = ratio(concealed, samples);
+    const emitted = delta(a.jitterBufferEmitted, b.jitterBufferEmitted);
     return {
         dt,
         decodedFps: frames / dt,
@@ -442,7 +493,8 @@ export function receiverWindow(prev: ReceiverSample, cur: ReceiverSample): Recei
         dropped: delta(a.framesDropped, b.framesDropped),
         freezes: delta(a.freezeCount, b.freezeCount),
         freezeSeconds: delta(a.freezeSeconds, b.freezeSeconds),
-        bufferMs: opt(ratio(delta(a.jitterBufferDelay, b.jitterBufferDelay), delta(a.jitterBufferEmitted, b.jitterBufferEmitted)), s => s * 1000),
+        bufferMs: opt(ratio(delta(a.jitterBufferDelay, b.jitterBufferDelay), emitted), s => s * 1000),
+        bufferTargetMs: opt(ratio(delta(a.jitterBufferTarget ?? null, b.jitterBufferTarget ?? null), emitted), s => s * 1000),
         interFrameSigmaMs: mean == null || meanSq == null ? null : Math.sqrt(Math.max(0, meanSq - mean * mean)) * 1000,
         lost: loss == null ? null : lost,
         expected: loss == null ? null : expected,
@@ -458,22 +510,28 @@ export function receiverWindow(prev: ReceiverSample, cur: ReceiverSample): Recei
 
 const freezesText = (count: number, seconds: number | null) => `congelou ${count}x` + (count && seconds != null ? ` (${dec(seconds)} s)` : "");
 
+/** "buffer 210 ms alvo 205 ms colchão 200 ms": a espera no jitter buffer, o atraso que ele mirou e o colchão pedido. */
+function bufferText(bufferMs: number | null, targetMs: number | null, cushionMs: number | null | undefined): string | null {
+    return join([opt(bufferMs, v => `buffer ${int(v)} ms`), opt(targetMs, v => `alvo ${int(v)} ms`), opt(cushionMs, v => `colchão ${int(v)} ms`)]) || null;
+}
+
 /**
  * Linha de UMA transmissao assistida, ex.: "Recepção de leo (abc123): VP9 libvpx 1280x720 · 29,8 fps decodificados de
- * 30,0 recebidos, 0 descartados · congelou 1x (0,4 s) · buffer 45 ms · σ entre quadros 6 ms · perda 0,8% · nack 3 pli 0 ·
- * 1650 kbps · áudio ocultado 0,2%".
+ * 30,0 recebidos, 0 descartados · congelou 1x (0,4 s) · buffer 245 ms alvo 240 ms colchão 200 ms · σ entre quadros 6 ms ·
+ * perda 0,8% · nack 3 pli 0 · 1650 kbps · áudio ocultado 0,2%". O marcador do Teredo sai no fim, quando ha.
  */
 export function formatReceiverLine(label: string, cur: ReceiverSample, w: ReceiverWindow): string {
     return `Recepção de ${label}: ` + join([
         join([coder(cur.codec, cur.decoder, cur.powerEfficient), size(cur.width, cur.height)]),
         join([`${dec(w.decodedFps)} fps decodificados`, opt(w.receivedFps, f => `de ${dec(f)} recebidos`)]) + (opt(w.dropped, n => `, ${n} descartados`) ?? ""),
         opt(w.freezes, n => freezesText(n, w.freezeSeconds)),
-        opt(w.bufferMs, v => `buffer ${int(v)} ms`),
+        bufferText(w.bufferMs, w.bufferTargetMs, cur.cushionMs),
         opt(w.interFrameSigmaMs, v => `σ entre quadros ${int(v)} ms`),
         opt(w.lossPct, p => `perda ${dec(p)}%`),
         join([opt(w.nacks, n => `nack ${n}`), opt(w.plis, n => `pli ${n}`)]),
         `${int(w.kbps)} kbps`,
-        opt(w.concealedPct, p => `áudio ocultado ${dec(p)}%`)
+        opt(w.concealedPct, p => `áudio ocultado ${dec(p)}%`),
+        routeText(null, cur.teredo)
     ], " · ");
 }
 
@@ -492,6 +550,9 @@ export class ReceiverLog {
     private expected: number | null = null;
     private bufferSum: number | null = null;
     private bufferCount = 0;
+    private targetSum: number | null = null;
+    private targetCount = 0;
+    private teredo: TeredoSide | null = null;
     private concealed: number | null = null;
     private audioSamples: number | null = null;
     private readonly kbps: number[] = [];
@@ -517,6 +578,9 @@ export class ReceiverLog {
             this.expected = add(this.expected, w.expected);
             this.bufferSum = add(this.bufferSum, w.bufferMs);
             if (w.bufferMs != null) this.bufferCount++;
+            this.targetSum = add(this.targetSum, w.bufferTargetMs);
+            if (w.bufferTargetMs != null) this.targetCount++;
+            this.teredo = cur.teredo ?? this.teredo;
             this.concealed = add(this.concealed, w.concealed);
             this.audioSamples = add(this.audioSamples, w.audioSamples);
             pushCapped(this.kbps, w.kbps);
@@ -529,7 +593,7 @@ export class ReceiverLog {
     /**
      * Resumo quando a transmissao assistida acaba, ex.: "Resumo da recepção de leo (abc123): 12 min 30 s · VP9 libvpx
      * 1280x720 · 29,5 fps em média · congelou 3x (1,2 s) · 12 descartados · perda média 0,4% · mediana 1650 kbps · buffer
-     * médio 45 ms · áudio ocultado 0,2%". null = nenhuma janela medida.
+     * médio 245 ms alvo médio 240 ms colchão 200 ms · áudio ocultado 0,2%". null = nenhuma janela medida.
      */
     summary(label: string, now: number): string | null {
         const { last } = this;
@@ -542,8 +606,13 @@ export class ReceiverLog {
             opt(this.dropped, n => `${n} descartados`),
             opt(ratio(this.lost, this.expected), r => `perda média ${dec(r * 100)}%`),
             `mediana ${int(median(this.kbps)!)} kbps`,
-            opt(ratio(this.bufferSum, this.bufferCount), v => `buffer médio ${int(v)} ms`),
-            opt(ratio(this.concealed, this.audioSamples), r => `áudio ocultado ${dec(r * 100)}%`)
+            join([
+                opt(ratio(this.bufferSum, this.bufferCount), v => `buffer médio ${int(v)} ms`),
+                opt(ratio(this.targetSum, this.targetCount), v => `alvo médio ${int(v)} ms`),
+                opt(last.cushionMs, v => `colchão ${int(v)} ms`)
+            ]),
+            opt(ratio(this.concealed, this.audioSamples), r => `áudio ocultado ${dec(r * 100)}%`),
+            routeText(null, this.teredo)
         ], " · ");
     }
 }

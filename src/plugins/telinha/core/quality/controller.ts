@@ -12,9 +12,12 @@
 // - a banda de um espectador so limita o degrau DELE.
 // Nivel efetivo do espectador = o mais restritivo entre o global e o dele (levels.meet).
 //
-// Cuidados com a adaptacao propria do WebRTC (degradationPreference "maintain-framerate"):
-// ao sentir CPU/banda ele mesmo reduz a resolucao, e so desfaz depois de >=10 s sem sobrecarga.
-// Logo, "qualityLimitationReason = cpu" continua aparecendo depois que nos ja descemos; so conta
+// Adaptacao propria do WebRTC: desde a 0.2.10 os envios usam degradationPreference "maintain-framerate-and-resolution"
+// (streaming.ts → applySenderParams): num soluco da internet o WebRTC nao muda mais a resolucao nem o fps sozinho, so a
+// imagem fica mais borrada por um momento. Quem muda o degrau e so este controller, e para a rede so com problema que
+// dura (trackNet: perda, RTT, fila do pacer ou banda estimada curta por mais que um soluco). Num Chromium que recusa essa
+// preferencia, vale a antiga ("maintain-framerate"): ao sentir CPU ele mesmo reduz a resolucao, e so desfaz depois de
+// >=10 s sem sobrecarga. Logo, "qualityLimitationReason = cpu" continua aparecendo depois que nos ja descemos; so conta
 // como sinal se a resolucao real estiver abaixo do nosso degrau E ja passou esse tempo.
 //
 // Placa de video (encoder por hardware, ex.: NVENC): tambem e COMPARTILHADA, uma unidade de codificacao para os
@@ -72,7 +75,42 @@ const UPLINK_TTL_MS = 60_000;
 // janelas de ~2 s seguidas
 const FPS_STREAK = 2;
 const CPU_STREAK = 2;
-const BW_STREAK = 3;
+
+// Rede de UM espectador (o degrau dele) e o upload (o de todos). Uma janela de ~2 s mostra a rede no limite quando ha:
+// - congestionamento: perda >= NET_LOSS_PCT, RTT NET_RTT_RISE_MS acima do menor RTT recente (a fila do caminho
+//   cresceu) ou pacotes esperando mais de NET_PACER_MS no pacer deste PC;
+// - banda curta: a banda estimada abaixo do que o degrau pede (LEVELS.minKbps), com o envio usando >= NET_FULL_RATIO
+//   dela (o caminho esta cheio; com menos, e o encoder que pede pouco, ex.: tela parada).
+// So desce com o problema seguido por mais que um soluco (log de 31/10: dois soluços de ~10 s, e o WebRTC encolhia a
+// imagem de 1080p a 320x180 e levava ~60 s para voltar):
+const NET_LOSS_PCT = 2;
+const NET_RTT_RISE_MS = 60;
+const NET_PACER_MS = 100;
+const NET_FULL_RATIO = 0.85;
+/** o menor RTT das janelas destes ultimos ms e a base sem fila */
+const RTT_BASE_MS = 120_000;
+/**
+ * Congestionamento seguido por isto: desce. Um soluco de 10 s cai em no maximo 6 janelas de 2 s (12 s, contando as das
+ * pontas), entao nunca chega aqui.
+ */
+const CONGESTED_MS = 14_000;
+/**
+ * So a banda curta, num degrau em que a estimativa ja deu o que ele pede: desce depois disto. Depois de um soluco o
+ * estimador do WebRTC (GCC) sobe devagar: no log de 31/10 levou ~20-25 s para voltar acima dos 4,5 Mbps do 1080p60. Num
+ * degrau em que a estimativa nunca deu o que ele pede (caminho estreito), vale o CONGESTED_MS.
+ */
+const SHORT_MS = 30_000;
+/** recuo do estimador: a banda estimada caiu para isto da janela anterior, ou menos (o GCC recua para 0,85 do entregue) */
+const BACKOFF_RATIO = 0.85;
+/**
+ * Subir a banda de um espectador: estavel (sem problema, sem recuo e com a banda estimada >= UP_HEADROOM x o piso do degrau
+ * de cima em toda janela) por BW_UP_STABLE_MS. Desceu de novo ate BW_UNDONE_MS depois de subir: a espera dobra, ate
+ * BW_MAX_HOLD_MS; volta para BW_UP_STABLE_MS depois de BW_HOLD_RESET_MS sem descer.
+ */
+const BW_UP_STABLE_MS = 30_000;
+const BW_UNDONE_MS = 60_000;
+const BW_MAX_HOLD_MS = 600_000;
+const BW_HOLD_RESET_MS = 900_000;
 
 const FPS_SHORT_RATIO = 0.8;
 const MIN_SOURCE_FPS = 20;
@@ -107,7 +145,23 @@ const GPU_STREAK = 2;
  */
 const GPU_FIXED_RATE = 2.7 * 1920 * 1080 * 60;
 
+/** Quanto esperar estavel antes de subir e como a espera cresce quando a subida e desfeita. */
+interface HoldRules {
+    baseMs: number;
+    maxMs: number;
+    /** desceu de novo ate isto depois de subir: a subida foi desfeita e a espera dobra */
+    undoneMs: number;
+    /** sem descer por isto: a espera volta para baseMs */
+    resetMs: number;
+}
+
+/** O degrau global (CPU, placa de video, upload): como sempre foi. */
+const GLOBAL_HOLD: HoldRules = { baseMs: BASE_HOLD_MS, maxMs: MAX_HOLD_MS, undoneMs: FAILED_UP_MS, resetMs: HOLD_RESET_MS };
+/** A banda de um espectador. */
+const BW_HOLD: HoldRules = { baseMs: BW_UP_STABLE_MS, maxMs: BW_MAX_HOLD_MS, undoneMs: BW_UNDONE_MS, resetMs: BW_HOLD_RESET_MS };
+
 interface Hold {
+    rules: HoldRules;
     holdMs: number;
     lastDownAt: number;
     lastUpAt: number;
@@ -115,10 +169,10 @@ interface Hold {
     calmSince: number;
 }
 
-const newHold = (now: number): Hold => ({ holdMs: BASE_HOLD_MS, lastDownAt: -Infinity, lastUpAt: -Infinity, calmSince: now });
+const newHold = (now: number, rules: HoldRules): Hold => ({ rules, holdMs: rules.baseMs, lastDownAt: -Infinity, lastUpAt: -Infinity, calmSince: now });
 
 function noteDown(h: Hold, now: number) {
-    if (now - h.lastUpAt < FAILED_UP_MS) h.holdMs = Math.min(h.holdMs * 2, MAX_HOLD_MS);
+    if (now - h.lastUpAt < h.rules.undoneMs) h.holdMs = Math.min(h.holdMs * 2, h.rules.maxMs);
     h.lastDownAt = h.calmSince = now;
 }
 
@@ -127,8 +181,36 @@ function noteUp(h: Hold, now: number) {
 }
 
 function relax(h: Hold, now: number) {
-    if (h.holdMs > BASE_HOLD_MS && now - h.lastDownAt >= HOLD_RESET_MS) h.holdMs = BASE_HOLD_MS;
+    if (h.holdMs > h.rules.baseMs && now - h.lastDownAt >= h.rules.resetMs) h.holdMs = h.rules.baseMs;
 }
+
+/** A rede de UM espectador ao longo das janelas (trackNet). */
+interface NetState {
+    /** degrau a que os periodos abaixo se referem (mudou: recomecam) */
+    level: QualityLevel | null;
+    /** inicio das janelas seguidas com congestionamento (perda, RTT, fila); null = a ultima nao tinha */
+    congestedSince: number | null;
+    /** inicio das janelas seguidas com algum problema (congestionamento ou banda curta) */
+    troubleSince: number | null;
+    /** degrau em que a banda estimada ja deu o que ele pede */
+    enoughFor: QualityLevel | null;
+    /** a ultima janela: algum problema / o estimador recuou */
+    trouble: boolean;
+    backoff: boolean;
+    /** banda estimada da janela anterior */
+    lastEst: number | null;
+    /** RTT das janelas recentes (a base sem fila e o menor) */
+    rtts: { at: number; ms: number; }[];
+    /** sem problema nem recuo desde (a subida do degrau global depois de descer por upload) */
+    calmSince: number;
+}
+
+const newNet = (now: number): NetState => ({
+    level: null, congestedSince: null, troubleSince: null, enoughFor: null, trouble: false, backoff: false, lastEst: null, rtts: [], calmSince: now
+});
+
+/** Uma casa decimal com virgula. */
+const dec = (v: number) => v.toFixed(1).replace(".", ",");
 
 interface ViewerState {
     peerId: PeerId;
@@ -144,7 +226,7 @@ interface ViewerState {
     /** teto deste espectador por causa da banda dele */
     bwLevel: QualityLevel;
     bwHold: Hold;
-    bwStreak: number;
+    net: NetState;
     applied: QualityLevel | null;
     applying: boolean;
     /** a captura mudou de tamanho depois do ultimo apply: reaplicar o mesmo degrau (captureResized) */
@@ -153,6 +235,8 @@ interface ViewerState {
     expectGpu: boolean | undefined;
     /** log de estatisticas deste envio (core/statsLog.ts): linhas a cada STATS_LOG_MS e o resumo quando ele para */
     log: SenderLog;
+    /** motivo da proxima troca de degrau que o log anota (setGlobal / setViewerBw → noteLevels) */
+    changeWhy: string | null;
 }
 
 type Active = ViewerState & { metrics: WindowMetrics; };
@@ -200,7 +284,6 @@ export class QualityController {
     private fpsStreak = 0;
     private cpuStreak = 0;
     private gpuStreak = 0;
-    private uploadStreak = 0;
     /** upload total medido quando a maioria dos espectadores estava limitada por banda */
     private uplink: { kbps: number; at: number; } | null = null;
     private sourceFpsEma: number | null = null;
@@ -212,7 +295,7 @@ export class QualityController {
     constructor(deps: QualityDeps) {
         this.deps = deps;
         this.global = deps.ceiling;
-        this.globalHold = newHold(performance.now());
+        this.globalHold = newHold(performance.now(), GLOBAL_HOLD);
         this.published = this.buildState();
         this.publishedKey = JSON.stringify(this.published);
     }
@@ -239,8 +322,8 @@ export class QualityController {
         const now = performance.now();
         this.viewers.set(peerId, {
             peerId, ready: false, readyAt: Infinity, ignoreUntil: now + WARMUP_MS, prev: null, metrics: null, fresh: false,
-            bwLevel: this.deps.ceiling, bwHold: newHold(now), bwStreak: 0, applied: null, applying: false, resized: false, expectGpu: gpu,
-            log: new SenderLog(now)
+            bwLevel: this.deps.ceiling, bwHold: newHold(now, BW_HOLD), net: newNet(now), applied: null, applying: false, resized: false, expectGpu: gpu,
+            log: new SenderLog(now), changeWhy: null
         });
         if (this.deps.enabled()) {
             const before = this.global;
@@ -288,13 +371,13 @@ export class QualityController {
         const now = performance.now();
         this.global = this.deps.ceiling;
         this.globalReason = null;
-        this.globalHold = newHold(now);
-        this.fpsStreak = this.cpuStreak = this.gpuStreak = this.uploadStreak = 0;
+        this.globalHold = newHold(now, GLOBAL_HOLD);
+        this.fpsStreak = this.cpuStreak = this.gpuStreak = 0;
         this.uplink = null;
         for (const v of this.viewers.values()) {
             v.bwLevel = this.deps.ceiling;
-            v.bwHold = newHold(now);
-            v.bwStreak = 0;
+            v.bwHold = newHold(now, BW_HOLD);
+            v.net = newNet(now);
             v.ignoreUntil = Math.max(v.ignoreUntil, now + SETTLE_MS);
             this.applyViewer(v);
         }
@@ -390,7 +473,9 @@ export class QualityController {
         const now = performance.now();
         for (const v of this.viewers.values()) {
             guardStatsLog(() => {
-                const line = v.log.trackLevel(this.levelFor(v.peerId), now) && v.prev && v.log.line(v.prev, this.deps.label(v.peerId), this.levelsOf(v), true);
+                const changed = v.log.trackLevel(this.levelFor(v.peerId), now, v.changeWhy);
+                v.changeWhy = null;
+                const line = changed && v.prev && v.log.line(v.prev, this.deps.label(v.peerId), this.levelsOf(v), true);
                 if (line) log.info(line);
             });
         }
@@ -533,17 +618,47 @@ export class QualityController {
         if (reason && level !== this.global) this.setGlobal(level, reason, now, `mais um espectador: ${why}`, "down");
     }
 
-    private bandwidthProblem(v: Active, now: number): string | null {
+    /**
+     * A janela nova da rede de UM espectador (ver NET_* no topo): atualiza os periodos seguidos de problema e devolve o
+     * motivo para descer o degrau dele quando o problema ja durou mais que um soluco (CONGESTED_MS; so a banda curta,
+     * SHORT_MS); null = nao desce. Na carencia de banda do espectador novo (levels.inBandwidthGrace), nada conta.
+     */
+    private trackNet(v: Active, now: number): { why: string; tag: string; } | null {
         const m = v.metrics;
+        const n = v.net;
         const level = this.levelFor(v.peerId);
-        const spec = LEVELS[level];
-        if (m.availableKbps != null && spec.minKbps > 0 && m.availableKbps < spec.minKbps)
-            return `banda estimada ${Math.round(m.availableKbps)} kbps, o degrau pede ${spec.minKbps}`;
-        const target = this.targetHeight(level);
-        const sinceDown = now - Math.max(v.bwHold.lastDownAt, this.globalHold.lastDownAt);
-        if (m.bandwidthFraction >= LIMITED_FRACTION && m.frameHeight > 0 && m.frameHeight < target * BINDING_RATIO && sinceDown >= ADAPTATION_MEMORY_MS)
-            return `o WebRTC reduziu para ${m.frameHeight}p por banda (degrau ${target}p)`;
-        return null;
+        if (n.level !== level) {
+            n.level = level;
+            n.congestedSince = n.troubleSince = null;
+        }
+        const need = LEVELS[level].minKbps;
+        const est = m.availableKbps;
+        if (m.rttMs != null) n.rtts.push({ at: now, ms: m.rttMs });
+        while (n.rtts.length && now - n.rtts[0].at > RTT_BASE_MS) n.rtts.shift();
+        const base = n.rtts.length ? Math.min(...n.rtts.map(r => r.ms)) : null;
+
+        const loss = m.lossPct != null && m.lossPct >= NET_LOSS_PCT ? `perda de ${dec(m.lossPct)}%` : null;
+        const rtt = m.rttMs != null && base != null && m.rttMs - base >= NET_RTT_RISE_MS ? `RTT de ${Math.round(m.rttMs)} ms (${Math.round(base)} ms sem fila)` : null;
+        const queue = m.pacerMs != null && m.pacerMs > NET_PACER_MS ? `fila de ${Math.round(m.pacerMs)} ms no envio` : null;
+        const congestion = loss ?? rtt ?? queue;
+        const short = est != null && need > 0 && est < need && m.sentKbps >= est * NET_FULL_RATIO
+            ? `banda estimada ${Math.round(est)} kbps, o degrau pede ${need}` : null;
+        if (est != null && est >= need) n.enoughFor = level;
+        n.backoff = n.lastEst != null && est != null && est <= n.lastEst * BACKOFF_RATIO;
+        n.lastEst = est;
+        n.trouble = !!(congestion || short);
+        if (n.trouble || n.backoff) n.calmSince = now;
+
+        const start = now - m.dt * 1000;
+        const counts = !inBandwidthGrace(v.readyAt, now);
+        n.congestedSince = counts && congestion ? n.congestedSince ?? start : null;
+        n.troubleSince = counts && n.trouble ? n.troubleSince ?? start : null;
+        // so a banda curta: depois de um soluco o estimador demora a voltar (SHORT_MS); se ela nunca deu o que o degrau pede, nao
+        const limit = n.enoughFor === level ? SHORT_MS : CONGESTED_MS;
+        const since = n.congestedSince != null && now - n.congestedSince >= CONGESTED_MS ? n.congestedSince
+            : n.troubleSince != null && now - n.troubleSince >= limit ? n.troubleSince : null;
+        if (since == null) return null;
+        return { why: `${congestion ?? short} há ${Math.round((now - since) / 1000)} s`, tag: loss ? "perda" : rtt ? "RTT" : queue ? "fila" : "banda estimada" };
     }
 
     private decide(now: number) {
@@ -582,21 +697,18 @@ export class QualityController {
                 cpuBinding = `o WebRTC reduziu ${this.deps.label(v.peerId)} para ${m.frameHeight}p por CPU (degrau ${target}p)`;
         }
 
-        // banda: a maioria limitada ao mesmo tempo = o upload do streamer
-        // (espectador novo, ainda na carencia de banda, fica de fora: nao entra em bwBad, entao nao soma
-        // no upload geral e o bwStreak dele volta a zero no laco por espectador)
-        const bwBad = new Map<Active, string>();
+        // rede: cada espectador com problema que dura (trackNet); a maioria ao mesmo tempo = o upload do streamer
+        // (espectador novo, ainda na carencia de banda, nunca entra em bwBad)
+        const bwBad = new Map<Active, { why: string; tag: string; }>();
         for (const v of active) {
-            if (inBandwidthGrace(v.readyAt, now)) continue;
-            const why = this.bandwidthProblem(v, now);
-            if (why) bwBad.set(v, why);
+            const bad = this.trackNet(v, now);
+            if (bad) bwBad.set(v, bad);
         }
         const uploadWide = this.viewers.size >= 2 && bwBad.size >= Math.max(2, Math.ceil(active.length / 2));
 
         this.gpuStreak = gpuOver ? this.gpuStreak + 1 : 0;
         this.fpsStreak = fpsShort ? this.fpsStreak + 1 : 0;
         this.cpuStreak = cpuBinding ? this.cpuStreak + 1 : 0;
-        this.uploadStreak = uploadWide ? this.uploadStreak + 1 : 0;
         if (gpuOver || fpsShort || cpuBinding || uploadWide || anyCpu) this.globalHold.calmSince = now;
 
         const sinceDown = now - this.globalHold.lastDownAt;
@@ -607,7 +719,7 @@ export class QualityController {
             globalChanged = this.stepGlobalDown("cpu", now, fpsShort);
         } else if (cpuBinding && this.cpuStreak >= CPU_STREAK && sinceDown >= ADAPTATION_MEMORY_MS) {
             globalChanged = this.stepGlobalDown("cpu", now, cpuBinding);
-        } else if (uploadWide && this.uploadStreak >= BW_STREAK && sinceDown >= DOWN_COOLDOWN_MS) {
+        } else if (uploadWide && sinceDown >= DOWN_COOLDOWN_MS) {
             const total = active.reduce((acc, v) => acc + v.metrics.sentKbps, 0);
             this.uplink = { kbps: total, at: now };
             globalChanged = this.stepGlobalDown("upload", now, `${bwBad.size} de ${active.length} espectadores com banda limitada, ${Math.round(total)} kbps enviados no total`);
@@ -616,7 +728,8 @@ export class QualityController {
         }
 
         if (uploadWide || globalChanged) {
-            for (const v of active) v.bwStreak = 0;
+            // o problema de rede de cada um era o upload (ou o degrau de todos mudou): os periodos recomecam
+            for (const v of active) v.net.congestedSince = v.net.troubleSince = null;
             return;
         }
 
@@ -624,18 +737,18 @@ export class QualityController {
         const preferMotion = this.preferMotion();
         for (const v of active) {
             relax(v.bwHold, now);
-            const why = bwBad.get(v);
-            v.bwStreak = why ? v.bwStreak + 1 : 0;
-            if (why || v.metrics.bandwidthFraction >= ANY_LIMIT_FRACTION) v.bwHold.calmSince = now;
-            const current = this.levelFor(v.peerId);
-            if (why) {
-                const next = v.bwStreak >= BW_STREAK && now - v.bwHold.lastDownAt >= DOWN_COOLDOWN_MS ? stepDown(current, preferMotion) : null;
-                if (next) this.setViewerBw(v, next, now, why, "down");
-            } else if (v.bwLevel !== this.deps.ceiling && now - v.bwHold.calmSince >= v.bwHold.holdMs) {
-                const next = stepUp(v.bwLevel, this.deps.ceiling, preferMotion);
-                const avail = v.metrics.availableKbps;
-                if (next && (avail == null || avail >= LEVELS[next].minKbps * UP_HEADROOM))
-                    this.setViewerBw(v, next, now, `estável há ${Math.round((now - v.bwHold.calmSince) / 1000)} s`, "up");
+            const bad = bwBad.get(v);
+            const m = v.metrics;
+            const next = v.bwLevel !== this.deps.ceiling ? stepUp(v.bwLevel, this.deps.ceiling, preferMotion) : null;
+            // estavel = sem problema nem recuo do estimador, sem limitacao do WebRTC e com folga para o degrau de cima
+            if (v.net.trouble || v.net.backoff || m.bandwidthFraction >= ANY_LIMIT_FRACTION
+                || (next && m.availableKbps != null && m.availableKbps < LEVELS[next].minKbps * UP_HEADROOM)) v.bwHold.calmSince = now;
+            if (bad) {
+                // sem espera entre duas descidas: depois de uma, o problema precisa durar de novo (trackNet recomeca a conta)
+                const down = stepDown(this.levelFor(v.peerId), preferMotion);
+                if (down) this.setViewerBw(v, down, now, bad.why, "down", `banda: ${bad.tag}`);
+            } else if (next && now - v.bwHold.calmSince >= v.bwHold.holdMs) {
+                this.setViewerBw(v, next, now, `estável há ${Math.round((now - v.bwHold.calmSince) / 1000)} s`, "up", "banda: estável");
             }
         }
     }
@@ -643,7 +756,7 @@ export class QualityController {
     private stepGlobalDown(reason: GlobalReason, now: number, why: string): boolean {
         const next = stepDown(this.global, this.preferMotion());
         if (!next) {
-            this.fpsStreak = this.cpuStreak = this.gpuStreak = this.uploadStreak = 0;
+            this.fpsStreak = this.cpuStreak = this.gpuStreak = 0;
             this.globalHold.lastDownAt = now; // nao tenta de novo a cada janela
             logThrottled("auto-quality-floor", "warn", `Qualidade automática: já no mínimo (${levelText(this.global)}) e ainda limitado por ${REASON_LABEL[reason]} — ${why}`, 60_000);
             return false;
@@ -663,8 +776,9 @@ export class QualityController {
         if (load && (load.perEncoder > UP_MAX_BUSY || load.total > cpuBudget() * 0.8)) return false;
         const up = this.uplinkFresh(now);
         if (up && n * LEVELS[next].minKbps > up.kbps) return false;
-        if (this.globalReason === "upload" && active.some(v =>
-            v.metrics.availableKbps != null && v.metrics.availableKbps < LEVELS[meet(next, v.bwLevel)].minKbps * UP_HEADROOM))
+        // desceu pelo upload: so sobe com a rede de todos estavel ha BW_UP_STABLE_MS (como a banda de um espectador)
+        if (this.globalReason === "upload" && active.some(v => now - v.net.calmSince < BW_UP_STABLE_MS
+            || (v.metrics.availableKbps != null && v.metrics.availableKbps < LEVELS[meet(next, v.bwLevel)].minKbps * UP_HEADROOM)))
             return false;
         const stable = `estável há ${Math.round((now - this.globalHold.calmSince) / 1000)} s`;
         this.setGlobal(next, this.globalReason ?? "cpu", now, gpu ? `${stable}, previsão de ${gpu.ms.toFixed(1)} ms por quadro na placa` : stable, "up");
@@ -677,23 +791,28 @@ export class QualityController {
         else noteUp(this.globalHold, now);
         this.global = level;
         this.globalReason = level === this.deps.ceiling ? null : reason;
-        this.fpsStreak = this.cpuStreak = this.gpuStreak = this.uploadStreak = 0;
-        for (const v of this.viewers.values()) v.ignoreUntil = Math.max(v.ignoreUntil, now + SETTLE_MS);
+        this.fpsStreak = this.cpuStreak = this.gpuStreak = 0;
+        for (const v of this.viewers.values()) {
+            v.ignoreUntil = Math.max(v.ignoreUntil, now + SETTLE_MS);
+            v.changeWhy = dir === "up" ? `${REASON_LABEL[reason]}: estável` : REASON_LABEL[reason];
+        }
         const n = this.viewers.size;
         log.info(`Qualidade automática: ${levelText(from)} → ${levelText(level)} para ${n === 1 ? "o espectador" : `os ${n} espectadores`} (${REASON_LABEL[reason]}: ${why})`
             + (dir === "down" ? `; nova subida só após ${Math.round(this.globalHold.holdMs / 1000)} s estável` : ""));
         this.emit();
     }
 
-    private setViewerBw(v: ViewerState, level: QualityLevel, now: number, why: string, dir: "down" | "up") {
+    private setViewerBw(v: ViewerState, level: QualityLevel, now: number, why: string, dir: "down" | "up", tag: string) {
         const from = this.levelFor(v.peerId);
         if (dir === "down") noteDown(v.bwHold, now);
         else noteUp(v.bwHold, now);
         v.bwLevel = level;
-        v.bwStreak = 0;
+        v.net.congestedSince = v.net.troubleSince = null;
         v.ignoreUntil = Math.max(v.ignoreUntil, now + SETTLE_MS);
+        v.changeWhy = tag;
         const to = this.levelFor(v.peerId);
-        if (to !== from) log.info(`Qualidade automática: ${levelText(from)} → ${levelText(to)} para ${this.deps.label(v.peerId)} (banda: ${why})`);
+        if (to !== from) log.info(`Qualidade automática: ${levelText(from)} → ${levelText(to)} para ${this.deps.label(v.peerId)} (banda: ${why})`
+            + (dir === "down" ? `; nova subida só após ${Math.round(v.bwHold.holdMs / 1000)} s estável` : ""));
         this.emit();
     }
 

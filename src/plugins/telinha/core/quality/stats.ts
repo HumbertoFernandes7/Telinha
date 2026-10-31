@@ -7,10 +7,13 @@
 // Leitura das estatisticas de UM RTCRtpSender de video (outbound-rtp + media-source + par de
 // candidatos) e o resumo de uma janela entre duas leituras.
 
+import { pairTeredo, type TeredoSide } from "@plugins/telinha/core/teredo";
+
 /**
- * O que a mesma leitura traz so para o log de estatisticas (core/statsLog.ts); a qualidade automatica nao usa nada
- * daqui. Contadores acumulados (diferenca entre duas leituras) e valores do momento; null = o Chromium nao expos.
- * Sem enderecos, portas nem SSRC: do par de candidatos, so o tipo.
+ * O que a mesma leitura traz da rede e para o log de estatisticas (core/statsLog.ts). A qualidade automatica usa so a
+ * perda, o RTT e a fila do pacer (linkWindow → WindowMetrics). Contadores acumulados (diferenca entre duas leituras) e
+ * valores do momento; null = o Chromium nao expos. Sem enderecos, portas nem SSRC: do par de candidatos, so o tipo e se
+ * ele passa pelo Teredo.
  */
 export interface SenderLogCounters {
     /** mimeType do codec em uso (outbound-rtp → codec), ex.: "video/VP9" */
@@ -39,6 +42,10 @@ export interface SenderLogCounters {
     jitterMs: number | null;
     /** tipos dos candidatos do par em uso, local/remoto, ex.: "host/srflx" */
     route: string | null;
+    /** o par em uso passa pelo Teredo (core/teredo.ts); null = nao, ou nao da para saber */
+    teredo: TeredoSide | null;
+    /** qualityLimitationResolutionChanges: trocas de resolucao feitas pelo proprio WebRTC */
+    resolutionChanges: number | null;
 }
 
 /** Contadores acumulados de uma leitura. */
@@ -105,6 +112,10 @@ export interface WindowMetrics {
     /** pixels codificados por segundo na janela */
     pixelsPerSecond: number;
     frameHeight: number;
+    /** rede na janela (linkWindow); null = o Chromium nao expos */
+    lossPct: number | null;
+    rttMs: number | null;
+    pacerMs: number | null;
 }
 
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
@@ -134,7 +145,9 @@ function logCounters(report: RTCStatsReport, out: any, remote: any, pair: any): 
         rttTotal: num(remote?.totalRoundTripTime),
         rttCount: num(remote?.roundTripTimeMeasurements),
         jitterMs: jitter != null ? jitter * 1000 : null,
-        route: local || peer ? `${local ?? "?"}/${peer ?? "?"}` : null
+        route: local || peer ? `${local ?? "?"}/${peer ?? "?"}` : null,
+        teredo: pairTeredo(report, pair),
+        resolutionChanges: num(out.qualityLimitationResolutionChanges)
     };
 }
 
@@ -192,6 +205,56 @@ function safeLogCounters(report: RTCStatsReport, out: any, remote: any, pair: an
 
 const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 
+/** Diferenca de um contador acumulado entre duas leituras; null sem um dos lados ou se ele voltou (reiniciado). */
+export function delta(a: number | null, b: number | null): number | null {
+    return a != null && b != null && b >= a ? b - a : null;
+}
+
+/** a / b com b > 0; senao null. */
+export function ratio(a: number | null, b: number | null): number | null {
+    return a != null && b ? a / b : null;
+}
+
+/** A rede numa janela, dos contadores de duas leituras (SenderLogCounters). */
+export interface LinkWindow {
+    /** pacotes enviados (com retransmissoes) */
+    packets: number | null;
+    /** pacotes perdidos (relatados pelo espectador) e de midia enviados; so com os dois */
+    lost: number | null;
+    media: number | null;
+    /** perda na janela (%); sem os contadores, a fractionLost do ultimo relatorio */
+    lossPct: number | null;
+    /** RTT medio na janela; sem os contadores, o do ultimo relatorio */
+    rttMs: number | null;
+    /** espera media de um pacote no pacer (ΔtotalPacketSendDelay / ΔpacketsSent) */
+    pacerMs: number | null;
+}
+
+export function linkWindow(a: SenderLogCounters, b: SenderLogCounters): LinkWindow {
+    const packets = delta(a.packetsSent, b.packetsSent);
+    // packetsSent conta as retransmissoes; a perda e sobre os pacotes de midia
+    const media = packets == null ? null : Math.max(0, packets - (delta(a.retransmittedPacketsSent, b.retransmittedPacketsSent) ?? 0));
+    const lost = delta(a.packetsLost, b.packetsLost);
+    const loss = ratio(lost, media);
+    const rtt = ratio(delta(a.rttTotal, b.rttTotal), delta(a.rttCount, b.rttCount));
+    const pacer = ratio(delta(a.packetSendDelay, b.packetSendDelay), packets);
+    return {
+        packets,
+        lost: loss == null ? null : lost,
+        media: loss == null ? null : media,
+        lossPct: loss == null ? (b.fractionLost == null ? null : b.fractionLost * 100) : Math.min(100, loss * 100),
+        rttMs: rtt == null ? b.rttMs : rtt * 1000,
+        pacerMs: pacer == null ? null : pacer * 1000
+    };
+}
+
+/** Os contadores de uma leitura sem nenhum deles (leitura sem o log). */
+export const NO_LINK_COUNTERS: SenderLogCounters = {
+    mimeType: null, targetKbps: null, packetsSent: null, retransmittedPacketsSent: null, retransmittedBytesSent: null, packetSendDelay: null,
+    nackCount: null, pliCount: null, keyFramesEncoded: null, qpSum: null, packetsLost: null, fractionLost: null, rttMs: null, rttTotal: null,
+    rttCount: null, jitterMs: null, route: null, teredo: null, resolutionChanges: null
+};
+
 /** Null quando a janela e curta demais ou os contadores voltaram (sender trocado). */
 export function diffSamples(prev: SenderSample, cur: SenderSample): WindowMetrics | null {
     const dt = (cur.at - prev.at) / 1000;
@@ -213,6 +276,7 @@ export function diffSamples(prev: SenderSample, cur: SenderSample): WindowMetric
         : cur.sourceFps;
     const encodedFps = frames / dt;
     const encodeTime = cur.totalEncodeTime - prev.totalEncodeTime;
+    const link = linkWindow(prev.log ?? NO_LINK_COUNTERS, cur.log ?? NO_LINK_COUNTERS);
 
     return {
         dt,
@@ -226,6 +290,9 @@ export function diffSamples(prev: SenderSample, cur: SenderSample): WindowMetric
         encodeMsPerFrame: frames > 0 && encodeTime >= 0 ? encodeTime / frames * 1000 : null,
         hardware: isHardwareEncoder(cur.powerEfficient, cur.implementation),
         pixelsPerSecond: cur.frameWidth * cur.frameHeight * encodedFps,
-        frameHeight: cur.frameHeight
+        frameHeight: cur.frameHeight,
+        lossPct: link.lossPct,
+        rttMs: link.rttMs,
+        pacerMs: link.pacerMs
     };
 }

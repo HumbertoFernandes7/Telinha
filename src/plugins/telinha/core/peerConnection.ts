@@ -12,9 +12,14 @@
 //   transceivers em que ENVIAMOS video para esse peer (codec escolhido por chooseCodec; H.264: o perfil que
 //   este PC codifica por hardware na frente das outras variantes).
 // - setRemoteDescription(): reordena o codec escolhido para o inicio das m-sections em que enviamos e
-//   injeta x-google-start/max-bitrate + opus estereo (ver sdp.ts). Isso garante o codec mesmo quando
-//   quem oferta e o outro lado (ex.: os dois transmitindo um para o outro, transceiver reaproveitado)
+//   injeta x-google-start/max-bitrate (em todas as de video) + opus estereo (ver sdp.ts). Isso garante o codec mesmo
+//   quando quem oferta e o outro lado (ex.: os dois transmitindo um para o outro, transceiver reaproveitado)
 //   e corta a rampa inicial de bitrate (~12 s de 320x180 ate 720p no spike).
+// - candidatos pelo Teredo (core/teredo.ts → TeredoFilter): o Trystero manda os nossos candidatos um a um pelo
+//   `onicecandidate` (trickle) e o SDP de cada renegociacao pelo `localDescription`, e aplica os do outro lado com
+//   addIceCandidate e setRemoteDescription. Os quatro passam por aqui: um candidato pelo Teredo so sai ou entra quando nao
+//   ha outro caminho para o mesmo componente. Os ganchos sao desta classe (o Trystero so ve ela): nada no Trystero e
+//   mudado. Se um dia ele passar a ler os candidatos por outro caminho, o filtro so deixa de agir (a conexao nao quebra).
 //
 // Se o SDP ajustado for recusado, aplica o original (nunca derruba a conexao por causa do ajuste).
 //
@@ -38,6 +43,7 @@
 import { applyCodecPreferences } from "./codec";
 import { errorText, log, logThrottled } from "./log";
 import { mungeRemoteSdp, type VideoCodecName } from "./sdp";
+import { TeredoFilter } from "./teredo";
 
 export interface SendPlan {
     /** codec de video que queremos ENVIAR para o peer desta conexao */
@@ -121,7 +127,8 @@ function mungeRemoteDescription(pc: RTCPeerConnection, description: RTCSessionDe
     const mids = (kind: "audio" | "video") => new Set(sendingTransceivers(pc, kind).map(t => t.mid).filter((m): m is string => !!m));
     const videoMids = mids("video");
     const audioMids = mids("audio");
-    if (!videoMids.size && !audioMids.size) return description;
+    // a banda vai em toda m-section de video, enviando ou nao (sdp.ts → RemoteSdpPlan.bitrate)
+    if (!videoMids.size && !audioMids.size && !plan.bitrate) return description;
 
     const result = mungeRemoteSdp(description.sdp, { videoMids, audioMids, codec: plan.codec, h264Profile: plan.h264Profile, bitrate: plan.bitrate });
     const summary = [...result.changes, ...result.notes].join("; ");
@@ -132,9 +139,81 @@ function mungeRemoteDescription(pc: RTCPeerConnection, description: RTCSessionDe
     return result.changes.length ? { type: description.type, sdp: result.sdp } : description;
 }
 
+/** Nome do peer desta conexao para o log (do plano de envio); nunca lanca. */
+function labelOf(pc: RTCPeerConnection): string {
+    try {
+        return hooks?.planFor(pc)?.label ?? "conexão";
+    } catch {
+        return "conexão";
+    }
+}
+
+const teredoFilters = new WeakMap<RTCPeerConnection, TeredoFilter>();
+
+/** O filtro de candidatos pelo Teredo desta conexao (core/teredo.ts). */
+function teredoOf(pc: RTCPeerConnection): TeredoFilter {
+    let filter = teredoFilters.get(pc);
+    if (!filter) teredoFilters.set(pc, filter = new TeredoFilter(() => labelOf(pc)));
+    return filter;
+}
+
+/** O SDP dos nossos candidatos que vai para o outro lado, sem os pelo Teredo que tem outro caminho. */
+function filteredLocal(pc: RTCPeerConnection, d: RTCSessionDescription | null): RTCSessionDescription | null {
+    if (!d?.sdp) return d;
+    let { sdp } = d;
+    try {
+        sdp = teredoOf(pc).filterSdp(d.sdp, "local");
+    } catch (e) {
+        logThrottled("pc-teredo-local", "warn", "Falha ao filtrar os candidatos do SDP local (usando o original): " + errorText(e));
+    }
+    return sdp === d.sdp ? d : { type: d.type, sdp, toJSON: () => ({ type: d.type, sdp }) } as RTCSessionDescription;
+}
+
 /** Classe criada sob demanda (nunca no carregamento do modulo). */
 export function getPeerConnectionClass(): typeof RTCPeerConnection {
-    return PeerConnectionClass ??= class TelinhaPeerConnection extends RTCPeerConnection {
+    if (PeerConnectionClass) return PeerConnectionClass;
+    const iceHandlers = new WeakMap<RTCPeerConnection, ((ev: RTCPeerConnectionIceEvent) => any) | null>();
+    const Base = RTCPeerConnection;
+    const cls = class TelinhaPeerConnection extends Base {
+        constructor(config?: RTCConfiguration) {
+            super(config);
+            // os nossos candidatos: o handler que o Trystero poe em onicecandidate (acessor abaixo) so recebe o que o
+            // filtro deixa passar; o evento original nunca chega nele direto
+            this.addEventListener("icecandidate", ev => {
+                const handler = iceHandlers.get(this);
+                if (!handler) return;
+                try {
+                    teredoOf(this).localCandidate(ev as RTCPeerConnectionIceEvent, e => handler.call(this, e));
+                } catch (e) {
+                    logThrottled("pc-teredo-ice", "warn", "Falha ao filtrar um candidato local (enviado como veio): " + errorText(e));
+                    handler.call(this, ev as RTCPeerConnectionIceEvent);
+                }
+            });
+        }
+
+        override addIceCandidate(candidate?: RTCIceCandidateInit | null, ...legacy: any[]): Promise<void> {
+            if (legacy.length || typeof candidate?.candidate !== "string" || !candidate.candidate) return (super.addIceCandidate as any)(candidate, ...legacy);
+            const init: RTCIceCandidateInit = {
+                candidate: candidate.candidate, sdpMid: candidate.sdpMid, sdpMLineIndex: candidate.sdpMLineIndex, usernameFragment: candidate.usernameFragment
+            };
+            let now: Promise<void> | null = null;
+            let sync = true;
+            try {
+                teredoOf(this).remoteCandidate(init, c => {
+                    const added = super.addIceCandidate(c);
+                    if (sync) now = added;
+                    // segurado e liberado depois (core/teredo.ts): o Trystero ja seguiu; um erro aqui (ex.: conexao fechada) so some
+                    else added.catch(() => { });
+                });
+            } catch (e) {
+                logThrottled("pc-teredo-remote", "warn", "Falha ao filtrar um candidato do outro lado (aplicado como veio): " + errorText(e));
+                return super.addIceCandidate(candidate);
+            } finally {
+                sync = false;
+            }
+            return now ?? Promise.resolve();
+        }
+
         override setLocalDescription(description?: RTCLocalSessionDescriptionInit): Promise<void> {
             // contida: so o rollback passa (desfaz uma oferta nossa pendente sem tocar no envio)
             if (contained.has(this) && description?.type !== "rollback") return refuseNegotiation("setLocalDescription");
@@ -155,6 +234,13 @@ export function getPeerConnectionClass(): typeof RTCPeerConnection {
                 munged = mungeRemoteDescription(this, description);
             } catch (e) {
                 logThrottled("pc-munge", "warn", "Falha ao ajustar o SDP remoto (usando o original): " + errorText(e));
+            }
+            try {
+                // candidatos do outro lado no SDP (renegociacao, reinicio do ICE): sem os pelo Teredo que tem outro caminho
+                const sdp = munged.sdp && teredoOf(this).filterSdp(munged.sdp, "remote");
+                if (sdp && sdp !== munged.sdp) munged = { type: munged.type, sdp };
+            } catch (e) {
+                logThrottled("pc-teredo-remote-sdp", "warn", "Falha ao filtrar os candidatos do SDP remoto (usando o original): " + errorText(e));
             }
             if (munged === description) return super.setRemoteDescription(description);
             return super.setRemoteDescription(munged).catch(e => {
@@ -183,4 +269,21 @@ export function getPeerConnectionClass(): typeof RTCPeerConnection {
             super.removeTrack(sender);
         }
     };
+    // acessores definidos fora da sintaxe de classe: no TypeScript do DOM os dois sao propriedades
+    Object.defineProperty(cls.prototype, "onicecandidate", {
+        configurable: true,
+        get(this: RTCPeerConnection) {
+            return iceHandlers.get(this) ?? null;
+        },
+        set(this: RTCPeerConnection, handler: ((ev: RTCPeerConnectionIceEvent) => any) | null) {
+            iceHandlers.set(this, typeof handler === "function" ? handler : null);
+        }
+    });
+    Object.defineProperty(cls.prototype, "localDescription", {
+        configurable: true,
+        get(this: RTCPeerConnection) {
+            return filteredLocal(this, Reflect.get(Base.prototype, "localDescription", this));
+        }
+    });
+    return PeerConnectionClass = cls;
 }

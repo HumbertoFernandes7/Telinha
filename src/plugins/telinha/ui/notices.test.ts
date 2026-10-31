@@ -161,6 +161,36 @@ describe("ligar e desligar", () => {
     });
 });
 
+describe("conexao pelo Teredo (core/teredoWatch.ts)", () => {
+    const peer = (teredo: "local" | "remote" | "both" | undefined, discordUserId = FRIEND_ID) =>
+        ({ peerId: `p${discordUserId}`, discordUserId, username: "amigo", streaming: false, admitted: true, ...(teredo ? { teredo } : {}) });
+
+    test("este PC no Teredo: o passo a passo para desligar, uma vez por pessoa na sessao; o clique nao abre nada", () => {
+        setState({ ...EMPTY, peers: [peer("local")] });
+        assert.equal(notifications.length, 1);
+        const [n] = notifications;
+        assert.equal(n.title, "Telinha: conexão lenta pelo Teredo");
+        assert.equal(n.body, "Sua conexão com amigo está passando pelo Teredo, um túnel lento do Windows, e a live pode ficar ruim. Para desligar: menu Iniciar → "
+            + "digite cmd → botão direito → Executar como administrador → cole netsh interface teredo set state disabled e aperte Enter.");
+        assert.equal(n.onClick, undefined);
+        assert.doesNotMatch(n.body, /\d+\.\d+\.\d+\.\d+|2001:/, "sem endereco");
+
+        // saiu do Teredo e voltou, ou os dois PCs: o lado deste PC ja foi avisado
+        setState({ ...EMPTY, peers: [peer(undefined)] });
+        setState({ ...EMPTY, peers: [peer("both")] });
+        assert.equal(notifications.length, 1);
+    });
+
+    test("so o PC do amigo no Teredo: uma linha curta pedindo para ele desligar", () => {
+        setState({ ...EMPTY, peers: [peer("remote"), peer(undefined, OTHER_ID)] });
+        assert.equal(notifications.length, 1);
+        assert.equal(notifications[0].title, "Telinha: conexão do amigo pelo Teredo");
+        assert.equal(notifications[0].body, "A conexão de amigo passa pelo Teredo, um túnel lento do Windows. Peça para ele desligar (ele também recebe o aviso no Telinha dele).");
+        setState({ ...EMPTY, peers: [peer("local")] });
+        assert.equal(notifications.length, 2, "o lado deste PC e outro aviso");
+    });
+});
+
 describe("falha ao notificar", () => {
     test("a notificacao que o Vencord recusa vai para o log do plugin e nao derruba o estado", async t => {
         t.mock.method(notificationsImpl, "show", () => Promise.reject(new Error("sem permissao")));

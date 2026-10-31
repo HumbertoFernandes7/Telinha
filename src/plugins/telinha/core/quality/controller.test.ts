@@ -25,7 +25,7 @@ describe("qualidade automatica: carencia de banda do espectador novo (levels.BW_
         assert.equal(BW_GRACE_MS, 20_000);
     });
 
-    test("espectador novo com 500 kbps estimados: aos 10 s nao desce; desce depois da carencia + 3 janelas ruins", async t => {
+    test("espectador novo com 500 kbps estimados: na carencia nada conta; depois, caminho estreito desce 14 s depois", async t => {
         const clock = useFakeClock(t);
         // banda estimada de 0,5 Mbps desde o inicio (a estimativa oscila nos primeiros segundos de um espectador novo)
         const h = qualityHarness(clock, { A: new EncoderSim({ availableKbps: 500 }) });
@@ -37,22 +37,20 @@ describe("qualidade automatica: carencia de banda do espectador novo (levels.BW_
         for (let at = EVAL_MS; at <= 10_000; at += EVAL_MS) await h.evaluateAt(at);
         assert.equal(h.controller.levelFor("A"), "1080p60", "aos 10 s ainda esta na carencia");
 
-        // a carencia acaba em 20 s: as janelas ruins contam de 20 s em diante (BW_STREAK = 3 janelas seguidas)
-        for (let at = 12_000; at < BW_GRACE_MS; at += EVAL_MS) await h.evaluateAt(at);
-        assert.equal(h.controller.levelFor("A"), "1080p60", "ate o fim da carencia nada muda");
-        await h.evaluateAt(BW_GRACE_MS);
-        await h.evaluateAt(BW_GRACE_MS + EVAL_MS);
-        assert.equal(h.controller.levelFor("A"), "1080p60", "2 janelas ruins depois da carencia ainda nao bastam");
+        // a carencia acaba em 20 s: a 1a janela que conta e a de 18-20 s; a estimativa nunca deu os 4500 do 1080p60
+        // (caminho estreito): desce depois de 14 s seguidos de banda curta
+        for (let at = 12_000; at <= BW_GRACE_MS + 10_000; at += EVAL_MS) await h.evaluateAt(at);
+        assert.equal(h.controller.levelFor("A"), "1080p60", "12 s de banda curta ainda nao bastam");
 
-        await h.evaluateAt(BW_GRACE_MS + 2 * EVAL_MS);
+        await h.evaluateAt(BW_GRACE_MS + 12_000);
         // conteudo em movimento (sem leitura de movimento e fonte a 60 fps): de 1080p60 vai para 720p60
         assert.equal(h.controller.levelFor("A"), "720p60");
-        assert.deepEqual(h.applied.map(a => [a.level, a.atMs]), [["1080p60", 0], ["720p60", BW_GRACE_MS + 2 * EVAL_MS]]);
+        assert.deepEqual(h.applied.map(a => [a.level, a.atMs]), [["1080p60", 0], ["720p60", BW_GRACE_MS + 12_000]]);
         assert.deepEqual(h.controller.state?.viewers.A, { level: "720p60", reason: "bandwidth" });
         assert.match(h.controller.state?.reasonText ?? "", /^720p 60 fps — a conexão com o espectador está limitada$/);
     });
 
-    test("espectador que ja passou da carencia: a mesma queda de banda desce depois de 3 janelas (6 s), sem esperar 20 s", async t => {
+    test("espectador que ja passou da carencia, com a banda que ja deu o degrau: a mesma queda so desce depois de 30 s", async t => {
         const clock = useFakeClock(t);
         const sim = new EncoderSim({ availableKbps: 20_000 });
         const h = qualityHarness(clock, { A: sim });
@@ -61,13 +59,13 @@ describe("qualidade automatica: carencia de banda do espectador novo (levels.BW_
         for (let at = EVAL_MS; at <= 30_000; at += EVAL_MS) await h.evaluateAt(at);
         assert.equal(h.controller.levelFor("A"), "1080p60", "banda boa: fica no teto");
 
+        // depois de um soluco o estimador do WebRTC leva ~20-25 s para voltar: so a banda curta espera 30 s
         sim.set({ availableKbps: 500 });
-        await h.evaluateAt(32_000);
-        await h.evaluateAt(34_000);
+        for (let at = 32_000; at <= 58_000; at += EVAL_MS) await h.evaluateAt(at);
         assert.equal(h.controller.levelFor("A"), "1080p60");
-        await h.evaluateAt(36_000);
+        await h.evaluateAt(60_000);
         assert.equal(h.controller.levelFor("A"), "720p60");
-        assert.equal(h.applied.at(-1)?.atMs, 36_000);
+        assert.equal(h.applied.at(-1)?.atMs, 60_000);
     });
 });
 

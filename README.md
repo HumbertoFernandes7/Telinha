@@ -180,6 +180,9 @@ Pode, de preferência em modo borderless (tela cheia exclusiva pode aparecer pre
 **O instalador vai estragar meu Vencord?**
 Não: ele não altera os arquivos do Vencord. Só troca o pequeno `app.asar` do Discord (o que o Vencord colocou lá) por um que também carrega o Telinha, e guarda uma cópia do original em `%APPDATA%\Telinha\backup`. Rodar o `TelinhaInstaller.exe` de novo e clicar em **Desinstalar** devolve o do Vencord exatamente como estava. Se o Discord não abrir, tente **Desinstalar**; se nem isso resolver, reinstale o Vencord oficial em [vencord.dev/download](https://vencord.dev/download/).
 
+**A imagem engasga ou fica borrada de vez em quando. O que dá para fazer?**
+Num soluço curto da internet o Telinha não muda mais a resolução nem o fps: a imagem pode ficar mais borrada por um momento e volta sozinha. A qualidade só desce quando o problema dura, e só volta a subir depois de um tempo estável. Quem assiste tem a opção **"Colchão contra engasgos"** (padrão 0,2 s): a imagem chega um pouco atrasada, mas não engasga em soluços da internet. Se aparecer o aviso de que a sua conexão passa pelo **Teredo** (um túnel lento do Windows), desligue-o: menu Iniciar → digite `cmd` → botão direito → **Executar como administrador** → cole `netsh interface teredo set state disabled` e aperte Enter.
+
 **Deu problema. E agora?**
 Nas configurações do plugin, clique em **"Copiar diagnóstico"** e mande o texto para quem compartilhou o Telinha com você ou para o autor (Humberto, [@HumbertoFernandes7](https://github.com/HumbertoFernandes7)). Os logs não contêm IPs. As Issues do GitHub não são usadas neste repositório.
 

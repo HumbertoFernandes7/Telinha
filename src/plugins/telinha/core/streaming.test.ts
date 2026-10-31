@@ -448,11 +448,11 @@ describe("pedidos para assistir e o envio para cada espectador", () => {
         await turns();
         const sender = videoSenderOf(pc)!;
         assert.deepEqual(sender.encoding, { active: true, maxBitrate: 20_000_000, maxFramerate: 60, scaleResolutionDownBy: 1, priority: "high", networkPriority: "high" });
-        assert.equal(sender.params.degradationPreference, "maintain-framerate");
+        assert.equal(sender.params.degradationPreference, "maintain-framerate-and-resolution");
         assert.deepEqual(getState().local?.viewers, ["peerE"]);
         assert.deepEqual(since(), [
             "Enviando para edu (peerE): codec VP9 (automático: o espectador não decodifica H.264 por hardware → VP9)",
-            "Envio para edu (peerE): 1080p 60 fps, até 20000 kbps, prioriza fps"
+            "Envio para edu (peerE): 1080p 60 fps, até 20000 kbps, mantém resolução e fps (num soluço só a imagem perde nitidez)"
         ]);
 
         // pedir de novo assistindo: nada muda
@@ -469,14 +469,14 @@ describe("pedidos para assistir e o envio para cada espectador", () => {
         assert.equal(removalsFrom(rig.room, "peerE").length, 1);
     });
 
-    test("sendPlanFor: o plano de envio so existe para quem assiste, com o teto e a banda inicial da qualidade", async () => {
+    test("sendPlanFor: a banda (inicio fixo, teto da qualidade) para qualquer peer; o codec so para quem assiste", async () => {
         await startStreaming(screenOptions({ quality: "720p60" }));
         assert.equal(sendPlanFor(null), null);
-        assert.equal(sendPlanFor("peerE"), null, "ainda nao assiste");
+        assert.deepEqual(sendPlanFor("peerE"), { codec: null, h264Profile: null, bitrate: { startKbps: 4000, maxKbps: 12000 }, label: "edu (peerE)" }, "ainda nao assiste");
         rig.room.receive("watch", { op: "start" }, "peerE");
-        assert.deepEqual(sendPlanFor("peerE"), { codec: "vp9", h264Profile: null, bitrate: { startKbps: 6000, maxKbps: 12000 }, label: "edu (peerE)" });
+        assert.deepEqual(sendPlanFor("peerE"), { codec: "vp9", h264Profile: null, bitrate: { startKbps: 4000, maxKbps: 12000 }, label: "edu (peerE)" });
         stopStreaming();
-        assert.equal(sendPlanFor("peerE"), null, "sem transmissao");
+        assert.deepEqual(sendPlanFor("peerE"), { codec: null, h264Profile: null, bitrate: { startKbps: 4000, maxKbps: 20000 }, label: "edu (peerE)" }, "sem transmissao");
     });
 
     test("addStream que termina depois de o espectador desistir: o envio e desfeito (e uma falha nisso so avisa)", async t => {
@@ -553,7 +553,7 @@ describe("pedidos para assistir e o envio para cada espectador", () => {
         rig.room.settleStreams(true);
         await turns();
         assert.equal(videoSenderOf(pc)?.setCalls.length, 1);
-        assert.deepEqual(since(), ["Envio para heitor (peerH): 1080p 60 fps, até 20000 kbps, prioriza fps"]);
+        assert.deepEqual(since(), ["Envio para heitor (peerH): 1080p 60 fps, até 20000 kbps, mantém resolução e fps (num soluço só a imagem perde nitidez)"]);
     });
 
     test("addStream antigo que falha com um pedido novo no ar: o espectador continua pelo envio novo", async () => {

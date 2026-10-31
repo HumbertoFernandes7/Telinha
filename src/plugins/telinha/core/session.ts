@@ -30,6 +30,7 @@ import { getPeerConnectionClass, setPcHooks } from "./peerConnection";
 import { computeAdmitted, me, selfHello, sendPresence } from "./presence";
 import * as streaming from "./streaming";
 import { startLocalCaps } from "./stuckEncoder";
+import { checkTeredoRoutes, TEREDO_CHECK_MS } from "./teredoWatch";
 import * as viewing from "./viewing";
 
 const HANDSHAKE_TIMEOUT_MS = 15_000;
@@ -698,6 +699,7 @@ function tick() {
     streaming.tick();
     diag.tickDiagShare();
     if (tickCount % 2 === 0) viewing.sampleStats();
+    if (rt.room && tickCount % (TEREDO_CHECK_MS / 1000) === 0) void checkTeredoRoutes();
 }
 
 function peerIdOfPc(pc: RTCPeerConnection): PeerId | null {

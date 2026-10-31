@@ -202,7 +202,7 @@ describe("pedido de VP9 de quem assiste (acao \"codec\")", () => {
         await seconds(rig, 6);
         await asks(gone);
         assert.deepEqual(about(after(), gone), [`${gone.label} pediu VP9 (nenhum quadro em H.264 do lado dele), mas não está recebendo a sua transmissão: ignorado`]);
-        assert.equal(sendPlanFor(gone.peerId), null);
+        assert.equal(sendPlanFor(gone.peerId)?.codec, null, "nao assiste: so a banda, sem codec");
     });
 
     test("pedido malformado: ignorado sem log; da mesma conexao, um pedido a cada 5 s no maximo", async () => {

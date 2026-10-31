@@ -5,17 +5,20 @@
  */
 
 // Testes da RTCPeerConnection do Telinha (core/peerConnection.ts) sobre a RTCPeerConnection falsa: preferencia de
-// codec antes do setLocalDescription implicito, ajuste do SDP remoto (sdp.ts) e a volta ao SDP original quando o
-// Chromium recusa o ajustado.
+// codec antes do setLocalDescription implicito, ajuste do SDP remoto (sdp.ts), a volta ao SDP original quando o
+// Chromium recusa o ajustado, e os candidatos pelo Teredo (core/teredo.ts) nos quatro caminhos que o Trystero usa:
+// onicecandidate e localDescription (os nossos), addIceCandidate e setRemoteDescription (os do outro lado).
 // Rodar:  pnpm test:file src/plugins/telinha/core/peerConnection.test.ts  (todos: pnpm test:unit)
 
 import assert from "node:assert/strict";
 import { after, before, beforeEach, describe, test } from "node:test";
 
+import { useFakeClock } from "@test/fakes/clock";
 import { audioTrack, type FakeRTCPeerConnection, installWebRtc, videoTrack, type WebRtcEnv } from "@test/fakes/webrtc";
 import { logged, logMark } from "@test/helpers/wpa-session";
 
 import { containPeerConnection, getPeerConnectionClass, isContained, type SendPlan, setPcHooks } from "./peerConnection";
+import { resetTeredoMemory, TEREDO_HOLD_MS, TeredoFilter } from "./teredo";
 
 type TestPc = FakeRTCPeerConnection & RTCPeerConnection;
 
@@ -183,7 +186,7 @@ describe("TelinhaPeerConnection", () => {
             assert.equal(logged(/^amigo2: SDP remoto \(pranswer\) ajustado — AV1 ausente no SDP do outro lado/, mark).length, 1);
         });
 
-        test("nada a fazer: rollback, sem sdp, sem plano, sem transceivers que enviam", async () => {
+        test("nada a fazer: rollback, sem sdp, sem plano; sem transceivers que enviam, so a banda (em toda m-section de video)", async () => {
             const { pc } = sendingPc();
             plan = { codec: "vp9", bitrate: null, label: "x" };
             await pc.setRemoteDescription({ type: "rollback" } as RTCSessionDescriptionInit);
@@ -198,9 +201,15 @@ describe("TelinhaPeerConnection", () => {
             idle.addReceivingTrack(videoTrack());
             const noMid = idle.addSendingTrack(videoTrack());
             noMid.mid = null;
-            plan = { codec: "vp9", bitrate: { startKbps: 1, maxKbps: 2 }, label: "x" };
+            plan = { codec: "vp9", bitrate: null, label: "x" };
             await idle.setRemoteDescription(remote());
             assert.equal(idle.descriptionCalls.at(-1)!.description!.sdp, REMOTE_SDP, "transceiver sem mid nao conta");
+            plan = { codec: "vp9", bitrate: { startKbps: 1, maxKbps: 2 }, label: "x" };
+            await idle.setRemoteDescription(remote());
+            const applied = idle.descriptionCalls.at(-1)!.description!.sdp!;
+            assert.match(applied, /m=video 9 UDP\/TLS\/RTP\/SAVPF 96 98\r\n/, "o codec so onde enviamos");
+            assert.match(applied, /a=fmtp:98 profile-id=0;x-google-start-bitrate=1;x-google-max-bitrate=2\r\n/, "a banda tambem onde so recebemos");
+            assert.doesNotMatch(applied, /stereo/);
         });
 
         test("ajuste que lanca: aviso e o original", async () => {
@@ -235,6 +244,176 @@ describe("TelinhaPeerConnection", () => {
                 throw new Error("SDP invalido");
             };
             await assert.rejects(pc.setRemoteDescription(remote()), /SDP invalido/);
+        });
+    });
+
+    describe("candidatos pelo Teredo (core/teredo.ts)", () => {
+        const TEREDO = "2001:0:4136:e378:8000:63bf:3fff:fdd2";
+        const V4 = "203.0.113.7";
+        const cand = (address: string, component = 1) => `candidate:1 ${component} udp 1677729535 ${address} 46154 typ srflx generation 0`;
+        const remoteInit = (address: string): RTCIceCandidateInit => ({ candidate: cand(address), sdpMid: "0", sdpMLineIndex: 0, usernameFragment: "r1" });
+
+        beforeEach(() => resetTeredoMemory());
+
+        test("addIceCandidate: o Teredo do outro lado so entra sem outro caminho; os outros, como vieram (o erro chega no Trystero)", async t => {
+            const clock = useFakeClock(t);
+            const pc = newPc();
+            plan = { codec: null, bitrate: null, label: "amigo (abc123)" };
+            const mark = logMark();
+            await pc.addIceCandidate(remoteInit(TEREDO));
+            assert.equal(pc.remoteCandidates.length, 0, "segurado a espera de um direto");
+            await pc.addIceCandidate(remoteInit(V4));
+            clock.tick(TEREDO_HOLD_MS);
+            assert.deepEqual(pc.remoteCandidates.map(c => c?.candidate), [cand(V4)]);
+            assert.equal(logged(/^amigo \(abc123\): um candidato do outro PC pelo Teredo deixado de fora/, mark).length, 1);
+
+            // o fim dos candidatos (sem texto) e a forma antiga com callbacks passam direto
+            await pc.addIceCandidate({ candidate: "", sdpMid: "0" });
+            await pc.addIceCandidate(null);
+            await (pc.addIceCandidate as any)(remoteInit(TEREDO), () => { }, () => { });
+            assert.equal(pc.remoteCandidates.length, 4);
+
+            pc.addIceCandidateImpl = () => {
+                throw new Error("candidato invalido");
+            };
+            await assert.rejects(pc.addIceCandidate(remoteInit("198.51.100.9")), /candidato invalido/);
+        });
+
+        test("addIceCandidate: o Teredo sozinho entra depois da espera; se a conexao ja fechou, o erro some (o Trystero ja seguiu)", async t => {
+            const clock = useFakeClock(t);
+            const pc = newPc();
+            await pc.addIceCandidate(remoteInit(TEREDO));
+            clock.tick(TEREDO_HOLD_MS);
+            assert.deepEqual(pc.remoteCandidates.map(c => c?.candidate), [cand(TEREDO)]);
+
+            const closed = newPc();
+            closed.addIceCandidateImpl = () => Promise.reject(new Error("closed"));
+            await closed.addIceCandidate(remoteInit(TEREDO));
+            clock.tick(TEREDO_HOLD_MS);
+            await new Promise(resolve => setImmediate(resolve));
+            assert.equal(closed.remoteCandidates.length, 0);
+        });
+
+        test("onicecandidate: o handler do Trystero so recebe o que o filtro deixa passar; o getter devolve o handler", t => {
+            useFakeClock(t);
+            const pc = newPc();
+            const seen: (string | null)[] = [];
+            const handler = (ev: RTCPeerConnectionIceEvent) => seen.push(ev.candidate?.candidate ?? null);
+            pc.emitIceCandidate({ candidate: cand(V4), sdpMid: "0" });
+            assert.deepEqual(seen, [], "sem handler, nada");
+            pc.onicecandidate = handler;
+            assert.equal(pc.onicecandidate, handler);
+            pc.emitIceCandidate({ candidate: cand(TEREDO), sdpMid: "0", usernameFragment: "l1" });
+            pc.emitIceCandidate({ candidate: cand(V4), sdpMid: "0", usernameFragment: "l1" });
+            pc.emitIceCandidate({ candidate: cand(TEREDO, 2), sdpMid: "0", usernameFragment: "l1" });
+            pc.emitIceCandidate(null);
+            assert.deepEqual(seen, [cand(V4), cand(TEREDO, 2), null], "o Teredo com IPv4 no mesmo componente nao sai; o do componente 2 (sem outro) sai no fim da coleta");
+            pc.onicecandidate = null;
+            assert.equal(pc.onicecandidate, null);
+            pc.emitIceCandidate({ candidate: cand(V4), sdpMid: "0" });
+            assert.equal(seen.length, 3);
+        });
+
+        test("onicecandidate: filtro que lanca manda o candidato como veio (com um aviso)", t => {
+            const pc = newPc();
+            const seen: string[] = [];
+            pc.onicecandidate = ev => seen.push(ev.candidate!.candidate);
+            t.mock.method(TeredoFilter.prototype, "localCandidate", () => {
+                throw new Error("quebrado");
+            });
+            const mark = logMark();
+            pc.emitIceCandidate({ candidate: cand(TEREDO), sdpMid: "0" });
+            assert.deepEqual(seen, [cand(TEREDO)]);
+            assert.equal(logged(/^Falha ao filtrar um candidato local \(enviado como veio\): Error: quebrado$/, mark).length, 1);
+        });
+
+        test("o plano que lanca nao impede o filtro: o log usa \"conexão\" no lugar do nome", async t => {
+            useFakeClock(t);
+            setPcHooks({
+                planFor: () => {
+                    throw new Error("sem plano");
+                }
+            });
+            const pc = newPc();
+            const mark = logMark();
+            await pc.addIceCandidate(remoteInit(V4));
+            await pc.addIceCandidate(remoteInit(TEREDO));
+            assert.equal(logged(/^conexão: um candidato do outro PC pelo Teredo deixado de fora/, mark).length, 1);
+        });
+
+        test("addIceCandidate: filtro que lanca aplica o candidato como veio (com um aviso)", async t => {
+            const pc = newPc();
+            t.mock.method(TeredoFilter.prototype, "remoteCandidate", () => {
+                throw new Error("quebrado");
+            });
+            const mark = logMark();
+            await pc.addIceCandidate(remoteInit(TEREDO));
+            assert.deepEqual(pc.remoteCandidates.map(c => c?.candidate), [cand(TEREDO)]);
+            assert.equal(logged(/^Falha ao filtrar um candidato do outro lado \(aplicado como veio\): Error: quebrado$/, mark).length, 1);
+        });
+
+        /** Um SDP de renegociacao com os candidatos `lines` na m-section de video. */
+        const withCandidates = (lines: string[], type: RTCSdpType = "offer") => ({ type, sdp: REMOTE_SDP.replace("a=mid:1\r\n", `a=mid:1\r\na=ice-ufrag:u1\r\n${lines.map(l => `a=${l}\r\n`).join("")}`) });
+
+        test("localDescription (o SDP de cada renegociacao que o Trystero manda): sem o nosso Teredo quando ha outro caminho", async () => {
+            const pc = newPc();
+            assert.equal(pc.localDescription, null);
+            const both = withCandidates([cand(TEREDO), cand(V4)]);
+            await pc.setLocalDescription(both);
+            const sent = pc.localDescription!;
+            assert.equal(sent.type, "offer");
+            assert.doesNotMatch(sent.sdp, /2001:0:4136/);
+            assert.match(sent.sdp, /203\.0\.113\.7/);
+            assert.deepEqual(JSON.parse(JSON.stringify(sent)), { type: "offer", sdp: sent.sdp }, "toJSON como o do Chromium");
+
+            // a mesma geracao do ICE (mesmo ufrag): o IPv4 dela ja saiu, entao o Teredo continua de fora
+            await pc.setLocalDescription(withCandidates([cand(TEREDO)]));
+            assert.doesNotMatch(pc.localDescription!.sdp, /2001:0:4136/);
+
+            // reinicio do ICE (ufrag nova) so com o Teredo: fica, e o objeto e o do Chromium
+            const alone = withCandidates([cand(TEREDO)]);
+            alone.sdp = alone.sdp.replace("ice-ufrag:u1", "ice-ufrag:u9");
+            await pc.setLocalDescription(alone);
+            assert.equal(pc.localDescription, pc.localDescription, "sem nada a tirar: o objeto do Chromium");
+            assert.equal(pc.localDescription!.sdp, alone.sdp);
+        });
+
+        test("localDescription: filtro que lanca devolve o original (com um aviso)", async t => {
+            const pc = newPc();
+            const both = withCandidates([cand(TEREDO), cand(V4)]);
+            await pc.setLocalDescription(both);
+            t.mock.method(TeredoFilter.prototype, "filterSdp", () => {
+                throw new Error("quebrado");
+            });
+            const mark = logMark();
+            assert.equal(pc.localDescription!.sdp, both.sdp);
+            assert.equal(logged(/^Falha ao filtrar os candidatos do SDP local \(usando o original\): Error: quebrado$/, mark).length, 1);
+        });
+
+        test("setRemoteDescription (renegociacao, reinicio do ICE): sem o Teredo do outro lado quando ha outro caminho", async t => {
+            useFakeClock(t);
+            const pc = newPc();
+            await pc.setRemoteDescription(withCandidates([cand(TEREDO), cand(V4)]));
+            const applied = pc.descriptionCalls.at(-1)!.description!.sdp!;
+            assert.doesNotMatch(applied, /2001:0:4136/);
+            assert.match(applied, /203\.0\.113\.7/);
+            // o IPv4 do SDP vale para um Teredo que chega depois pelo trickle (mesmo ufrag)
+            await pc.addIceCandidate({ candidate: cand(TEREDO), sdpMid: "1", usernameFragment: "u1" });
+            assert.equal(pc.remoteCandidates.length, 0);
+            // reinicio do ICE (ufrag nova) so com o Teredo: fica
+            const restart = withCandidates([cand(TEREDO)], "answer");
+            restart.sdp = restart.sdp.replace("ice-ufrag:u1", "ice-ufrag:u2");
+            await pc.setRemoteDescription(restart);
+            assert.equal(pc.descriptionCalls.at(-1)!.description!.sdp, restart.sdp);
+
+            t.mock.method(TeredoFilter.prototype, "filterSdp", () => {
+                throw new Error("quebrado");
+            });
+            const mark = logMark();
+            const both = withCandidates([cand(TEREDO), cand(V4)]);
+            await pc.setRemoteDescription(both);
+            assert.equal(pc.descriptionCalls.at(-1)!.description!.sdp, both.sdp);
+            assert.equal(logged(/^Falha ao filtrar os candidatos do SDP remoto \(usando o original\): Error: quebrado$/, mark).length, 1);
         });
     });
 });

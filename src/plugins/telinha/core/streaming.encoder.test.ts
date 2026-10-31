@@ -22,7 +22,7 @@ import { after, afterEach, before, describe, test } from "node:test";
 
 import { getState } from "@plugins/telinha/store";
 import { pluginSettings } from "@test/fakes/vencord";
-import { DEFAULT_VIDEO_CODECS, EncoderSim, type FakeMediaStreamTrack, type FakeRTCRtpSender, negotiatedCodecs, type StatsEntry, videoSenderStats } from "@test/fakes/webrtc";
+import { DEFAULT_VIDEO_CODECS, EncoderSim, type FakeMediaStreamTrack, type FakeRTCPeerConnection, type FakeRTCRtpSender, negotiatedCodecs, type StatsEntry, videoSenderStats } from "@test/fakes/webrtc";
 import { connectViewer, createRig, destroyRig, enterCall, logMark, screenOptions, seconds, type StreamingRig, turns, videoSenderOf } from "@test/helpers/wpb-streaming";
 
 import { getLocalCaps } from "./codec";
@@ -362,10 +362,37 @@ describe("parametros de envio (applySenderParams)", () => {
         const since = logMark();
         const v = await watcher("p720", { hw: false });
         assert.deepEqual(v.sender.encoding, { active: true, maxBitrate: 12_000_000, maxFramerate: 60, scaleResolutionDownBy: 1.5, priority: "high", networkPriority: "high" });
-        assert.ok(about(since(), v).includes(`Envio para ${v.label}: 720p 60 fps, até 12000 kbps (captura 1920x1080 ÷1.5 = 1280x720), prioriza fps`));
+        assert.ok(about(since(), v).includes(`Envio para ${v.label}: 720p 60 fps, até 12000 kbps (captura 1920x1080 ÷1.5 = 1280x720), mantém resolução e fps (num soluço só a imagem perde nitidez)`));
+        assert.equal((v.sender.params as { degradationPreference?: string; }).degradationPreference, "maintain-framerate-and-resolution");
     });
 
-    test("degradationPreference recusado: aplica sem ele e nao tenta de novo nas proximas vezes", async () => {
+    test("Chromium sem \"maintain-framerate-and-resolution\": cai para \"maintain-framerate\" (a de antes) e nao tenta de novo", async () => {
+        await startStreaming(screenOptions({ quality: "720p60" }));
+        const v = await held("oldchromium");
+        const tried: (string | undefined)[] = [];
+        v.sender.setParametersImpl = params => {
+            const pref = (params as { degradationPreference?: string; }).degradationPreference;
+            tried.push(pref);
+            if (pref === "maintain-framerate-and-resolution") throw new TypeError("The provided value 'maintain-framerate-and-resolution' is not a valid enum value of type RTCDegradationPreference.");
+        };
+        const since = logMark();
+        rig.room.settleStreams(true);
+        await turns();
+        assert.deepEqual(tried, ["maintain-framerate-and-resolution", "maintain-framerate"]);
+        assert.deepEqual(about(since(), v), [
+            `Envio para ${v.label}: degradationPreference recusado (TypeError: The provided value 'maintain-framerate-and-resolution' is not a valid enum value `
+            + "of type RTCDegradationPreference.); 720p 60 fps, até 12000 kbps (captura 1920x1080 ÷1.5 = 1280x720) aplicado, com \"maintain-framerate\": "
+            + "prioriza fps (o WebRTC pode reduzir a resolução sozinho)"
+        ]);
+        const track = rt.local!.stream.getVideoTracks()[0] as FakeMediaStreamTrack;
+        track.setSettings({ width: 1904, height: 1040 });
+        await seconds(rig, 1);
+        assert.deepEqual(tried, ["maintain-framerate-and-resolution", "maintain-framerate", "maintain-framerate"], "direto na que ele aceitou");
+        track.setSettings({ width: 1920, height: 1080 });
+        await seconds(rig, 1);
+    });
+
+    test("degradationPreference recusado (as duas): aplica sem nenhuma e nao tenta de novo nas proximas vezes", async () => {
         await startStreaming(screenOptions({ quality: "720p60" }));
         const v = await held("nodeg");
         const tried: boolean[] = [];
@@ -376,18 +403,18 @@ describe("parametros de envio (applySenderParams)", () => {
         const since = logMark();
         rig.room.settleStreams(true);
         await turns();
-        assert.deepEqual(tried, [true, false]);
+        assert.deepEqual(tried, [true, true, false]);
         assert.equal(v.sender.encoding.maxBitrate, 12_000_000);
         assert.deepEqual(about(since(), v), [
             `Envio para ${v.label}: degradationPreference recusado (InvalidModificationError: degradationPreference not supported); `
-            + "720p 60 fps, até 12000 kbps (captura 1920x1080 ÷1.5 = 1280x720) aplicado"
+            + "720p 60 fps, até 12000 kbps (captura 1920x1080 ÷1.5 = 1280x720) aplicado, sem preferência (o WebRTC escolhe)"
         ]);
 
         // a captura mudou de tamanho: reaplica direto sem degradationPreference
         const track = rt.local!.stream.getVideoTracks()[0] as FakeMediaStreamTrack;
         track.setSettings({ width: 1904, height: 1040 });
         await seconds(rig, 1);
-        assert.deepEqual(tried, [true, false, false]);
+        assert.deepEqual(tried, [true, true, false, false]);
 
         // e se agora falhar, so avisa (sem tentar com/sem de novo)
         v.sender.setParametersImpl = () => {
@@ -414,7 +441,7 @@ describe("parametros de envio (applySenderParams)", () => {
         refuse = false;
         await seconds(rig, 2);
         assert.equal(v.sender.setCalls.length, 1);
-        assert.ok(about(since(), v).includes(`Envio para ${v.label}: 1080p 60 fps, até 20000 kbps, prioriza fps`));
+        assert.ok(about(since(), v).includes(`Envio para ${v.label}: 1080p 60 fps, até 20000 kbps, mantém resolução e fps (num soluço só a imagem perde nitidez)`));
     });
 
     test("sender ainda sem encodings: o encodings[0] e criado com os parametros do degrau", async () => {
@@ -489,7 +516,7 @@ describe("captura que muda de tamanho (checkCaptureSize)", () => {
     });
 });
 
-describe("qualidade automatica: o plano de envio de quem desceu de degrau", () => {
+describe("qualidade automatica: o inicio da banda e o soluco da internet (0.2.10)", () => {
     before(() => {
         pluginSettings.set("autoQuality", true);
     });
@@ -499,15 +526,58 @@ describe("qualidade automatica: o plano de envio de quem desceu de degrau", () =
         pluginSettings.set("autoQuality", false);
     });
 
-    test("banda curta por mais que a carencia: o espectador desce para 720p e a renegociacao comeca na banda do degrau", async () => {
+    /** Uma renegociacao com o SDP do outro lado (video que enviamos no mid 1): o x-google-start-bitrate que foi aplicado. */
+    async function renegotiate(v: TestViewer): Promise<string | undefined> {
+        const pc = rig.room.peers.get(v.peerId) as unknown as FakeRTCPeerConnection;
+        const t = pc.getTransceivers().find(x => x.sender === v.sender)!;
+        t.mid = "1";
+        const sdp = ["v=0", "o=- 1 2 IN IP4 127.0.0.1", "s=-", "t=0 0", "m=video 9 UDP/TLS/RTP/SAVPF 96", "a=mid:1", "a=rtpmap:96 VP9/90000", ""].join("\r\n");
+        await pc.setRemoteDescription({ type: "offer", sdp });
+        return /x-google-start-bitrate=(\d+)/.exec(pc.descriptionCalls.at(-1)!.description!.sdp!)?.[1];
+    }
+
+    test("o x-google-start-bitrate e o mesmo (4000) em toda renegociacao, antes e depois de o degrau mudar, assistindo ou nao", async () => {
         await startStreaming(screenOptions());
         const v = await watcher("bw", { hw: false });
         new EncoderSim({ availableKbps: 500 }).attach(v.sender);
-        assert.deepEqual(sendPlanFor(v.peerId)?.bitrate, { startKbps: 10_000, maxKbps: 20_000 });
-        await seconds(rig, 30);
+        assert.deepEqual(sendPlanFor(v.peerId)?.bitrate, { startKbps: 4000, maxKbps: 20_000 });
+        assert.equal(await renegotiate(v), "4000");
+        // caminho estreito: depois da carencia de 20 s e mais 14 s de banda curta, desce
+        await seconds(rig, 40);
         assert.equal(getState().local?.autoQuality?.viewers[v.peerId]?.level, "720p60");
-        assert.deepEqual(sendPlanFor(v.peerId)?.bitrate, { startKbps: 6000, maxKbps: 20_000 }, "o teto continua (pode subir sem renegociar); o inicio acompanha o degrau");
         assert.equal(v.sender.encoding.scaleResolutionDownBy, 1.5);
+        assert.deepEqual(sendPlanFor(v.peerId)?.bitrate, { startKbps: 4000, maxKbps: 20_000 }, "o inicio nao acompanha o degrau (mudar reinicia a estimativa)");
+        assert.equal(await renegotiate(v), "4000");
+
+        // quem nao assiste tambem leva a banda (sem codec): uma m-section sem ela no meio reiniciaria a estimativa depois
+        const idle = await connectViewer(rig, "eidle", "820000000000000001", "idle");
+        assert.deepEqual(sendPlanFor("eidle"), { codec: null, h264Profile: null, bitrate: { startKbps: 4000, maxKbps: 20_000 }, label: "idle (eidle)" });
+        assert.ok(idle);
+        stopStreaming();
+        assert.deepEqual(sendPlanFor(v.peerId)?.bitrate, { startKbps: 4000, maxKbps: 20_000 }, "sem transmitir: o teto maior");
+    });
+
+    test("soluco de 10 s (perda, RTT e banda no chao) e o estimador voltando: o degrau nao muda e o envio fica em maintain-framerate-and-resolution", async () => {
+        await startStreaming(screenOptions());
+        const v = await watcher("hiccup", { hw: false });
+        const link = { targetKbps: 16_000, rtxKbps: 0, lossPct: 0, rttMs: 30, jitterMs: 2, naksPerSecond: 0, plisPerSecond: 0, keyframesPerSecond: 0, qp: 28, pacerMs: 2 };
+        const sim = new EncoderSim({ availableKbps: 20_000, kbps: 16_000, link }).attach(v.sender);
+        await seconds(rig, 40);
+        const calls = v.sender.setCalls.length;
+        const since = logMark();
+        sim.set({ availableKbps: 1500, kbps: 1400, link: { ...link, lossPct: 5, rttMs: 150, pacerMs: 180 } });
+        await seconds(rig, 10);
+        for (const kbps of [2000, 2600, 3200, 3800, 6000, 12_000, 20_000]) {
+            sim.set({ availableKbps: kbps, kbps: Math.min(kbps * 0.95, 16_000), link });
+            await seconds(rig, 4);
+        }
+        await seconds(rig, 60);
+        assert.equal(getState().local?.autoQuality?.viewers[v.peerId]?.level, "1080p60");
+        assert.deepEqual(since().filter(l => l.startsWith("Qualidade automática:")), []);
+        assert.equal(v.sender.setCalls.length, calls, "nenhum setParameters novo: nem resolucao nem fps mudaram");
+        assert.equal((v.sender.params as { degradationPreference?: string; }).degradationPreference, "maintain-framerate-and-resolution");
+        assert.equal(v.sender.encoding.scaleResolutionDownBy, 1);
+        assert.equal(v.sender.encoding.maxFramerate, 60);
     });
 });
 

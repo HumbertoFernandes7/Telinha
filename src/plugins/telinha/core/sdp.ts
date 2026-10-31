@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-// Ajustes na descricao REMOTA (o SDP que recebemos do outro lado), aplicados so nas m-sections em
-// que NOS enviamos midia para aquele peer. Mexer na descricao remota e permitido pelo Chromium
+// Ajustes na descricao REMOTA (o SDP que recebemos do outro lado): codec e opus so nas m-sections em
+// que NOS enviamos midia para aquele peer; a banda inicial/maxima em todas as de video (RemoteSdpPlan.bitrate).
+// Mexer na descricao remota e permitido pelo Chromium
 // (o "munging" da descricao local e que esta sendo descontinuado).
 //
 // Por que funciona: no libwebrtc, o codec e os limites de bitrate de ENVIO saem da descricao remota
@@ -47,7 +48,11 @@ export interface RemoteSdpPlan {
     codec: VideoCodecName | null;
     /** H.264: perfil por hardware deste PC (profile-level-id), na frente das outras variantes H.264 */
     h264Profile?: string | null;
-    /** x-google-start/max-bitrate em kbps nos codecs de video reais */
+    /**
+     * x-google-start/max-bitrate em kbps nos codecs de video reais de TODAS as m-sections de video (as que enviamos e as que
+     * so recebemos): a banda da conexao e uma so, e cada m-section de video reaplica a dela quando o codec muda; uma sem o
+     * inicio no meio faria a proxima com ele reiniciar a estimativa (streaming.ts → START_KBPS)
+     */
     bitrate: { startKbps: number; maxKbps: number; } | null;
 }
 
@@ -147,7 +152,7 @@ function addOpusStereo(lines: string[]): string | null {
     return "opus estéreo 128 kbps";
 }
 
-/** Aplica o plano nas m-sections em que enviamos. Lanca em SDP inesperado (quem chama cai para o original). */
+/** Aplica o plano (codec e opus nas m-sections em que enviamos; banda em todas as de video). Lanca em SDP inesperado (quem chama cai para o original). */
 export function mungeRemoteSdp(sdp: string, plan: RemoteSdpPlan): MungeResult {
     const eol = sdp.includes("\r\n") ? "\r\n" : "\n";
     const head: string[] = [];
@@ -165,8 +170,8 @@ export function mungeRemoteSdp(sdp: string, plan: RemoteSdpPlan): MungeResult {
         const mid = lines.find(l => l.startsWith("a=mid:"))?.slice(6).trim();
         if (!mid || /^m=\w+ 0 /.test(lines[0])) continue; // sem mid ou m-section rejeitada
 
-        if (kind === "video" && plan.videoMids.has(mid)) {
-            if (plan.codec) {
+        if (kind === "video") {
+            if (plan.codec && plan.videoMids.has(mid)) {
                 const c = reorderVideoCodecs(lines, plan.codec, plan.h264Profile, notes);
                 if (c) changes.push(`mid ${mid}: ${c}`);
             }
