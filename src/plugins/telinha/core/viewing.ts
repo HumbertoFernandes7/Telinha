@@ -18,6 +18,7 @@ import { computePasswordProof, isValidPassword, normalizePassword } from "./acce
 import { getPc, peerLabel, publish, rt, type ViewerEntry } from "./context";
 import { errorText, log, logThrottled } from "./log";
 import { me } from "./presence";
+import { emptyReceiverCounters, guardStatsLog, readAudioInbound, readVideoInbound, ReceiverLog, type ReceiverSample } from "./statsLog";
 
 const RESPONSE_TIMEOUT_MS = 20_000;
 /** o transmissor pediu para esperar a aprovacao dele (60 s do lado dele + folga de rede) */
@@ -267,15 +268,9 @@ function videoReceiver(v: ViewerEntry) {
     return getPc(v.peerId)?.getReceivers().find(r => r.track === track) ?? null;
 }
 
-interface InboundSample {
-    framesDecoded: number;
-    width: number;
-    height: number;
+/** Uma leitura do receiver (statsLog.ts → ReceiverSample, com os contadores do log) e o fps relatado. */
+interface InboundSample extends ReceiverSample {
     fps: number | null;
-    bytes: number;
-    codec: string | null;
-    decoder: string | null;
-    powerEfficient: boolean | null;
 }
 
 async function sample(v: ViewerEntry): Promise<InboundSample | null> {
@@ -286,12 +281,15 @@ async function sample(v: ViewerEntry): Promise<InboundSample | null> {
     const video = videoReceiver(v);
     if (!video) return null;
 
-    const out: InboundSample = { framesDecoded: 0, width: 0, height: 0, fps: null, bytes: 0, codec: null, decoder: null, powerEfficient: null };
+    const out: InboundSample = {
+        at: 0, framesDecoded: 0, width: 0, height: 0, fps: null, bytes: 0, codec: null, decoder: null, powerEfficient: null, log: emptyReceiverCounters()
+    };
     for (const r of receivers) {
         const report = await r.getStats();
         report.forEach((s: any) => {
             if (s.type !== "inbound-rtp") return;
             out.bytes += s.bytesReceived ?? 0;
+            if (s.kind === "audio") guardStatsLog(() => readAudioInbound(out.log, s));
             if (r !== video || s.kind !== "video") return;
             out.framesDecoded = s.framesDecoded ?? 0;
             out.width = s.frameWidth ?? 0;
@@ -300,8 +298,10 @@ async function sample(v: ViewerEntry): Promise<InboundSample | null> {
             out.decoder = s.decoderImplementation ?? null;
             out.powerEfficient = typeof s.powerEfficientDecoder === "boolean" ? s.powerEfficientDecoder : null;
             if (s.codecId) out.codec = (report.get(s.codecId) as any)?.mimeType ?? null;
+            guardStatsLog(() => readVideoInbound(out.log, s));
         });
     }
+    out.at = performance.now();
     return out;
 }
 
@@ -330,6 +330,14 @@ function attachStream(v: ViewerEntry, stream: MediaStream) {
     v.firstFrameAt = null;
     v.meter = null;
     log.info(`Assistir ${peerLabel(v.peerId)}: stream recebido em ${Math.round(performance.now() - v.requestedAt)} ms (${stream.getVideoTracks().length} vídeo, ${stream.getAudioTracks().length} áudio)`);
+
+    // log de estatisticas deste stream: as linhas saem em sampleStats; o resumo, quando o stream sai (fim, parar, recusa...)
+    const statsLog = new ReceiverLog(performance.now());
+    v.statsLog = statsLog;
+    v.streamCleanup.push(() => guardStatsLog(() => {
+        const line = statsLog.summary(peerLabel(v.peerId), performance.now());
+        if (line) log.info(line);
+    }));
 
     const onRemoveTrack = () => {
         if (v.stream === stream && !stream.getVideoTracks().some(t => t.readyState === "live")) end(v, "a transmissão foi encerrada");
@@ -409,7 +417,10 @@ export function onIdentityInvalid(peerId: PeerId) {
     if (v) fail(v, INVALID_IDENTITY_TEXT);
 }
 
-/** A cada 2 s: largura, altura, fps e kbps de cada stream assistido; tambem recupera de um timeout de 1o quadro. */
+/**
+ * A cada 2 s: largura, altura, fps e kbps de cada stream assistido; tambem recupera de um timeout de 1o quadro. A mesma
+ * leitura alimenta o log de estatisticas (uma linha a cada STATS_LOG_MS por stream, core/statsLog.ts).
+ */
 export function sampleStats() {
     for (const v of rt.viewing.values()) {
         if (!v.stream || (v.status !== "playing" && v.status !== "waiting-first-frame" && v.status !== "error")) continue;
@@ -420,6 +431,10 @@ export function sampleStats() {
             const prev = v.meter;
             v.meter = { bytes: s.bytes, frames: s.framesDecoded, at: now };
             if (s.framesDecoded > 0 && v.firstFrameAt == null) onFirstFrame(v, s);
+            guardStatsLog(() => {
+                const line = v.statsLog?.add(s, peerLabel(v.peerId));
+                if (line) log.info(line);
+            });
             if (!prev || now <= prev.at) return;
             const dt = (now - prev.at) / 1000;
             const fps = s.fps ?? Math.max(0, (s.framesDecoded - prev.frames) / dt);
