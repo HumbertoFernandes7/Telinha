@@ -105,7 +105,7 @@ export const settings = definePluginSettings({
     shareDiagnostics: {
         type: OptionType.BOOLEAN,
         displayName: "Compartilhar diagnóstico para ajudar a depurar",
-        description: "Quem também ligou esta opção e está na mesma call pode pedir o registro do Telinha deste PC; vai só o registro do Telinha, sem IP.",
+        description: "Quem também ligou esta opção e está na mesma call pode pedir o registro do Telinha deste PC; vai só o registro do Telinha (com os nomes de quem está na call), sem IP; enquanto quem pediu mantiver o pedido, o envio recomeça sozinho quando você reabrir o Discord.",
         default: false,
         hidden: () => !isIdentityConfigured(),
         onChange: () => onShareDiagnosticsChanged()

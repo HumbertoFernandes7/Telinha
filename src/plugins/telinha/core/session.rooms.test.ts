@@ -28,7 +28,7 @@ import { logged, logMark, macrotask, settleImmediates } from "@test/helpers/wpa-
 import { rt } from "./context";
 import { getLocalCertificate } from "./identity/certificate";
 import { getPeerConnectionClass } from "./peerConnection";
-import { isSessionActive, onAdmissionSettingChanged, onPasswordChanged, startSession, stopSession } from "./session";
+import { isSessionActive, MAX_RECEIVE_BYTES, onAdmissionSettingChanged, onPasswordChanged, startSession, stopSession } from "./session";
 import { startStreaming } from "./streaming";
 
 const TOKENS_KEY = "telinha-identity-tokens-v1";
@@ -111,6 +111,8 @@ describe("sessao: sala do canal de voz", () => {
             assert.equal(rt.certFingerprint, cert.fingerprint);
             assert.equal(room.config.rtcPolyfill, getPeerConnectionClass());
             assert.equal(room.callbacks.handshakeTimeoutMs, 15_000);
+            assert.equal(room.config.maxReceiveBytes, 1024 * 1024, "mensagem recebida de no maximo 1 MB (o padrao do Trystero e 256 MB)");
+            assert.equal(MAX_RECEIVE_BYTES, 1024 * 1024);
             assert.deepEqual([...room.actions.keys()].sort(), ["codec", "diag", "identity", "presence", "watch"]);
             assert.equal(typeof room.onPeerJoin, "function");
             assert.equal(typeof room.onPeerStream, "function");

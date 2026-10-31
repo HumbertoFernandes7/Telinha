@@ -13,7 +13,7 @@ import { describe, test } from "node:test";
 
 import { getEventLog } from "@plugins/telinha/store";
 
-import { errorMessage, errorText, log, logThrottled, maskPrivate, shortId, stripIps } from "./log";
+import { errorMessage, errorText, log, logThrottled, maskPrivate, notePrivateTitle, shortId, stripIps } from "./log";
 
 const last = () => getEventLog().at(-1)!;
 
@@ -48,6 +48,31 @@ describe("maskPrivate (o que sai do PC no diagnostico compartilhado)", () => {
         assert.equal(maskPrivate("{\"id_token\":\"abc\",\"client_secret\": \"x\", \"code_verifier\":\"y\"}"), "{\"id_token\":\"[token]\",\"client_secret\": \"[token]\", \"code_verifier\":\"[token]\"}");
         assert.equal(maskPrivate("o id_token venceu; prova renovada"), "o id_token venceu; prova renovada", "a palavra sozinha fica");
         assert.equal(maskPrivate("Envio p/ leo (abc123): VP9 1280x720 29,8 fps"), "Envio p/ leo (abc123): VP9 1280x720 29,8 fps");
+    });
+
+    test("ids numericos do Discord (17 a 20 digitos) viram [id]; numeros menores ficam", () => {
+        assert.equal(maskPrivate("amigo (discord 200000000000000002) e (discord 12345678901234567890)"), "amigo (discord [id]) e (discord [id])");
+        assert.equal(maskPrivate("canal: 1234567890123456789; app 1565419793446862929"), "canal: [id]; app [id]");
+        assert.equal(maskPrivate("enviado 1650000 bytes em 1730000000000 ms; 123456789012345678901"), "enviado 1650000 bytes em 1730000000000 ms; 123456789012345678901");
+    });
+
+    test("nome da janela capturada: a linha de inicio (de qualquer sessao) e, nesta sessao, o nome em qualquer linha", () => {
+        // de uma sessao anterior (nome desconhecido aqui): so pela forma da linha, inclusive com aspas no nome
+        assert.equal(
+            maskPrivate("Iniciando transmissão: janela \"Doc \"x\" - Word\" em 1080p60 com áudio"),
+            "Iniciando transmissão: janela \"[janela]\" em 1080p60 com áudio"
+        );
+        assert.equal(maskPrivate("Iniciando transmissão: tela \"Tela 1\" em 720p60 sem áudio"), "Iniciando transmissão: tela \"[janela]\" em 720p60 sem áudio");
+        assert.equal(maskPrivate("Iniciando transmissão: janela \"cortada"), "Iniciando transmissão: janela \"cortada", "sem o fim da linha, a forma nao confere");
+
+        notePrivateTitle("Banco Secreto 10.1.2.3 - Chrome");
+        notePrivateTitle("Banco Secreto");
+        notePrivateTitle("abc");
+        notePrivateTitle("Banco Secreto");
+        assert.equal(maskPrivate("erro na Banco Secreto [ip] - Chrome e na Banco Secreto 10.1.2.3 - Chrome"), "erro na [janela] e na [janela]", "o nome inteiro primeiro, com e sem o IP");
+        assert.equal(maskPrivate("Banco Secreto caiu; abc fica"), "[janela] caiu; abc fica", "nome curto demais nao e mascarado solto");
+        for (let i = 0; i < 25; i++) notePrivateTitle(`janela numero ${i}`);
+        assert.equal(maskPrivate("Banco Secreto e janela numero 24"), "Banco Secreto e [janela]", "guarda so os 20 mais recentes");
     });
 });
 

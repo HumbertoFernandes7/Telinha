@@ -89,9 +89,10 @@
 //        quem pede → quem manda   { op: "unsubscribe" }   parar
 //        quem manda → quem pede   { op: "lines", lines: [{ t, level, text }], dropped? }
 //          t = hora local de quem manda ("HH:MM:SS.mmm"; nas linhas da sessao anterior "AAAA-MM-DD HH:MM:SS.mmm"),
-//          level = "info" | "warn" | "error", text = a linha (ate DIAG_MAX_LINE_CHARS caracteres, sem IPs, caminhos de
-//          usuario nem tokens); ate DIAG_MAX_LINES_PER_MESSAGE linhas por mensagem; dropped = quantas linhas ficaram de
-//          fora pelos limites desde a mensagem anterior.
+//          level = "info" | "warn" | "error", text = a linha (ate DIAG_MAX_LINE_CHARS caracteres, sem caracteres de
+//          controle, IPs, caminhos de usuario, ids numericos do Discord, o nome da janela capturada nem tokens; os nomes
+//          de quem esta na call ficam); ate DIAG_MAX_LINES_PER_MESSAGE linhas por mensagem; dropped = quantas linhas
+//          ficaram de fora pelos limites desde a mensagem anterior (inclusive com mais de 10 mensagens esperando o canal).
 //    - quem manda so aceita "subscribe" de um peer admitido, no seu canal de voz, com a identidade do Discord verificada
 //      e com caps.diag. Depois do "subscribe", sem pergunta nem aviso (so uma linha nas configuracoes e no log), na
 //      ordem: as ultimas linhas da sessao anterior (%APPDATA%\Telinha\logs\renderer.log), o mesmo texto do "Copiar
@@ -100,7 +101,9 @@
 //      "unsubscribe", quando quem pede sai da sala ou do canal de voz, perde a caps.diag ou deixa de passar nas regras,
 //      quando a opcao e desligada aqui ou quando qualquer um recarrega o Discord (a conexao cai).
 //    - quem pede so aceita "lines" de uma conexao a qual mandou "subscribe" e escreve cada linha no console com o
-//      prefixo "[Telinha] [diag <nome>]" (vai para o renderer_js.log do Discord), com a hora de la e a daqui.
+//      prefixo "[Telinha] [diag <nome>]" (vai para o renderer_js.log do Discord), com a hora de la e a daqui; o que
+//      ficou de fora vira no maximo um aviso por segundo. Cada ponta recebe mensagens de ate 1 MB (joinRoom
+//      maxReceiveBytes, core/session.ts → MAX_RECEIVE_BYTES; a maior "lines" fica abaixo de ~620 KB).
 //    Compatibilidade: versoes sem a acao (a v0.2.8 e anteriores, o amigo virtual) nunca anunciam caps.diag, entao
 //    nenhuma mensagem "diag" vai para elas; o sanitizePresence delas descarta o campo novo. Mensagem, linha ou campo
 //    malformado e ignorado (parseDiagMessage).

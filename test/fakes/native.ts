@@ -23,6 +23,7 @@ export function defaultTelinhaNatives(): Record<string, AnyFn> {
     return {
         appendDiagLog: async () => true,
         readDiagLog: async () => [],
+        clearDiagLog: async () => true,
         listSources: async () => ({
             sources: [
                 { id: "screen:0:0", name: "Tela inteira", kind: "screen" },

@@ -24,18 +24,19 @@ import {
 import { formatDiagnostics, getEventLog, getState } from "@plugins/telinha/store";
 import type { FakeAction } from "@test/fakes/trystero";
 import { ME_ID, pluginSettings } from "@test/fakes/vencord";
-import { connectViewer, createRig, destroyRig, enterCall, leaveCall, seconds, setMembers, type StreamingRig, turns } from "@test/helpers/wpb-streaming";
+import { connectViewer, createRig, destroyRig, enterCall, leaveCall, seconds, setMembers, type StreamingRig, turns, windowOptions } from "@test/helpers/wpb-streaming";
 
 import { rt } from "./context";
 import { diagLogSession } from "./diagLog";
 import {
-    DIAG_LIVE_BUFFER_LINES, DIAG_MAX_SNAPSHOT_LINES, DIAG_RECEIVE_BURST, DIAG_RECEIVE_PER_SECOND, DIAG_REFRESH_TIMEOUT_MS, DIAG_SNAPSHOT_MIN_INTERVAL_MS,
+    DIAG_LIVE_BUFFER_LINES, DIAG_MAX_QUEUED_MESSAGES, DIAG_MAX_SNAPSHOT_LINES, DIAG_RECEIVE_BURST, DIAG_RECEIVE_PER_SECOND, DIAG_REFRESH_TIMEOUT_MS, DIAG_SNAPSHOT_MIN_INTERVAL_MS,
     diagEligible, diagName, diagText, formatDiagReceived, localDateTime, localTime, onShareDiagnosticsChanged, setDiagnosticsSource, setDiagRequest,
     startDiagShare, stopDiagShare, tickDiagShare
 } from "./diagShare";
 import { log } from "./log";
 import { selfPresence } from "./presence";
 import { startSession, stopSession } from "./session";
+import { startStreaming, stopStreaming } from "./streaming";
 
 const DEFAULT_SOURCE = { refresh: () => Promise.resolve(), format: () => formatDiagnostics() };
 const PREFIX_RE = /^\[Telinha\] \[diag /;
@@ -185,7 +186,9 @@ describe("protocolo (acao \"diag\")", () => {
 describe("texto, hora e nome", () => {
     test("diagText: uma linha so, mascarada, cortada em DIAG_MAX_LINE_CHARS com reticencias", () => {
         assert.equal(diagText("a\nb\r\nc"), "a ⏎ b ⏎ c");
+        assert.equal(diagText("a\u0007b\u001b[31m\tc"), "a b [31m c", "sem caracteres de controle (o JSON os escreve com 6 bytes)");
         assert.equal(diagText("pasta C:\\Users\\Fulano\\AppData e 10.1.2.3"), "pasta C:\\Users\\[usuário]\\AppData e [ip]");
+        assert.equal(diagText("amigo (discord 200000000000000002) no canal 1234567890123456789"), "amigo (discord [id]) no canal [id]");
         const long = diagText("x".repeat(5000));
         assert.equal(long.length, DIAG_MAX_LINE_CHARS);
         assert.ok(long.endsWith("…"));
@@ -400,7 +403,7 @@ describe("quem manda: o 'Copiar diagnóstico' primeiro, depois as linhas novas",
         assert.equal(diagTo(f).length, n);
     });
 
-    test("parou de pedir enquanto o texto era preparado: nada sai", async () => {
+    test("parou de pedir enquanto o texto era preparado: nada sai, e o pedido seguinte leva o texto completo", async () => {
         let release!: () => void;
         setDiagnosticsSource({ refresh: () => new Promise<void>(resolve => (release = resolve)), format: () => "Telinha — diagnóstico" });
         const f = await friend();
@@ -410,6 +413,42 @@ describe("quem manda: o 'Copiar diagnóstico' primeiro, depois as linhas novas",
         await turns();
         await seconds(rig);
         assert.deepEqual(diagTo(f), []);
+
+        // o cancelado nao conta como "saiu ha pouco": logo em seguida, o texto completo
+        setDiagnosticsSource({ refresh: () => Promise.resolve(), format: () => "Telinha — diagnóstico" });
+        await asksUs(f);
+        assert.deepEqual(textsTo(f).slice(0, 2), [NOTHING_STORED, "Telinha — diagnóstico"]);
+        assert.equal(textsTo(f).some(t => t.includes("saiu há")), false);
+    });
+
+    test("o canal nao anda: no maximo DIAG_MAX_QUEUED_MESSAGES mensagens na fila; o resto conta no dropped da proxima", async () => {
+        const f = await friend();
+        const action = rig.room.actions.get("diag") as FakeAction;
+        const waiting: (() => void)[] = [];
+        action.sendImpl = () => new Promise<void>(resolve => waiting.push(resolve));
+        try {
+            await asksUs(f);
+            // a primeira parte (1 mensagem) espera o canal; cada segundo com uma linha nova enfileira mais uma
+            const ticks = DIAG_MAX_QUEUED_MESSAGES + 5;
+            for (let i = 0; i < ticks; i++) {
+                log.info(`fila ${i}`);
+                await seconds(rig);
+            }
+            assert.equal(linesMsgsTo(f).length, 1, "so a primeira chegou ao canal");
+        } finally {
+            action.sendImpl = null;
+        }
+        waiting[0]();
+        await turns();
+        const queued = linesMsgsTo(f);
+        assert.equal(queued.length, DIAG_MAX_QUEUED_MESSAGES, "a fila andou: so as que couberam");
+        assert.equal(queued.at(-1)?.lines[0].text, `fila ${DIAG_MAX_QUEUED_MESSAGES - 2}`);
+
+        await seconds(rig);
+        const next = linesMsgsTo(f).at(-1)!;
+        assert.equal(linesMsgsTo(f).length, DIAG_MAX_QUEUED_MESSAGES + 1, "o que ficou de fora vai no proximo segundo, mesmo sem linha nova");
+        assert.deepEqual(next.lines, []);
+        assert.equal(next.dropped, 6, "as 6 linhas das mensagens que nao couberam");
     });
 
     test("parou de pedir com mensagens na fila: as que ainda nao sairam nao saem", async () => {
@@ -489,6 +528,25 @@ describe("quem manda: limites e mascara das linhas ao vivo", () => {
         assert.equal(tokens.level, "error");
         assert.equal(tokens.text, "token [token] e Bearer [token], id_token=[token]; peer [ip] ⏎ segunda");
     });
+
+    test("ids do Discord e o nome da janela transmitida saem mascarados; o log local fica como esta", async () => {
+        const f = await live();
+        const title = "Planilha \"salários\" 10.0.0.7 - Excel";
+        pluginSettings.set("autoQuality", false);
+        try {
+            await startStreaming(windowOptions({ source: { id: "window:1234:0", name: title, kind: "window" } }));
+            log.info(`${f.name} (discord ${f.id}) viu a "${title}"`);
+            await seconds(rig);
+        } finally {
+            stopStreaming();
+            pluginSettings.set("autoQuality", true);
+        }
+        const texts = textsTo(f);
+        assert.ok(texts.includes("Iniciando transmissão: janela \"[janela]\" em 1080p60 sem áudio"), texts.join("\n"));
+        assert.ok(texts.includes(`${f.name} (discord [id]) viu a "[janela]"`));
+        assert.equal(texts.some(t => t.includes("salários") || t.includes(f.id)), false);
+        assert.ok(getEventLog().some(e => e.msg === `Iniciando transmissão: janela "${title.replace("10.0.0.7", "[ip]")}" em 1080p60 sem áudio`), "no log local, o nome fica");
+    });
 });
 
 describe("quem manda: o fim da sessao anterior (registro em arquivo)", () => {
@@ -524,16 +582,30 @@ describe("quem manda: o fim da sessao anterior (registro em arquivo)", () => {
         assert.deepEqual(textsTo(f).slice(0, 2), [NOTHING_STORED, "Telinha — diagnóstico"]);
     });
 
-    test("com a opcao ligada, o log vai para o arquivo em lotes; desligada, para", async () => {
-        const appended = () => rig.native.calls.filter(c => c.name === "appendDiagLog").map(c => String(c.args[0])).join("");
+    const appended = () => rig.native.calls.filter(c => c.name === "appendDiagLog").map(c => String(c.args[0])).join("");
+    const clears = () => rig.native.calls.filter(c => c.name === "clearDiagLog").length;
+
+    test("com a opcao ligada, o log vai para o arquivo em lotes; desligada, para e o arquivo e apagado", async () => {
         log.info("isto vai para o arquivo");
         await seconds(rig, 3);
         assert.match(appended(), new RegExp(` ${diagLogSession()} info isto vai para o arquivo\\n`));
 
+        const before = clears();
         pluginSettings.set("shareDiagnostics", false);
+        assert.equal(clears(), before + 1, "desligar apaga renderer.log e .1");
         log.info("isto nao vai");
         await seconds(rig, 3);
         assert.doesNotMatch(appended(), /isto nao vai/);
+    });
+
+    test("desligada sem o onChange (configuracao sincronizada): o tick para de gravar (sem apagar)", async () => {
+        const before = clears();
+        pluginSettings.load({ shareDiagnostics: false });
+        await seconds(rig);
+        log.info("depois da sincronizacao");
+        await seconds(rig, 3);
+        assert.doesNotMatch(appended(), /depois da sincronizacao/);
+        assert.equal(clears(), before, "so o onChange apaga");
     });
 });
 
@@ -650,8 +722,24 @@ describe("quem pede (este PC): \"Receber diagnóstico\"", () => {
         assert.deepEqual(getState().diag?.receivingFrom, [f.id]);
 
         rig.room.receive("diag", { op: "lines", lines: [], dropped: 7 }, f.peerId);
-        assert.equal(out.at(-1), `[Telinha] [diag _gupi] ${here} (aqui ${here}) warn (7 linha(s) ficaram de fora pelos limites)`);
+        assert.equal(out.length, 2, "o que ficou de fora so soma; o aviso sai no tick");
+        await seconds(rig);
+        const tick = localTime(Date.now());
+        assert.deepEqual(out.slice(2), [`[Telinha] [diag _gupi] ${tick} (aqui ${tick}) warn (7 linha(s) ficaram de fora pelos limites)`]);
         assert.equal(since().filter(e => e.msg.startsWith("Recebendo o diagnóstico")).length, 1, "o aviso de 'recebendo' sai uma vez");
+    });
+
+    test("so 'ficaram de fora' em rajada (10 mil mensagens): no maximo um aviso por segundo, com a soma", async t => {
+        const out = captureConsole(t);
+        const f = await friend({ name: "inunda" });
+        setDiagRequest(f.id, f.name, true);
+        for (let i = 0; i < 10_000; i++) rig.room.receive("diag", { op: "lines", lines: [], dropped: 1 }, f.peerId);
+        assert.deepEqual(out, [], "nada no console na hora");
+        await seconds(rig);
+        assert.equal(out.length, 1);
+        assert.match(out[0], /^\[Telinha\] \[diag inunda\] .* warn \(10000 linha\(s\) ficaram de fora pelos limites\)$/);
+        await seconds(rig, 3);
+        assert.equal(out.length, 1, "nada novo: nenhum aviso");
     });
 
     test("quem nao passa nas regras nao recebe o pedido; quando passar (ligou a opcao la), o tick pede", async () => {
@@ -696,11 +784,12 @@ describe("quem pede (este PC): \"Receber diagnóstico\"", () => {
         for (let i = 0; i < messages; i++) rig.room.receive("diag", batch, f.peerId);
         const printed = out.filter(l => l.endsWith(" info l")).length;
         assert.equal(printed, DIAG_RECEIVE_BURST);
-        const notices = out.filter(l => / warn \(\d+ linha\(s\) ficaram de fora pelos limites\)$/.test(l));
-        assert.equal(notices.length, 2);
-        assert.match(notices[0], / warn \(200 linha\(s\)/);
+        const notices = () => out.filter(l => / warn \(\d+ linha\(s\) ficaram de fora pelos limites\)$/.test(l));
+        assert.equal(notices().length, 0, "o aviso espera o tick");
 
         await seconds(rig, 2);
+        assert.equal(notices().length, 1);
+        assert.match(notices()[0], / warn \(400 linha\(s\)/, "as duas mensagens que nao couberam, num aviso so");
         out.length = 0;
         rig.room.receive("diag", batch, f.peerId);
         assert.equal(out.filter(l => l.endsWith(" info l")).length, 2 * DIAG_RECEIVE_PER_SECOND, "2 s depois: o que encheu");
@@ -876,10 +965,16 @@ describe("ganchos fora da sessao", () => {
         const f = await friend();
         await asksUs(f);
         const since = logSince();
+        const clearsBefore = rig.native.calls.filter(c => c.name === "clearDiagLog").length;
         stopSession();
         await turns();
         assert.equal(rt.diagSending.size, 0);
         assert.ok(since().some(e => e.msg === `Parou de enviar o diagnóstico para ${f.name} (${f.peerId.slice(0, 6)}): a sala fechou`));
+        assert.equal(rig.native.calls.filter(c => c.name === "clearDiagLog").length, clearsBefore, "parar o plugin nao apaga o registro");
+
+        // a opcao desligada com o plugin parado: o registro e apagado do mesmo jeito
+        pluginSettings.set("shareDiagnostics", false);
+        assert.equal(rig.native.calls.filter(c => c.name === "clearDiagLog").length, clearsBefore + 1);
         startSession();
         await enterCall(rig);
     });

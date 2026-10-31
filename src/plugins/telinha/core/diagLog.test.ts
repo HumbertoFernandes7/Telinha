@@ -19,8 +19,8 @@ import { flushPromises, useFakeClock } from "@test/fakes/clock";
 import { installNative, type NativeEnv } from "@test/fakes/native";
 
 import {
-    DIAG_LOG_BATCH_LINES, DIAG_LOG_FLUSH_MS, DIAG_LOG_MAX_PENDING_LINES, DIAG_PREVIOUS_MAX_CHARS, DIAG_PREVIOUS_MAX_LINES, diagLogSession, readPreviousSession,
-    startDiagLog, stopDiagLog
+    clearDiagLog, DIAG_LOG_BATCH_LINES, DIAG_LOG_FLUSH_MS, DIAG_LOG_MAX_PENDING_LINES, DIAG_PREVIOUS_MAX_CHARS, DIAG_PREVIOUS_MAX_LINES, diagLogSession,
+    readPreviousSession, startDiagLog, stopDiagLog
 } from "./diagLog";
 import { log } from "./log";
 
@@ -255,5 +255,50 @@ describe("ler a sessao anterior", () => {
         assert.equal(await readPreviousSession(), null);
         withNative(undefined, async () => []);
         assert.deepEqual(await readPreviousSession(), []);
+    });
+});
+
+describe("apagar (a opcao foi desligada)", () => {
+    test("para de gravar, esquece o que esperava e pede ao main para apagar renderer.log e .1", async t => {
+        const clock = useFakeClock(t);
+        const batches = withNative();
+        startDiagLog();
+        log.info("nunca vai");
+        clearDiagLog();
+        log.info("nem esta");
+        clock.tick(DIAG_LOG_FLUSH_MS);
+        await flushPromises();
+        assert.equal(batches.length, 0);
+        assert.equal(native!.calls.filter(c => c.name === "clearDiagLog").length, 1);
+
+        clearDiagLog();
+        await flushPromises();
+        assert.equal(native!.calls.filter(c => c.name === "clearDiagLog").length, 2, "parado: apaga do mesmo jeito");
+    });
+
+    for (const [what, clear, why] of [
+        ["o main diz que nao apagou", async () => false, "o processo principal não apagou"],
+        ["o IPC falha", async () => {
+            throw new Error("IPC caiu");
+        }, "Error: IPC caiu"]
+    ] as const) {
+        test(`falha ao apagar (${what}): so um aviso no log`, async () => {
+            native = installNative({ clearDiagLog: clear });
+            clearDiagLog();
+            await flushPromises();
+            const warn = getEventLog().at(-1)!;
+            assert.equal(warn.level, "warn");
+            assert.equal(warn.msg, `Não deu para apagar o registro do Telinha em arquivo (${why})`);
+        });
+    }
+
+    test("sem a parte nativa, ou com um native.ts sem clearDiagLog: nada (e nada lanca)", async () => {
+        const before = getEventLog().length;
+        clearDiagLog();
+        native = installNative({ clearDiagLog: undefined as never });
+        clearDiagLog();
+        await flushPromises();
+        assert.deepEqual(native.calls, []);
+        assert.equal(getEventLog().length, before);
     });
 });

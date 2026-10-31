@@ -131,6 +131,10 @@ export interface DiagSubscriber {
     sentSeq: number;
     /** envios em ordem: a primeira parte pode ser mais de uma mensagem */
     chain: Promise<void>;
+    /** mensagens na fila (no maximo DIAG_MAX_QUEUED_MESSAGES; o resto so conta em `dropped`) */
+    queued: number;
+    /** linhas que ficaram de fora da fila, para o `dropped` da proxima mensagem */
+    dropped: number;
 }
 
 /** Uma conexao da qual pedimos o diagnostico (core/diagShare.ts, lado de quem pede). */
@@ -144,6 +148,8 @@ export interface DiagSubscription {
     tokens: number;
     /** Date.now() da ultima recarga do balde */
     refilledAt: number;
+    /** linhas que ficaram de fora (de la ou pelo balde) desde o ultimo aviso no console (um aviso por segundo, no tick) */
+    droppedPending: number;
 }
 
 export const rt = {

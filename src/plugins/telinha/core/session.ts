@@ -43,6 +43,13 @@ const IDENTITY_CHECK_TIMEOUT_MS = 10_000;
 const IDENTITY_RETRY_MS = 1500;
 /** acao "identity" do mesmo peer: no maximo uma verificacao neste intervalo */
 const IDENTITY_RENEWAL_MIN_MS = 10_000;
+/**
+ * Maior mensagem que o Trystero aceita receber (o padrao, 256 MB, aloca e decodifica antes do nosso parser). As nossas:
+ * presenca, "watch", "codec" e "identity" (id_token <= 8 KB) cabem em poucos KB, o hello do handshake tambem; a maior e
+ * uma "lines" do diagnostico (200 linhas de ate 1000 caracteres sem caracteres de controle: ~620 KB no pior caso). As
+ * internas do Trystero: SDP da renegociacao (dezenas de KB) e metadados de stream/track (ele mesmo limita em 64 KB).
+ */
+export const MAX_RECEIVE_BYTES = 1024 * 1024;
 const NO_IDENTITY: PreparedIdentity = { certificates: [], fingerprint: null };
 
 let active = false;
@@ -238,6 +245,7 @@ function joinNow(roomId: string, reason: string, identity: PreparedIdentity) {
         {
             appId: APP_ID,
             password,
+            maxReceiveBytes: MAX_RECEIVE_BYTES,
             relayConfig: { urls: RELAY_URLS },
             // certificado DTLS persistente em TODAS as conexoes (o nonce do id_token aponta para ele); sem ele, o do Chromium
             rtcConfig: { iceServers: ICE_SERVERS, ...(identity.certificates.length ? { certificates: identity.certificates } : {}) },

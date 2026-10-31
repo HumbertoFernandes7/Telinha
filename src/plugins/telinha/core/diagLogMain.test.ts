@@ -16,10 +16,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, afterEach, before, describe, test } from "node:test";
 
-import { appendDiagLog, readDiagLog } from "@plugins/telinha/native";
+import { appendDiagLog, clearDiagLog, readDiagLog } from "@plugins/telinha/native";
 import { app, ipcEvent } from "@test/fakes/electron";
 
-import { appendDiagLogMain, DIAG_LOG_FILE, DIAG_LOG_MAX_APPEND_CHARS, DIAG_LOG_MAX_BYTES, DIAG_LOG_TAIL_LINES, readDiagLogMain, setDiagLogDirForTests } from "./diagLogMain";
+import {
+    appendDiagLogMain, clearDiagLogMain, DIAG_LOG_FILE, DIAG_LOG_MAX_APPEND_CHARS, DIAG_LOG_MAX_BYTES, DIAG_LOG_TAIL_LINES, readDiagLogMain, setDiagLogDirForTests
+} from "./diagLogMain";
 
 let root: string;
 let dir: string;
@@ -84,6 +86,17 @@ describe("registro em arquivo (processo main)", () => {
         assert.equal(lines.at(-1), "nova 299");
     });
 
+    test("apagar (a opcao foi desligada): renderer.log e .1 somem; sem arquivo tambem da certo", async () => {
+        freshDir();
+        assert.equal(await clearDiagLog(ipcEvent()), true, "nada gravado ainda: nada a apagar");
+        await appendDiagLogMain("a\n");
+        writeFileSync(file() + ".1", "velha\n");
+        assert.equal(await clearDiagLogMain(), true);
+        assert.equal(existsSync(file()), false);
+        assert.equal(existsSync(file() + ".1"), false);
+        assert.deepEqual(await readDiagLogMain(), []);
+    });
+
     test("lote invalido (nao e texto, vazio, grande demais) e recusado sem gravar", async () => {
         freshDir();
         for (const bad of [42, null, "", "z".repeat(DIAG_LOG_MAX_APPEND_CHARS + 1)]) assert.equal(await appendDiagLogMain(bad), false, String(bad).slice(0, 20));
@@ -104,5 +117,6 @@ describe("registro em arquivo (processo main)", () => {
         });
         assert.equal(await appendDiagLogMain("a\n"), false);
         assert.deepEqual(await readDiagLogMain(), []);
+        assert.equal(await clearDiagLogMain(), false);
     });
 });

@@ -13,7 +13,7 @@ import { desktopCapturer, type IpcMainInvokeEvent } from "electron";
 
 import { readScreenAudioMain, screenAudioStatusMain, startScreenAudioMain, stopScreenAudioMain } from "./core/audio/screenAudioMain";
 import type { ScreenAudioRead, ScreenAudioStart, ScreenAudioStatus } from "./core/audio/types";
-import { appendDiagLogMain, readDiagLogMain } from "./core/diagLogMain";
+import { appendDiagLogMain, clearDiagLogMain, readDiagLogMain } from "./core/diagLogMain";
 import { getWindowProcessInfo } from "./nativeWindowPid";
 import { RELAY_URLS } from "./protocol";
 
@@ -259,6 +259,11 @@ export function appendDiagLog(_: IpcMainInvokeEvent, text: string): Promise<bool
 /** As ultimas linhas do registro (renderer.log.1 + renderer.log), mais antiga primeiro. */
 export function readDiagLog(_: IpcMainInvokeEvent): Promise<string[]> {
     return readDiagLogMain();
+}
+
+/** Apaga o registro (renderer.log e .1): "Compartilhar diagnóstico" foi desligado. false = nao apagou. */
+export function clearDiagLog(_: IpcMainInvokeEvent): Promise<boolean> {
+    return clearDiagLogMain();
 }
 
 // #endregion

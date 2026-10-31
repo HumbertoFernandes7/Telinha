@@ -29,7 +29,7 @@ import type { PeerId } from "@plugins/telinha/types";
 import type { MessageAction } from "trystero";
 
 import { type DiagSubscriber, type PeerEntry, peerLabel, publish, rt } from "./context";
-import { readPreviousSession, startDiagLog, stopDiagLog, type StoredLine } from "./diagLog";
+import { clearDiagLog, readPreviousSession, startDiagLog, stopDiagLog, type StoredLine } from "./diagLog";
 import { isIdentityConfigured } from "./identity/config";
 import { errorText, log, logThrottled, maskPrivate, shortId } from "./log";
 import { sendPresence } from "./presence";
@@ -53,6 +53,8 @@ export const DIAG_LIVE_BUFFER_LINES = 300;
 /** limite de recepcao (quem pede): um balde de DIAG_RECEIVE_BURST linhas que enche DIAG_RECEIVE_PER_SECOND por segundo */
 export const DIAG_RECEIVE_BURST = 3000;
 export const DIAG_RECEIVE_PER_SECOND = 60;
+/** mensagens esperando o canal, por conexao (a primeira parte tem no maximo 8); alem disso, as linhas so contam em dropped */
+export const DIAG_MAX_QUEUED_MESSAGES = 10;
 
 const OFF_HERE = "\"Compartilhar diagnóstico\" desligado aqui";
 
@@ -89,9 +91,13 @@ export function localDateTime(at: number): string {
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${localTime(at)}`;
 }
 
-/** Uma linha que pode sair deste PC: numa linha so, sem IPs, pasta do usuario nem tokens, no maximo DIAG_MAX_LINE_CHARS. */
+/**
+ * Uma linha que pode sair deste PC: numa linha so, sem caracteres de controle, sem dados privados (maskPrivate: IPs, pasta
+ * do usuario, ids do Discord, nome da janela capturada, tokens), no maximo DIAG_MAX_LINE_CHARS. Sem caracteres de controle
+ * (que o JSON escreve com 6 bytes), uma mensagem de 200 linhas fica abaixo de ~620 KB (session.ts → MAX_RECEIVE_BYTES).
+ */
 export function diagText(text: string): string {
-    const clean = maskPrivate(text.replace(/\r?\n/g, " ⏎ "));
+    const clean = maskPrivate(text.replace(/\r?\n/g, " ⏎ ").replace(/\p{Cc}+/gu, " "));
     return clean.length > DIAG_MAX_LINE_CHARS ? clean.slice(0, DIAG_MAX_LINE_CHARS - 1) + "…" : clean;
 }
 
@@ -149,8 +155,19 @@ function onEvent(event: TelinhaEvent) {
     if (live.length > DIAG_LIVE_BUFFER_LINES) live.splice(0, live.length - DIAG_LIVE_BUFFER_LINES);
 }
 
-/** Envios para a mesma conexao saem em ordem (a primeira parte pode ser mais de uma mensagem). */
-function enqueue(sub: DiagSubscriber, msg: DiagMessage) {
+/**
+ * Envios para a mesma conexao saem em ordem (a primeira parte pode ser mais de uma mensagem). Com DIAG_MAX_QUEUED_MESSAGES
+ * na fila (o canal nao anda), a mensagem nova fica de fora e as linhas dela vao no `dropped` da proxima que couber.
+ */
+function enqueue(sub: DiagSubscriber, lines: DiagLine[], dropped = 0) {
+    if (sub.queued >= DIAG_MAX_QUEUED_MESSAGES) {
+        sub.dropped += lines.length + dropped;
+        return;
+    }
+    const total = dropped + sub.dropped;
+    sub.dropped = 0;
+    sub.queued++;
+    const msg: DiagMessage = { op: "lines", lines, ...(total ? { dropped: total } : {}) };
     sub.chain = sub.chain
         .then(() => {
             // parou de receber enquanto a mensagem esperava a vez. Recebendo, a sala (e a acao) existe: leaveRoom tira
@@ -158,11 +175,14 @@ function enqueue(sub: DiagSubscriber, msg: DiagMessage) {
             if (rt.diagSending.get(sub.peerId) !== sub) return;
             return send(rt.diagAction as MessageAction<DiagMessage>, sub.peerId, msg);
         })
-        .catch(e => logThrottled("diag-send", "warn", `Falha ao enviar o diagnóstico para ${sub.username}: ${errorText(e)}`, 60_000));
+        .catch(e => logThrottled("diag-send", "warn", `Falha ao enviar o diagnóstico para ${sub.username}: ${errorText(e)}`, 60_000))
+        .then(() => {
+            sub.queued--;
+        });
 }
 
 function enqueueLines(sub: DiagSubscriber, lines: DiagLine[]) {
-    for (let i = 0; i < lines.length; i += DIAG_MAX_LINES_PER_MESSAGE) enqueue(sub, { op: "lines", lines: lines.slice(i, i + DIAG_MAX_LINES_PER_MESSAGE) });
+    for (let i = 0; i < lines.length; i += DIAG_MAX_LINES_PER_MESSAGE) enqueue(sub, lines.slice(i, i + DIAG_MAX_LINES_PER_MESSAGE));
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
@@ -212,7 +232,6 @@ async function sendFirstPart(sub: DiagSubscriber) {
         sub.sentSeq = seq;
         lines = [diagLine(now, "info", `--- o diagnóstico completo saiu há ${Math.round((now - last) / 1000)} s: daqui em diante, só as linhas novas ---`)];
     } else {
-        lastSnapshotAt.set(sub.discordUserId, now);
         const [previous] = await Promise.all([
             withTimeout(readPreviousSession(), DIAG_REFRESH_TIMEOUT_MS, null),
             withTimeout(source.refresh(), DIAG_REFRESH_TIMEOUT_MS, null)
@@ -226,6 +245,8 @@ async function sendFirstPart(sub: DiagSubscriber) {
         }
         sub.sentSeq = seq;
         lines = [...previousLines(previous), ...snapshotLines(text), diagLine(Date.now(), "info", "--- ao vivo: cada linha nova do Telinha deste PC a partir daqui ---")];
+        // so conta como enviado o que vai mesmo para a fila (um pedido cancelado no meio nao segura o proximo)
+        lastSnapshotAt.set(sub.discordUserId, Date.now());
     }
     enqueueLines(sub, lines);
     sub.ready = true;
@@ -251,7 +272,9 @@ function onSubscribe(peerId: PeerId) {
         username: presence!.username,
         ready: false,
         sentSeq: seq,
-        chain: Promise.resolve()
+        chain: Promise.resolve(),
+        queued: 0,
+        dropped: 0
     };
     rt.diagSending.set(peerId, sub);
     log.info(`Enviando o diagnóstico deste PC para ${peerLabel(peerId)} (pedido pelo "Compartilhar diagnóstico", ligado aqui)`);
@@ -289,7 +312,8 @@ function flushLive() {
         const lines = pending.slice(0, DIAG_MAX_LINES_PER_SECOND).map(({ event }) => diagLine(event.at, event.level, event.msg));
         const dropped = lost + pending.length - lines.length;
         sub.sentSeq = seq;
-        if (lines.length || dropped) enqueue(sub, { op: "lines", lines, ...(dropped ? { dropped } : {}) });
+        // sub.dropped: o que ficou de fora da fila cheia sai assim que ela andar, mesmo sem linha nova
+        if (lines.length || dropped || sub.dropped) enqueue(sub, lines, dropped);
     }
 }
 
@@ -342,7 +366,8 @@ function reconcileRequests() {
             username: entry.presence!.username,
             receiving: false,
             tokens: DIAG_RECEIVE_BURST,
-            refilledAt: Date.now()
+            refilledAt: Date.now(),
+            droppedPending: 0
         });
         send(action, entry.peerId, { op: "subscribe" }).catch(e => logThrottled("diag-sub", "warn", "Falha ao pedir o diagnóstico: " + errorText(e), 60_000));
         log.info(`Pedindo o diagnóstico de ${peerLabel(entry.peerId)}`);
@@ -350,7 +375,10 @@ function reconcileRequests() {
     }
 }
 
-/** Linhas que chegaram: so de quem pedimos, dentro do limite de recepcao; cada uma vai para o console. */
+/**
+ * Linhas que chegaram: so de quem pedimos, dentro do limite de recepcao; cada uma vai para o console. O que ficou de fora
+ * (o `dropped` de la e o que passou do balde) so soma: o aviso sai no tick, no maximo um por segundo por conexao.
+ */
 function onLines(peerId: PeerId, msg: Extract<DiagMessage, { op: "lines"; }>) {
     const s = rt.diagReceiving.get(peerId);
     if (!s) {
@@ -364,12 +392,21 @@ function onLines(peerId: PeerId, msg: Extract<DiagMessage, { op: "lines"; }>) {
     s.tokens -= take;
     const name = diagName(s.username);
     for (const line of msg.lines.slice(0, take)) console.log(formatDiagReceived(name, line, now));
-    const dropped = (msg.dropped ?? 0) + msg.lines.length - take;
-    if (dropped) console.log(formatDiagReceived(name, { t: localTime(now), level: "warn", text: `(${dropped} linha(s) ficaram de fora pelos limites)` }, now));
+    s.droppedPending += (msg.dropped ?? 0) + msg.lines.length - take;
     if (!s.receiving) {
         s.receiving = true;
         log.info(`Recebendo o diagnóstico de ${peerLabel(peerId)}: no console do Discord (renderer_js.log), linhas "[Telinha] [diag ${name}]"`);
         publish();
+    }
+}
+
+/** Um aviso por conexao com o que ficou de fora desde o ultimo (no tick: no maximo um por segundo, qualquer que seja o ritmo de la). */
+function reportDropped() {
+    const now = Date.now();
+    for (const s of rt.diagReceiving.values()) {
+        if (!s.droppedPending) continue;
+        console.log(formatDiagReceived(diagName(s.username), { t: localTime(now), level: "warn", text: `(${s.droppedPending} linha(s) ficaram de fora pelos limites)` }, now));
+        s.droppedPending = 0;
     }
 }
 
@@ -384,9 +421,14 @@ export function onDiagMessage(peerId: PeerId, msg: DiagMessage): void {
     else onLines(peerId, msg);
 }
 
-/** A cada segundo (session.ts → tick): confere as regras, pede/para de pedir e manda as linhas novas. */
+/**
+ * A cada segundo (session.ts → tick): confere as regras, pede/para de pedir, manda as linhas novas e avisa o que ficou de
+ * fora do que chegou. A opcao desligada sem o onChange (configuracao sincronizada de outro PC) tambem para o arquivo.
+ */
 export function tickDiagShare(): void {
     if (!active) return;
+    if (!shareOn()) stopDiagLog();
+    reportDropped();
     reviewSending();
     reconcileRequests();
     flushLive();
@@ -432,14 +474,17 @@ export function stopDiagShare(): void {
     active = false;
 }
 
-/** A opcao "Compartilhar diagnóstico" mudou (settings.ts): presenca nova (caps.diag); desligada, para tudo. */
+/**
+ * A opcao "Compartilhar diagnóstico" mudou (settings.ts): presenca nova (caps.diag); desligada, para tudo e apaga o
+ * registro em arquivo (mesmo com o plugin parado). Parar o plugin nao apaga: so desligar a opcao.
+ */
 export function onShareDiagnosticsChanged(): void {
+    if (!shareOn()) clearDiagLog();
     if (!active) return;
     if (shareOn()) {
         log.info("\"Compartilhar diagnóstico\" ligado: quem também ligou e está na call, com a identidade verificada, pode pedir o registro do Telinha deste PC");
         startDiagLog();
     } else {
-        stopDiagLog();
         for (const peerId of [...rt.diagSending.keys()]) stopSending(peerId, "você desligou \"Compartilhar diagnóstico\"");
         rt.diagRequested.clear();
         reconcileRequests();

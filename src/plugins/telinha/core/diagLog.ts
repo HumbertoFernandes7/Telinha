@@ -119,6 +119,24 @@ export function stopDiagLog(): void {
 }
 
 /**
+ * A opcao foi desligada (core/diagShare.ts): para de gravar, esquece o que esperava e apaga o arquivo (renderer.log e
+ * .1). Um lote a caminho chega antes no main (as operacoes la sao em fila), entao nada sobra. Parar o plugin nao apaga.
+ */
+export function clearDiagLog(): void {
+    off?.();
+    off = null;
+    pending = [];
+    if (timer) clearTimeout(timer);
+    timer = null;
+    const native = getNativeOrNull();
+    if (typeof native?.clearDiagLog !== "function") return;
+    const failed = (why: string) => log.warn(`Não deu para apagar o registro do Telinha em arquivo (${why})`);
+    native.clearDiagLog().then(ok => {
+        if (ok !== true) failed("o processo principal não apagou");
+    }, e => failed(errorText(e)));
+}
+
+/**
  * O fim das sessoes anteriores guardado no arquivo, mais antigo primeiro: no maximo DIAG_PREVIOUS_MAX_LINES linhas e
  * DIAG_PREVIOUS_MAX_CHARS caracteres (as mais novas). null = nao deu para ler (sem a parte nativa, erro no main).
  */

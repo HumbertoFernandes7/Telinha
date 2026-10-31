@@ -63,6 +63,20 @@ export function appendDiagLogMain(text: unknown): Promise<boolean> {
     });
 }
 
+/** Apaga o registro (renderer.log e renderer.log.1): a opcao foi desligada. Arquivo que nao existe nao e erro. false = nao apagou. */
+export function clearDiagLogMain(): Promise<boolean> {
+    return serial(async () => {
+        try {
+            const file = logFile();
+            await fs.rm(file, { force: true });
+            await fs.rm(file + ".1", { force: true });
+            return true;
+        } catch {
+            return false;
+        }
+    });
+}
+
 /** As ultimas DIAG_LOG_TAIL_LINES linhas do registro (renderer.log.1 + renderer.log), mais antiga primeiro. [] = nada. */
 export function readDiagLogMain(): Promise<string[]> {
     return serial(async () => {
