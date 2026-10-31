@@ -34,7 +34,7 @@ O `Telinha-addon-*.zip` é o pacote que o instalador baixa sozinho: você não p
 
 - **Transmitir:** na call, **"Transmitir com Telinha"** (embaixo do painel da conexão de voz) → escolha a tela ou uma janela e quem pode assistir (**Todos da call**, **Só meus amigos do Discord**, **Só quem eu aprovar** ou **Com senha**).
   - Janela: vai o som só daquele programa. Tela inteira: vai todo o som do PC, **menos o do Discord**.
-- **Assistir:** **"Assistir"** no quadradinho da pessoa na tela da call, na etiqueta **TELINHA** ao lado do nome dela, ou na barra do Telinha. Também abre em janela separada, com tela cheia e volume.
+- **Assistir:** **"Assistir"** no quadradinho da pessoa na tela da call ou na etiqueta **TELINHA** ao lado do nome dela (as duas tocam ali mesmo, dentro do Discord), ou na barra do Telinha. Também abre em janela separada, com tela cheia e volume.
 - **Ver quem está assistindo** e **expulsar** alguém da sua transmissão.
 - **Identidade verificada pelo próprio Discord** (selo "✔ verificado"), **qualidade automática**, **sons de entrar e sair** e **aviso de tela preta** (jogo em tela cheia exclusiva → use **Sem bordas**).
 

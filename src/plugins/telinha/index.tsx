@@ -56,7 +56,8 @@ function SettingsAbout() {
             <Paragraph>
                 Numa call de voz, use "Transmitir com Telinha" logo abaixo do painel da conexão de voz (ou no menu do
                 Vencord, na barra de título). Quem transmite pelo Telinha aparece com a etiqueta TELINHA na lista do canal
-                de voz: clique nela para assistir numa janela própria. Todos na call precisam ter o Telinha.
+                de voz: clique nela para assistir aqui dentro do Discord, na tela da call (o botão "Abrir em janela" leva
+                para uma janela própria). Todos na call precisam ter o Telinha.
             </Paragraph>
             <Button size="small" variant="secondary" onClick={copyDiagnostics}>
                 Copiar diagnóstico

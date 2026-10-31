@@ -26,7 +26,8 @@ export function createRoot(container: Element | DocumentFragment, options?: unkn
 }
 
 export {
-    ChannelStore, FluxDispatcher, PopoutActions, PopoutWindowStore, RelationshipStore, SelectedChannelStore, UserStore, VoiceStateStore
+    ChannelRouter, ChannelRTCStore, ChannelStore, FluxDispatcher, NavigationRouter, PopoutActions, PopoutWindowStore, RelationshipStore,
+    SelectedChannelStore, UserStore, VoiceStateStore
 } from "./stores";
 export { closeAllModals, closeModal, Menu, Modal, OAuth2AuthorizeModal, openModal, openModalLazy, Select, showToast, Tooltip } from "./ui";
 

@@ -5,8 +5,8 @@
  */
 
 // Testes do estado compartilhado das tiles da call (ui/callView/tileState.ts): quem e dono da sessao "Assistir na
-// call", quem toca o audio, a graca de 4 s ao desmontar e a previa da propria transmissao (o volume por usuario e
-// de ui/volumes.ts).
+// call", quem toca o audio, a graca de 4 s ao desmontar, a tile esperada pela etiqueta da lista de voz (sem tile, painel
+// flutuante) e a previa da propria transmissao (o volume por usuario e de ui/volumes.ts).
 // O nucleo e o de verdade (sem sala: watch() falha e publica o erro, unwatch() limpa a sessao).
 // Rodar:  pnpm test:file src/plugins/telinha/ui/callView/tileState.test.ts
 
@@ -19,15 +19,17 @@ import { afterEach, beforeEach, describe, test } from "node:test";
 import { unwatch } from "@plugins/telinha/actions";
 import { rt } from "@plugins/telinha/core/context";
 import { getState, resetState } from "@plugins/telinha/store";
-import { closeAllViewers, openViewer } from "@plugins/telinha/ui/viewerWindows";
+import { closeAllViewers, isViewerOpen, openViewer } from "@plugins/telinha/ui/viewerWindows";
 import { useFakeClock } from "@test/fakes/clock";
 import { act, cleanup, renderHook, settle } from "@test/fakes/render";
 import { loggerLines, PopoutActions, resetVencordFakes, toasts } from "@test/fakes/vencord";
 
 import {
+    expectTile,
     isAudioOwner,
     isLocalPreviewHidden,
     isTileOwned,
+    NO_TILE_FALLBACK_MS,
     registerTile,
     releaseToWindow,
     resetTileState,
@@ -39,6 +41,7 @@ import {
 } from "./tileState";
 
 const PEER = "peerA";
+const panels = () => Array.from(document.body.querySelectorAll<HTMLElement>(".vc-telinha-floating"));
 
 describe("tileState", () => {
     beforeEach(() => {
@@ -283,12 +286,77 @@ describe("tileState", () => {
         });
     });
 
+    describe("etiqueta da lista de voz: a tile do amigo deveria aparecer na tela da call (expectTile)", () => {
+        const fellBack = () => loggerLines.some(l => l.level === "warn" && /Nenhuma tile de peerA apareceu/.test(String(l.args[0])));
+
+        test("nenhuma tile monta a tempo: a sessao vai para o painel flutuante dentro do Discord, nunca para uma janela", async t => {
+            const clock = useFakeClock(t);
+            startTileWatch(PEER);
+            expectTile(PEER);
+            await settle();
+
+            act(() => clock.tick(NO_TILE_FALLBACK_MS - 1));
+            assert.equal(panels().length, 0, "ainda esperando a tile");
+            assert.equal(isTileOwned(PEER), true);
+
+            act(() => clock.tick(1));
+            await settle();
+            assert.equal(panels().length, 1, "o painel flutuante abriu");
+            assert.equal(isViewerOpen(PEER), true);
+            assert.equal(isTileOwned(PEER), false, "o painel passa a cuidar da sessao");
+            assert.equal(PopoutActions.opened.length, 0, "nenhuma janela separada");
+            assert.ok(fellBack(), "o motivo fica no log");
+
+            closeAllViewers();
+            act(() => clock.tick(0)); // o painel sai da tela num setTimeout(0)
+            await settle();
+            assert.equal(panels().length, 0);
+        });
+
+        test("a tile monta antes do prazo: nada de painel (e pedir de novo com ela montada nem agenda)", async t => {
+            const clock = useFakeClock(t);
+            startTileWatch(PEER);
+            expectTile(PEER);
+            const token = registerTile(PEER);
+            expectTile(PEER);
+            act(() => clock.tick(NO_TILE_FALLBACK_MS * 3));
+            await settle();
+            assert.equal(panels().length, 0);
+            assert.equal(isTileOwned(PEER), true, "a tile segue dona");
+            assert.equal(fellBack(), false);
+            unregisterTile(PEER, token);
+        });
+
+        test("parou de assistir ou abriu a janela antes do prazo: nada a mover", async t => {
+            const clock = useFakeClock(t);
+            startTileWatch(PEER);
+            expectTile(PEER);
+            stopTileWatch(PEER);
+            act(() => clock.tick(NO_TILE_FALLBACK_MS));
+            await settle();
+            assert.equal(panels().length, 0, "parou: nada abre");
+
+            startTileWatch(PEER);
+            expectTile(PEER);
+            expectTile(PEER); // um so timer
+            openViewer(PEER);
+            await settle();
+            act(() => clock.tick(NO_TILE_FALLBACK_MS));
+            await settle();
+            assert.equal(panels().length, 0, "a janela ja mostra a sessao");
+            assert.equal(PopoutActions.opened.length, 1, "so a janela que o usuario abriu");
+            assert.equal(fellBack(), false);
+        });
+    });
+
     test("plugin parado: esquece posse e timers de graca, e para de ouvir o estado", async t => {
         const clock = useFakeClock(t);
         const token = registerTile(PEER);
         startTileWatch(PEER);
         await settle();
         unregisterTile(PEER, token);
+        startTileWatch("peerB");
+        expectTile("peerB");
 
         const { result } = renderHook(() => useTileStateVersion());
         const before = result.current;
@@ -298,6 +366,7 @@ describe("tileState", () => {
 
         clock.tick(10_000);
         assert.equal(loggerLines.some(l => /Nenhuma tile mostra/.test(String(l.args[0]))), false, "o timer de graca foi cancelado");
+        assert.equal(panels().length, 0, "e o da tile esperada pela etiqueta tambem");
 
         // sem ouvir o estado: uma sessao que some nao mexe em nada
         const quiet = result.current;

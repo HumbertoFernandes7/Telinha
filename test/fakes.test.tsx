@@ -23,7 +23,10 @@ import { canvas2d, resetMedia, resizeObservers } from "@test/fakes/dom";
 import { ipcEvent } from "@test/fakes/electron";
 import { installFetch, jsonResponse } from "@test/fakes/fetch";
 import { act, fireEvent, render, screen, settle } from "@test/fakes/render";
-import { Modal, MODAL_CLOSE_LABEL, ModalHost, modals, pluginSettings, Select, toasts, Tooltip, webpackModules } from "@test/fakes/vencord";
+import {
+    ChannelRouter, ChannelRTCStore, FluxDispatcher, Modal, MODAL_CLOSE_LABEL, ModalHost, modals, NavigationRouter, pluginSettings, resetVencordFakes,
+    Select, SelectedChannelStore, toasts, Tooltip, webpackModules
+} from "@test/fakes/vencord";
 import { CspPolicies } from "@test/fakes/vencord/main/csp";
 import { type StatsEntry, videoSenderStats } from "@test/fakes/webrtc";
 import { findByCodeLazy, findStoreLazy } from "@webpack";
@@ -256,5 +259,23 @@ describe("fakes", () => {
         </>);
         assert.deepEqual(labels, ["Ninguém assistindo", "Estado da transmissão", undefined, "Rótulo"]);
         assert.deepEqual([...document.querySelectorAll("[data-tooltip]")].map(e => e.getAttribute("data-tooltip")), ["Ninguém assistindo", "Ninguém assistindo", "", ""]);
+    });
+
+    test("navigation: ChannelRouter shows the channel, NavigationRouter records the path, the call's focused tile follows Flux", () => {
+        ChannelRouter.transitionToChannel("500000000000000005");
+        assert.equal(SelectedChannelStore.getChannelId(), "500000000000000005");
+        NavigationRouter.transitionTo("/channels/@me/1");
+        assert.deepEqual(NavigationRouter.paths, ["/channels/@me/1"]);
+
+        void FluxDispatcher.dispatch({ type: "CHANNEL_RTC_SELECT_PARTICIPANT", channelId: "500000000000000005", id: "200000000000000002" });
+        assert.equal(ChannelRTCStore.getSelectedParticipantId("500000000000000005"), "200000000000000002");
+        void FluxDispatcher.dispatch({ type: "CHANNEL_RTC_SELECT_PARTICIPANT", channelId: "500000000000000005", id: null });
+        assert.equal(ChannelRTCStore.getSelectedParticipantId("500000000000000005"), null);
+
+        ChannelRTCStore.selectParticipant("500000000000000005", "300000000000000003");
+        resetVencordFakes();
+        assert.deepEqual([ChannelRouter.transitions, NavigationRouter.paths], [[], []]);
+        assert.equal(SelectedChannelStore.getChannelId(), null);
+        assert.equal(ChannelRTCStore.getSelectedParticipantId("500000000000000005"), null);
     });
 });
