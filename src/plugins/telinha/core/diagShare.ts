@@ -29,7 +29,7 @@ import type { PeerId } from "@plugins/telinha/types";
 import type { MessageAction } from "trystero";
 
 import { type DiagSubscriber, type PeerEntry, peerLabel, publish, rt } from "./context";
-import { clearDiagLog, readPreviousSession, startDiagLog, stopDiagLog, type StoredLine } from "./diagLog";
+import { clearDiagLog, isDiagLogRunning, readPreviousSession, startDiagLog, stopDiagLog, type StoredLine } from "./diagLog";
 import { isIdentityConfigured } from "./identity/config";
 import { errorText, log, logThrottled, maskPrivate, shortId } from "./log";
 import { sendPresence } from "./presence";
@@ -423,11 +423,13 @@ export function onDiagMessage(peerId: PeerId, msg: DiagMessage): void {
 
 /**
  * A cada segundo (session.ts → tick): confere as regras, pede/para de pedir, manda as linhas novas e avisa o que ficou de
- * fora do que chegou. A opcao desligada sem o onChange (configuracao sincronizada de outro PC) tambem para o arquivo.
+ * fora do que chegou. A opcao mudou sem o onChange (configuracao sincronizada de outro PC, settings.load): o registro em
+ * arquivo segue a opcao como no onChange (desligada: para e apaga; ligada: volta a gravar).
  */
 export function tickDiagShare(): void {
     if (!active) return;
-    if (!shareOn()) stopDiagLog();
+    if (!shareOn() && isDiagLogRunning()) clearDiagLog();
+    else if (shareOn()) startDiagLog();
     reportDropped();
     reviewSending();
     reconcileRequests();

@@ -108,7 +108,12 @@ export function startDiagLog(): void {
     add(Date.now(), "info", `--- registro do Telinha em arquivo ligado (sessão ${diagLogSession()}) ---`);
 }
 
-/** Para de gravar (a opcao desligou, ou o plugin parou); o que esperava vai num ultimo lote, se der. */
+/** Esta gravando (startDiagLog sem stopDiagLog/clearDiagLog depois). */
+export function isDiagLogRunning(): boolean {
+    return off !== null;
+}
+
+/** Para de gravar (o plugin parou); o que esperava vai num ultimo lote, se der. */
 export function stopDiagLog(): void {
     if (!off) return;
     off();

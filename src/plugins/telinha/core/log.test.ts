@@ -53,6 +53,11 @@ describe("maskPrivate (o que sai do PC no diagnostico compartilhado)", () => {
     test("ids numericos do Discord (17 a 20 digitos) viram [id]; numeros menores ficam", () => {
         assert.equal(maskPrivate("amigo (discord 200000000000000002) e (discord 12345678901234567890)"), "amigo (discord [id]) e (discord [id])");
         assert.equal(maskPrivate("canal: 1234567890123456789; app 1565419793446862929"), "canal: [id]; app [id]");
+        // o Client ID do app na linha da identidade fica (publico; diz qual build o amigo usa); o resto da linha nao muda
+        assert.equal(
+            maskPrivate("identidade: configurada (app 1565419793446862929); local: pronta; peer (discord 200000000000000002)"),
+            "identidade: configurada (app 1565419793446862929); local: pronta; peer (discord [id])"
+        );
         assert.equal(maskPrivate("enviado 1650000 bytes em 1730000000000 ms; 123456789012345678901"), "enviado 1650000 bytes em 1730000000000 ms; 123456789012345678901");
     });
 
@@ -73,6 +78,16 @@ describe("maskPrivate (o que sai do PC no diagnostico compartilhado)", () => {
         assert.equal(maskPrivate("Banco Secreto caiu; abc fica"), "[janela] caiu; abc fica", "nome curto demais nao e mascarado solto");
         for (let i = 0; i < 25; i++) notePrivateTitle(`janela numero ${i}`);
         assert.equal(maskPrivate("Banco Secreto e janela numero 24"), "Banco Secreto e [janela]", "guarda so os 20 mais recentes");
+    });
+
+    test("nome de uma palavra so ('Discord', 'Spotify', 'Discord-Canary'): so na linha da captura; com separador, em qualquer linha", () => {
+        for (const one of ["Discord", "Spotify", "Discord-Canary", "  Steam  "]) notePrivateTitle(one);
+        assert.equal(maskPrivate("identidade do Discord verificada; Spotify e Steam abertos; Discord-Canary"), "identidade do Discord verificada; Spotify e Steam abertos; Discord-Canary");
+        assert.equal(maskPrivate("Iniciando transmissão: janela \"Discord\" em 1080p60 sem áudio"), "Iniciando transmissão: janela \"[janela]\" em 1080p60 sem áudio");
+
+        notePrivateTitle("Relatório - Word");
+        notePrivateTitle("Notas — Bloco");
+        assert.equal(maskPrivate("salvou Relatório - Word e Notas — Bloco"), "salvou [janela] e [janela]");
     });
 });
 
