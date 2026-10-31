@@ -388,14 +388,25 @@ describe("checagem do encoder no ar", () => {
         assert.equal(softwareFallback(sw(853, 480, "bandwidth"), false, HW, "auto", caps()), null, "nao e queda: nao troca o codec");
         assert.equal(softwareFallback(sw(320, 180, "bandwidth"), false, HW, "h264", caps()), null);
 
-        // queda de verdade: tamanho que a placa aceita, ou o tamanho e o nosso (o WebRTC nao esta reduzindo nada)
+        // queda de verdade: OpenH264 num tamanho que a placa aceita
         assert.equal(isTransientSoftwareH264(sw(1280, 720, "bandwidth")), false, "1280x720 a placa aceita");
-        assert.equal(isTransientSoftwareH264(sw(1199, 720, "none")), false, "reducao nossa com largura impar: nao muda sozinho");
-        assert.equal(isTransientSoftwareH264(sw(853, 480)), false, "sem qualityLimitationReason: como antes");
         assert.equal(isTransientSoftwareH264({ ...OPENH264, limitation: "bandwidth" }), false, "sem tamanho: como antes");
         assert.equal(isTransientSoftwareH264({ ...NVIDIA, width: 427, height: 240, limitation: "bandwidth" }), false, "na placa nao e software");
         assert.equal(softwareFallback(sw(1280, 720, "bandwidth"), false, HW, "auto", caps())?.codec, "vp9");
-        assert.equal(softwareFallback(sw(1199, 720, "none"), false, HW, "auto", caps())?.codec, "vp9");
+        assert.equal(softwareFallback(sw(1920, 1080, "none"), false, HW, "auto", caps())?.codec, "vp9");
+    });
+
+    test("tamanho que a placa nao aceita nunca e queda, seja qual for o qualityLimitationReason (log de 31/10)", () => {
+        const sw = (width: number, height: number, limitation?: string): EncoderReport => ({ ...OPENH264, width, height, limitation });
+        // o WebRTC reduziu por banda e o motivo voltou para "none" com o 853x480 / 427x240 ainda no ar
+        for (const [w, h] of [[853, 480], [427, 240]]) {
+            for (const limitation of ["none", undefined, "other"]) {
+                assert.equal(isTransientSoftwareH264(sw(w, h, limitation)), true, `${w}x${h} ${limitation}`);
+                assert.equal(softwareFallback(sw(w, h, limitation), false, HW, "auto", caps()), null, `${w}x${h} ${limitation}: nao troca`);
+            }
+        }
+        // uma reducao nossa com largura impar (evenScale evita) tambem nao e a placa falhando
+        assert.equal(softwareFallback(sw(1199, 720, "none"), false, HW, "auto", caps()), null);
     });
 
     test("pickNegotiatedCodec: variante certa entre os ja negociados, so os campos de RTCRtpCodec", () => {

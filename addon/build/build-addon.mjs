@@ -8,6 +8,8 @@
  *            --skip-smoke
  *
  * Output: <out>/payload/ (the files of %APPDATA%\Telinha\addon\), <out>/Telinha-addon-<commit>.zip (+ .sha256).
+ * Version (version.json, banner, VERSION define): TELINHA_VERSION when set (CI sets the release's, scripts/release.mjs
+ * plan), else package.json's "version". Never edited here: docs/releases.md.
  *
  * The plugin (src/plugins/telinha) is compiled against the pinned official Vencord sources in .vencord/ (vencord.json,
  * fetched by `pnpm bootstrap`) WITHOUT bundling Vencord: every `@api/*`, `@components/*`, `@utils/*`,
@@ -29,7 +31,6 @@ import vm from "vm";
 
 import { requirePinnedCheckout, VENCORD_DIR, VENCORD_DIST } from "../../scripts/vencord.mjs";
 
-const ADDON_VERSION = "0.2.5";
 const PLUGIN_DIR = "src/plugins/telinha";
 const PLUGIN_NAME = "Telinha";
 const HELPER = "telinha-audio.exe";
@@ -59,6 +60,12 @@ const git = (...a) => {
 const sha256 = buf => createHash("sha256").update(buf).digest("hex");
 
 // ------------------------------------------------------------------------------------------- inputs
+// The add-on version: the release's (TELINHA_VERSION, set by CI) or package.json's. It must be a version the updater
+// can compare (installed copies only move to a newer one), so its own parser decides.
+const pkgVersion = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8")).version;
+const ADDON_VERSION = process.env.TELINHA_VERSION?.trim() || pkgVersion;
+if (require("../loader/updater.js").plainVersion(ADDON_VERSION) !== ADDON_VERSION)
+    die(`version ${JSON.stringify(ADDON_VERSION)} (${process.env.TELINHA_VERSION?.trim() ? "TELINHA_VERSION" : "package.json"}) is not a semantic version like 0.2.6`);
 const outRoot = resolve(REPO, arg("--out", "dist/addon"));
 const payloadDir = join(outRoot, "payload");
 

@@ -95,7 +95,8 @@ describe("checagem do encoder H.264 no ar (tick)", () => {
 
     before(async () => {
         await startStreaming(screenOptions());
-        for (const name of ["gpu", "band", "cpu", "other", "resize", "retry", "twice", "nocodec", "gone"]) early[name] = await watcher(name, { stats: gpuStats() });
+        for (const name of ["gpu", "band", "cpu", "other", "leozzyy", "gupi", "odd", "resize", "retry", "twice", "nocodec", "gone"])
+            early[name] = await watcher(name, { stats: gpuStats() });
     });
 
     after(() => stopStreaming());
@@ -131,6 +132,44 @@ describe("checagem do encoder H.264 no ar (tick)", () => {
         band.sender.stats = gpuStats({ frameWidth: 1280, frameHeight: 720 });
         await seconds(rig, 2);
         assert.deepEqual(about(since(), band).slice(1), [`O H.264 para ${band.label} voltou para a placa de vídeo (1280x720)`]);
+    });
+
+    test("log de 31/10: o motivo volta para \"none\" com o tamanho do WebRTC ainda no ar; nao e queda e o H.264 continua para todos", async () => {
+        const { leozzyy, gupi, odd } = early;
+        const transient = (v: TestViewer, size: string) => `O H.264 para ${v.label} passou para o OpenH264 (software) em ${size}: o WebRTC reduziu a resolução `
+            + "por conta própria (banda) e a placa de vídeo só codifica H.264 em tamanho par a partir de 360p. Volta para a placa sozinho quando a resolução subir; não é queda.";
+        const since = logMark();
+        // 00:13:00: banda curta, o WebRTC reduz o degrau 720p para 853x480 (largura impar): OpenH264
+        leozzyy.sender.stats = softStats({ frameWidth: 853, frameHeight: 480, qualityLimitationReason: "bandwidth" });
+        await seconds(rig, 2);
+        // 00:13:20: o motivo volta para "none", mas o WebRTC ainda nao subiu a resolucao (antes: queda, VP9 so para ele)
+        leozzyy.sender.stats = softStats({ frameWidth: 853, frameHeight: 480, qualityLimitationReason: "none" });
+        await seconds(rig, 20);
+        // 00:18:24 e 00:18:56: outro espectador, 427x240 por banda e depois 853x480 com "none" (antes: a 2a queda, H.264 desligado)
+        gupi.sender.stats = softStats({ frameWidth: 427, frameHeight: 240, qualityLimitationReason: "bandwidth" });
+        await seconds(rig, 2);
+        gupi.sender.stats = softStats({ frameWidth: 853, frameHeight: 480, qualityLimitationReason: "none" });
+        await seconds(rig, 30);
+        // visto direto em 853x480 com "none": a mesma linha de passagem, sem um motivo que nao existe
+        odd.sender.stats = softStats({ frameWidth: 853, frameHeight: 480, qualityLimitationReason: "none" });
+        await seconds(rig, 2);
+
+        const lines = since();
+        assert.deepEqual(about(lines, leozzyy), [transient(leozzyy, "853x480")], "so a linha de passagem (repeticoes no mesmo minuto omitidas)");
+        assert.deepEqual(about(lines, gupi), [transient(gupi, "427x240")]);
+        assert.deepEqual(about(lines, odd), [
+            `O H.264 para ${odd.label} passou para o OpenH264 (software) em 853x480: um tamanho que a placa de vídeo não codifica (só H.264 em tamanho par `
+            + "a partir de 360p), em geral uma redução do WebRTC que ainda não voltou a subir. Volta para a placa sozinho quando a resolução subir; não é queda."
+        ]);
+        assert.ok(!lines.some(l => l.includes("está sendo codificado por software")), "nenhuma queda");
+        for (const v of [leozzyy, gupi, odd]) {
+            assert.equal(v.sender.encoding.codec, undefined, "continua em H.264, sem troca para VP9");
+            assert.equal(sendPlanFor(v.peerId)?.codec, "h264");
+        }
+        assert.equal(getLocalCaps().h264HwEncode, true, "nenhuma queda contada: o H.264 automatico continua ligado");
+        // os proximos espectadores ainda recebem H.264 (e a queda de verdade do teste seguinte e a 1a da sessao)
+        const next = await watcher("depois");
+        assert.equal(sendPlanFor(next.peerId)?.codec, "h264");
     });
 
     test("OpenH264 logo depois de a janela mudar de tamanho: so loga; passado o tempo de reaplicar, e queda: troca para VP9 sem reconectar", async () => {

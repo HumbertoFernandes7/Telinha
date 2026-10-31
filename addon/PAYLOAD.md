@@ -363,6 +363,9 @@ working (`installer/internal/core` `TestAfterAutomaticUpdate`).
 ### 8.6 What a release must look like
 
 A normal (not pre-release) GitHub release tagged `vX.Y.Z`, with `Telinha-addon-<commit>.zip` whose `version.json` says
-`"version": "X.Y.Z"` (`ADDON_VERSION` in `build-addon.mjs`) and `Telinha-addon-<commit>.zip.sha256` (GitHub adds the
-asset `digest` itself). The installer's default is the same release (`releases/latest`); `--prerelease` lets it take a
-pre-release for testing, which installed copies never update to on their own.
+`"version": "X.Y.Z"` (`TELINHA_VERSION` when `build-addon.mjs` runs, else `package.json`'s version) and
+`Telinha-addon-<commit>.zip.sha256` (GitHub adds the asset `digest` itself), plus a line in the release notes naming the
+zip with its SHA-256. CI publishes exactly that on every product change merged into `main` and checks it with this
+updater before publishing (`scripts/release.mjs verify`, [docs/releases.md](../docs/releases.md)). The installer's
+default is the same release (`releases/latest`); `--prerelease` lets it take a pre-release for testing, which installed
+copies never update to on their own.
