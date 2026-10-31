@@ -29,7 +29,7 @@ import { migrateAccessSettings, settings } from "./settings";
 
 const STORED_KEYS = [
     "groupPassword", "rejectOutsiders", "defaultAccess", "requireVerifiedIdentity", "defaultQuality", "autoQuality", "shareAudioByDefault",
-    "playSounds", "codec", "autoUpdate"
+    "playSounds", "codec", "autoUpdate", "shareDiagnostics"
 ];
 
 describe("as opcoes", () => {
@@ -52,7 +52,8 @@ describe("as opcoes", () => {
             shareAudioByDefault: true,
             playSounds: true,
             codec: "auto",
-            autoUpdate: true
+            autoUpdate: true,
+            shareDiagnostics: false
         });
     });
 
@@ -74,6 +75,14 @@ describe("as opcoes", () => {
 
     test("'Exigir identidade verificada' aparece (o build tem Client ID do Discord)", () => {
         assert.equal(settings.def.requireVerifiedIdentity.hidden(), false);
+    });
+
+    test("'Compartilhar diagnóstico' vem desligado, com o texto combinado, e aparece (o build tem Client ID do Discord)", () => {
+        const def = settings.def.shareDiagnostics;
+        assert.equal(def.default, false);
+        assert.equal(def.displayName, "Compartilhar diagnóstico para ajudar a depurar");
+        assert.equal(def.description, "Quem também ligou esta opção e está na mesma call pode pedir o registro do Telinha deste PC; vai só o registro do Telinha, sem IP.");
+        assert.equal(def.hidden(), false);
     });
 });
 

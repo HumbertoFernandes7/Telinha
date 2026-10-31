@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-// Testes do log do nucleo (core/log.ts): mascara de IPs, texto de erro, nivel -> console, buffer do diagnostico
-// e o limite de repeticao por chave (logThrottled).
+// Testes do log do nucleo (core/log.ts): mascara de IPs, a mascara do que sai do PC (maskPrivate: pasta do usuario e
+// tokens), texto de erro, nivel -> console, buffer do diagnostico e o limite de repeticao por chave (logThrottled).
 // Rodar:  pnpm test:file src/plugins/telinha/core/log.test.ts  (todos: pnpm test:unit)
 
 import assert from "node:assert/strict";
@@ -13,7 +13,7 @@ import { describe, test } from "node:test";
 
 import { getEventLog } from "@plugins/telinha/store";
 
-import { errorMessage, errorText, log, logThrottled, shortId, stripIps } from "./log";
+import { errorMessage, errorText, log, logThrottled, maskPrivate, shortId, stripIps } from "./log";
 
 const last = () => getEventLog().at(-1)!;
 
@@ -23,6 +23,31 @@ describe("stripIps", () => {
         assert.equal(stripIps("v6 2001:0db8:85a3:0000:0000:8a2e:0370:7334 fim"), "v6 [ip] fim");
         assert.equal(stripIps("v6 curto fe80::1 e 2001:db8::8a2e:370:7334"), "v6 curto [ip] e [ip]");
         assert.equal(stripIps("sem endereco, versao 1.2.3"), "sem endereco, versao 1.2.3");
+    });
+});
+
+describe("maskPrivate (o que sai do PC no diagnostico compartilhado)", () => {
+    test("IPs e a pasta do usuario (Windows, com a barra dobrada do JSON, Linux e macOS)", () => {
+        assert.equal(maskPrivate("de 10.0.0.1 e fe80::1"), "de [ip] e [ip]");
+        assert.equal(maskPrivate("C:\\Users\\Fulano de Tal\\AppData\\Roaming"), "C:\\Users\\[usuário]\\AppData\\Roaming");
+        assert.equal(maskPrivate("d:/users/fulano/x"), "d:/users/[usuário]/x");
+        assert.equal(maskPrivate("{\"dir\":\"C:\\\\Users\\\\Fulano\\\\Telinha\"}"), "{\"dir\":\"C:\\\\Users\\\\[usuário]\\\\Telinha\"}");
+        assert.equal(maskPrivate("C:\\Documents and Settings\\Fulano\\x"), "C:\\Documents and Settings\\[usuário]\\x");
+        assert.equal(maskPrivate("perfil C:\\Users\\Fulano"), "perfil C:\\Users\\[usuário]", "a pasta no fim do texto");
+        assert.equal(maskPrivate("/home/fulano/.config e /Users/fulano/Library"), "/home/[usuário]/.config e /Users/[usuário]/Library");
+        assert.equal(maskPrivate("https://discord.com/api/users/@me e C:\\Program Files\\Discord"), "https://discord.com/api/users/@me e C:\\Program Files\\Discord", "o resto fica");
+    });
+
+    test("tokens: JWT (id_token), token de conta do Discord, Bearer e campos com nome de segredo", () => {
+        assert.equal(maskPrivate("tok eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl fim"), "tok [token] fim");
+        // so o formato (id em base64 . 6 . 27 a 40), montado aqui: um literal com essa cara seria barrado pelo GitHub
+        const accountToken = ["A".repeat(26), "B".repeat(6), "c".repeat(38)].join(".");
+        assert.equal(maskPrivate(`conta ${accountToken} fim`), "conta [token] fim");
+        assert.equal(maskPrivate("Authorization: Bearer abc.DEF-123_x= fim"), "Authorization: Bearer [token] fim");
+        assert.equal(maskPrivate("access_token=abc&refresh_token=def"), "access_token=[token]&refresh_token=[token]");
+        assert.equal(maskPrivate("{\"id_token\":\"abc\",\"client_secret\": \"x\", \"code_verifier\":\"y\"}"), "{\"id_token\":\"[token]\",\"client_secret\": \"[token]\", \"code_verifier\":\"[token]\"}");
+        assert.equal(maskPrivate("o id_token venceu; prova renovada"), "o id_token venceu; prova renovada", "a palavra sozinha fica");
+        assert.equal(maskPrivate("Envio p/ leo (abc123): VP9 1280x720 29,8 fps"), "Envio p/ leo (abc123): VP9 1280x720 29,8 fps");
     });
 });
 

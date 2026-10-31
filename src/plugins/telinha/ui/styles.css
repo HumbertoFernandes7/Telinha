@@ -709,8 +709,20 @@
 }
 
 .vc-telinha-update-status,
-.vc-telinha-identity-status {
+.vc-telinha-identity-status,
+.vc-telinha-diag-status {
     color: var(--text-muted);
+}
+
+/* settings page: "Compartilhar diagnóstico" (who gets yours, "Receber diagnóstico" per friend) */
+.vc-telinha-diag {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+    margin-top: 8px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border-subtle, var(--background-modifier-accent));
 }
 
 /* settings page: identity (Autorizar o Telinha no Discord / Desvincular) */

@@ -9,6 +9,7 @@
 import { generatePassword } from "./core/access";
 import { getScreenAudioStatus as fetchScreenAudioStatus } from "./core/audio/screenAudio";
 import { publish, rt, setLastError } from "./core/context";
+import * as diagShare from "./core/diagShare";
 import { authorizeIdentity, forgetIdentity, getLocalIdentityState, type LocalIdentityState, subscribeLocalIdentity } from "./core/identity";
 import { isIdentityConfigured } from "./core/identity/config";
 import { errorText, log } from "./core/log";
@@ -205,3 +206,11 @@ export function unlinkTelinhaIdentity(): Promise<void> {
 }
 
 // #endregion
+
+/**
+ * "Receber diagnóstico" de uma pessoa da call (core/diagShare.ts; precisa de "Compartilhar diagnóstico" ligado aqui e
+ * la). Ligado, as linhas dela vao para o console com o prefixo "[Telinha] [diag <nome>]". Acompanhe getState().diag.
+ */
+export function setDiagRequest(discordUserId: string, username: string, on: boolean): void {
+    diagShare.setDiagRequest(discordUserId, username, on);
+}
