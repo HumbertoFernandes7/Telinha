@@ -110,6 +110,15 @@ describe("com o loader do add-on", () => {
         assert.ok(button("Reiniciar agora"));
     });
 
+    test("pronta, mas nao entrou ao reiniciar: a linha diz por que, e 'Reiniciar agora' continua la", async () => {
+        next = statusOf({ phase: "ready", ready: "0.3.0", waiting: { reason: "others", detail: { pids: [1234], exes: ["DiscordCanary.exe"] }, at: "x", starts: 2 } });
+        withLoader();
+        render(<UpdateSection />);
+        await settle();
+        assert.ok(screen.getByText("Versão 0.3.0 pronta, mas não entrou ao reiniciar (2 tentativas): outro Discord está aberto com o Telinha (Discord Canary). Feche todos os Discords, inclusive pelo ícone perto do relógio (botão direito → Sair do Discord), e abra de novo."));
+        assert.ok(button("Reiniciar agora"));
+    });
+
     test("main ocupado (baixando): os botoes ficam travados mesmo sem clique", async () => {
         next = statusOf({ phase: "downloading", latest: { version: "0.3.0", tag: "v0.3.0" } });
         withLoader();

@@ -15,7 +15,7 @@ import { showToast } from "@webpack/common";
 import { startSession, stopSession } from "./actions";
 import { localIdentityDiagnostics } from "./core/identity";
 import { peerIdentityDiagnostics } from "./core/session";
-import { refreshUpdateStatus, startUpdateChecks, stopUpdateChecks, updateDiagnostics } from "./core/update";
+import { refreshUpdateLog, refreshUpdateStatus, startUpdateChecks, stopUpdateChecks, updateDiagnostics } from "./core/update";
 import { migrateAccessSettings, settings } from "./settings";
 import { formatDiagnostics } from "./store";
 import { callViewPatches, renderCallTileStream, stopCallView } from "./ui/callView";
@@ -40,8 +40,8 @@ function identityDiagnostics(): string {
 }
 
 function copyDiagnostics() {
-    // fresh version/update status first (asks the main process), then the copy
-    refreshUpdateStatus()
+    // fresh version/update status and the last update lines of main.log first (asks the main process), then the copy
+    Promise.all([refreshUpdateStatus(), refreshUpdateLog()])
         .catch(() => null)
         .then(() => copyToClipboard(`${formatDiagnostics()}\n${updateDiagnostics()}\n${identityDiagnostics()}\n\n${formatVoiceTagDiagnostics()}`))
         .then(

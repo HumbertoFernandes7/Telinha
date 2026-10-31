@@ -14,6 +14,22 @@ import { settings } from "@plugins/telinha/settings";
 
 export type UpdatePhase = "idle" | "checking" | "downloading" | "up-to-date" | "available" | "ready" | "error";
 
+/**
+ * Por que a versão pronta não entrou no último início do Discord (updater.js startup(), state.json `waiting`):
+ *   trial            a versão atual ainda não confirmou que abriu direito
+ *   others           outro Discord aberto usando o Telinha (detail: pids e, quando deu pra ver, os programas)
+ *   in-use           um arquivo da pasta do Telinha estava em uso (detail.code: EPERM, EBUSY...)
+ *   activate-failed  a pasta da versão nova não pôde ser posta no lugar (antivírus?)
+ *   locked           outro início do Discord estava trocando a versão ao mesmo tempo (swap.lock)
+ */
+export interface UpdateWaiting {
+    reason: string;
+    detail: { pids?: number[]; exes?: (string | null)[]; code?: string | null; } | null;
+    at: string | null;
+    /** quantos inícios seguidos ela já esperou */
+    starts: number;
+}
+
 /** O que o updater.js devolve (status()). */
 export interface AddonUpdateStatus {
     supported: boolean;
@@ -22,6 +38,8 @@ export interface AddonUpdateStatus {
     latest: { version: string; tag: string; } | null;
     /** versão baixada e conferida, esperando o Discord reiniciar */
     ready: string | null;
+    /** por que `ready` não entrou no último início (ausente num loader antigo) */
+    waiting?: UpdateWaiting | null;
     /** quiet = rede, limite do GitHub ou offline: nunca vira aviso, só a linha de status */
     error: { kind: string; message: string; quiet: boolean; } | null;
     checkedAt: number | null;
@@ -35,6 +53,8 @@ interface AddonNative {
     updateStatus(): Promise<AddonUpdateStatus>;
     updateCheck(opts: { autoDownload: boolean; manual: boolean; }): Promise<AddonUpdateStatus>;
     updateDownload(): Promise<AddonUpdateStatus>;
+    /** as últimas linhas "update" do main.log (ausente num loader antigo) */
+    updateLog?(): Promise<string[]>;
 }
 
 const FIRST_CHECK_DELAY_MS = 15_000;
@@ -42,6 +62,8 @@ const CHECK_INTERVAL_MS = 6 * 60 * 60_000;
 const PROGRESS_POLL_MS = 700;
 
 let status: AddonUpdateStatus | null = null;
+/** últimas linhas "update" do main.log, lidas para o "Copiar diagnóstico"; null = não deu pra ler */
+let recentLog: string[] | null = null;
 const listeners = new Set<() => void>();
 let firstTimer: ReturnType<typeof setTimeout> | null = null;
 let intervalTimer: ReturnType<typeof setInterval> | null = null;
@@ -87,6 +109,20 @@ export async function refreshUpdateStatus(): Promise<AddonUpdateStatus | null> {
         console.warn("[Telinha] update status failed", e);
     }
     return status;
+}
+
+/** Lê do main as últimas linhas "update" do main.log (para o "Copiar diagnóstico"). */
+export async function refreshUpdateLog(): Promise<string[] | null> {
+    const api = addonNative();
+    recentLog = null;
+    if (typeof api?.updateLog !== "function") return null;
+    try {
+        const lines = await api.updateLog();
+        recentLog = Array.isArray(lines) ? lines.filter((l): l is string => typeof l === "string") : null;
+    } catch (e) {
+        console.warn("[Telinha] update log failed", e);
+    }
+    return recentLog;
 }
 
 /** Roda uma operação longa no main, atualizando o status enquanto ela anda (procurando → baixando → pronto). */
@@ -155,6 +191,36 @@ export function relaunchDiscord(): boolean {
     return true;
 }
 
+const FLAVORS: Record<string, string> = {
+    "discord.exe": "Discord", "discordptb.exe": "Discord PTB", "discordcanary.exe": "Discord Canary", "discorddevelopment.exe": "Discord Development"
+};
+const CLOSE_AND_REOPEN = "Feche o Discord por completo e abra de novo. Se não resolver, reinicie o computador.";
+
+/** Por que a versão pronta não entrou ao reiniciar, e o que fazer (frases curtas do aviso e das configurações). */
+export function explainWaiting(w: UpdateWaiting | null | undefined): { why: string; fix: string; } | null {
+    if (!w) return null;
+    switch (w.reason) {
+        case "others": {
+            const exes = (w.detail?.exes ?? []).filter((e): e is string => typeof e === "string" && e.length > 0);
+            const names = [...new Set(exes.map(e => FLAVORS[e.toLowerCase()] ?? e))];
+            return {
+                why: `outro Discord está aberto com o Telinha${names.length ? ` (${names.join(", ")})` : ""}`,
+                fix: "Feche todos os Discords, inclusive pelo ícone perto do relógio (botão direito → Sair do Discord), e abra de novo."
+            };
+        }
+        case "in-use":
+            return { why: "um arquivo do Telinha estava em uso (o ajudante de áudio ou o antivírus)", fix: CLOSE_AND_REOPEN };
+        case "activate-failed":
+            return { why: "o Windows não deixou pôr a versão nova no lugar (antivírus?)", fix: CLOSE_AND_REOPEN };
+        case "locked":
+            return { why: "outro Discord estava trocando de versão ao mesmo tempo", fix: "Feche o Discord por completo e abra de novo." };
+        case "trial":
+            return { why: "a versão atual ainda não tinha confirmado que abriu direito", fix: "Reinicie o Discord mais uma vez." };
+        default:
+            return { why: "não deu pra trocar desta vez", fix: "Reinicie o Discord mais uma vez." };
+    }
+}
+
 /** Linha de status da página de configurações: em dia / baixando / pronto, reinicie / erro curto. */
 export function describeUpdate(s: AddonUpdateStatus | null): string {
     if (!s) return "Ainda não verifiquei.";
@@ -170,8 +236,13 @@ export function describeUpdate(s: AddonUpdateStatus | null): string {
             return `Em dia.${s.skipped ? ` A versão ${s.skipped} foi ignorada porque não iniciou direito.` : rolledBack}`;
         case "available":
             return `Versão ${s.latest?.version ?? "nova"} disponível.`;
-        case "ready":
-            return `Versão ${s.ready} pronta: reinicie o Discord para usar.`;
+        case "ready": {
+            const w = s.waiting;
+            const stuck = explainWaiting(w);
+            if (!stuck || !w) return `Versão ${s.ready} pronta: reinicie o Discord para usar.`;
+            const tries = w.starts > 1 ? ` (${w.starts} tentativas)` : "";
+            return `Versão ${s.ready} pronta, mas não entrou ao reiniciar${tries}: ${stuck.why}. ${stuck.fix}`;
+        }
         case "error":
             return `Erro: ${s.error?.message ?? "a verificação falhou"}.${rolledBack}`;
         default:
@@ -179,10 +250,19 @@ export function describeUpdate(s: AddonUpdateStatus | null): string {
     }
 }
 
-/** Para o "Copiar diagnóstico". */
+/**
+ * Para o "Copiar diagnóstico": versão e status; o motivo cru de uma versão que não entrou (quando houver); as últimas
+ * linhas "update" do main.log (lidas antes por refreshUpdateLog()).
+ */
 export function updateDiagnostics(): string {
     if (!updatesSupported()) return "versão: ? (sem o loader do add-on: atualização automática indisponível)";
     const s = status;
     const version = s?.installed ? `${s.installed.version}${s.installed.commit ? ` (${s.installed.commit})` : ""}` : "?";
-    return `versão: ${version}; atualização automática: ${autoUpdate() ? "ligada" : "desligada"}; atualização: ${describeUpdate(s)}`;
+    const lines = [`versão: ${version}; atualização automática: ${autoUpdate() ? "ligada" : "desligada"}; atualização: ${describeUpdate(s)}`];
+    const w = s?.waiting;
+    if (w) lines.push(`atualização esperando: ${w.reason}; ${w.starts} início(s) seguido(s); último ${w.at ?? "?"}${w.detail ? `; ${JSON.stringify(w.detail)}` : ""}`);
+    if (!recentLog) lines.push("main.log: não deu pra ler (loader antigo ou sem acesso)");
+    else if (!recentLog.length) lines.push("main.log: nenhuma linha de atualização");
+    else lines.push("main.log (últimas linhas de atualização):", ...recentLog.map(l => `  ${l}`));
+    return lines.join("\n");
 }

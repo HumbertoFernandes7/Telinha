@@ -110,6 +110,35 @@ describe("quando avisa", () => {
     });
 });
 
+describe("pronta, mas nao entrou ao reiniciar (o loader diz por que)", () => {
+    const stuck = (version: string, reason: string, detail: Record<string, unknown> | null = null) =>
+        mainSays({ phase: "ready", ready: version, waiting: { reason, detail, at: "2026-10-31T05:53:12.000Z", starts: 1 } });
+
+    test("outro Discord aberto: o aviso diz qual e o que fazer, e nao promete que 'entra sozinha'", async () => {
+        await stuck("1.0.0", "others", { pids: [1234], exes: ["DiscordPTB.exe"] });
+        const [n] = notifications;
+        assert.equal(n.title, "Telinha 1.0.0 pronto");
+        assert.equal(n.body, "Não deu pra trocar de versão: outro Discord está aberto com o Telinha (Discord PTB).");
+        render(n.richBody as ReactElement);
+        assert.ok(screen.getByText("Não deu pra trocar de versão: outro Discord está aberto com o Telinha (Discord PTB). Feche todos os Discords, inclusive pelo ícone perto do relógio (botão direito → Sair do Discord), e abra de novo."));
+        assert.equal(screen.queryByText(/entra sozinha/), null);
+        assert.ok(screen.getByRole("button", { name: "Reiniciar agora" }));
+        assert.ok(screen.getByRole("button", { name: "Depois" }));
+    });
+
+    test("arquivo em uso: fechar o Discord por completo, e se nao resolver reiniciar o computador", async () => {
+        await stuck("1.0.1", "in-use", { code: "EBUSY" });
+        render(notifications[0].richBody as ReactElement);
+        assert.ok(screen.getByText("Não deu pra trocar de versão: um arquivo do Telinha estava em uso (o ajudante de áudio ou o antivírus). Feche o Discord por completo e abra de novo. Se não resolver, reinicie o computador."));
+    });
+
+    test("um aviso por versao: o motivo nao repete o aviso da mesma versao", async () => {
+        await ready("1.0.2");
+        await stuck("1.0.2", "locked");
+        assert.equal(notifications.length, 1);
+    });
+});
+
 describe("nunca no meio de uma transmissao", () => {
     test("transmitindo: espera; quando a transmissao acaba, aparece", async () => {
         setState({ ...EMPTY, local: LOCAL });

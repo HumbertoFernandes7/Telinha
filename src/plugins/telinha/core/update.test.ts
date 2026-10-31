@@ -20,8 +20,8 @@ import { installNative, type NativeEnv, updateStatus as statusOf } from "@test/f
 import { pluginSettings, resetVencordFakes } from "@test/fakes/vencord";
 
 import {
-    type AddonUpdateStatus, checkForUpdateNow, describeUpdate, downloadUpdateNow, getUpdateStatus, refreshUpdateStatus, relaunchDiscord, startUpdateChecks,
-    stopUpdateChecks, subscribeUpdates, updateDiagnostics, updatesSupported
+    type AddonUpdateStatus, checkForUpdateNow, describeUpdate, downloadUpdateNow, explainWaiting, getUpdateStatus, refreshUpdateLog, refreshUpdateStatus, relaunchDiscord,
+    startUpdateChecks, stopUpdateChecks, subscribeUpdates, updateDiagnostics, updatesSupported, type UpdateWaiting
 } from "./update";
 
 const asStatus = (patch: Parameters<typeof statusOf>[0]) => statusOf(patch) as AddonUpdateStatus;
@@ -71,6 +71,27 @@ describe("frases do status (describeUpdate)", () => {
         assert.equal(describeUpdate(asStatus({ phase: "available", latest: { version: "0.3.0", tag: "v0.3.0" } })), "Versão 0.3.0 disponível.");
         assert.equal(describeUpdate(asStatus({ phase: "available", latest: null })), "Versão nova disponível.");
         assert.equal(describeUpdate(asStatus({ phase: "ready", ready: "0.3.0" })), "Versão 0.3.0 pronta: reinicie o Discord para usar.");
+        assert.equal(describeUpdate(asStatus({ phase: "ready", ready: "0.3.0", waiting: null })), "Versão 0.3.0 pronta: reinicie o Discord para usar.");
+    });
+
+    test("pronta, mas nao entrou ao reiniciar: diz por que e o que fazer (e quantas vezes ja tentou)", () => {
+        const stuck = (reason: string, detail: Record<string, unknown> | null = null, starts = 1) =>
+            describeUpdate(asStatus({ phase: "ready", ready: "0.2.8", waiting: { reason, detail, at: "2026-10-31T05:53:00Z", starts } }));
+        assert.equal(
+            stuck("others", { pids: [1234], exes: ["DiscordPTB.exe"] }),
+            "Versão 0.2.8 pronta, mas não entrou ao reiniciar: outro Discord está aberto com o Telinha (Discord PTB). Feche todos os Discords, inclusive pelo ícone perto do relógio (botão direito → Sair do Discord), e abra de novo."
+        );
+        assert.equal(
+            stuck("in-use", { code: "EBUSY" }, 3),
+            "Versão 0.2.8 pronta, mas não entrou ao reiniciar (3 tentativas): um arquivo do Telinha estava em uso (o ajudante de áudio ou o antivírus). Feche o Discord por completo e abra de novo. Se não resolver, reinicie o computador."
+        );
+        assert.equal(
+            stuck("activate-failed", { code: "EPERM" }),
+            "Versão 0.2.8 pronta, mas não entrou ao reiniciar: o Windows não deixou pôr a versão nova no lugar (antivírus?). Feche o Discord por completo e abra de novo. Se não resolver, reinicie o computador."
+        );
+        assert.equal(stuck("locked"), "Versão 0.2.8 pronta, mas não entrou ao reiniciar: outro Discord estava trocando de versão ao mesmo tempo. Feche o Discord por completo e abra de novo.");
+        assert.equal(stuck("trial"), "Versão 0.2.8 pronta, mas não entrou ao reiniciar: a versão atual ainda não tinha confirmado que abriu direito. Reinicie o Discord mais uma vez.");
+        assert.equal(stuck("algo-novo"), "Versão 0.2.8 pronta, mas não entrou ao reiniciar: não deu pra trocar desta vez. Reinicie o Discord mais uma vez.");
     });
 
     test("erro: a mensagem do loader, ou a frase padrao; mais o desfazer", () => {
@@ -88,6 +109,26 @@ describe("frases do status (describeUpdate)", () => {
             describeUpdate(asStatus({ phase: "idle", lastRollback: { version: "0.3.0", to: "0.2.3", at: "x", reason: "y" } })),
             "Ainda não verifiquei nesta sessão. A versão 0.3.0 não iniciou direito e foi desfeita sozinha."
         );
+    });
+});
+
+describe("por que a versao nao entrou (explainWaiting)", () => {
+    const w = (reason: string, detail: UpdateWaiting["detail"] = null): UpdateWaiting => ({ reason, detail, at: null, starts: 1 });
+
+    test("sem motivo: nada a explicar", () => {
+        assert.equal(explainWaiting(null), null);
+        assert.equal(explainWaiting(undefined), null);
+    });
+
+    test("outro Discord: o nome de cada tipo de Discord, sem repetir; programa desconhecido sai como veio; sem nomes, so a frase", () => {
+        const why = (detail: UpdateWaiting["detail"]) => explainWaiting(w("others", detail))!.why;
+        assert.equal(why({ pids: [1, 2], exes: ["Discord.exe", "discordcanary.EXE"] }), "outro Discord está aberto com o Telinha (Discord, Discord Canary)");
+        assert.equal(why({ pids: [1, 2], exes: ["DiscordPTB.exe", "DiscordPTB.exe"] }), "outro Discord está aberto com o Telinha (Discord PTB)");
+        assert.equal(why({ pids: [1], exes: ["DiscordDevelopment.exe"] }), "outro Discord está aberto com o Telinha (Discord Development)");
+        assert.equal(why({ pids: [1], exes: ["Estranho.exe"] }), "outro Discord está aberto com o Telinha (Estranho.exe)");
+        assert.equal(why({ pids: [1], exes: [null, ""] }), "outro Discord está aberto com o Telinha");
+        assert.equal(why({ pids: [1] }), "outro Discord está aberto com o Telinha");
+        assert.equal(why(null), "outro Discord está aberto com o Telinha");
     });
 });
 
@@ -360,7 +401,8 @@ describe("texto do diagnostico", () => {
     test("com o loader: versao instalada (e commit), atualizacao automatica e a frase do status", async () => {
         native = installNative();
         await refreshUpdateStatus();
-        assert.equal(updateDiagnostics(), "versão: 0.2.3 (abcdef12); atualização automática: ligada; atualização: Em dia.");
+        await refreshUpdateLog();
+        assert.equal(updateDiagnostics(), "versão: 0.2.3 (abcdef12); atualização automática: ligada; atualização: Em dia.\nmain.log: nenhuma linha de atualização");
 
         pluginSettings.set("autoUpdate", false);
         assert.match(updateDiagnostics(), /atualização automática: desligada/);
@@ -369,12 +411,54 @@ describe("texto do diagnostico", () => {
     test("sem commit, ou sem versao instalada", async () => {
         native = installNative({}, { addon: { updateStatus: async () => asStatus({ installed: { version: "0.2.3", commit: null }, phase: "ready", ready: "0.3.0" }) } });
         await refreshUpdateStatus();
-        assert.equal(updateDiagnostics(), "versão: 0.2.3; atualização automática: ligada; atualização: Versão 0.3.0 pronta: reinicie o Discord para usar.");
+        await refreshUpdateLog();
+        assert.equal(updateDiagnostics().split("\n")[0], "versão: 0.2.3; atualização automática: ligada; atualização: Versão 0.3.0 pronta: reinicie o Discord para usar.");
 
         native.restore();
         native = installNative({}, { addon: { updateStatus: async () => asStatus({ installed: null }) } });
         await refreshUpdateStatus();
         assert.match(updateDiagnostics(), /^versão: \?;/);
         await flushPromises();
+    });
+
+    test("versao que nao entrou: o motivo cru (pids, programas, codigo) e as ultimas linhas do main.log", async () => {
+        const waiting = { reason: "others", detail: { pids: [1234], exes: ["DiscordPTB.exe"] }, at: "2026-10-31T05:53:12.000Z", starts: 2 };
+        const log = ["2026-10-31T05:53:10.000Z [1234] update: staged, applied at the next Discord start {}", "2026-10-31T05:53:12.000Z [5678] update: staged update waits, another Discord is running from this add-on {\"pids\":[1234]}"];
+        native = installNative({}, { addon: { updateStatus: async () => asStatus({ phase: "ready", ready: "0.2.8", waiting }), updateLog: async () => [...log, 42] } });
+        await refreshUpdateStatus();
+        assert.deepEqual(await refreshUpdateLog(), log, "so texto");
+        const lines = updateDiagnostics().split("\n");
+        assert.match(lines[0], /atualização: Versão 0\.2\.8 pronta, mas não entrou ao reiniciar \(2 tentativas\): outro Discord está aberto com o Telinha \(Discord PTB\)\./);
+        assert.equal(lines[1], 'atualização esperando: others; 2 início(s) seguido(s); último 2026-10-31T05:53:12.000Z; {"pids":[1234],"exes":["DiscordPTB.exe"]}');
+        assert.equal(lines[2], "main.log (últimas linhas de atualização):");
+        assert.deepEqual(lines.slice(3), log.map(l => `  ${l}`));
+    });
+
+    test("motivo sem detalhe nem hora", async () => {
+        native = installNative({}, { addon: { updateStatus: async () => asStatus({ phase: "ready", ready: "0.2.8", waiting: { reason: "locked", detail: null, at: null, starts: 1 } }) } });
+        await refreshUpdateStatus();
+        assert.equal(updateDiagnostics().split("\n")[1], "atualização esperando: locked; 1 início(s) seguido(s); último ?");
+    });
+
+    test("main.log que nao da pra ler: loader antigo (sem updateLog), falha no main, resposta que nao e lista", async t => {
+        const warn = t.mock.method(console, "warn", () => { });
+        native = installNative({}, { addon: { updateLog: undefined as never } });
+        await refreshUpdateStatus();
+        assert.equal(await refreshUpdateLog(), null);
+        assert.equal(updateDiagnostics().split("\n").at(-1), "main.log: não deu pra ler (loader antigo ou sem acesso)");
+        native.restore();
+
+        native = installNative({}, { addon: { updateLog: async () => { throw new Error("ipc"); } } });
+        assert.equal(await refreshUpdateLog(), null);
+        assert.deepEqual(warn.mock.calls.map(c => c.arguments[0]), ["[Telinha] update log failed"]);
+        native.restore();
+
+        native = installNative({}, { addon: { updateLog: async () => "texto" } });
+        assert.equal(await refreshUpdateLog(), null);
+        assert.equal(updateDiagnostics().split("\n").at(-1), "main.log: não deu pra ler (loader antigo ou sem acesso)");
+    });
+
+    test("sem o loader, refreshUpdateLog nao chama nada", async () => {
+        assert.equal(await refreshUpdateLog(), null);
     });
 });

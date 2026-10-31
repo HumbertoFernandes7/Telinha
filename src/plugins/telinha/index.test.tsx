@@ -196,6 +196,25 @@ describe("pagina do plugin e 'Copiar diagnostico'", () => {
         assert.ok(native.calls.some(c => c.name === "updateStatus"), "a versao foi lida de novo no main antes de copiar");
     });
 
+    test("uma versao que nao entrou: o motivo e as ultimas linhas 'update' do main.log vao junto, antes da identidade", async () => {
+        const log = ["2026-10-31T05:53:12.000Z [5678] update: staged update waits, another Discord is running from this add-on {\"pids\":[1234],\"exes\":[\"DiscordPTB.exe\"]}"];
+        native = installNative({}, {
+            addon: {
+                updateStatus: async () => statusOf({ phase: "ready", ready: "0.2.8", waiting: { reason: "others", detail: { pids: [1234], exes: ["DiscordPTB.exe"] }, at: "2026-10-31T05:53:12.000Z", starts: 1 } }),
+                updateLog: async () => log
+            }
+        });
+        render(<About />);
+        copy();
+        await waitFor(() => assert.equal(toasts.length, 1));
+        const text = clipboard[0];
+        assert.ok(native.calls.some(c => c.name === "updateLog"), "o main.log foi lido antes de copiar");
+        assert.match(text, /atualização: Versão 0\.2\.8 pronta, mas não entrou ao reiniciar: outro Discord está aberto com o Telinha \(Discord PTB\)\./);
+        assert.match(text, /\natualização esperando: others; 1 início\(s\) seguido\(s\); último 2026-10-31T05:53:12\.000Z; \{"pids":\[1234\],"exes":\["DiscordPTB\.exe"\]\}\n/);
+        const lines = text.indexOf(`main.log (últimas linhas de atualização):\n  ${log[0]}\n`);
+        assert.ok(lines > 0 && lines < text.indexOf("\nidentidade: configurada"), "as linhas do main.log vem antes da identidade");
+    });
+
     test("sem o loader do add-on, a versao sai como desconhecida", async () => {
         render(<About />);
         copy();
