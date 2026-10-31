@@ -42,7 +42,8 @@ file but shared by the tests inside it: stop what you start (`stopSession()`, `s
 | `@test/fakes/render` | testing-library/react (`render`, `screen`, `fireEvent`, `act`, `waitFor`, `within`...), loads the DOM, unmounts after each test; `settle()` lets the core's microtask-published state land inside `act`. Import testing-library **only from here**. |
 | `@test/fakes/fetch` | `installFetch(handler)` + `jsonResponse()`; everything else is blocked. |
 | `@test/fakes/childProcess` | `mockSpawn(t, onSpawn)` → `FakeChildProcess` (`writeStdout`, `exit`, `fail`) for the main-process code. |
-| `@test/fakes/electron` | `desktopCapturer` (`sources`, `getSourcesImpl`), `FakeSession.requestDisplayMedia()`, `ipcEvent()`. |
+| `@test/fakes/electron` | `desktopCapturer` (`sources`, `getSourcesImpl`), `FakeSession.requestDisplayMedia()`, `ipcEvent()`, `app.getGPUInfo` (`gpuInfo`, `getGPUInfoImpl`). |
+| `@test/fakes/worker` | `installWorker(script)`: a dedicated `Worker` whose worker side is the test's `script` (`emit`, `fail`; `terminated`, `posted`, `refuse` for a CSP); `healthyProbe()` / `stuckProbe()` play the WebCodecs probe worker (core/encoderProbe.ts). |
 
 Per-test overrides: every fake is a plain object or class with public fields. Replace a method with node:test's
 `t.mock.method(UserStore, "getUser", ...)` / `t.mock.method(dataStoreImpl, "get", ...)`, or set the `*Impl` hooks

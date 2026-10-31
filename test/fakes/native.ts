@@ -18,9 +18,12 @@ export interface NativeCall {
 
 type AnyFn = (...args: any[]) => any;
 
-/** Defaults: two sources, capture handler ok, no whole-screen audio helper. */
+/** Defaults: two sources, capture handler ok, no whole-screen audio helper, an empty log file that accepts every batch. */
 export function defaultTelinhaNatives(): Record<string, AnyFn> {
     return {
+        appendDiagLog: async () => true,
+        readDiagLog: async () => [],
+        clearDiagLog: async () => true,
         listSources: async () => ({
             sources: [
                 { id: "screen:0:0", name: "Tela inteira", kind: "screen" },

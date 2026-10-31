@@ -15,7 +15,7 @@ import { after, before, beforeEach, describe, test } from "node:test";
 import { audioTrack, type FakeRTCPeerConnection, installWebRtc, videoTrack, type WebRtcEnv } from "@test/fakes/webrtc";
 import { logged, logMark } from "@test/helpers/wpa-session";
 
-import { getPeerConnectionClass, type SendPlan, setPcHooks } from "./peerConnection";
+import { containPeerConnection, getPeerConnectionClass, isContained, type SendPlan, setPcHooks } from "./peerConnection";
 
 type TestPc = FakeRTCPeerConnection & RTCPeerConnection;
 
@@ -236,5 +236,70 @@ describe("TelinhaPeerConnection", () => {
             };
             await assert.rejects(pc.setRemoteDescription(remote()), /SDP invalido/);
         });
+    });
+});
+
+// Conexao contida (envio travado na placa de video; streaming.ts → containStuck): o resto em streaming.stuck.test.ts.
+describe("conexao contida", () => {
+    let rtc: WebRtcEnv;
+
+    before(() => {
+        rtc = installWebRtc();
+    });
+
+    after(() => {
+        setPcHooks(null);
+        rtc.restore();
+    });
+
+    /** pc que envia video (mid "1", como no SDP remoto) e audio (mid "0"). */
+    function sendingPc() {
+        const pc = new (getPeerConnectionClass())({}) as unknown as TestPc;
+        const video = pc.addSendingTrack(videoTrack());
+        const audio = pc.addSendingTrack(audioTrack());
+        video.mid = "1";
+        audio.mid = "0";
+        return { pc, video };
+    }
+
+    const videoLine = (pc: TestPc) => /^m=video .*$/m.exec(pc.descriptionCalls.at(-1)!.description!.sdp!)?.[0];
+
+    test("close e removeTrack viram nada so na contida; conter de novo guarda tudo junto", () => {
+        const free = sendingPc();
+        const stuck = sendingPc();
+        containPeerConnection(stuck.pc as unknown as RTCPeerConnection, ["sender"]);
+        containPeerConnection(stuck.pc as unknown as RTCPeerConnection, ["stream"]);
+        assert.equal(isContained(stuck.pc as unknown as RTCPeerConnection), true);
+        assert.equal(isContained(free.pc as unknown as RTCPeerConnection), false);
+        assert.equal(isContained(null), false);
+
+        free.pc.removeTrack(free.video.sender);
+        stuck.pc.removeTrack(stuck.video.sender);
+        assert.equal(free.video.sender.track, null, "a saudavel tira a faixa");
+        assert.ok(stuck.video.sender.track, "a contida nao");
+        free.pc.close();
+        stuck.pc.close();
+        assert.equal(free.pc.connectionState, "closed");
+        assert.equal(stuck.pc.connectionState, "connected");
+    });
+
+    test("renegociar na contida: setRemoteDescription e setLocalDescription recusados (nada chega ao Chromium), so o rollback passa", async () => {
+        setPcHooks({ planFor: () => ({ codec: "vp9", bitrate: { startKbps: 5000, maxKbps: 20000 }, label: "amigo" }) });
+        const free = sendingPc();
+        const stuck = sendingPc();
+        containPeerConnection(stuck.pc as unknown as RTCPeerConnection);
+        const mark = logMark();
+        await assert.rejects(stuck.pc.setRemoteDescription({ type: "offer", sdp: REMOTE_SDP }), (e: DOMException) => e.name === "InvalidStateError");
+        await assert.rejects(stuck.pc.setLocalDescription(), /setLocalDescription recusado/);
+        await assert.rejects(stuck.pc.setLocalDescription({ type: "answer", sdp: REMOTE_SDP }), /setLocalDescription recusado/);
+        assert.equal(stuck.pc.descriptionCalls.length, 0, "o Chromium nao viu nenhuma");
+        assert.equal(stuck.video.codecPreferences, null, "nem preferencia de codec");
+        await stuck.pc.setLocalDescription({ type: "rollback" });
+        assert.deepEqual(stuck.pc.descriptionCalls.map(c => c.description?.type), ["rollback"]);
+        assert.equal(logged(/^setRemoteDescription recusado na conexão com o envio travado pela placa de vídeo/, mark).length, 1, "um aviso por minuto");
+
+        // a saudavel negocia como sempre
+        await free.pc.setRemoteDescription({ type: "offer", sdp: REMOTE_SDP });
+        assert.equal(videoLine(free.pc), "m=video 9 UDP/TLS/RTP/SAVPF 98 96");
     });
 });

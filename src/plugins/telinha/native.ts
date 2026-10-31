@@ -9,10 +9,11 @@
 // permitido e liberar os relays no CSP. Todo o resto (handler de display media etc.) e preguicoso.
 
 import { ConnectSrc, CspPolicies } from "@main/csp";
-import { desktopCapturer, type IpcMainInvokeEvent } from "electron";
+import { app, desktopCapturer, type IpcMainInvokeEvent } from "electron";
 
 import { readScreenAudioMain, screenAudioStatusMain, startScreenAudioMain, stopScreenAudioMain } from "./core/audio/screenAudioMain";
 import type { ScreenAudioRead, ScreenAudioStart, ScreenAudioStatus } from "./core/audio/types";
+import { appendDiagLogMain, clearDiagLogMain, readDiagLogMain } from "./core/diagLogMain";
 import { getWindowProcessInfo } from "./nativeWindowPid";
 import { RELAY_URLS } from "./protocol";
 
@@ -227,6 +228,60 @@ export function resetDisplayMedia(_: IpcMainInvokeEvent) {
     stopScreenAudioMain();
 }
 
+// #region ambiente do encoder (core/stuckEncoder.ts)
+
+/**
+ * Ambiente que decide se o H.264 da placa de video volta a ser tentado depois de travar (core/stuckEncoder.ts): a placa
+ * ativa (app.getGPUInfo("basic"): vendorId/deviceId PCI e a versao do driver), o Chromium e o Discord deste processo.
+ * null = desconhecido. Nunca lanca.
+ */
+export interface GpuEnvironment {
+    vendorId: number | null;
+    deviceId: number | null;
+    driverVersion: string | null;
+    chrome: string | null;
+    discord: string | null;
+    /** por que a placa ficou desconhecida (diagnostico) */
+    error: string | null;
+}
+
+const GPU_INFO_TIMEOUT_MS = 3000;
+
+const pciId = (n: unknown) => (typeof n === "number" && Number.isInteger(n) && n >= 0 && n <= 0xFFFF ? n : null);
+const shortText = (s: unknown) => (typeof s === "string" && s.trim() ? s.trim().slice(0, 64) : null);
+
+export async function gpuEnvironment(_: IpcMainInvokeEvent): Promise<GpuEnvironment> {
+    const env: GpuEnvironment = { vendorId: null, deviceId: null, driverVersion: null, chrome: shortText(process.versions?.chrome), discord: null, error: null };
+    try {
+        env.discord = shortText(app.getVersion());
+    } catch { }
+    try {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<"timeout">(resolve => {
+            timer = setTimeout(() => resolve("timeout"), GPU_INFO_TIMEOUT_MS);
+        });
+        const info = await Promise.race([app.getGPUInfo("basic"), timeout]).finally(() => clearTimeout(timer));
+        if (info === "timeout") {
+            env.error = "getGPUInfo demorou demais";
+            return env;
+        }
+        const devices: any[] = Array.isArray((info as any)?.gpuDevice) ? (info as any).gpuDevice : [];
+        const gpu = devices.find(d => d?.active === true) ?? devices[0];
+        if (!gpu) {
+            env.error = "getGPUInfo sem gpuDevice";
+            return env;
+        }
+        env.vendorId = pciId(gpu.vendorId);
+        env.deviceId = pciId(gpu.deviceId);
+        env.driverVersion = shortText(gpu.driverVersion);
+    } catch (e) {
+        env.error = errorText(e);
+    }
+    return env;
+}
+
+// #endregion
+
 // #region audio da tela inteira (telinha-audio.exe; ver core/audio/)
 
 export function screenAudioStatus(_: IpcMainInvokeEvent): Promise<ScreenAudioStatus> {
@@ -244,6 +299,25 @@ export function readScreenAudio(_: IpcMainInvokeEvent, id: number, maxWaitMs: nu
 
 export function stopScreenAudio(_: IpcMainInvokeEvent, id?: number): void {
     stopScreenAudioMain(typeof id === "number" ? id : undefined);
+}
+
+// #endregion
+
+// #region registro do Telinha em arquivo (core/diagLog.ts → core/diagLogMain.ts; so com "Compartilhar diagnóstico")
+
+/** Acrescenta um lote de linhas ao %APPDATA%\Telinha\logs\renderer.log (roda para .1 ao passar de 100 KiB). false = nao gravou. */
+export function appendDiagLog(_: IpcMainInvokeEvent, text: string): Promise<boolean> {
+    return appendDiagLogMain(text);
+}
+
+/** As ultimas linhas do registro (renderer.log.1 + renderer.log), mais antiga primeiro. */
+export function readDiagLog(_: IpcMainInvokeEvent): Promise<string[]> {
+    return readDiagLogMain();
+}
+
+/** Apaga o registro (renderer.log e .1): "Compartilhar diagnóstico" foi desligado. false = nao apagou. */
+export function clearDiagLog(_: IpcMainInvokeEvent): Promise<boolean> {
+    return clearDiagLogMain();
 }
 
 // #endregion

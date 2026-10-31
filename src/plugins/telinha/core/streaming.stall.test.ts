@@ -7,12 +7,14 @@
 // Testes do H.264 que nao sai (core/streaming.ts → checkStall, no tick): com a conexao e a captura no ar, nada do video
 // de um envio H.264 sai do PC. Dois casos vistos em 31/10 numa placa AMD: o encoder nao codifica nenhum quadro
 // ("Codificando para ...: video/H264" sem encoderImplementation, 0.2.6) e, as 02:54, o encoder sobe e codifica, mas nenhum
-// pacote de video sai (o espectador so recebe o audio). Passados H264_STALL_MS, so ESSE espectador passa para VP9 (como
-// uma queda do H.264 por software) e a queda conta na sessao: na 2a, o H.264 automatico desliga. Um envio que sai de fato
-// (SENT_MIN_BYTES), um encoder lento ou uma tela preta parada (poucos bytes por quadro) nunca sao culpados.
-// Este PC "codifica H.264 na placa" pela sonda falsa e o espectador anuncia h264HwDecode, como em
-// streaming.encoder.test.ts. A contagem de quedas e do processo: a ordem dos testes importa (1a queda, 2a desliga o
-// H.264 automatico, depois so com o codec fixado em H.264).
+// pacote de video sai (o espectador so recebe o audio). Desde a v0.2.9, passados H264_STALL_MS a placa de video travou: o
+// envio fica CONTIDO, sem trocar o codec (a troca destruia o envio e travava o Discord; containStuck), o H.264 automatico
+// desliga na hora (sem esperar a 2a queda), o PC lembra, quem transmite ve o aviso e quem assiste recebe { op: "stuck" }.
+// Um envio que sai de fato (SENT_MIN_BYTES), um encoder lento ou uma tela preta parada (poucos bytes por quadro) nunca
+// sao culpados. Este PC "codifica H.264 na placa" pela sonda falsa e o espectador anuncia h264HwDecode, como em
+// streaming.encoder.test.ts. O travamento desliga o H.264 automatico no processo: a ordem dos testes importa (primeiro
+// os envios saudaveis, depois o 1o travamento no automatico, depois so com o codec fixado em H.264). O que nunca mexe no
+// envio travado (parar, expulsar, trocar de fonte...) fica em streaming.stuck.test.ts.
 // Rodar:  pnpm test:file src/plugins/telinha/core/streaming.stall.test.ts  (todos: pnpm test:unit)
 
 import "@test/fakes/dom";
@@ -20,13 +22,18 @@ import "@test/fakes/dom";
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 
+import { rt } from "@plugins/telinha/core/context";
 import { pluginSettings } from "@test/fakes/vencord";
 import { type FakeRTCPeerConnection, type FakeRTCRtpSender, type StatsEntry, videoSenderStats } from "@test/fakes/webrtc";
-import { connectViewer, createRig, destroyRig, enterCall, logMark, screenOptions, seconds, type StreamingRig, turns, videoSenderOf } from "@test/helpers/wpb-streaming";
+import {
+    connectViewer, createRig, destroyRig, enterCall, logMark, removalsFrom, repliesTo, screenOptions, seconds, type StreamingRig, turns, videoSenderOf
+} from "@test/helpers/wpb-streaming";
 
 import { getLocalCaps } from "./codec";
+import { isContained } from "./peerConnection";
 import { STATS_LINE_RE } from "./statsLog";
 import { H264_STALL_MS, sendPlanFor, SENT_MIN_BYTES, startStreaming, stopStreaming } from "./streaming";
+import { STUCK_NOTICE, STUCK_NOTICE_PINNED, stuckEncoderDiagnostics, stuckRecord } from "./stuckEncoder";
 
 /** O encoder do log das 02:54 (placa AMD, Telinha 0.2.6). */
 const AMD = "MediaFoundationVideoEncodeAccelerator (AMDh264Encoder)";
@@ -114,6 +121,19 @@ const stalled = (v: TestViewer, seconds: number, source: number) =>
     `O encoder H.264 para ${v.label} não codificou nenhum quadro em ${seconds} s, com a conexão no ar e a captura entregando quadros `
     + `(${source} quadros da captura, 0 codificados, 0 enviados, 0,0 kB enviados, encoder não informado pelo Chromium, tamanho desconhecido)`;
 
+/** O fim da linha de log de um envio contido (containStuck). */
+const contained = (v: TestViewer) => `: a placa de vídeo travou com H.264. O envio para ${v.label} fica como está até o Discord reiniciar `
+    + "(trocar o codec, parar ou fechar a conexão travaria o Discord inteiro). O H.264 automático fica desligado neste PC até o driver, o Chromium ou a placa mudarem.";
+
+/** O envio ficou contido: nenhum codec trocado, o plano continua H.264, a conexao contida e o espectador avisado. */
+function assertContained(v: TestViewer) {
+    assert.equal(v.sender.encoding.codec, undefined, "o codec nunca foi trocado (setParameters com codec destruiria o envio)");
+    assert.ok(v.sender.setCalls.every(p => !(p.encodings[0] as { codec?: unknown; }).codec), "nenhum setParameters com codec");
+    assert.equal(sendPlanFor(v.peerId)?.codec, "h264", "send.decision nao mudou: renegociar nao troca o codec");
+    assert.ok(isContained(v.pc as unknown as RTCPeerConnection), "a conexao ficou contida");
+    assert.deepEqual(repliesTo(rig.room, v.peerId).filter(m => m.op === "stuck"), [{ op: "stuck" }], "quem assiste foi avisado uma vez");
+}
+
 /** Codec fixado em H.264 durante `fn`. */
 async function pinnedH264(fn: () => Promise<void>) {
     pluginSettings.set("codec", "h264");
@@ -145,35 +165,7 @@ after(async () => {
 });
 
 describe("H.264 que nao sai do PC (checkStall)", () => {
-    test("log de 31/10: nenhum quadro em 8 s com a captura no ar → VP9 so para ele, sem reconectar; 1a queda da sessao", async () => {
-        const v = await watcher("gupi");
-        const other = await watcher("leo");
-        other.sender.stats = videoSenderStats({ mimeType: "video/H264", encoderImplementation: AMD, powerEfficientEncoder: true, framesEncoded: 600 });
-        assert.equal(sendPlanFor(v.peerId)?.codec, "h264");
-        v.sender.stats = h264Stats({});
-        const since = logMark();
-        await seconds(rig, 1); // 1a leitura: comeca a contar
-        await seconds(rig, H264_STALL_MS / 1000 - 1);
-        assert.equal(v.sender.encoding.codec, undefined, "7 s: ainda esperando");
-        assert.deepEqual(about(since(), v), [`Codificando para ${v.label}: video/H264`], "o mesmo que o log de 31/10 mostrou");
-
-        await seconds(rig, 1);
-        assert.equal(sentCodec(v.sender), "video/VP9", "trocado sem reconectar");
-        assert.equal(sendPlanFor(v.peerId)?.codec, "vp9", "renegociacoes futuras ja vao com VP9");
-        assert.deepEqual(about(since(), v).slice(1), [
-            `${stalled(v, 8, 480)}: trocando para VP9 só para ${v.label}. Os próximos espectadores ainda tentam a placa de vídeo.`,
-            `${v.label} agora recebe VP9 (trocado sem reconectar)`
-        ]);
-        assert.equal(getLocalCaps().h264HwEncode, true, "uma queda so nao desliga o H.264 automatico");
-        assert.equal(other.sender.encoding.codec, undefined, "o outro espectador continua em H.264");
-        assert.equal(sendPlanFor(other.peerId)?.codec, "h264");
-
-        // uma vez por espectador: o tick nao confere mais esse envio
-        await seconds(rig, 10);
-        assert.equal(stalls(since(), v).length, 1);
-    });
-
-    test("encoder lento que solta o 1o quadro aos 5 s: nunca troca, nem depois", async () => {
+    test("encoder lento que solta o 1o quadro aos 5 s: nunca e culpado, nem depois", async () => {
         const v = await watcher("lento");
         const plan: EncoderPlan = { encodesAfterMs: 5000 };
         v.sender.stats = h264Stats(plan);
@@ -182,10 +174,11 @@ describe("H.264 que nao sai do PC (checkStall)", () => {
         assert.equal(v.sender.encoding.codec, undefined);
         assert.equal(sendPlanFor(v.peerId)?.codec, "h264");
         assert.deepEqual(about(since(), v).filter(l => !l.startsWith("Codificando para")), []);
+        assert.equal(isContained(v.pc as unknown as RTCPeerConnection), false);
         assert.equal(getLocalCaps().h264HwEncode, true);
     });
 
-    test("H.264 saindo de verdade nunca troca; uma tela preta parada, com poucos bytes por quadro, tambem nao", async () => {
+    test("H.264 saindo de verdade nunca e culpado; uma tela preta parada, com poucos bytes por quadro, tambem nao", async () => {
         const healthy = await watcher("saudavel");
         healthy.sender.stats = h264Stats({ encodesAfterMs: 0 });
         // ~5 bytes por quadro: abaixo de SENT_MIN_BYTES por mais de um minuto, mas o bytesSent anda a cada leitura
@@ -218,32 +211,93 @@ describe("H.264 que nao sai do PC (checkStall)", () => {
         stopWatching(connecting);
         stopWatching(idle);
         await turns();
+        assert.equal(rt.lastError, null, "nenhum aviso de placa travada");
     });
 
-    test("log das 02:54: o encoder AMD no ar codifica, mas nada sai (0 enviados, 0 kB) → VP9 em 8 s; a 2a queda desliga o H.264 automatico", async () => {
-        const v = await watcher("tobitsu");
-        assert.equal(sendPlanFor(v.peerId)?.codec, "h264");
-        v.sender.stats = h264Stats({ encodesAfterMs: 0, sentCap: 0, framesSentZero: true });
+    test("OpenH264 (software, num tamanho que a placa nao aceita) que codifica e nada sai: so esse espectador vai para VP9, sem conter nem marcar a placa", async () => {
+        const v = await watcher("software");
+        let n = 0;
+        v.sender.stats = () => {
+            n++;
+            const entries = videoSenderStats({
+                mimeType: "video/H264", encoderImplementation: "OpenH264", powerEfficientEncoder: false, framesEncoded: 60 * n, bytesSent: 0,
+                frameWidth: 480, frameHeight: 270, sourceFrames: 60 * n, sourceFps: 60
+            });
+            entries[0].framesSent = 0;
+            return entries;
+        };
         const since = logMark();
-        await seconds(rig, 1);
+        await seconds(rig, H264_STALL_MS / 1000 + 1);
+        assert.equal(sentCodec(v.sender), "video/VP9", "trocado sem reconectar (o encoder no ar e de software: seguro)");
+        assert.equal(isContained(v.pc as unknown as RTCPeerConnection), false);
+        assert.equal(rt.lastError, null, "nenhum aviso de placa travada");
+        assert.equal(stuckRecord(), null, "a placa nao fica marcada");
+        assert.equal(getLocalCaps().h264HwEncode, true, "uma queda so nao desliga o H.264 automatico");
+        const lines = stalls(since(), v);
+        assert.equal(lines.length, 1);
+        assert.ok(lines[0].endsWith(`encoder OpenH264, 480x270): trocando para VP9 só para ${v.label}. Os próximos espectadores ainda tentam a placa de vídeo.`), lines[0]);
+        assert.deepEqual(repliesTo(rig.room, v.peerId).filter(m => m.op === "stuck"), []);
+    });
+
+    test("log de 31/10 (0.2.6): nenhum quadro em 8 s com a captura no ar → travou, contido (sem trocar o codec); o H.264 automatico desliga ja na 1a", async () => {
+        const v = await watcher("gupi");
+        const other = await watcher("leo");
+        other.sender.stats = videoSenderStats({ mimeType: "video/H264", encoderImplementation: AMD, powerEfficientEncoder: true, framesEncoded: 600 });
+        assert.equal(sendPlanFor(v.peerId)?.codec, "h264");
+        v.sender.stats = h264Stats({});
+        const since = logMark();
+        await seconds(rig, 1); // 1a leitura: comeca a contar
         await seconds(rig, H264_STALL_MS / 1000 - 1);
-        assert.equal(v.sender.encoding.codec, undefined, "7 s: ainda esperando");
-        assert.deepEqual(about(since(), v), [`Codificando para ${v.label}: video/H264 (${AMD}, hardware)`], "o mesmo que o log das 02:54 mostrou");
+        assert.equal(rt.lastError, null, "7 s: ainda esperando");
+        assert.deepEqual(about(since(), v), [`Codificando para ${v.label}: video/H264`], "o mesmo que o log de 31/10 mostrou");
 
         await seconds(rig, 1);
-        assert.equal(sentCodec(v.sender), "video/VP9", "trocado sem reconectar");
-        assert.equal(sendPlanFor(v.peerId)?.codec, "vp9");
-        assert.deepEqual(about(since(), v).slice(1), [
-            `O H.264 para ${v.label} codificou quadros, mas nenhum saiu deste PC em 8 s, com a conexão no ar e a captura entregando quadros `
-            + `(480 quadros da captura, 541 codificados, 0 enviados, 0,0 kB enviados, encoder ${AMD}, 1920x1080): trocando para VP9 só para ${v.label}. `
-            + "Foi a 2ª queda nesta sessão: os próximos espectadores vão receber VP9.",
-            `${v.label} agora recebe VP9 (trocado sem reconectar)`
-        ]);
-        assert.equal(getLocalCaps().h264HwEncode, false, "H.264 automatico desligado na sessao");
+        assertContained(v);
+        assert.deepEqual(about(since(), v).slice(1), [`${stalled(v, 8, 480)}${contained(v)}`], "nada de \"trocando para VP9\"");
+        assert.equal(rt.lastError, STUCK_NOTICE, "o aviso na barra do Telinha");
+        assert.equal(getLocalCaps().h264HwEncode, false, "H.264 automatico desligado na hora, sem esperar a 2a queda");
+        assert.ok(stuckRecord(), "lembrado neste PC");
+        assert.equal(other.sender.encoding.codec, undefined, "o outro espectador continua em H.264");
+        assert.equal(sendPlanFor(other.peerId)?.codec, "h264");
 
-        // os proximos ja comecam em VP9 (nao esperam 8 s por um H.264 que nao sai)
+        // o tick nao le mais esse envio (nem as estatisticas: nada mais e conferido nele)
+        const reads = v.sender.getStatsCalls;
+        await seconds(rig, 10);
+        assert.equal(v.sender.getStatsCalls, reads);
+        assert.equal(stalls(since(), v).length, 1);
+        assertContained(v);
+
+        assert.ok(stuckEncoderDiagnostics().includes("travou nesta sessão: sim (1 conexão contida)"));
+
+        // os proximos ja comecam em VP9 (nenhum encoder H.264 da placa e criado)
         const next = await watcher("depois");
         assert.equal(sendPlanFor(next.peerId)?.codec, "vp9");
+
+        // ele para de assistir: sem removeStream (a transmissao e so de tela, sem audio para cortar)
+        stopWatching(v);
+        await turns();
+        assert.equal(removalsFrom(rig.room, v.peerId).length, 0);
+        assert.ok(v.sender.track, "a faixa continua no envio travado");
+    });
+
+    test("log das 02:54 (codec fixado em H.264): o encoder AMD codifica, mas nada sai (0 enviados, 0 kB) → travou, contido; o aviso pede o Automatico", async () => {
+        await pinnedH264(async () => {
+            const v = await watcher("tobitsu");
+            assert.equal(sendPlanFor(v.peerId)?.codec, "h264");
+            v.sender.stats = h264Stats({ encodesAfterMs: 0, sentCap: 0, framesSentZero: true });
+            const since = logMark();
+            await seconds(rig, 1);
+            await seconds(rig, H264_STALL_MS / 1000 - 1);
+            assert.deepEqual(about(since(), v), [`Codificando para ${v.label}: video/H264 (${AMD}, hardware)`], "o mesmo que o log das 02:54 mostrou");
+
+            await seconds(rig, 1);
+            assertContained(v);
+            assert.deepEqual(about(since(), v).slice(1), [
+                `O H.264 para ${v.label} codificou quadros, mas nenhum saiu deste PC em 8 s, com a conexão no ar e a captura entregando quadros `
+                + `(480 quadros da captura, 541 codificados, 0 enviados, 0,0 kB enviados, encoder ${AMD}, 1920x1080)${contained(v)}`
+            ]);
+            assert.equal(rt.lastError, STUCK_NOTICE_PINNED);
+        });
     });
 
     test("com o libwebrtc (framesSent = framesEncoded): o bytesSent parado tambem e nada saindo", async () => {
@@ -254,9 +308,9 @@ describe("H.264 que nao sai do PC (checkStall)", () => {
             await seconds(rig, H264_STALL_MS / 1000 + 1);
             assert.deepEqual(stalls(since(), v), [
                 `O H.264 para ${v.label} codificou quadros, mas nenhum saiu deste PC em 8 s, com a conexão no ar e a captura entregando quadros `
-                + `(480 quadros da captura, 541 codificados, 541 enviados, 0,0 kB enviados, encoder ${AMD}, 1920x1080). `
-                + "Continua em H.264 porque o codec está fixado nas configurações."
+                + `(480 quadros da captura, 541 codificados, 541 enviados, 0,0 kB enviados, encoder ${AMD}, 1920x1080)${contained(v)}`
             ]);
+            assertContained(v);
         });
     });
 
@@ -273,18 +327,19 @@ describe("H.264 que nao sai do PC (checkStall)", () => {
             await seconds(rig, 1);
             assert.deepEqual(stalls(since(), small), [
                 `O H.264 para ${small.label} codificou quadros, mas nenhum saiu deste PC em 8 s, com a conexão no ar e a captura entregando quadros `
-                + `(480 quadros da captura, 541 codificados, 541 enviados, 8,0 kB enviados, encoder ${AMD}, 1920x1080). `
-                + "Continua em H.264 porque o codec está fixado nas configurações."
+                + `(480 quadros da captura, 541 codificados, 541 enviados, 8,0 kB enviados, encoder ${AMD}, 1920x1080)${contained(small)}`
             ]);
+            assertContained(small);
 
             // passou de SENT_MIN_BYTES: o video saiu de fato e a checagem acabou (se o espectador nao decodifica, ele pede VP9)
             await seconds(rig, 20);
             assert.deepEqual(stalls(since(), big), []);
+            assert.equal(isContained(big.pc as unknown as RTCPeerConnection), false);
             assert.equal(stalls(since(), small).length, 1, "uma vez por espectador");
         });
     });
 
-    test("codec fixado em H.264: a captura volta depois de parada e conta 8 s dali; nenhum quadro so loga, continua em H.264", async () => {
+    test("codec fixado em H.264: a captura volta depois de parada e conta 8 s dali; travou = contido, continua em H.264", async () => {
         await pinnedH264(async () => {
             const v = await watcher("volta");
             assert.equal(sendPlanFor(v.peerId)?.codec, "h264");
@@ -301,24 +356,8 @@ describe("H.264 que nao sai do PC (checkStall)", () => {
             const lines = stalls(since(), v);
             assert.equal(lines.length, 1);
             assert.match(lines[0], /^O encoder H\.264 para volta \(svolta\) não codificou nenhum quadro em 8 s, com a conexão no ar e a captura entregando quadros \(2\d0 quadros/);
-            assert.ok(lines[0].endsWith(". Continua em H.264 porque o codec está fixado nas configurações."), lines[0]);
-            assert.equal(v.sender.encoding.codec, undefined, "sem troca");
-            assert.equal(sendPlanFor(v.peerId)?.codec, "h264");
-        });
-    });
-
-    test("codec fixado em H.264: nenhum quadro em 8 s so loga, continua em H.264", async () => {
-        await pinnedH264(async () => {
-            const v = await watcher("fixado");
-            assert.equal(sendPlanFor(v.peerId)?.codec, "h264");
-            v.sender.stats = h264Stats({});
-            const since = logMark();
-            await seconds(rig, H264_STALL_MS / 1000 + 1);
-            assert.equal(v.sender.encoding.codec, undefined, "sem troca");
-            assert.equal(sendPlanFor(v.peerId)?.codec, "h264");
-            assert.deepEqual(about(since(), v).slice(1), [`${stalled(v, 8, 480)}. Continua em H.264 porque o codec está fixado nas configurações.`]);
-            await seconds(rig, 5);
-            assert.equal(about(since(), v).length, 2, "uma vez por espectador");
+            assert.ok(lines[0].endsWith(contained(v)), lines[0]);
+            assertContained(v);
         });
     });
 
@@ -337,15 +376,15 @@ describe("H.264 que nao sai do PC (checkStall)", () => {
             await seconds(rig, H264_STALL_MS / 1000 + 1);
             assert.deepEqual(stalls(since(), framesOnly), [
                 `O H.264 para ${framesOnly.label} codificou quadros, mas nenhum saiu deste PC em 8 s, com a conexão no ar e a captura entregando quadros `
-                + `(480 quadros da captura, 541 codificados, 0 enviados, encoder ${AMD}, 1920x1080). Continua em H.264 porque o codec está fixado nas configurações.`
+                + `(480 quadros da captura, 541 codificados, 0 enviados, encoder ${AMD}, 1920x1080)${contained(framesOnly)}`
             ]);
             assert.deepEqual(stalls(since(), none), [
                 `O encoder H.264 para ${none.label} não codificou nenhum quadro em 8 s, com a conexão no ar e a captura entregando quadros `
-                + "(480 quadros da captura, 0 codificados, encoder não informado pelo Chromium, tamanho desconhecido). "
-                + "Continua em H.264 porque o codec está fixado nas configurações."
+                + `(480 quadros da captura, 0 codificados, encoder não informado pelo Chromium, tamanho desconhecido)${contained(none)}`
             ]);
             await seconds(rig, 15);
             assert.deepEqual(stalls(since(), late), []);
+            assert.equal(isContained(late.pc as unknown as RTCPeerConnection), false);
         });
     });
 });

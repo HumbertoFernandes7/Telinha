@@ -13,18 +13,22 @@ import definePlugin from "@utils/types";
 import { showToast } from "@webpack/common";
 
 import { startSession, stopSession } from "./actions";
+import { setDiagnosticsSource } from "./core/diagShare";
 import { localIdentityDiagnostics } from "./core/identity";
 import { peerIdentityDiagnostics } from "./core/session";
+import { stuckEncoderDiagnostics } from "./core/stuckEncoder";
 import { refreshUpdateLog, refreshUpdateStatus, startUpdateChecks, stopUpdateChecks, updateDiagnostics } from "./core/update";
 import { migrateAccessSettings, settings } from "./settings";
 import { formatDiagnostics } from "./store";
 import { callViewPatches, renderCallTileStream, stopCallView } from "./ui/callView";
 import { runAction } from "./ui/common";
+import { DiagShareSection } from "./ui/DiagShareUI";
 import { IdentitySection } from "./ui/IdentityUI";
 import { panelJsx, voiceUserIconsJsx } from "./ui/jsxShims";
 import { renderToolboxActions, userContextMenuPatch } from "./ui/menus";
 import { startNotices, stopNotices } from "./ui/notices";
 import { startSounds, stopSounds } from "./ui/sounds";
+import { StuckEncoderSection } from "./ui/StuckEncoderSection";
 import { startUpdateNotices, stopUpdateNotices } from "./ui/updateNotice";
 import { UpdateSection } from "./ui/UpdateSection";
 import { closeAllViewers } from "./ui/viewerWindows";
@@ -39,11 +43,18 @@ function identityDiagnostics(): string {
     }
 }
 
+/**
+ * The "Copiar diagnóstico" text, in two steps: refresh (fresh version/update status and the last update lines of
+ * main.log, asked from the main process), then format. Also what core/diagShare.ts sends to a friend who asked for it.
+ */
+const diagnostics = {
+    refresh: () => Promise.all([refreshUpdateStatus(), refreshUpdateLog()]).catch(() => null),
+    format: () => `${formatDiagnostics()}\n${updateDiagnostics()}\n${identityDiagnostics()}\n${stuckEncoderDiagnostics()}\n\n${formatVoiceTagDiagnostics()}`
+};
+
 function copyDiagnostics() {
-    // fresh version/update status and the last update lines of main.log first (asks the main process), then the copy
-    Promise.all([refreshUpdateStatus(), refreshUpdateLog()])
-        .catch(() => null)
-        .then(() => copyToClipboard(`${formatDiagnostics()}\n${updateDiagnostics()}\n${identityDiagnostics()}\n\n${formatVoiceTagDiagnostics()}`))
+    diagnostics.refresh()
+        .then(() => copyToClipboard(diagnostics.format()))
         .then(
             () => showToast({ text: "Diagnóstico do Telinha copiado", variant: "success" }),
             () => showToast({ text: "Não consegui copiar o diagnóstico", variant: "critical" })
@@ -62,6 +73,8 @@ function SettingsAbout() {
             <Button size="small" variant="secondary" onClick={copyDiagnostics}>
                 Copiar diagnóstico
             </Button>
+            <StuckEncoderSection />
+            <DiagShareSection />
             <IdentitySection />
             <UpdateSection />
         </div>
@@ -115,6 +128,8 @@ export default definePlugin({
     start() {
         // v0.1.0 → v0.2.0: "Aprovar quem vai assistir" vira "Quem pode assistir (padrão)"
         migrateAccessSettings();
+        // "Compartilhar diagnóstico": a friend who asks gets the same text as "Copiar diagnóstico"
+        setDiagnosticsSource(diagnostics);
         startNotices();
         startSounds();
         startUpdateNotices();

@@ -231,6 +231,40 @@ describe("pedido de VP9 de quem assiste (acao \"codec\")", () => {
         assert.equal(sentCodec(sender), "video/VP9");
     });
 
+    test("o video ainda nao saiu do PC: o pedido e ignorado sem tocar no envio; com o video saindo, o proximo pedido troca", async () => {
+        const v = await watcher("naosaiu");
+        let frames = 0;
+        let leaving = false;
+        // a captura entrega quadros, mas o encoder nao soltou nada (ainda dentro dos 8 s do checkStall)
+        v.sender.stats = () => videoSenderStats({
+            mimeType: "video/H264", encoderImplementation: NVENC, powerEfficientEncoder: true, framesEncoded: leaving ? 600 : 0,
+            bytesSent: leaving ? 5_000_000 : 0, sourceFrames: (frames += 60), sourceFps: 60
+        });
+        let getParams = 0;
+        const get = v.sender.getParameters.bind(v.sender);
+        v.sender.getParameters = () => {
+            getParams++;
+            return get();
+        };
+        await seconds(rig, 2);
+        const since = logMark();
+        await asks(v);
+        assert.equal(v.sender.encoding.codec, undefined, "nenhuma troca");
+        assert.equal(getParams, 0, "nem getParameters");
+        assert.equal(sendPlanFor(v.peerId)?.codec, "h264");
+        assert.deepEqual(about(since(), v), [
+            `Pedido de VP9 de ${v.label} ignorado: o vídeo para ele ainda não saiu deste PC, e trocar o codec de um encoder que não soltou nada pode travar o Discord `
+            + "(se o vídeo não sair, o Telinha avisa)"
+        ]);
+
+        // o video comeca a sair (o espectador e quem nao decodifica): o proximo pedido dele troca so o envio dele
+        leaving = true;
+        await seconds(rig, 6);
+        await asks(v);
+        assert.equal(sentCodec(v.sender), "video/VP9");
+        assert.equal(getLocalCaps().h264HwEncode, true, "nenhuma queda contada");
+    });
+
     test("codec fixado em H.264: o pedido so e logado, o envio continua em H.264", async () => {
         pluginSettings.set("codec", "h264");
         try {

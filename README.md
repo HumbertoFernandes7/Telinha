@@ -183,6 +183,8 @@ Não: ele não altera os arquivos do Vencord. Só troca o pequeno `app.asar` do 
 **Deu problema. E agora?**
 Nas configurações do plugin, clique em **"Copiar diagnóstico"** e mande o texto para quem compartilhou o Telinha com você ou para o autor (Humberto, [@HumbertoFernandes7](https://github.com/HumbertoFernandes7)). Os logs não contêm IPs. As Issues do GitHub não são usadas neste repositório.
 
+Para não precisar copiar nada toda vez: se você e quem está ajudando ligarem **"Compartilhar diagnóstico para ajudar a depurar"** nas configurações do plugin, essa pessoa pode pedir o registro do Telinha do seu PC enquanto vocês estão na mesma call (as duas identidades verificadas). Vai só o registro do Telinha (com os nomes de quem está na call), sem IP, sem a pasta do seu usuário, sem ids do Discord, sem o nome da janela que você transmite e sem tokens; a página do plugin mostra para quem ele está indo. Desligar a opção (ou sair da call) para na hora, e desligar apaga o registro guardado neste PC. Enquanto quem pediu mantiver o pedido, o envio recomeça sozinho quando você reabrir o Discord.
+
 ## Para desenvolvedores
 
 Este repositório tem **só o código do Telinha**. O Vencord oficial é uma dependência de build: o commit fixado em [`vencord.json`](vencord.json) (Vencord 1.15.13, `443688b5`) é baixado pelo `pnpm bootstrap` para `.vencord/`, que fica fora do git (nunca é commitado nem copiado para cá).
@@ -223,6 +225,7 @@ pnpm check             # typecheck, lint, lint-styles, test:unit, build:addon e 
 
   e abra `http://localhost:8788`. Detalhes em [`tools/telinha-peer/README.md`](tools/telinha-peer/README.md).
 - As constantes do protocolo estão duplicadas entre o plugin e o amigo virtual; mantenha as duas em sincronia.
+- **Teste da placa de vídeo** para mandar a um amigo: [`tools/teste-placa/teste-placa.html`](tools/teste-placa/teste-placa.html), um arquivo só que abre direto do disco no Chrome ou no Edge, testa o encoder de vídeo da placa em 2 passos (WebCodecs e WebRTC em loopback com uma animação, depois com a tela) e gera um texto para colar de volta. Detalhes em [`tools/teste-placa/README.md`](tools/teste-placa/README.md).
 
 ## Créditos e licença
 
@@ -249,7 +252,7 @@ It is a plugin for [Vencord](https://github.com/Vendicated/Vencord) (a Discord c
 - **Available, not yet tested between two real PCs:** watching right inside the call view (an "Assistir" button on the person's tile, which can still pop out into a separate window) and the viewer controls: a "Quem está assistindo" (who is watching) list with Expulsar (kick) and Liberar (unblock), a warning when two connections claim the same Discord account (neither gets the stream), "Quem pode assistir" (who can watch), chosen when you start streaming: everyone in the call, only your Discord friends, only people you approve, or a per-stream password; and Discord-verified identity (a one-time "Autorizar" in Discord's own window, so nobody can pretend to be someone else in the call).
 - **Privacy:** a direct connection means people in the call can see each other's IP. Only people in the same voice channel are accepted by default, there is an optional group password, and logs never contain IP addresses.
 - **Limitations:** each viewer gets a separate copy from the streamer (2-4 viewers recommended); exclusive-fullscreen games may show black (use borderless); no DLL injection into games.
-- **Support:** use "Copy diagnostics" in the plugin settings and send it to the author; GitHub Issues are not used in this repository.
+- **Support:** use "Copy diagnostics" in the plugin settings and send it to the author; GitHub Issues are not used in this repository. With "Compartilhar diagnóstico para ajudar a depurar" (share diagnostics, off by default) on at both ends, a verified friend in the same call can ask for your Telinha log directly (with the names of who is in the call; no IPs, user folder, Discord ids, captured window title or tokens).
 - **Developers:** this repo holds only Telinha's code; the official Vencord commit pinned in `vencord.json` is fetched into `.vencord/` (gitignored) by `pnpm bootstrap`. See [Para desenvolvedores](#para-desenvolvedores) for the commands (`pnpm check`, `pnpm build:addon`, `pnpm build:installer`).
 - **Credits and disclaimer:** based on Vencord by the Vencord team; not affiliated with Discord or the Vencord team, and not supported by the Vencord team. Client mods violate Discord's Terms of Service, so use it at your own risk.
 - **License:** GPL-3.0-or-later, like Vencord.

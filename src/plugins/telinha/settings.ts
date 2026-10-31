@@ -6,6 +6,7 @@
 
 import { definePluginSettings } from "@api/Settings";
 import { migrateAccessSetting } from "@plugins/telinha/core/access";
+import { onShareDiagnosticsChanged } from "@plugins/telinha/core/diagShare";
 import { isIdentityConfigured } from "@plugins/telinha/core/identity/config";
 import { onAdmissionSettingChanged, onPasswordChanged } from "@plugins/telinha/core/session";
 import { onApprovalPolicyChanged, onAutoQualitySettingChanged } from "@plugins/telinha/core/streaming";
@@ -99,6 +100,15 @@ export const settings = definePluginSettings({
         displayName: "Atualizar automaticamente",
         description: "Recomendado: ao abrir o Discord (e a cada 6 horas), o Telinha procura uma versão nova, baixa em segundo plano e confere o SHA-256 publicado no GitHub. A versão nova só entra quando o Discord reiniciar, nunca no meio de uma transmissão. Desligado: só avisa que há versão nova, com o botão Atualizar.",
         default: true
+    },
+    // protocol.ts, passo 9 (core/diagShare.ts); sem Client ID ninguem e verificado e a opcao nao faria nada
+    shareDiagnostics: {
+        type: OptionType.BOOLEAN,
+        displayName: "Compartilhar diagnóstico para ajudar a depurar",
+        description: "Quem também ligou esta opção e está na mesma call pode pedir o registro do Telinha deste PC; vai só o registro do Telinha (com os nomes de quem está na call), sem IP; enquanto quem pediu mantiver o pedido, o envio recomeça sozinho quando você reabrir o Discord.",
+        default: false,
+        hidden: () => !isIdentityConfigured(),
+        onChange: () => onShareDiagnosticsChanged()
     }
 });
 

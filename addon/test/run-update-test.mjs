@@ -24,7 +24,7 @@ import { join } from "path";
 
 import { zipSync } from "fflate";
 
-import { argValue, HERE, makeChecker, pickPayload, pickVencordDist, REPO, SCRATCH } from "./common.mjs";
+import { argValue, HERE, makeChecker, pickPayload, pickVencordDist, PLUGIN_NATIVES, REPO, SCRATCH } from "./common.mjs";
 
 const require = createRequire(import.meta.url);
 const upd = require("../loader/updater.js");
@@ -479,12 +479,12 @@ let cycleTree;
     const r1 = await boot("i1-a", t, { TELINHA_UPDATE_API: gh.base, FAKE_ADDON_CALLS: "bootOk,check" });
     const a1 = r1.addon ?? {};
     check("start 1: Discord + Vencord + Telinha 0.1.0 loaded", r1.afterLoad?.discordLoaded && a1.vencordLoaded && a1.rendererHooked && a1.version === "0.1.0" && r1.loaderMarker === "0.1.0", { a1, marker: r1.loaderMarker });
-    check("pluginHelpers.TelinhaAddon = the loader's natives (next to the 8 plugin natives)", JSON.stringify([...(r1.preload?.addonHelpers ?? [])].sort()) === '["bootOk","updateCheck","updateDownload","updateLog","updateStatus"]' && r1.preload?.telinhaHelpers?.length === 8, r1.preload);
+    check(`pluginHelpers.TelinhaAddon = the loader's natives (next to the ${PLUGIN_NATIVES.length} plugin natives)`, JSON.stringify([...(r1.preload?.addonHelpers ?? [])].sort()) === '["bootOk","updateCheck","updateDownload","updateLog","updateStatus"]' && r1.preload?.telinhaHelpers?.length === PLUGIN_NATIVES.length, r1.preload);
     check("update check over IPC: 0.1.1 downloaded, verified, staged", r1.addonCalls?.check?.phase === "ready" && verifies(t.staged) === "0.1.1" && verifies(t.addonDir) === "0.1.0", r1.addonCalls);
     const r2 = await boot("i1-b", t, { FAKE_ADDON_CALLS: "bootOk,status" });
     const a2 = r2.addon ?? {};
     check("start 2: the 0.1.0 loader swapped and handed the boot to the 0.1.1 loader", r2.loaderMarker === "0.1.1" && a2.version === "0.1.1" && a2.update?.kind === "swapped" && a2.update.from === "0.1.0", { marker: r2.loaderMarker, update: a2.update, version: a2.version });
-    check("start 2: Discord + Vencord + Telinha 0.1.1 fully loaded (hooks, 8 natives, CSP, no errors)", r2.afterLoad?.discordLoaded && a2.vencordLoaded && a2.rendererHooked && a2.ipcMapHooked && a2.nativeChannels?.length === 8 && r2.csp?.mode === "chained" && !a2.errors?.length, a2.errors);
+    check(`start 2: Discord + Vencord + Telinha 0.1.1 fully loaded (hooks, ${PLUGIN_NATIVES.length} natives, CSP, no errors)`, r2.afterLoad?.discordLoaded && a2.vencordLoaded && a2.rendererHooked && a2.ipcMapHooked && a2.nativeChannels?.length === PLUGIN_NATIVES.length && r2.csp?.mode === "chained" && !a2.errors?.length, a2.errors);
     check("addon\\ = 0.1.1, addon.prev = 0.1.0", verifies(t.addonDir) === "0.1.1" && verifies(t.prev) === "0.1.0" && !existsSync(t.staged));
     check("plugin's boot report confirmed the good start; trial over", r2.addonCalls?.bootOk?.confirmed === true && !t.state().trial && a2.bootConfirmed === true, { bootOk: r2.addonCalls?.bootOk, trial: t.state().trial });
     check("status after the swap: installed 0.1.1", r2.addonCalls?.status?.installed?.version === "0.1.1", r2.addonCalls?.status);
@@ -503,7 +503,7 @@ console.log("\nI2 the new version never reports a good start: rolled back at the
     const r2 = await boot("i2-b", t, { FAKE_ADDON_CALLS: "bootOk" });
     const a2 = r2.addon ?? {};
     check("start 2: the 0.1.1 loader rolled back and handed the boot to 0.1.0", r2.loaderMarker === "0.1.0" && a2.version === "0.1.0" && a2.update?.kind === "rolledBack" && a2.update.from === "0.1.1", { marker: r2.loaderMarker, update: a2.update });
-    check("start 2: Discord + Vencord + Telinha 0.1.0 loaded", r2.afterLoad?.discordLoaded && a2.vencordLoaded && a2.rendererHooked && a2.nativeChannels?.length === 8 && !a2.errors?.length, a2.errors);
+    check("start 2: Discord + Vencord + Telinha 0.1.0 loaded", r2.afterLoad?.discordLoaded && a2.vencordLoaded && a2.rendererHooked && a2.nativeChannels?.length === PLUGIN_NATIVES.length && !a2.errors?.length, a2.errors);
     check("0.1.1 marked bad, addon\\ = 0.1.0, install.json = 0.1.0", !!t.state().bad?.["0.1.1"] && verifies(t.addonDir) === "0.1.0" && goodRecord(t.record(), "0.1.0", "base0100"));
     check("main.log: ROLLED BACK", /update: ROLLED BACK/.test(t.mainLog()));
 }
@@ -524,7 +524,7 @@ console.log("\nI4 the new version's natives throw: its start is not confirmed, r
     const r1 = await boot("i4-a", t, { FAKE_ADDON_CALLS: "bootOk" });
     check("start 1: 0.1.1 runs, Discord fine, boot report refused (natives not loaded)", r1.loaderMarker === "0.1.1" && r1.afterLoad?.discordLoaded && r1.addonCalls?.bootOk?.confirmed === false && t.state().trial?.armed === true, r1.addonCalls);
     const r2 = await boot("i4-b", t, { FAKE_ADDON_CALLS: "bootOk" });
-    check("start 2: back on 0.1.0 with working natives, 0.1.1 marked bad", r2.loaderMarker === "0.1.0" && r2.addon?.nativeChannels?.length === 8 && r2.addonCalls?.bootOk?.confirmed === true && !!t.state().bad?.["0.1.1"], r2.addon?.update);
+    check("start 2: back on 0.1.0 with working natives, 0.1.1 marked bad", r2.loaderMarker === "0.1.0" && r2.addon?.nativeChannels?.length === PLUGIN_NATIVES.length && r2.addonCalls?.bootOk?.confirmed === true && !!t.state().bad?.["0.1.1"], r2.addon?.update);
 }
 
 console.log("\nI5 another Discord is running from the add-on: the swap waits and says why; a stale marker does not block");

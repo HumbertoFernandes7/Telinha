@@ -1,0 +1,2059 @@
+<!doctype html>
+<!--
+    Telinha, transmissão de tela P2P dentro do Discord
+    Copyright (c) 2026 Humberto Fernandes
+    SPDX-License-Identifier: GPL-3.0-or-later
+
+    Telinha - teste da placa de video (tools/teste-placa/README.md). Um arquivo so, sem rede: abre direto do disco
+    (file://) no Chrome ou no Edge, que usam o mesmo Chromium e o mesmo encoder MediaFoundation do Discord.
+
+    Parte 1 (WebCodecs, num Worker): o VideoEncoder sozinho, cada teste num Worker novo. Se flush()/close() nao
+    responder, o Worker fica como esta (nunca esperamos nem derrubamos um encoder preso) e a rodada para.
+    Parte 2 (WebRTC): um par de RTCPeerConnection em loopback, conexoes novas por teste, codec nunca trocado no ar.
+    Um envio que nao gera imagem fica aberto e intocado (sem close/setParameters/removeTrack/replaceTrack/getStats):
+    desmontar um encoder de hardware preso trava a thread de WebRTC do processo inteiro. A rodada para ali.
+
+    O teste "igual ao Telinha hoje" repete o plugin (src/plugins/telinha/core): codec.ts (setCodecPreferences com o
+    perfil H.264 42001f na frente), sdp.ts (o mesmo perfil na frente do SDP remoto + x-google-start/max-bitrate),
+    streaming.ts e quality/levels.ts (contentHint "motion", maxBitrate, maxFramerate, scaleResolutionDownBy par,
+    priority/networkPriority "high", degradationPreference "maintain-framerate"). Mantenha em sincronia.
+-->
+<html lang="pt-BR">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Teste da placa de vídeo — Telinha</title>
+    <style>
+        :root {
+            color-scheme: light dark;
+            --bg: #f4f5f7;
+            --fg: #1e1f22;
+            --muted: #5f636d;
+            --card: #fff;
+            --line: #dfe1e6;
+            --ok: #16794a;
+            --ok-bg: #e3f5eb;
+            --bad: #c42733;
+            --bad-bg: #fde7e9;
+            --warn: #8a5a00;
+            --warn-bg: #fff3d6;
+            --run: #3c46c8;
+            --run-bg: #e8eafd;
+            --accent: #5865f2;
+            --accent-fg: #fff;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #1b1c1f;
+                --fg: #e3e5e8;
+                --muted: #9ca1ab;
+                --card: #26282c;
+                --line: #3a3d43;
+                --ok: #4fd18b;
+                --ok-bg: #1d3a2b;
+                --bad: #ff7a83;
+                --bad-bg: #4a2227;
+                --warn: #f3c25a;
+                --warn-bg: #43361b;
+                --run: #a7adff;
+                --run-bg: #2c2f57;
+                --accent: #6f7bff;
+                --accent-fg: #fff;
+            }
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            padding: 24px 16px 48px;
+            background: var(--bg);
+            color: var(--fg);
+            font: 16px/1.5 system-ui, "Segoe UI", sans-serif;
+        }
+
+        main {
+            max-width: 760px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            font-size: 26px;
+            line-height: 1.2;
+            margin: 0 0 6px;
+        }
+
+        h2 {
+            font-size: 19px;
+            margin: 0 0 10px;
+        }
+
+        h3 {
+            font-size: 16px;
+            margin: 16px 0 6px;
+        }
+
+        h4 {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--muted);
+            margin: 14px 0 2px;
+        }
+
+        p {
+            margin: 0 0 10px;
+        }
+
+        .lead {
+            color: var(--muted);
+            margin-bottom: 18px;
+        }
+
+        section {
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            padding: 18px;
+            margin-bottom: 16px;
+        }
+
+        ol.steps {
+            margin: 0 0 16px;
+            padding-left: 22px;
+        }
+
+        ol.steps li {
+            margin-bottom: 4px;
+        }
+
+        button {
+            font: inherit;
+            cursor: pointer;
+            border-radius: 10px;
+            border: 1px solid var(--line);
+            background: var(--card);
+            color: var(--fg);
+            padding: 10px 16px;
+        }
+
+        button:disabled {
+            opacity: .5;
+            cursor: default;
+        }
+
+        button.big {
+            display: block;
+            width: 100%;
+            padding: 16px;
+            font-size: 20px;
+            font-weight: 600;
+            background: var(--accent);
+            border-color: var(--accent);
+            color: var(--accent-fg);
+        }
+
+        button.second {
+            display: block;
+            width: 100%;
+            margin-top: 10px;
+        }
+
+        button.link {
+            border: 0;
+            background: none;
+            padding: 4px 0;
+            color: var(--muted);
+            text-decoration: underline;
+            font-size: 14px;
+        }
+
+        .row-links {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px 18px;
+            margin-top: 6px;
+        }
+
+        .hint {
+            color: var(--muted);
+            font-size: 14px;
+            margin-top: 10px;
+        }
+
+        .notice {
+            border-radius: 10px;
+            padding: 12px 14px;
+            margin: 0 0 14px;
+            background: var(--run-bg);
+            color: var(--fg);
+        }
+
+        .notice.ok {
+            background: var(--ok-bg);
+        }
+
+        .notice.bad {
+            background: var(--bad-bg);
+        }
+
+        .notice.warn {
+            background: var(--warn-bg);
+        }
+
+        .notice strong {
+            display: block;
+            margin-bottom: 2px;
+        }
+
+        .notice p:last-child {
+            margin-bottom: 0;
+        }
+
+        label.field {
+            display: block;
+            font-size: 14px;
+            color: var(--muted);
+            margin-top: 14px;
+        }
+
+        input[type="text"] {
+            display: block;
+            width: 100%;
+            margin-top: 4px;
+            padding: 8px 10px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--bg);
+            color: var(--fg);
+            font: inherit;
+        }
+
+        .status {
+            font-weight: 600;
+            margin-bottom: 8px;
+            overflow-wrap: anywhere;
+        }
+
+        .status small {
+            display: block;
+            font-weight: 400;
+            color: var(--muted);
+        }
+
+        progress {
+            width: 100%;
+            height: 10px;
+            margin-bottom: 14px;
+            accent-color: var(--accent);
+        }
+
+        .previews {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+            gap: 12px;
+        }
+
+        figure {
+            margin: 0;
+        }
+
+        canvas,
+        video {
+            display: block;
+            width: 100%;
+            aspect-ratio: 16 / 9;
+            height: auto;
+            background: #000;
+            border-radius: 8px;
+        }
+
+        figcaption {
+            font-size: 13px;
+            color: var(--muted);
+            margin-top: 4px;
+        }
+
+        .results-run+.results-run {
+            margin-top: 18px;
+        }
+
+        ol.tests {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+        }
+
+        ol.tests li {
+            display: grid;
+            grid-template-columns: 30px minmax(0, 1fr) auto;
+            gap: 4px 10px;
+            align-items: start;
+            padding: 10px 0;
+            border-top: 1px solid var(--line);
+        }
+
+        .num {
+            font-weight: 700;
+            color: var(--muted);
+            font-variant-numeric: tabular-nums;
+        }
+
+        .what {
+            overflow-wrap: anywhere;
+        }
+
+        .what small {
+            display: block;
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        .badge {
+            font-size: 14px;
+            font-weight: 600;
+            border-radius: 999px;
+            padding: 2px 10px;
+            white-space: nowrap;
+            background: var(--line);
+            color: var(--muted);
+        }
+
+        .badge.ok {
+            background: var(--ok-bg);
+            color: var(--ok);
+        }
+
+        .badge.bad {
+            background: var(--bad-bg);
+            color: var(--bad);
+        }
+
+        .badge.warn {
+            background: var(--warn-bg);
+            color: var(--warn);
+        }
+
+        .badge.run {
+            background: var(--run-bg);
+            color: var(--run);
+        }
+
+        .detail {
+            grid-column: 2 / 4;
+            font-size: 13px;
+            color: var(--muted);
+            overflow-wrap: anywhere;
+        }
+
+        textarea {
+            width: 100%;
+            min-height: 140px;
+            margin-top: 12px;
+            padding: 10px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--bg);
+            color: var(--fg);
+            font: 12px/1.4 ui-monospace, Consolas, monospace;
+            resize: vertical;
+        }
+
+        details {
+            color: var(--muted);
+            font-size: 15px;
+        }
+
+        details summary {
+            cursor: pointer;
+            color: var(--fg);
+        }
+
+        @media (max-width: 560px) {
+            h1 {
+                font-size: 22px;
+            }
+
+            section {
+                padding: 14px;
+            }
+
+            .previews {
+                grid-template-columns: minmax(0, 1fr);
+            }
+
+            ol.tests li {
+                grid-template-columns: 26px minmax(0, 1fr);
+            }
+
+            .badge {
+                grid-column: 2;
+                justify-self: start;
+                white-space: normal;
+            }
+
+            .detail {
+                grid-column: 2;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <main>
+        <h1>Teste da placa de vídeo</h1>
+        <p class="lead">Esta página testa se a sua placa de vídeo consegue gerar o vídeo que o Telinha transmite. São 2 passos de 1 a 2 minutos cada, e nada é enviado pela internet.</p>
+
+        <section id="intro">
+            <ol class="steps">
+                <li>Abra esta página no <b>Chrome</b> ou no <b>Edge</b>. Não transmita nada no Discord enquanto o teste roda.</li>
+                <li><b>Passo 1:</b> clique no botão azul e deixe esta página na frente até terminar.</li>
+                <li><b>Passo 2:</b> clique em “Passo 2”. O navegador pergunta o que compartilhar: escolha <b>Tela inteira</b> e deixe esta página aparecendo.</li>
+                <li>No fim, coloque a versão do driver (se achar) e clique em <b>Copiar resultado</b>. Cole na conversa do Discord com quem te mandou esta página.</li>
+            </ol>
+            <div class="notice warn">
+                <strong>Se o navegador travar</strong>
+                <p>Se aparecer “Página sem resposta”, clique em <b>Sair das páginas</b>. Se o navegador inteiro travar, feche ele; se não fechar, aperte <b>Ctrl+Shift+Esc</b> (Gerenciador de Tarefas), clique no Chrome ou no Edge e em <b>Finalizar tarefa</b>. Depois abra esta página de novo: o que já foi testado fica guardado.</p>
+            </div>
+            <div id="notice" class="notice" hidden></div>
+            <button id="btnAnim" class="big" type="button">Passo 1: testar minha placa de vídeo</button>
+            <div class="row-links"><button id="btnAnimRestart" class="link" type="button" hidden>Começar o passo 1 do zero</button></div>
+            <button id="btnTela" class="second" type="button">Passo 2: testar com a minha tela (escolha Tela inteira)</button>
+            <div class="row-links"><button id="btnTelaRestart" class="link" type="button" hidden>Começar o passo 2 do zero</button></div>
+            <p class="hint" id="telaHint">O passo 2 repete a transmissão de teste com a sua tela de verdade e mostra se o vídeo saiu da placa de vídeo ou do processador (só dá para ver isso com a tela compartilhada).</p>
+        </section>
+
+        <section id="live" hidden>
+            <div class="status" id="status">Preparando…</div>
+            <progress id="prog" max="1" value="0"></progress>
+            <div class="previews">
+                <figure>
+                    <canvas id="src" width="1920" height="1080"></canvas>
+                    <figcaption>O que está sendo enviado</figcaption>
+                </figure>
+                <figure>
+                    <video id="dst" muted autoplay playsinline></video>
+                    <figcaption>O que chegou do outro lado (só na parte 2)</figcaption>
+                </figure>
+            </div>
+        </section>
+
+        <section id="results" hidden>
+            <h2>Resultados</h2>
+            <div id="final" class="notice" hidden></div>
+            <div id="runs"></div>
+            <h3>Último passo</h3>
+            <label class="field" for="driver">Versão do driver da placa de vídeo (se conseguir achar). AMD: abra o <b>AMD Software</b> → engrenagem (Configurações) → <b>Sistema</b> → Versão do driver. NVIDIA: abra o <b>NVIDIA App</b> → <b>Drivers</b>. Ou digite <b>edge://gpu</b> (ou <b>chrome://gpu</b>) na barra de endereço e procure “Driver version”.
+                <input id="driver" type="text" autocomplete="off" spellcheck="false" maxlength="120">
+            </label>
+            <button id="btnCopy" class="big" type="button" style="margin-top:16px">Copiar resultado</button>
+            <p class="hint" id="copyMsg">Se o Discord transformar o texto em arquivo (message.txt), tudo bem: mande assim mesmo.</p>
+            <textarea id="out" readonly spellcheck="false" aria-label="Resultado em texto"></textarea>
+        </section>
+
+        <details>
+            <summary>O que esta página faz?</summary>
+            <p>Parte 1: pede para a placa de vídeo gerar alguns segundos de vídeo, de vários tipos, e confere se saiu alguma coisa.</p>
+            <p>Parte 2: cria uma transmissão de mentirinha dentro da própria página (uma animação no passo 1, a sua tela no passo 2, enviada de uma conexão para outra no mesmo computador; nada sai para a internet) e confere se a imagem chegou do outro lado.</p>
+            <p>Se um teste travar ou não gerar imagem, a página para ali de propósito, para não travar o navegador. O que já foi testado fica guardado neste navegador.</p>
+        </details>
+        <noscript><p>Esta página precisa de JavaScript ligado.</p></noscript>
+    </main>
+
+    <!-- Worker da parte 1 (vira um Blob: abre por file:// sem servidor) -->
+    <script type="text/plain" id="wcWorker">
+        "use strict";
+        function drawFrame(ctx, w, h, i) {
+            ctx.fillStyle = `hsl(${(i * 6) % 360} 45% 18%)`;
+            ctx.fillRect(0, 0, w, h);
+            for (let b = 0; b < 10; b++) {
+                ctx.fillStyle = `hsl(${(i * 6 + b * 36) % 360} 70% ${b % 2 ? 42 : 62}%)`;
+                ctx.fillRect(((i * 14 + b * (w / 10)) % (w + 60)) - 60, 0, w / 24, h);
+            }
+            ctx.fillStyle = "#ffd23f";
+            ctx.beginPath();
+            ctx.arc(w / 2 + Math.sin(i / 9) * w * 0.38, h / 2 + Math.sin(i / 6) * h * 0.3, h / 10, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = "#fff";
+            ctx.font = `bold ${Math.round(h / 12)}px sans-serif`;
+            ctx.fillText(`Telinha WebCodecs quadro ${i}`, w / 20, h / 8);
+        }
+
+        self.onmessage = async ({ data }) => {
+            if (!data || data.cmd !== "run") return;
+            const { config, frames } = data;
+            const post = (ev, extra) => self.postMessage({ ev, ...extra });
+            const describe = e => `${e && e.name ? e.name + ": " : ""}${e && e.message ? e.message : String(e)}`;
+            const r = { supported: null, sent: 0, chunks: 0, keyframes: 0, bytes: 0, firstChunkMs: null, error: null, queueMax: 0 };
+            let t0 = 0;
+            try {
+                post("phase", { phase: "isConfigSupported" });
+                try {
+                    const sup = await VideoEncoder.isConfigSupported(config);
+                    r.supported = !!sup.supported;
+                } catch (e) {
+                    r.supported = false;
+                    r.error = describe(e);
+                }
+                if (!r.supported) {
+                    post("done", { result: r });
+                    return;
+                }
+                post("phase", { phase: "configure" });
+                const enc = new VideoEncoder({
+                    output: chunk => {
+                        r.chunks++;
+                        r.bytes += chunk.byteLength;
+                        if (chunk.type === "key") r.keyframes++;
+                        if (r.firstChunkMs === null) r.firstChunkMs = Math.round(performance.now() - t0);
+                    },
+                    error: e => { r.error = r.error || describe(e); }
+                });
+                enc.configure(config);
+                const canvas = new OffscreenCanvas(config.width, config.height);
+                const ctx = canvas.getContext("2d", { alpha: false });
+                post("phase", { phase: "encode" });
+                t0 = performance.now();
+                for (let i = 0; i < frames && enc.state === "configured"; i++) {
+                    const wait = t0 + (i * 1000) / config.framerate - performance.now();
+                    if (wait > 1) await new Promise(res => setTimeout(res, wait));
+                    if (enc.state !== "configured") break;
+                    drawFrame(ctx, config.width, config.height, i);
+                    const frame = new VideoFrame(canvas, { timestamp: Math.round((i * 1e6) / config.framerate), duration: Math.round(1e6 / config.framerate) });
+                    try {
+                        enc.encode(frame, { keyFrame: i === 0 });
+                    } finally {
+                        frame.close();
+                    }
+                    r.sent = i + 1;
+                    r.queueMax = Math.max(r.queueMax, enc.encodeQueueSize);
+                    if (i % 10 === 9) post("progress", { sent: r.sent, chunks: r.chunks });
+                }
+                post("phase", { phase: "flush" });
+                if (enc.state === "configured") {
+                    try {
+                        await enc.flush();
+                    } catch (e) {
+                        r.error = r.error || describe(e);
+                    }
+                }
+                r.encodeMs = Math.round(performance.now() - t0);
+                post("phase", { phase: "close" });
+                if (enc.state !== "closed") enc.close();
+                post("done", { result: r });
+            } catch (e) {
+                r.error = r.error || describe(e);
+                post("done", { result: r });
+            }
+        };
+    </script>
+
+    <script>
+        "use strict";
+        (() => {
+            const VERSION = "teste-placa v3";
+            /** progresso: IndexedDB (cada transacao confirmada, sobrevive a matar o navegador) + localStorage de reserva */
+            const STORE_KEY = "telinha-teste-placa-v1";
+            const IDB_NAME = "telinha-teste-placa";
+            const IDB_STORE = "state";
+            /** parte 2 com a aba escondida: espera ela voltar no maximo isto durante um teste (antes de um teste, sem limite) */
+            const VISIBLE_WAIT_MS = 60000;
+            /** parte 2: a aba sumiu durante a medicao: refaz a medicao no maximo tantas vezes */
+            const MAX_RESAMPLES = 3;
+            /** getStats, createOffer/Answer, set*Description, setParameters, replaceTrack: sem resposta nisto = TRAVOU */
+            const STEP_TIMEOUT_MS = 4000;
+            /** parte 1: o Worker sem dar sinal nisto (em qualquer fase) = TRAVOU */
+            const WC_TIMEOUT_MS = 5000;
+            /** parte 1: quadros por teste */
+            const WC_FRAMES = 60;
+            /** conexao local (ICE + DTLS) sem abrir nisto = SEM CONEXAO (nao e a placa de video) */
+            const CONNECT_TIMEOUT_MS = 10000;
+            /** parte 2: leituras do getStats por teste, uma por segundo */
+            const SAMPLE_SECONDS = 6;
+            const SRC_W = 1920;
+            const SRC_H = 1080;
+
+            /**
+             * Degraus do Telinha (streaming.ts → QUALITY, quality/levels.ts → LEVELS e sendPlanFor): maxKbps vai no
+             * encodings[0].maxBitrate; startKbps e xMaxKbps no x-google-start-bitrate/x-google-max-bitrate do SDP remoto.
+             * 720p30 e o degrau da qualidade automatica abaixo de 1080p60: o x-google-max fica no teto (20000) e o
+             * start = min(10000, 6000 * 0,5).
+             */
+            const LEVEL = {
+                "1080p60": { width: 1920, height: 1080, fps: 60, maxKbps: 20000, startKbps: 10000, xMaxKbps: 20000 },
+                "1080p30": { width: 1920, height: 1080, fps: 30, maxKbps: 12000, startKbps: 6000, xMaxKbps: 12000 },
+                "720p30": { width: 1280, height: 720, fps: 30, maxKbps: 6000, startKbps: 3000, xMaxKbps: 20000 }
+            };
+
+            /**
+             * Do mais seguro ao mais arriscado. Parte 1 (wc): o WebCodecs confere o NIVEL H.264 contra o tamanho (42001f,
+             * nivel 3.1, e recusado em 1080p), entao 1080p usa 42002a: o mesmo perfil Baseline do Telinha, nivel 4.2. Na
+             * parte 2 (rtc) o Chromium nao passa o nivel do SDP para a placa, so o perfil. Os niveis 5.2 da parte 2 ficam
+             * por ultimo (variantes de nivel, pouco provaveis). No passo 1 (animacao) a parte 2 so tem os testes com
+             * `anim`: com o canvas o Chromium esconde o encoderImplementation; a lista inteira roda no passo 2 (tela).
+             */
+            const TESTS = [
+                { kind: "wc", id: "wc-vp9-720p30", codec: "vp09.00.10.08", level: "720p30", accel: "no-preference", sub: "controle: VP9, feito pelo processador" },
+                { kind: "wc", id: "wc-42001f-720p30-hw", codec: "avc1.42001f", level: "720p30", accel: "prefer-hardware", sub: "o tipo do Telinha" },
+                { kind: "wc", id: "wc-42002a-1080p30-hw", codec: "avc1.42002a", level: "1080p30", accel: "prefer-hardware" },
+                { kind: "wc", id: "wc-42002a-1080p60-hw", codec: "avc1.42002a", level: "1080p60", accel: "prefer-hardware", sub: "o tipo do Telinha em 1080p 60" },
+                { kind: "wc", id: "wc-42e02a-1080p60-hw", codec: "avc1.42e02a", level: "1080p60", accel: "prefer-hardware" },
+                { kind: "wc", id: "wc-4d0028-1080p60-hw", codec: "avc1.4d0028", level: "1080p60", accel: "prefer-hardware" },
+                { kind: "wc", id: "wc-640028-1080p60-hw", codec: "avc1.640028", level: "1080p60", accel: "prefer-hardware" },
+                { kind: "wc", id: "wc-640034-1080p60-hw", codec: "avc1.640034", level: "1080p60", accel: "prefer-hardware" },
+                { kind: "wc", id: "wc-42002a-1080p60-auto", codec: "avc1.42002a", level: "1080p60", accel: "no-preference", sub: "sem exigir a placa" },
+                { kind: "rtc", id: "rtc-vp9-1080p60", codec: "VP9", level: "1080p60", anim: true, sub: "controle: o tipo de vídeo que já funciona" },
+                { kind: "rtc", id: "rtc-42001f-720p30", codec: "H264", plid: "42001f", level: "720p30" },
+                { kind: "rtc", id: "rtc-42001f-1080p30", codec: "H264", plid: "42001f", level: "1080p30" },
+                { kind: "rtc", id: "rtc-42001f-1080p60", codec: "H264", plid: "42001f", level: "1080p60", telinha: true, anim: true, sub: "igual ao Telinha hoje" },
+                { kind: "rtc", id: "rtc-42e01f-720p30", codec: "H264", plid: "42e01f", level: "720p30" },
+                { kind: "rtc", id: "rtc-4d0034-1080p60", codec: "H264", plid: "4d0034", level: "1080p60" },
+                { kind: "rtc", id: "rtc-640034-1080p60", codec: "H264", plid: "640034", level: "1080p60" },
+                { kind: "rtc", id: "rtc-420034-1080p60", codec: "H264", plid: "420034", level: "1080p60", sub: "o tipo do Telinha com nível 5.2" },
+                { kind: "rtc", id: "rtc-42e034-1080p60", codec: "H264", plid: "42e034", level: "1080p60" }
+            ];
+
+            const VERDICT = {
+                OK: { code: "FUNCIONA", ui: "Funciona", tone: "ok" },
+                SEM_IMAGEM: { code: "NÃO GERA IMAGEM", ui: "Não gera imagem", tone: "bad" },
+                NAO_CHEGA: { code: "CODIFICA MAS NÃO CHEGA", ui: "A imagem sai, mas não chega", tone: "bad" },
+                PAROU: { code: "COMEÇOU E PAROU", ui: "Começou e parou", tone: "bad" },
+                SEM_CAPTURA: { code: "SEM QUADROS DA CAPTURA", ui: "Sem imagem para testar", tone: "warn" },
+                TRAVOU: { code: "TRAVOU", ui: "Travou", tone: "bad" },
+                SEM_CONEXAO: { code: "SEM CONEXÃO", ui: "A conexão de teste não abriu", tone: "warn" },
+                NAO_SUPORTA: { code: "NÃO SUPORTADO", ui: "Não disponível", tone: "" },
+                PULADO: { code: "PULADO", ui: "Pulado", tone: "" },
+                ERRO: { code: "ERRO", ui: "Deu erro", tone: "warn" },
+                REPETIR: { code: "REPETIR", ui: "Repetir (a aba ficou escondida)", tone: "warn" }
+            };
+
+            const SOURCES = { anim: "Passo 1: com a animação", tela: "Passo 2: com a sua tela" };
+            const PART = { wc: "Parte 1: a placa de vídeo gerando vídeo sozinha", rtc: "Parte 2: uma transmissão de teste, como no Discord" };
+            const H264_PROFILE = { "42e0": "Constrained Baseline", 4200: "Baseline", "4d00": "Main", 6400: "High" };
+
+            const $ = id => document.getElementById(id);
+            const sleep = ms => new Promise(r => setTimeout(r, ms));
+            const errText = e => (e && e.message) ? `${e.name && e.name !== "Error" ? e.name + ": " : ""}${e.message}` : String(e);
+
+            /** Testes de cada passo: 1 = parte 1 + controle e "=Telinha" da parte 2; 2 (tela) = a parte 2 inteira. */
+            const testsFor = source => TESTS.map((t, i) => i).filter(i => source === "anim" ? (TESTS[i].kind === "wc" || TESTS[i].anim) : TESTS[i].kind === "rtc");
+
+            // ------------------------------------------------------------------ tempo-limite
+
+            class Timeout extends Error {
+                constructor(what, ms) {
+                    super(`${what} não respondeu em ${Math.round(ms / 1000)} s`);
+                    this.name = "Timeout";
+                }
+            }
+
+            /** Espera `promise` no maximo `ms`; estourou = Timeout (o teste marca TRAVOU e a rodada para). */
+            function T(promise, what, ms = STEP_TIMEOUT_MS) {
+                let timer;
+                const limit = new Promise((_, reject) => { timer = setTimeout(() => reject(new Timeout(what, ms)), ms); });
+                return Promise.race([Promise.resolve(promise), limit]).finally(() => clearTimeout(timer));
+            }
+
+            /** Igual, mas estourar ou falhar = null (para as informacoes do PC, que nao sao teste). */
+            async function soft(promiseFn, ms) {
+                try {
+                    return await T(promiseFn(), "info", ms);
+                } catch {
+                    return null;
+                }
+            }
+
+            // ------------------------------------------------------------------ estado guardado
+
+            let state = { v: 1, runs: {} };
+            /**
+             * Algo nesta pagina ficou preso de proposito (Worker com encoder parado, RTCPeerConnection que nao gera
+             * imagem): nenhum teste novo ate reabrir o navegador, e nada encosta neles.
+             */
+            const leftAlone = [];
+
+            /**
+             * O localStorage do Chromium grava no disco em lote (o 1o depois de ~5 s, depois com limite de ritmo): matar o
+             * navegador pelo Gerenciador de Tarefas perde o que estava pendente. Por isso o estado vai para o IndexedDB,
+             * uma transacao "strict" por gravacao, esperada antes de cada fase arriscada; o localStorage fica de reserva.
+             */
+            const storage = { db: null, idb: false, ls: false };
+
+            function parseState(text) {
+                try {
+                    const s = JSON.parse(text || "null");
+                    if (s && s.v === 1 && s.runs && typeof s.runs === "object") return s;
+                } catch { }
+                return null;
+            }
+
+            function openIdb() {
+                return new Promise(resolve => {
+                    try {
+                        const req = indexedDB.open(IDB_NAME, 1);
+                        req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+                        req.onsuccess = () => resolve(req.result);
+                        req.onerror = () => resolve(null);
+                        req.onblocked = () => resolve(null);
+                    } catch {
+                        resolve(null);
+                    }
+                });
+            }
+
+            function idbGet(db) {
+                return new Promise(resolve => {
+                    try {
+                        const req = db.transaction(IDB_STORE, "readonly").objectStore(IDB_STORE).get(STORE_KEY);
+                        req.onsuccess = () => resolve(req.result ?? null);
+                        req.onerror = () => resolve(null);
+                    } catch {
+                        resolve(null);
+                    }
+                });
+            }
+
+            /** true quando a transacao foi confirmada (oncomplete). */
+            function idbPut(db, text) {
+                return new Promise(resolve => {
+                    try {
+                        const tx = db.transaction(IDB_STORE, "readwrite", { durability: "strict" });
+                        tx.objectStore(IDB_STORE).put(text, STORE_KEY);
+                        tx.oncomplete = () => resolve(true);
+                        tx.onerror = () => resolve(false);
+                        tx.onabort = () => resolve(false);
+                        tx.commit?.();
+                    } catch {
+                        resolve(false);
+                    }
+                });
+            }
+
+            /** Le o estado guardado: o mais novo entre IndexedDB e localStorage. */
+            async function loadState() {
+                storage.db = await soft(openIdb, 3000);
+                storage.idb = !!storage.db;
+                try {
+                    localStorage.setItem(STORE_KEY + "-t", "1");
+                    localStorage.removeItem(STORE_KEY + "-t");
+                    storage.ls = true;
+                } catch { }
+                const fromIdb = storage.db ? parseState(await soft(() => idbGet(storage.db), 2000)) : null;
+                let fromLs = null;
+                try {
+                    fromLs = parseState(localStorage.getItem(STORE_KEY));
+                } catch { }
+                const pick = [fromIdb, fromLs].filter(Boolean).sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0))[0];
+                if (pick) state = pick;
+            }
+
+            /** Grava nos dois; a promessa termina quando o IndexedDB confirmou (ou desistiu em 2 s). */
+            function save() {
+                state.savedAt = Date.now();
+                const text = JSON.stringify(state);
+                try {
+                    localStorage.setItem(STORE_KEY, text);
+                } catch { }
+                return storage.db ? soft(() => idbPut(storage.db, text), 2000) : Promise.resolve(false);
+            }
+
+            /** Rodada que estava no meio de um teste quando a pagina morreu/travou: esse teste vira TRAVOU. */
+            function recoverInterrupted() {
+                const found = [];
+                for (const [source, run] of Object.entries(state.runs)) {
+                    if (!run || !run.running) continue;
+                    const { index, phase } = run.running;
+                    const test = TESTS[index];
+                    if (test && !run.results.some(r => r.id === test.id && r.verdict !== "REPETIR")) {
+                        run.results = run.results.filter(r => r.id !== test.id).concat({
+                            n: index + 1, id: test.id, verdict: "TRAVOU", pageDied: true,
+                            note: `a página parou durante "${phase}" (fechada ou travada)`
+                        });
+                        run.halted = { n: index + 1, why: "a página parou no meio do teste" };
+                        run.done = false;
+                        found.push({ source, n: index + 1, phase });
+                    }
+                    run.running = null;
+                }
+                if (found.length) save();
+                return found;
+            }
+
+            // ------------------------------------------------------------------ fonte: animacao 1920x1080
+
+            const canvas = $("src");
+            const ctx = canvas.getContext("2d", { alpha: false });
+            let drawTimer = null;
+            let frameNo = 0;
+            let drawLabel = "";
+
+            function draw() {
+                const t = performance.now() / 1000;
+                frameNo++;
+                const hue = (t * 25) % 360;
+                ctx.fillStyle = `hsl(${hue} 45% 16%)`;
+                ctx.fillRect(0, 0, SRC_W, SRC_H);
+                for (let i = 0; i < 12; i++) {
+                    const x = ((t * 420 + i * 180) % (SRC_W + 180)) - 180;
+                    ctx.fillStyle = `hsl(${(hue + i * 30) % 360} 70% ${i % 2 ? 42 : 62}%)`;
+                    ctx.fillRect(x, 0, 90, SRC_H);
+                }
+                const sq = 60;
+                const off = (t * 240) % (sq * 2);
+                ctx.fillStyle = "#f4f4f4";
+                for (let y = 0; y < 4; y++) {
+                    for (let x = -2; x < SRC_W / sq + 2; x++) {
+                        if ((x + y) % 2) ctx.fillRect(x * sq + off, SRC_H - 240 + y * sq, sq, sq);
+                    }
+                }
+                let seed = (frameNo * 7919) % 233280;
+                for (let i = 0; i < 60; i++) {
+                    seed = (seed * 9301 + 49297) % 233280;
+                    const a = seed / 233280;
+                    seed = (seed * 9301 + 49297) % 233280;
+                    const b = seed / 233280;
+                    ctx.fillStyle = `hsl(${Math.floor(a * 360)} 80% 55%)`;
+                    ctx.fillRect(a * (SRC_W - 40), b * (SRC_H - 300), 40, 40);
+                }
+                const bx = SRC_W / 2 + Math.sin(t * 1.3) * 760;
+                const by = SRC_H / 2 + Math.sin(t * 2.1) * 300;
+                ctx.beginPath();
+                ctx.arc(bx, by, 110, 0, Math.PI * 2);
+                ctx.fillStyle = "#ffd23f";
+                ctx.fill();
+                ctx.fillStyle = "rgba(0,0,0,.6)";
+                ctx.fillRect(60, 60, 1320, 300);
+                ctx.fillStyle = "#fff";
+                ctx.font = "bold 84px system-ui, sans-serif";
+                ctx.fillText("Telinha · teste da placa", 100, 160);
+                ctx.font = "56px ui-monospace, Consolas, monospace";
+                ctx.fillText(drawLabel, 100, 240);
+                ctx.fillText(`quadro ${frameNo}   ${t.toFixed(2)} s`, 100, 315);
+            }
+
+            function startDrawing() {
+                if (drawTimer) return;
+                draw();
+                // setInterval e nao requestAnimationFrame: continua (devagar) com a janela coberta
+                drawTimer = setInterval(draw, 1000 / 60);
+            }
+
+            function stopDrawing() {
+                clearInterval(drawTimer);
+                drawTimer = null;
+            }
+
+            // ------------------------------------------------------------------ escala par (quality/levels.ts → evenScale)
+
+            function scaledSide(side, scale) {
+                return scale > 1 ? Math.floor(side / scale + 0.5) : side;
+            }
+
+            function roundTo(value, decimals) {
+                const f = 10 ** decimals;
+                return Math.round(value * f) / f;
+            }
+
+            function evenAt(width, height, scale) {
+                return scaledSide(width, scale) % 2 === 0 && scaledSide(height, scale) % 2 === 0;
+            }
+
+            function shortestIn(lo, hi) {
+                const mid = (lo + hi) / 2;
+                for (let d = 3; d <= 6; d++) {
+                    const s = roundTo(mid, d);
+                    if (s > lo && s <= hi) return s;
+                }
+                return mid;
+            }
+
+            /** scaleResolutionDownBy que leva a captura a targetHeight com largura e altura PARES (H.264 na placa so aceita par). */
+            function evenScale(width, height, targetHeight) {
+                const plain = roundTo(height / targetHeight, 3);
+                if (plain <= 1 || evenAt(width, height, plain)) return plain;
+                let h = targetHeight - (targetHeight % 2);
+                for (let step = 0; step < 8 && h > 0; step++, h -= 2) {
+                    const hLo = height / (h + 0.5);
+                    const hHi = height / (h - 0.5);
+                    const near = 2 * Math.round((width * h) / height / 2);
+                    for (const w of [near, near - 2, near + 2]) {
+                        if (w <= 0) continue;
+                        const lo = Math.max(hLo, width / (w + 0.5));
+                        const hi = Math.min(hHi, width / (w - 0.5));
+                        if (hi <= lo) continue;
+                        const s = shortestIn(lo, hi);
+                        if (s > 1 && scaledSide(width, s) === w && scaledSide(height, s) === h) return s;
+                    }
+                }
+                return plain;
+            }
+
+            // ------------------------------------------------------------------ codecs e SDP (codec.ts, sdp.ts)
+
+            const plidOf = fmtp => (/profile-level-id=([0-9a-f]{6})/i.exec(fmtp || "") || [])[1]?.toLowerCase() ?? null;
+            const isPm1 = fmtp => /packetization-mode=1(?!\d)/.test(fmtp || "");
+            const NON_MEDIA = /^(rtx|red|ulpfec|flexfec-03|flexfec)$/i;
+
+            function senderCodecs() {
+                try {
+                    return RTCRtpSender.getCapabilities("video")?.codecs ?? [];
+                } catch {
+                    return [];
+                }
+            }
+
+            function receiverCodecs() {
+                try {
+                    return RTCRtpReceiver.getCapabilities("video")?.codecs ?? [];
+                } catch {
+                    return [];
+                }
+            }
+
+            /** Variante H.264 packetization-mode=1 do mesmo perfil (4 primeiros digitos) que o navegador sabe enviar. */
+            function offersProfile(plid) {
+                return senderCodecs().some(c => /^video\/h264$/i.test(c.mimeType) && isPm1(c.sdpFmtpLine) && plidOf(c.sdpFmtpLine)?.slice(0, 4) === plid.slice(0, 4));
+            }
+
+            /** 0 = a variante pedida; 1 = mesmo perfil, outro nivel; 2+ = o resto (codec.ts → sortCodecs, sdp.ts → h264Rank). */
+            function rankFor(test, fmtp) {
+                if (test.codec === "VP9") return /profile-id=[1-3]/.test(fmtp || "") ? 2 : 0;
+                if (!isPm1(fmtp)) return 3;
+                const p = plidOf(fmtp);
+                if (p === test.plid) return 0;
+                return p && p.slice(0, 4) === test.plid.slice(0, 4) ? 1 : 2;
+            }
+
+            /** setCodecPreferences: as variantes do codec do teste na frente, o resto como alternativa (codec.ts → applyCodecPreferences). */
+            function applyCodecPreferences(transceiver, test) {
+                const wanted = `video/${test.codec}`.toLowerCase();
+                let lastError = "";
+                for (const [name, caps] of [["sender", senderCodecs()], ["receiver", receiverCodecs()]]) {
+                    if (!caps.length) continue;
+                    const mine = caps.filter(c => c.mimeType.toLowerCase() === wanted).sort((a, b) => rankFor(test, a.sdpFmtpLine) - rankFor(test, b.sdpFmtpLine));
+                    if (!mine.length || rankFor(test, mine[0].sdpFmtpLine) > 1) {
+                        lastError = `${test.codec} ausente em ${name}.getCapabilities`;
+                        continue;
+                    }
+                    try {
+                        transceiver.setCodecPreferences([...mine, ...caps.filter(c => c.mimeType.toLowerCase() !== wanted)]);
+                        return name;
+                    } catch (e) {
+                        lastError = errText(e);
+                    }
+                }
+                throw new Error(`setCodecPreferences recusado (${lastError || "sem capacidades"})`);
+            }
+
+            /**
+             * Ajusta um SDP para o teste, nas m-sections de video: o payload do teste vai para o inicio da linha m=; no
+             * H.264 o profile-level-id dele vira exatamente o pedido; com `bitrate`, x-google-start/max-bitrate em todos os
+             * codecs de video reais (sdp.ts → addVideoBitrate).
+             */
+            function mungeSdp(sdp, test, bitrate) {
+                const eol = sdp.includes("\r\n") ? "\r\n" : "\n";
+                const head = [];
+                const sections = [];
+                for (const line of sdp.split(eol)) {
+                    if (line.startsWith("m=")) sections.push([line]);
+                    else if (sections.length) sections[sections.length - 1].push(line);
+                    else head.push(line);
+                }
+                let touched = 0;
+                for (const lines of sections) {
+                    if (!/^m=video [1-9]/.test(lines[0])) continue;
+                    const maps = [];
+                    lines.forEach((l, i) => {
+                        const m = /^a=rtpmap:(\d+) ([^/\s]+)\//.exec(l);
+                        if (m) maps.push({ pt: m[1], name: m[2].toUpperCase(), line: i });
+                    });
+                    const fmtpIdx = pt => lines.findIndex(l => l.startsWith(`a=fmtp:${pt} `));
+                    const fmtpOf = pt => { const i = fmtpIdx(pt); return i >= 0 ? lines[i].slice(`a=fmtp:${pt} `.length) : ""; };
+                    const candidates = maps.filter(m => m.name === test.codec && rankFor(test, fmtpOf(m.pt)) <= 1)
+                        .sort((a, b) => rankFor(test, fmtpOf(a.pt)) - rankFor(test, fmtpOf(b.pt)));
+                    if (!candidates.length) throw new Error(`${test.codec}${test.plid ? " " + test.plid.slice(0, 4) + "xx" : ""} ausente no SDP`);
+                    const pt = candidates[0].pt;
+                    const parts = lines[0].split(" ");
+                    lines[0] = [...parts.slice(0, 3), pt, ...parts.slice(3).filter(p => p !== pt)].join(" ");
+
+                    if (test.codec === "H264") {
+                        const i = fmtpIdx(pt);
+                        const params = (i >= 0 ? fmtpOf(pt) : "").split(";").map(s => s.trim()).filter(p => p && !/^profile-level-id=/i.test(p));
+                        params.push(`profile-level-id=${test.plid}`);
+                        params.sort();
+                        const line = `a=fmtp:${pt} ${params.join(";")}`;
+                        if (i >= 0) lines[i] = line;
+                        else lines.splice(candidates[0].line + 1, 0, line);
+                    }
+
+                    if (bitrate) {
+                        const extra = `x-google-start-bitrate=${bitrate.startKbps};x-google-max-bitrate=${bitrate.maxKbps}`;
+                        for (const m of maps) {
+                            if (NON_MEDIA.test(m.name)) continue;
+                            const i = fmtpIdx(m.pt);
+                            if (i >= 0) {
+                                if (!lines[i].includes("x-google-")) lines[i] += `;${extra}`;
+                            } else {
+                                const at = lines.findIndex(l => l.startsWith(`a=rtpmap:${m.pt} `));
+                                lines.splice(at + 1, 0, `a=fmtp:${m.pt} ${extra}`);
+                            }
+                        }
+                    }
+                    touched++;
+                }
+                if (!touched) throw new Error("SDP sem m=video");
+                return [...head, ...sections.flat()].join(eol);
+            }
+
+            /** Resumo curto do fmtp negociado (das estatisticas): "42001f asym=1" ou "VP9 profile-id=0". */
+            function negSummary(mime, fmtp) {
+                if (!mime) return null;
+                const name = mime.replace(/^video\//i, "");
+                if (/h264/i.test(name)) {
+                    const asym = /level-asymmetry-allowed=1/.test(fmtp || "") ? "asym=1" : "asym=0";
+                    return `${plidOf(fmtp) ?? "?"} ${asym}${isPm1(fmtp) ? "" : " pm=0"}`;
+                }
+                const p = /profile-id=(\d)/.exec(fmtp || "");
+                return `${name}${p ? " profile-id=" + p[1] : ""}`;
+            }
+
+            // ------------------------------------------------------------------ estatisticas
+
+            async function readStats(pc1, pc2) {
+                const a = await T(pc1.getStats(), "getStats do envio");
+                const b = await T(pc2.getStats(), "getStats do recebimento");
+                let out = null;
+                let src = null;
+                let inb = null;
+                a.forEach(r => {
+                    if (r.type === "outbound-rtp" && (r.kind || r.mediaType) === "video") out = r;
+                    else if (r.type === "media-source" && r.kind === "video") src = r;
+                });
+                b.forEach(r => {
+                    if (r.type === "inbound-rtp" && (r.kind || r.mediaType) === "video") inb = r;
+                });
+                const codec = out?.codecId ? a.get(out.codecId) : null;
+                return {
+                    t: performance.now(),
+                    enc: out?.encoderImplementation, hw: out?.powerEfficientEncoder,
+                    encoded: out?.framesEncoded ?? 0, sent: out?.framesSent ?? 0, bytes: out?.bytesSent ?? 0,
+                    w: out?.frameWidth, h: out?.frameHeight, fps: out?.framesPerSecond, lim: out?.qualityLimitationReason,
+                    mime: codec?.mimeType, fmtp: codec?.sdpFmtpLine,
+                    cap: src?.frames,
+                    decoded: inb?.framesDecoded ?? 0, dec: inb?.decoderImplementation, decHw: inb?.powerEfficientDecoder,
+                    rw: inb?.frameWidth, rh: inb?.frameHeight, rfps: inb?.framesPerSecond
+                };
+            }
+
+            function hwKind(name, hw) {
+                if (hw === true) return "placa";
+                if (hw === false) return "processador";
+                if (!name) return null;
+                if (/openh264|libvpx|libaom|dav1d|ffmpeg|software/i.test(name)) return "processador";
+                if (/mediafoundation|accelerat|nvidia|amd|intel|qsv|d3d11|dxva|hardware/i.test(name)) return "placa";
+                return null;
+            }
+
+            /** Numeros do teste a partir das leituras (a 1a e no instante em que a conexao abriu). */
+            function summarize(res, samples) {
+                if (!samples.length) return;
+                const first = samples[0];
+                const last = samples[samples.length - 1];
+                Object.assign(res, {
+                    enc: last.enc ?? null, hw: last.hw ?? null, encoded: last.encoded, sent: last.sent, bytes: last.bytes,
+                    w: last.w, h: last.h, fps: last.fps, lim: last.lim, decoded: last.decoded, dec: last.dec ?? null,
+                    decHw: last.decHw ?? null, rw: last.rw, rh: last.rh, rfps: last.rfps,
+                    neg: negSummary(last.mime, last.fmtp)
+                });
+                if (first.cap != null && last.cap != null) res.cap = last.cap - first.cap;
+                // quadros que a captura ja entregou a este envio desde o comeco (0 = nada chegou ao encoder)
+                if (last.cap != null) res.capTotal = last.cap;
+                res.series = samples.slice(1).map((s, i) => s.encoded - samples[i].encoded);
+                const secs = (last.t - first.t) / 1000;
+                if (secs > 0.5) res.kbps = Math.round(((last.bytes - first.bytes) * 8) / secs / 1000);
+                if (res.wantPlid && plidOf(last.fmtp) && plidOf(last.fmtp) !== res.wantPlid) res.negMismatch = true;
+            }
+
+            function judge(res, test) {
+                const fps = LEVEL[test.level].fps;
+                const capOk = res.cap == null || res.cap >= Math.max(5, fps);
+                const s = res.series || [];
+                const stopped = s.length >= 3 && s[s.length - 1] === 0 && s[s.length - 2] === 0 && (res.encoded ?? 0) > 0 && capOk;
+                if ((res.decoded ?? 0) > 0) return stopped ? "PAROU" : "OK";
+                if ((res.encoded ?? 0) > 0) return stopped ? "PAROU" : "NAO_CHEGA";
+                // nenhum quadro chegou ao encoder: nao diz nada da placa, e fechar e seguro; repete o teste
+                if (res.capTotal === 0) return "REPETIR";
+                return capOk ? "SEM_IMAGEM" : "SEM_CAPTURA";
+            }
+
+            /** Pode fechar estas conexoes: funcionou, nenhum quadro chegou ao encoder, ou o encoder gerou quadros. */
+            function safeToClose(res) {
+                return res.verdict === "OK" || res.verdict === "REPETIR";
+            }
+
+            /**
+             * Espera a aba voltar a aparecer (com ela escondida o Chromium segura os timers em ~1 por segundo e a animacao
+             * vira 1 fps). true = visivel; false = estourou `capMs`.
+             */
+            function waitVisible(index, capMs) {
+                if (document.visibilityState === "visible") return Promise.resolve(true);
+                const title = document.title;
+                document.title = "Volte para esta aba — teste da placa";
+                setStatus(index, "Volte para esta aba para continuar");
+                return new Promise(resolve => {
+                    let timer = null;
+                    const done = ok => {
+                        clearTimeout(timer);
+                        document.removeEventListener("visibilitychange", onVis);
+                        document.title = title;
+                        resolve(ok);
+                    };
+                    const onVis = () => { if (document.visibilityState === "visible") done(true); };
+                    document.addEventListener("visibilitychange", onVis);
+                    if (Number.isFinite(capMs)) timer = setTimeout(() => done(document.visibilityState === "visible"), capMs);
+                });
+            }
+
+            // ------------------------------------------------------------------ parte 1: WebCodecs num Worker
+
+            let workerUrl = null;
+
+            function newWorker() {
+                workerUrl ??= URL.createObjectURL(new Blob([$("wcWorker").textContent], { type: "text/javascript" }));
+                return new Worker(workerUrl);
+            }
+
+            /**
+             * Um teste de WebCodecs num Worker novo. O Worker avisa cada fase; WC_TIMEOUT_MS sem sinal = TRAVOU, e o Worker
+             * fica como esta (terminate() derrubaria o encoder preso, o que pode travar o processo da placa de video).
+             */
+            async function runWcTest(index, run, mark) {
+                const test = TESTS[index];
+                const lv = LEVEL[test.level];
+                const res = { n: index + 1, id: test.id };
+                const config = {
+                    codec: test.codec, width: lv.width, height: lv.height, framerate: lv.fps, bitrate: lv.maxKbps * 1000,
+                    hardwareAcceleration: test.accel, latencyMode: "realtime",
+                    ...(test.codec.startsWith("avc1") ? { avc: { format: "annexb" } } : {})
+                };
+                if (typeof VideoEncoder === "undefined") {
+                    res.verdict = "PULADO";
+                    res.note = "este navegador não tem WebCodecs";
+                    return res;
+                }
+                // a marca do teste fica no disco antes de o encoder existir
+                await mark("início");
+                let worker;
+                try {
+                    worker = newWorker();
+                } catch (e) {
+                    res.verdict = "ERRO";
+                    res.note = `Worker: ${errText(e)}`.slice(0, 200);
+                    return res;
+                }
+                const t0 = performance.now();
+                return new Promise(resolve => {
+                    let phase = "início";
+                    let timer = null;
+                    let finished = false;
+                    const finish = () => {
+                        finished = true;
+                        clearTimeout(timer);
+                        worker.onmessage = null;
+                        worker.onerror = null;
+                        res.ms = Math.round(performance.now() - t0);
+                        resolve(res);
+                    };
+                    const arm = () => {
+                        clearTimeout(timer);
+                        timer = setTimeout(() => {
+                            if (finished) return;
+                            res.verdict = "TRAVOU";
+                            res.note = `${phase} não respondeu em ${WC_TIMEOUT_MS / 1000} s`;
+                            res.wedged = true;
+                            leftAlone.push(worker);
+                            finish();
+                        }, WC_TIMEOUT_MS);
+                    };
+                    worker.onmessage = ({ data }) => {
+                        if (finished || !data) return;
+                        arm();
+                        if (data.ev === "phase") {
+                            phase = data.phase;
+                            mark(phase);
+                        } else if (data.ev === "progress") {
+                            res.sent = data.sent;
+                            res.chunks = data.chunks;
+                            setStatus(index, `codificando (${data.sent} de ${WC_FRAMES} quadros)`, `pacotes prontos: ${data.chunks}`);
+                        } else if (data.ev === "done") {
+                            Object.assign(res, data.result);
+                            res.verdict = res.supported === false ? (res.error ? "ERRO" : "NAO_SUPORTA")
+                                : res.chunks > 0 ? "OK"
+                                    : res.error ? "ERRO" : "SEM_IMAGEM";
+                            if (res.error) res.note = String(res.error).slice(0, 200);
+                            worker.terminate();
+                            finish();
+                        }
+                    };
+                    worker.onerror = e => {
+                        if (finished) return;
+                        res.verdict = "ERRO";
+                        res.note = `Worker: ${e.message || "erro"}`.slice(0, 200);
+                        worker.terminate();
+                        finish();
+                    };
+                    worker.postMessage({ cmd: "run", config, frames: WC_FRAMES });
+                    arm();
+                });
+            }
+
+            // ------------------------------------------------------------------ parte 2: WebRTC em loopback
+
+            function waitConnected(pc, ms) {
+                return new Promise(resolve => {
+                    let done = false;
+                    const finish = ok => {
+                        if (done) return;
+                        done = true;
+                        clearTimeout(timer);
+                        pc.removeEventListener("connectionstatechange", check);
+                        resolve(ok);
+                    };
+                    const check = () => {
+                        if (pc.connectionState === "connected") finish(true);
+                        else if (pc.connectionState === "failed" || pc.connectionState === "closed") finish(false);
+                    };
+                    const timer = setTimeout(() => finish(false), ms);
+                    pc.addEventListener("connectionstatechange", check);
+                    check();
+                });
+            }
+
+            /** Candidatos ICE de um lado para o outro, segurando os que chegam antes da descricao remota. */
+            function linkIce(from, to) {
+                const queue = [];
+                let ready = false;
+                from.onicecandidate = e => {
+                    if (!e.candidate) return;
+                    if (ready) to.addIceCandidate(e.candidate).catch(() => { });
+                    else queue.push(e.candidate);
+                };
+                return () => {
+                    ready = true;
+                    for (const c of queue.splice(0)) to.addIceCandidate(c).catch(() => { });
+                };
+            }
+
+            /** Parametros do sender como streaming.ts → applySenderParams (sem codec: o codec nunca muda no ar). */
+            async function applySenderParams(sender, test, capture) {
+                const lv = LEVEL[test.level];
+                const scale = capture.height > lv.height * 1.02 ? evenScale(capture.width, capture.height, lv.height) : 1;
+                const build = withDegradation => {
+                    const p = sender.getParameters();
+                    if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+                    Object.assign(p.encodings[0], { maxBitrate: lv.maxKbps * 1000, maxFramerate: lv.fps, scaleResolutionDownBy: scale, priority: "high", networkPriority: "high" });
+                    if (withDegradation) p.degradationPreference = "maintain-framerate";
+                    return p;
+                };
+                try {
+                    await T(sender.setParameters(build(true)), "setParameters");
+                    return { scale, degradation: true };
+                } catch (e) {
+                    if (e instanceof Timeout) throw e;
+                    await T(sender.setParameters(build(false)), "setParameters");
+                    return { scale, degradation: false };
+                }
+            }
+
+            /**
+             * Um teste de WebRTC com conexoes novas. So um envio que FUNCIONA e fechado (replaceTrack(null) com
+             * tempo-limite e close()). Qualquer outro resultado depois de o envio existir deixa as conexoes abertas e
+             * intocadas (leftAlone) e a rodada para: desmontar um encoder de hardware preso trava o WebRTC do processo.
+             */
+            async function runRtcTest(index, run, source, mark) {
+                const test = TESTS[index];
+                const res = { n: index + 1, id: test.id, wantPlid: test.plid ?? null };
+
+                if (test.codec === "H264" && !offersProfile(test.plid)) {
+                    res.verdict = "PULADO";
+                    res.note = `o navegador não oferece o perfil ${H264_PROFILE[test.plid.slice(0, 4)]}`;
+                    return res;
+                }
+                if (test.codec === "VP9" && !senderCodecs().some(c => /^video\/vp9$/i.test(c.mimeType))) {
+                    res.verdict = "PULADO";
+                    res.note = "o navegador não oferece VP9";
+                    return res;
+                }
+
+                let pc1 = null;
+                let pc2 = null;
+                let track = null;
+                let sender = null;
+                let sendStreamExists = false;
+                let samples = [];
+                let frameCb = null;
+                let measuring = true;
+                const dst = $("dst");
+                const t0 = performance.now();
+
+                try {
+                    await mark("preparando");
+                    track = await source.makeTrack(test);
+                    track.contentHint = "motion";
+                    const capture = source.size(track);
+                    pc1 = new RTCPeerConnection();
+                    pc2 = new RTCPeerConnection();
+                    const flushTo2 = linkIce(pc1, pc2);
+                    const flushTo1 = linkIce(pc2, pc1);
+                    pc2.ontrack = e => {
+                        dst.srcObject = e.streams[0] || new MediaStream([e.track]);
+                        dst.play?.().catch(() => { });
+                    };
+                    sender = pc1.addTrack(track, new MediaStream([track]));
+                    const transceiver = pc1.getTransceivers().find(t => t.sender === sender);
+                    res.prefs = applyCodecPreferences(transceiver, test);
+
+                    await mark("negociando");
+                    const lv = LEVEL[test.level];
+                    const offer = await T(pc1.createOffer(), "createOffer");
+                    await T(pc1.setLocalDescription(offer), "setLocalDescription (oferta)");
+                    await T(pc2.setRemoteDescription({ type: "offer", sdp: mungeSdp(offer.sdp, test, null) }), "setRemoteDescription (oferta)");
+                    flushTo2();
+                    const answer = await T(pc2.createAnswer(), "createAnswer");
+                    await T(pc2.setLocalDescription(answer), "setLocalDescription (resposta)");
+                    sendStreamExists = true;
+                    await T(pc1.setRemoteDescription({ type: "answer", sdp: mungeSdp(answer.sdp, test, { startKbps: lv.startKbps, maxKbps: lv.xMaxKbps }) }), "setRemoteDescription (resposta)");
+                    flushTo1();
+
+                    await mark("ajustando o envio");
+                    const params = await applySenderParams(sender, test, capture);
+                    res.scale = params.scale;
+                    if (!params.degradation) res.noDegradation = true;
+
+                    await mark("conectando");
+                    if (!(await waitConnected(pc1, CONNECT_TIMEOUT_MS))) {
+                        res.verdict = "SEM_CONEXAO";
+                        res.note = `estado ${pc1.connectionState}/${pc1.iceConnectionState} depois de ${CONNECT_TIMEOUT_MS / 1000} s`;
+                        return res;
+                    }
+                    const tConnected = performance.now();
+                    if (typeof dst.requestVideoFrameCallback === "function") {
+                        frameCb = dst.requestVideoFrameCallback(() => {
+                            frameCb = null;
+                            if (measuring) res.firstMs = Math.round(performance.now() - tConnected);
+                        });
+                    }
+
+                    await mark("medindo");
+                    // so mede com a aba na frente: escondida, a animacao cai para ~1 fps; sumiu no meio = mede de novo
+                    let hiddenTooLong = false;
+                    for (let attempt = 0; ; attempt++) {
+                        if (!(await waitVisible(index, VISIBLE_WAIT_MS))) {
+                            hiddenTooLong = true;
+                            break;
+                        }
+                        let hid = false;
+                        const onHide = () => { if (document.hidden) hid = true; };
+                        document.addEventListener("visibilitychange", onHide);
+                        try {
+                            samples = [await readStats(pc1, pc2)];
+                            for (let i = 0; i < SAMPLE_SECONDS && !hid; i++) {
+                                await sleep(1000);
+                                if (hid) break;
+                                samples.push(await readStats(pc1, pc2));
+                                const s = samples[samples.length - 1];
+                                setStatus(index, `medindo (${i + 1} de ${SAMPLE_SECONDS} s)`, `quadros gerados ${s.encoded} · recebidos ${s.decoded}${s.w ? ` · ${s.w}x${s.h}` : ""}`);
+                            }
+                        } finally {
+                            document.removeEventListener("visibilitychange", onHide);
+                        }
+                        if (!hid) break;
+                        res.resampled = attempt + 1;
+                        if (attempt + 1 >= MAX_RESAMPLES) {
+                            hiddenTooLong = true;
+                            break;
+                        }
+                    }
+                    if (hiddenTooLong) {
+                        // so os totais: os numeros com a aba escondida nao valem
+                        samples = [await readStats(pc1, pc2)];
+                        summarize(res, samples);
+                        res.hidden = true;
+                        if (res.encoded === 0 && (res.capTotal ?? 1) > 0) {
+                            res.verdict = "SEM_IMAGEM";
+                            res.note = `a aba ficou escondida, mas a placa recebeu ${res.capTotal ?? "?"} quadros e não gerou nenhum`;
+                        } else {
+                            res.verdict = "REPETIR";
+                            res.note = "a aba ficou escondida";
+                        }
+                    } else {
+                        summarize(res, samples);
+                        res.verdict = judge(res, test);
+                        if (res.verdict === "REPETIR") res.note = "nenhum quadro chegou ao encoder (a página ficou escondida?)";
+                    }
+                } catch (e) {
+                    summarize(res, samples);
+                    if (e instanceof Timeout) {
+                        res.verdict = "TRAVOU";
+                        res.note = e.message;
+                    } else {
+                        res.verdict = "ERRO";
+                        res.note = errText(e).slice(0, 200);
+                    }
+                } finally {
+                    measuring = false;
+                    if (frameCb !== null) {
+                        try {
+                            dst.cancelVideoFrameCallback(frameCb);
+                        } catch { }
+                    }
+                    res.ms = Math.round(performance.now() - t0);
+                    if (safeToClose(res) || !sendStreamExists) {
+                        try {
+                            await mark("fechando");
+                            res.closeMs = await teardown(pc1, pc2, sender, track, dst);
+                        } catch (e) {
+                            res.verdict = "TRAVOU";
+                            res.note = (res.note ? res.note + "; " : "") + errText(e);
+                            res.leftOpen = true;
+                            leftAlone.push(pc1, pc2);
+                        }
+                    } else {
+                        // nao gera imagem (ou travou): nada encosta mais nestas conexoes
+                        res.leftOpen = true;
+                        leftAlone.push(pc1, pc2);
+                    }
+                }
+                return res;
+            }
+
+            /**
+             * Fecha um envio que funcionou: replaceTrack(null) e assincrono (vai com tempo-limite) e passa pela mesma
+             * thread do encoder; se ele nao volta, o close() (sincrono, nao tem como limitar) nao e chamado. Um close()
+             * que volta depois do limite tambem conta como TRAVOU.
+             */
+            async function teardown(pc1, pc2, sender, track, dst) {
+                dst.srcObject = null;
+                if (sender && pc1 && pc1.connectionState !== "closed") await T(sender.replaceTrack(null), "replaceTrack(null) ao fechar");
+                track?.stop();
+                const t = performance.now();
+                pc1?.close();
+                pc2?.close();
+                const ms = Math.round(performance.now() - t);
+                if (ms > STEP_TIMEOUT_MS) throw new Timeout(`close() levou ${(ms / 1000).toFixed(1)} s e`, STEP_TIMEOUT_MS);
+                return ms;
+            }
+
+            // ------------------------------------------------------------------ fontes da parte 2
+
+            function animSource() {
+                return {
+                    async makeTrack(test) {
+                        startDrawing();
+                        const [track] = canvas.captureStream(LEVEL[test.level].fps).getVideoTracks();
+                        if (!track) throw new Error("captureStream sem vídeo");
+                        return track;
+                    },
+                    size: () => ({ width: SRC_W, height: SRC_H }),
+                    stop() { }
+                };
+            }
+
+            async function screenSource() {
+                const stream = await navigator.mediaDevices.getDisplayMedia({
+                    video: { width: { ideal: 1920, max: 1920 }, height: { ideal: 1080, max: 1080 }, frameRate: { ideal: 60, max: 60 } },
+                    audio: false
+                });
+                const base = stream.getVideoTracks()[0];
+                if (!base) throw new Error("a captura veio sem vídeo");
+                return {
+                    base,
+                    async makeTrack(test) {
+                        startDrawing();
+                        if (base.readyState === "ended") throw new Error("o compartilhamento da tela foi encerrado");
+                        const track = base.clone();
+                        try {
+                            await T(track.applyConstraints({ frameRate: { ideal: LEVEL[test.level].fps, max: LEVEL[test.level].fps } }), "applyConstraints", 3000);
+                        } catch { }
+                        return track;
+                    },
+                    size(track) {
+                        const s = track.getSettings();
+                        return { width: s.width || SRC_W, height: s.height || SRC_H };
+                    },
+                    stop() {
+                        stream.getTracks().forEach(t => t.stop());
+                    }
+                };
+            }
+
+            // ------------------------------------------------------------------ rodada
+
+            let busy = false;
+            let liveRun = null;
+
+            /** Primeiro teste da rodada ainda sem resultado (REPETIR conta como sem resultado; null = todos feitos). */
+            function nextIndex(run, source) {
+                const done = new Set((run?.results || []).filter(r => r.verdict !== "REPETIR").map(r => r.id));
+                return testsFor(source).find(i => !done.has(TESTS[i].id)) ?? null;
+            }
+
+            /**
+             * Um teste de WebCodecs com a placa (prefer-hardware) que nao gerou nada ou travou: os H.264 seguintes da
+             * parte 1 sao pulados (o "automatico" tambem, porque tenta a placa primeiro). Cada um travaria de novo.
+             */
+            function wcHardwareFailure(run) {
+                return run.results.find(r => {
+                    const t = TESTS[r.n - 1];
+                    return t && t.kind === "wc" && t.accel === "prefer-hardware" && (r.verdict === "SEM_IMAGEM" || r.verdict === "TRAVOU");
+                }) || null;
+            }
+
+            /** Para a rodada: travou, nao gera imagem, sem conexao ou um envio deixado aberto. */
+            function stopsRun(res) {
+                if (res.verdict === "TRAVOU") return true;
+                const test = TESTS[res.n - 1];
+                return test.kind === "rtc" && (res.leftOpen || res.verdict === "SEM_CONEXAO");
+            }
+
+            async function startRun(sourceName, fresh) {
+                if (busy || leftAlone.length) return;
+                busy = true;
+                let source = null;
+                try {
+                    // getDisplayMedia primeiro: precisa vir direto do clique
+                    source = sourceName === "tela" ? await screenSource() : animSource();
+                } catch (e) {
+                    busy = false;
+                    showNotice("warn", "Não deu para compartilhar a tela", `<p>${escapeHtml(errText(e))}. Se quiser tentar de novo, clique no botão e escolha a <b>tela inteira</b>.</p>`);
+                    return;
+                }
+
+                let run = state.runs[sourceName];
+                if (fresh || !run) {
+                    run = { startedAt: Date.now(), results: [], running: null, halted: null };
+                    state.runs[sourceName] = run;
+                }
+                run.halted = null;
+                run.done = false;
+                if (source.base) {
+                    const s = source.base.getSettings();
+                    run.capture = { w: s.width, h: s.height };
+                }
+                liveRun = sourceName;
+                await save();
+                hideNotice();
+                $("final").hidden = true;
+                $("live").hidden = false;
+                $("results").hidden = false;
+                render();
+                startDrawing();
+                $("live").scrollIntoView({ behavior: "smooth", block: "start" });
+
+                let stop = null;
+                for (const i of testsFor(sourceName)) {
+                    if (run.results.some(r => r.id === TESTS[i].id && r.verdict !== "REPETIR")) continue;
+                    if (source.base && source.base.readyState === "ended") {
+                        stop = { kind: "tela", n: i + 1 };
+                        break;
+                    }
+                    const test = TESTS[i];
+                    drawLabel = `${i + 1}. ${testShort(test)}`;
+                    const mark = async phase => {
+                        run.running = { index: i, phase, at: Date.now() };
+                        setStatus(i, phase);
+                        await save();
+                    };
+                    let res;
+                    const failed = test.kind === "wc" && test.codec.startsWith("avc1.") ? wcHardwareFailure(run) : null;
+                    if (failed) {
+                        res = { n: i + 1, id: test.id, verdict: "PULADO", note: `a placa não gerou imagem no teste ${failed.n}: não tentei de novo para não travar` };
+                    } else if (test.kind === "wc") {
+                        res = await runWcTest(i, run, mark);
+                    } else {
+                        // com a aba escondida a animacao cai para ~1 fps: so comeca com ela na frente
+                        for (let attempt = 0; attempt < 2; attempt++) {
+                            await waitVisible(i, Infinity);
+                            res = await runRtcTest(i, run, source, mark);
+                            if (attempt) res.retried = attempt;
+                            if (res.verdict !== "REPETIR") break;
+                        }
+                    }
+                    run.results = run.results.filter(r => r.id !== res.id).concat(res);
+                    run.running = null;
+                    await save();
+                    render();
+                    if (stopsRun(res)) {
+                        run.halted = { n: res.n, why: res.verdict === "TRAVOU" ? "TRAVOU" : res.leftOpen ? `${VERDICT[res.verdict].code}, parei para não travar` : VERDICT[res.verdict].code };
+                        stop = { kind: res.verdict === "TRAVOU" || res.verdict === "SEM_CONEXAO" ? res.verdict : res.leftOpen ? "PRESO" : res.verdict, n: res.n, verdict: res.verdict };
+                        break;
+                    }
+                    await sleep(600);
+                }
+
+                stopDrawing();
+                if (!stop || !leftAlone.length) source.stop();
+                if (!stop) run.done = !run.results.some(r => r.verdict === "REPETIR");
+                liveRun = null;
+                busy = false;
+                await save();
+                $("live").hidden = true;
+                render();
+                showFinal(sourceName, stop);
+            }
+
+            // ------------------------------------------------------------------ informacoes do PC
+
+            const env = {};
+            let envReady = null;
+
+            async function adapterText(options) {
+                const adapter = await soft(() => navigator.gpu.requestAdapter(options), 3000);
+                if (!adapter) return null;
+                let info = adapter.info;
+                if (!info && typeof adapter.requestAdapterInfo === "function") info = await soft(() => adapter.requestAdapterInfo(), 2000);
+                if (!info) return "(sem info)";
+                return [info.vendor, info.architecture, info.device, info.description].filter(Boolean).join(" / ") + (info.isFallbackAdapter ? " (fallback)" : "") || "(vazio)";
+            }
+
+            function collectEnv() {
+                return envReady ??= (async () => {
+                    env.ua = navigator.userAgent;
+                    const ua = await soft(() => navigator.userAgentData?.getHighEntropyValues(["fullVersionList", "platformVersion", "architecture", "bitness", "model"]), 2000);
+                    if (ua) {
+                        const brands = (ua.fullVersionList || []).filter(b => !/not.?a.?brand/i.test(b.brand)).map(b => `${b.brand} ${b.version}`);
+                        env.uaData = `${brands.join(", ")} | ${ua.platform || "?"} ${ua.platformVersion || "?"} ${ua.architecture || ""}${ua.bitness ? "-" + ua.bitness : ""}`.trim();
+                    }
+                    if (navigator.gpu) {
+                        // powerPreference e ignorado no Windows (crbug.com/369219127): um adaptador so
+                        env.webgpu = (await adapterText(undefined)) || "sem adaptador";
+                    } else env.webgpu = "sem WebGPU";
+                    try {
+                        const c = document.createElement("canvas");
+                        const gl = c.getContext("webgl2") || c.getContext("webgl");
+                        if (gl) {
+                            const ext = gl.getExtension("WEBGL_debug_renderer_info");
+                            env.webgl = ext ? `${gl.getParameter(ext.UNMASKED_VENDOR_WEBGL)} | ${gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)}` : `${gl.getParameter(gl.VENDOR)} | ${gl.getParameter(gl.RENDERER)}`;
+                            gl.getExtension("WEBGL_lose_context")?.loseContext();
+                        } else env.webgl = "sem WebGL";
+                    } catch (e) {
+                        env.webgl = "erro: " + errText(e);
+                    }
+                    const pm1 = list => [...new Set(list.filter(c => /^video\/h264$/i.test(c.mimeType) && isPm1(c.sdpFmtpLine)).map(c => plidOf(c.sdpFmtpLine)))];
+                    env.h264Send = pm1(senderCodecs()).join(" ") || "nenhum";
+                    env.h264Recv = pm1(receiverCodecs()).join(" ") || "nenhum";
+                    env.other = senderCodecs().map(c => c.mimeType.replace(/^video\//i, "")).filter((n, i, a) => !/^(rtx|red|ulpfec|flexfec-03|h264)$/i.test(n) && a.indexOf(n) === i).join(" ");
+                    // a sonda do Telinha (codec.ts → measureLocalCaps): encodingInfo "video/H264;<fmtp>" 1080p60 8 Mbps
+                    const mc = navigator.mediaCapabilities;
+                    if (typeof mc?.encodingInfo === "function") {
+                        const out = [];
+                        const deadline = Date.now() + 8000;
+                        for (const c of senderCodecs()) {
+                            if (!/^video\/h264$/i.test(c.mimeType) || !isPm1(c.sdpFmtpLine) || Date.now() > deadline) continue;
+                            const p = plidOf(c.sdpFmtpLine);
+                            if (out.some(x => x.startsWith(p))) continue;
+                            const r = await soft(() => mc.encodingInfo({ type: "webrtc", video: { contentType: `video/H264;${c.sdpFmtpLine}`, width: 1920, height: 1080, bitrate: 8e6, framerate: 60 } }), 2000);
+                            out.push(`${p}=${r ? (r.powerEfficient ? "placa" : r.supported ? "proc" : "não") : "?"}`);
+                        }
+                        env.probe = out.join(" ") || "nenhum";
+                    } else env.probe = "sem mediaCapabilities";
+                })();
+            }
+
+            // ------------------------------------------------------------------ texto para copiar
+
+            function pad(n) {
+                return String(n).padStart(2, "0");
+            }
+
+            function fmtDate(d) {
+                const off = -d.getTimezoneOffset();
+                const tz = `UTC${off >= 0 ? "+" : "-"}${pad(Math.floor(Math.abs(off) / 60))}${Math.abs(off) % 60 ? pad(Math.abs(off) % 60) : ""}`;
+                return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}h${pad(d.getMinutes())} ${tz}`;
+            }
+
+            function runStatus(run, source) {
+                if (run.done) return "completo";
+                if (run.halted) return `parou no teste ${run.halted.n} (${run.halted.why})`;
+                const again = run.results.filter(r => r.verdict === "REPETIR").length;
+                return `incompleto (${run.results.length - again} de ${testsFor(source).length}${again ? `, ${again} para repetir` : ""})`;
+            }
+
+            function levelText(level) {
+                const lv = LEVEL[level];
+                return `${lv.height}p ${lv.fps} fps`;
+            }
+
+            function h264Name(plid) {
+                const prof = H264_PROFILE[plid.slice(0, 4)] || plid.slice(0, 4);
+                const lvl = (parseInt(plid.slice(4), 16) / 10).toFixed(1);
+                return `${plid} (${prof} ${lvl})`;
+            }
+
+            function testTitle(test) {
+                if (test.kind === "wc") {
+                    const name = test.codec.startsWith("avc1.") ? `H.264 ${h264Name(test.codec.slice(5))}` : "VP9";
+                    return `${name} · ${levelText(test.level)} · ${test.accel === "prefer-hardware" ? "na placa" : "automático"}`;
+                }
+                return test.codec === "VP9" ? `VP9 · ${levelText(test.level)}` : `H.264 ${h264Name(test.plid)} · ${levelText(test.level)}`;
+            }
+
+            function testShort(test) {
+                if (test.kind === "wc") return `WC ${test.codec} ${test.level} ${test.accel === "prefer-hardware" ? "hw" : "auto"}${test.sub && test.sub.startsWith("controle") ? " (controle)" : ""}`;
+                const name = test.codec === "VP9" ? "VP9" : `H264 ${test.plid}`;
+                return `RTC ${name} ${test.level}${test.telinha ? " (=Telinha)" : ""}${test.codec === "VP9" ? " (controle)" : ""}`;
+            }
+
+            function lineFor(x) {
+                const test = TESTS[x.n - 1];
+                const v = VERDICT[x.verdict] || { code: x.verdict };
+                if (test && test.kind === "wc") {
+                    const p = [`${pad(x.n)} ${testShort(test)}: ${v.code}`];
+                    if (x.supported != null) p.push(x.supported ? "suportado" : "não suportado");
+                    if (x.note) p.push(x.note);
+                    if (x.sent && x.bytes == null) p.push(`${x.sent} quadros → ${x.chunks ?? 0} pacotes até parar`);
+                    else if (x.sent) p.push(`${x.sent} quadros → ${x.chunks ?? 0} pacotes (${x.keyframes ?? 0} chave) ${(x.bytes / 1e6).toFixed(2)}MB`);
+                    if (x.firstChunkMs != null) p.push(`1o pacote ${x.firstChunkMs}ms`);
+                    if (x.queueMax) p.push(`fila máx ${x.queueMax}`);
+                    if (x.encodeMs != null) p.push(`${x.encodeMs}ms`);
+                    if (x.wedged) p.push("worker deixado parado");
+                    return p.join(" | ");
+                }
+                const kind = hwKind(x.enc, x.hw);
+                const p = [`${pad(x.n)} ${test ? testShort(test) : x.id}: ${v.code}${x.verdict === "OK" || x.verdict === "PAROU" ? ` (${kind ?? "placa/proc ?"})` : ""}`];
+                if (x.note) p.push(x.note);
+                if (x.neg) p.push(`neg ${x.neg}${x.negMismatch ? " (≠ pedido " + x.wantPlid + ")" : ""}`);
+                if (x.encoded !== undefined) {
+                    p.push(`enc ${x.enc ?? "?"}${x.hw === true ? " hw" : x.hw === false ? " sw" : ""}`);
+                    p.push(`cod ${x.encoded} env ${x.sent} dec ${x.decoded}`);
+                    const size = x.w ? `${x.w}x${x.h}` : "sem tamanho";
+                    p.push(`${size} ${x.fps != null ? Math.round(x.fps) : "?"}fps ${x.kbps != null ? (x.kbps / 1000).toFixed(1) + "Mbps" : "?"} lim=${x.lim ?? "?"}`);
+                    if (x.series) p.push(`cod/s ${x.series.join(",")}`);
+                    if (x.cap != null) p.push(`cap ${x.cap}`);
+                    p.push(`decod ${x.dec ?? "?"}${x.decHw === true ? " hw" : x.decHw === false ? " sw" : ""}${x.rw ? ` ${x.rw}x${x.rh}` : ""}`);
+                }
+                if (x.firstMs != null) p.push(`1o quadro ${x.firstMs}ms`);
+                if (x.scale && x.scale !== 1) p.push(`escala ${x.scale}`);
+                if (x.noDegradation) p.push("sem degradationPreference");
+                if (x.prefs && x.prefs !== "sender") p.push(`prefs ${x.prefs}`);
+                if (x.hidden) p.push("aba escondida");
+                if (x.resampled) p.push(`medido de novo ${x.resampled}x (a aba sumiu)`);
+                if (x.retried) p.push("repetido do zero (a aba ficou escondida mais de 1 min)");
+                if (x.leftOpen) p.push("conexão deixada aberta");
+                if (x.closeMs != null && x.closeMs > 300) p.push(`close ${x.closeMs}ms`);
+                return p.join(" | ");
+            }
+
+            /**
+             * Nenhum SDP entra no texto; por garantia some qualquer linha de candidato ICE e nome mDNS. Sem regra de IP
+             * "solta": ela comia versoes de driver com 4 partes (32.0.12.19).
+             */
+            function sanitize(text) {
+                return text
+                    .replace(/^.*candidate:.*$/gim, "[linha removida]")
+                    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.local\b/gi, "[mdns]");
+            }
+
+            function buildText() {
+                const L = [];
+                L.push(`Telinha · teste da placa de vídeo (${VERSION})`);
+                L.push(`Data: ${fmtDate(new Date())}`);
+                L.push(`Navegador: ${navigator.userAgent}`);
+                if (env.uaData) L.push(`Versões: ${env.uaData}`);
+                L.push(`GPU (WebGPU): ${env.webgpu ?? "?"}`);
+                L.push(`GPU (WebGL): ${env.webgl ?? "?"}`);
+                L.push(`Driver (informado): ${state.driver ? state.driver : "não informado"}`);
+                L.push(`CPU ${navigator.hardwareConcurrency ?? "?"} threads${navigator.deviceMemory ? ` · ${navigator.deviceMemory} GB+` : ""} | tela ${screen.width}x${screen.height} @${devicePixelRatio}`);
+                L.push(`H.264 pm1 envia: ${env.h264Send ?? "?"} | recebe: ${env.h264Recv ?? "?"} | outros: ${env.other ?? "?"}`);
+                L.push(`Sonda do Telinha (encodingInfo 1080p60 8M): ${env.probe ?? "?"}`);
+                L.push(`Progresso guardado em: ${[storage.idb && "IndexedDB", storage.ls && "localStorage"].filter(Boolean).join(" + ") || "nada (sem armazenamento)"}`);
+                let any = false;
+                for (const name of Object.keys(SOURCES)) {
+                    const run = state.runs[name];
+                    if (!run || !run.results.length) continue;
+                    any = true;
+                    const what = name === "tela" ? `Tela ${run.capture ? run.capture.w + "x" + run.capture.h : "?"}` : `Animação ${SRC_W}x${SRC_H}`;
+                    L.push("");
+                    L.push(`== ${what} · começou ${fmtDate(new Date(run.startedAt))} · ${runStatus(run, name)}`);
+                    for (const r of [...run.results].sort((a, b) => a.n - b.n)) L.push(lineFor(r));
+                }
+                if (!any) L.push("", "(nenhum teste feito ainda)");
+                return sanitize(L.join("\n"));
+            }
+
+            async function copyResult() {
+                const btn = $("btnCopy");
+                btn.disabled = true;
+                await Promise.race([collectEnv(), sleep(6000)]);
+                const text = buildText();
+                const out = $("out");
+                out.value = text;
+                let ok = false;
+                try {
+                    await navigator.clipboard.writeText(text);
+                    ok = true;
+                } catch {
+                    try {
+                        out.focus();
+                        out.select();
+                        ok = document.execCommand("copy");
+                    } catch { }
+                }
+                btn.disabled = false;
+                $("copyMsg").textContent = ok
+                    ? "Copiado! Agora cole na conversa do Discord (Ctrl+V). Se o Discord transformar em arquivo (message.txt), tudo bem: mande assim mesmo."
+                    : "Não deu para copiar sozinho: selecione o texto abaixo (Ctrl+A), copie (Ctrl+C) e cole no Discord.";
+            }
+
+            // ------------------------------------------------------------------ tela
+
+            function escapeHtml(s) {
+                return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+            }
+
+            function showNotice(tone, title, html) {
+                const n = $("notice");
+                n.className = `notice ${tone}`;
+                n.innerHTML = `<strong>${escapeHtml(title)}</strong>${html}`;
+                n.hidden = false;
+            }
+
+            function hideNotice() {
+                $("notice").hidden = true;
+            }
+
+            function setStatus(index, phase, extra) {
+                const test = TESTS[index];
+                const list = testsFor(liveRun || "anim");
+                const pos = Math.max(0, list.indexOf(index));
+                $("status").innerHTML = `Teste ${index + 1}: ${escapeHtml(testTitle(test))}<small>${escapeHtml(PART[test.kind])} · ${escapeHtml(phase)}${extra ? " · " + escapeHtml(extra) : ""}</small>`;
+                $("prog").value = (pos + 0.5) / list.length;
+                const li = document.querySelector(`[data-run="${liveRun}"] [data-n="${index + 1}"] .badge`);
+                if (li && !li.classList.contains("run")) {
+                    li.className = "badge run";
+                    li.textContent = "Testando…";
+                }
+            }
+
+            function detailFor(r) {
+                const test = TESTS[r.n - 1];
+                if (r.verdict === "PULADO" || r.verdict === "SEM_CONEXAO" || r.verdict === "ERRO" || r.verdict === "NAO_SUPORTA") return r.note || "";
+                if (r.verdict === "REPETIR") return `${r.note || "a aba ficou escondida"}: clique em Continuar com esta página na frente`;
+                if (test.kind === "wc") {
+                    const parts = [];
+                    if (r.sent) parts.push(`${r.sent} quadros enviados, ${r.chunks ?? 0} prontos`);
+                    if (r.firstChunkMs != null) parts.push(`primeiro em ${r.firstChunkMs} ms`);
+                    if (r.verdict === "TRAVOU" && r.note) parts.push(r.note);
+                    return parts.join(" · ");
+                }
+                const parts = [];
+                const kind = hwKind(r.enc, r.hw);
+                if (kind) parts.push(kind === "placa" ? "feito pela placa de vídeo" : "feito pelo processador");
+                if (r.encoded !== undefined) parts.push(`${r.encoded} quadros gerados, ${r.decoded} recebidos`);
+                if (r.w) parts.push(`${r.w}x${r.h}`);
+                if (r.fps != null) parts.push(`${Math.round(r.fps)} fps`);
+                if (r.verdict === "SEM_CAPTURA") parts.push("a animação parou (a página ficou escondida?)");
+                if (r.verdict === "TRAVOU" && r.note) parts.push(r.note);
+                if (r.leftOpen) parts.push("parei aqui para não travar");
+                if (r.resampled) parts.push("medido de novo depois que você voltou para a aba");
+                return parts.join(" · ");
+            }
+
+            function render() {
+                const box = $("runs");
+                box.innerHTML = "";
+                let any = false;
+                for (const [name, label] of Object.entries(SOURCES)) {
+                    const run = state.runs[name];
+                    if (!run || (!run.results.length && liveRun !== name)) continue;
+                    any = true;
+                    const wrap = document.createElement("div");
+                    wrap.className = "results-run";
+                    wrap.dataset.run = name;
+                    wrap.innerHTML = `<h3>${escapeHtml(label)}</h3>`;
+                    let ol = null;
+                    let part = null;
+                    for (const i of testsFor(name)) {
+                        const test = TESTS[i];
+                        if (test.kind !== part) {
+                            part = test.kind;
+                            const h = document.createElement("h4");
+                            h.textContent = PART[part];
+                            wrap.appendChild(h);
+                            ol = document.createElement("ol");
+                            ol.className = "tests";
+                            wrap.appendChild(ol);
+                        }
+                        const r = run.results.find(x => x.id === test.id);
+                        const li = document.createElement("li");
+                        li.dataset.n = String(i + 1);
+                        const v = r ? VERDICT[r.verdict] : null;
+                        let badge = v ? v.ui : "—";
+                        if (r && test.kind === "rtc" && (r.verdict === "OK" || r.verdict === "PAROU")) {
+                            const kind = hwKind(r.enc, r.hw);
+                            if (kind) badge += kind === "placa" ? " (placa)" : " (processador)";
+                        }
+                        li.innerHTML = `<span class="num">${i + 1}</span><span class="what">${escapeHtml(testTitle(test))}${test.sub ? `<small>${escapeHtml(test.sub)}</small>` : ""}</span>`
+                            + `<span class="badge ${v ? v.tone : ""}">${escapeHtml(badge)}</span>`
+                            + (r ? `<span class="detail">${escapeHtml(detailFor(r))}</span>` : "");
+                        ol.appendChild(li);
+                    }
+                    box.appendChild(wrap);
+                }
+                $("results").hidden = !any;
+                renderButtons();
+            }
+
+            const TELA_LABEL = "Passo 2: testar com a minha tela (escolha Tela inteira)";
+
+            function renderButtons() {
+                const blocked = busy || leftAlone.length > 0;
+                for (const name of Object.keys(SOURCES)) {
+                    const run = state.runs[name];
+                    const btn = $(name === "anim" ? "btnAnim" : "btnTela");
+                    const restart = $(name === "anim" ? "btnAnimRestart" : "btnTelaRestart");
+                    const next = nextIndex(run, name);
+                    const resumable = !!run && run.results.length > 0 && !run.done && next !== null;
+                    btn.disabled = blocked;
+                    if (name === "anim") btn.textContent = resumable ? `Continuar o passo 1 (do teste ${next + 1})` : "Passo 1: testar minha placa de vídeo";
+                    else btn.textContent = resumable ? `Continuar o passo 2 (do teste ${next + 1}, escolha Tela inteira)` : TELA_LABEL;
+                    btn.dataset.resume = resumable ? "1" : "";
+                    restart.hidden = !(run && run.results.length) || blocked;
+                }
+                // depois do passo 1, o passo 2 vira o botao principal
+                const step1Started = !!state.runs.anim?.results.length;
+                $("btnTela").className = step1Started && !state.runs.tela?.done ? "big second" : "second";
+                $("btnAnim").className = step1Started && !state.runs.tela?.done ? "second" : "big";
+                const inline = $("btnTelaFinal");
+                if (inline) inline.disabled = blocked;
+            }
+
+            /** O passo 2 ainda nao mostrou nenhum nome de encoder (sem ele nao da para saber placa x processador). */
+            function step2Missing() {
+                const tela = state.runs.tela;
+                return !tela || !(tela.results || []).some(r => r.enc);
+            }
+
+            function showFinal(sourceName, stop) {
+                const f = $("final");
+                f.hidden = false;
+                const closeHow = "Feche esta aba (se aparecer “Página sem resposta”, clique em <b>Sair das páginas</b>) ou o navegador inteiro (se ele não fechar: Ctrl+Shift+Esc, clique no Chrome ou no Edge e em <b>Finalizar tarefa</b>).";
+                const next = sourceName === "anim" && step2Missing()
+                    ? "Depois abra esta página de novo e faça o <b>passo 2</b> (o que já foi testado fica guardado)."
+                    : "Se quiser ajudar mais, abra esta página de novo e clique em <b>Continuar</b> (o que já foi testado fica guardado).";
+                const again = (state.runs[sourceName]?.results || []).filter(r => r.verdict === "REPETIR").length;
+                if (!stop && again) {
+                    f.className = "notice warn";
+                    f.innerHTML = `<strong>Falta repetir ${again === 1 ? "1 teste" : again + " testes"}: a aba ficou escondida.</strong><p>Clique em <b>Continuar</b> lá em cima e deixe esta página na frente até terminar.</p>`;
+                } else if (!stop && sourceName === "anim" && step2Missing()) {
+                    f.className = "notice";
+                    f.innerHTML = "<strong>Passo 1 pronto! Falta o passo 2.</strong>"
+                        + "<p>Clique no botão abaixo. O navegador vai perguntar o que compartilhar: escolha <b>Tela inteira</b> e deixe esta página aparecendo. É ele que mostra se o vídeo saiu da placa de vídeo ou do processador.</p>"
+                        + `<button id="btnTelaFinal" class="big" type="button">${TELA_LABEL}</button>`;
+                    $("btnTelaFinal").addEventListener("click", () => onButton("tela", false));
+                } else if (!stop) {
+                    f.className = "notice ok";
+                    f.innerHTML = "<strong>Pronto!</strong><p>Coloque a versão do driver logo abaixo (se achar), clique em <b>Copiar resultado</b> e cole na conversa do Discord com quem te mandou esta página.</p>"
+                        + (sourceName === "tela" && !state.runs.anim?.results.length ? "<p>Se ainda não fez, faça também o <b>passo 1</b> (botão lá em cima).</p>" : "");
+                } else if (stop.kind === "TRAVOU" || stop.kind === "PRESO") {
+                    f.className = "notice bad";
+                    const what = stop.kind === "TRAVOU" ? "travou"
+                        : stop.verdict === "SEM_CAPTURA" ? "ficou sem imagem para testar (a página ficou escondida?)"
+                            : "não gerou imagem";
+                    f.innerHTML = `<strong>O teste ${stop.n} ${what}: parei aqui para não travar o navegador.</strong>`
+                        + "<p>Isso já é a resposta que a gente precisava. Faça assim:</p>"
+                        + `<p>1. Clique em <b>Copiar resultado</b> e mande no Discord.<br>2. ${closeHow}<br>3. ${next}</p>`;
+                } else if (stop.kind === "SEM_CONEXAO") {
+                    f.className = "notice warn";
+                    f.innerHTML = "<strong>A conexão de teste não abriu.</strong><p>Isso não é a placa de vídeo: o navegador não deixou a página conversar com ela mesma. Copie o resultado e mande assim mesmo. Para tentar de novo, feche o navegador e abra esta página de novo.</p>";
+                } else {
+                    f.className = "notice warn";
+                    f.innerHTML = `<strong>O compartilhamento da tela foi encerrado no teste ${stop.n}.</strong><p>Copie o resultado e mande, ou clique em continuar para compartilhar de novo.</p>`;
+                }
+                f.scrollIntoView({ behavior: "smooth", block: "start" });
+            }
+
+            // ------------------------------------------------------------------ inicio
+
+            function checkBrowser() {
+                const missing = [];
+                if (typeof RTCPeerConnection === "undefined") missing.push("RTCPeerConnection");
+                else if (!("setCodecPreferences" in RTCRtpTransceiver.prototype)) missing.push("setCodecPreferences");
+                if (!HTMLCanvasElement.prototype.captureStream) missing.push("captureStream");
+                if (missing.length) {
+                    showNotice("bad", "Este navegador não serve para o teste", `<p>Abra esta página no Chrome ou no Edge. (Falta: ${escapeHtml(missing.join(", "))})</p>`);
+                    $("btnAnim").disabled = true;
+                    $("btnTela").disabled = true;
+                    return false;
+                }
+                const chromium = /Chrome\/|Edg\//.test(navigator.userAgent) || (navigator.userAgentData?.brands || []).some(b => /chromium/i.test(b.brand));
+                if (!chromium || /OPR\/|Firefox\//.test(navigator.userAgent)) {
+                    showNotice("warn", "Use o Chrome ou o Edge", "<p>O Discord usa o mesmo motor do Chrome e do Edge. Em outro navegador o resultado não vale para o Telinha.</p>");
+                }
+                if (!navigator.mediaDevices?.getDisplayMedia) {
+                    $("btnTela").hidden = true;
+                    $("telaHint").hidden = true;
+                }
+                return true;
+            }
+
+            function onButton(name, fresh) {
+                if (busy || leftAlone.length) return;
+                const btn = $(name === "anim" ? "btnAnim" : "btnTela");
+                startRun(name, fresh || btn.dataset.resume !== "1");
+            }
+
+            $("btnAnim").addEventListener("click", () => onButton("anim", false));
+            $("btnTela").addEventListener("click", () => onButton("tela", false));
+            $("btnAnimRestart").addEventListener("click", () => onButton("anim", true));
+            $("btnTelaRestart").addEventListener("click", () => onButton("tela", true));
+            $("btnCopy").addEventListener("click", () => { copyResult(); });
+            $("driver").addEventListener("input", e => {
+                state.driver = e.target.value.trim().slice(0, 120);
+                save();
+            });
+
+            (async () => {
+                // nada roda antes de o estado guardado ser lido (o clique espera)
+                busy = true;
+                draw();
+                const ok = checkBrowser();
+                await loadState();
+                busy = false;
+                $("driver").value = state.driver || "";
+                const interrupted = recoverInterrupted();
+                if (interrupted.length) await save();
+                render();
+                if (!ok) {
+                    $("btnAnim").disabled = true;
+                    $("btnTela").disabled = true;
+                    return;
+                }
+                const noStorage = !storage.idb
+                    ? "<p><b>Atenção:</b> não consigo guardar o progresso neste navegador. Se travar, me diga em qual teste parou.</p>"
+                    : "";
+                if (interrupted.length) {
+                    const it = interrupted[0];
+                    const canContinue = nextIndex(state.runs[it.source], it.source) !== null;
+                    const step2 = it.source === "anim" && step2Missing();
+                    const then = canContinue
+                        ? `clique em <b>Continuar</b>${step2 ? " e depois faça o <b>passo 2</b>" : ""}`
+                        : step2 ? "faça o <b>passo 2</b>" : "copie o resultado";
+                    showNotice("bad", `Da última vez, a página travou no teste ${it.n}`,
+                        "<p>Isso já é uma resposta útil. Clique em <b>Copiar resultado</b> (lá embaixo) e mande no Discord.</p>"
+                        + `<p>Para seguir: se você não fechou o navegador inteiro depois do travamento, feche e abra de novo antes. Depois ${then}.</p>` + noStorage);
+                } else if (Object.values(state.runs).some(r => r && r.results.length)) {
+                    showNotice("", "Resultados guardados", "<p>Os resultados do último teste estão lá embaixo. Dá para copiar, continuar ou começar de novo.</p>" + noStorage);
+                } else if (noStorage) {
+                    showNotice("warn", "Não consigo guardar o progresso", "<p>Se travar, me diga em qual teste parou.</p>");
+                }
+                collectEnv();
+            })();
+        })();
+    </script>
+</body>
+
+</html>

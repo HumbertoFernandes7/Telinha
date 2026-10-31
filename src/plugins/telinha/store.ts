@@ -70,11 +70,28 @@ export interface TelinhaEvent {
 
 const MAX_EVENTS = 400;
 const events: TelinhaEvent[] = [];
+const eventListeners = new Set<(event: TelinhaEvent) => void>();
 
 /** Uso interno do nucleo (core/log.ts). A mensagem ja chega sem enderecos IP. */
 export function pushEvent(event: TelinhaEvent) {
     events.push(event);
     if (events.length > MAX_EVENTS) events.splice(0, events.length - MAX_EVENTS);
+    for (const fn of eventListeners) {
+        try {
+            fn(event);
+        } catch (e) {
+            console.error("[Telinha] listener do log falhou", e);
+        }
+    }
+}
+
+/**
+ * Uso interno do nucleo (diagnostico compartilhado e o registro em arquivo, core/diagShare.ts e core/diagLog.ts):
+ * cada evento novo, logo depois de entrar no buffer. O listener nao pode logar (seria chamado de novo).
+ */
+export function subscribeEvents(fn: (event: TelinhaEvent) => void): () => void {
+    eventListeners.add(fn);
+    return () => void eventListeners.delete(fn);
 }
 
 /** Copia dos eventos recentes (mais antigo primeiro). */
@@ -109,6 +126,7 @@ export function formatDiagnostics(): string {
         `alertas de identidade: ${(s.identityAlerts ?? []).map(a => `${a.self ? "diz ser você" : a.username}${a.kind && a.kind !== "duplicate" ? ` [${a.kind === "fake" ? "prova falsa" : "não verificada x verificada"}]` : ""} (${a.peerIds.length} conexões)`).join(", ") || "nenhum"}`,
         `bloqueados: ${(s.blocked ?? []).map(b => `${b.username} (${BLOCK_SHORT[b.reason]})`).join(", ") || "ninguém"}`,
         `assistindo: ${Object.values(s.viewing).map(v => `${v.peerId.slice(0, 6)}=${v.status}${v.passwordPrompt ? " (pedindo senha)" : v.checkingPassword ? " (conferindo senha)" : ""}${v.denied ? ` [${v.denied}]` : ""}${v.stats ? ` ${v.stats.width}x${v.stats.height}@${v.stats.fps} ${v.stats.kbps} kbps` : ""}`).join(", ") || "nada"}`,
+        ...(s.diag ? [`diagnóstico compartilhado: enviando para ${s.diag.sendingTo.join(", ") || "ninguém"}; pedido a ${s.diag.requested.length}, recebendo de ${s.diag.receivingFrom.length}`] : []),
         "",
         "eventos:",
         ...events.map(e => `${time(e.at)} ${e.level === "error" ? "ERRO " : e.level === "warn" ? "AVISO " : ""}${e.msg}`)
