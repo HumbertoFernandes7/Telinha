@@ -7,16 +7,17 @@
 // "TELINHA" pill next to a user in the voice channel member list (left sidebar). Teal, with the broadcast icon,
 // reading TELINHA: it must not be mistaken for Discord's own red "AO VIVO" tag (both can show at once if a friend
 // also uses Go Live), and Discord already uses blurple for its app/bot tags.
+// A friend's tag watches inside Discord, on the call screen (callView/watchInCall.ts), like the tile's "Assistir".
 
 import ErrorBoundary from "@components/ErrorBoundary";
 import { useTelinhaState } from "@plugins/telinha/store";
 import { Tooltip } from "@webpack/common";
 import type { MouseEvent } from "react";
 
+import { watchInCall } from "./callView/watchInCall";
 import { accessBadge, cl, currentUserId, watchersLabel } from "./common";
 import { BroadcastIcon } from "./icons";
 import { identityHint } from "./IdentityUI";
-import { openViewer } from "./viewerWindows";
 
 // #region Diagnostics: is the voice row patch running, and did we ever draw a tag?
 
@@ -66,7 +67,14 @@ function Pill({ tooltip, onClick }: { tooltip: string; onClick?(): void; }) {
                         e.stopPropagation();
                         e.preventDefault();
                         props.onClick();
+                        // the 2nd click of a double click is the same gesture: one action only
+                        if (e.detail > 1) return;
                         onClick?.();
+                    }}
+                    onDoubleClick={(e: MouseEvent) => {
+                        // nor Discord's own double click on the row
+                        e.stopPropagation();
+                        e.preventDefault();
                     }}
                     onKeyDown={e => {
                         if (onClick && (e.key === "Enter" || e.key === " ")) {
@@ -108,8 +116,8 @@ function VoiceUserTagInner({ userId, collapsed }: { userId: string; collapsed?: 
     const what = `Transmitindo pelo Telinha${hint ? ` (${hint})` : ""}${badge ? ` · ${badge}` : ""}`;
     return (
         <Pill
-            tooltip={state.viewing[peer.peerId] ? `${what} — clique para abrir a janela` : `${what} — clique para assistir`}
-            onClick={() => openViewer(peer.peerId)}
+            tooltip={state.viewing[peer.peerId] ? `${what} — clique para ver na tela da call` : `${what} — clique para assistir aqui no Discord, na tela da call`}
+            onClick={() => watchInCall(peer.peerId)}
         />
     );
 }

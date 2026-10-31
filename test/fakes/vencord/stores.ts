@@ -150,6 +150,12 @@ class FakeSelectedChannelStore extends FakeStore {
         return this.channelId;
     }
 
+    /** Test helper: the channel shown in Discord's main view (what ChannelRouter.transitionToChannel changes). */
+    setChannel(id: string | null) {
+        this.channelId = id;
+        this.emitChange();
+    }
+
     /**
      * Test helper: joins (or leaves, with null) a voice channel. Also registers the channel in ChannelStore when
      * `guildId` is given. Emits a store change but does NOT dispatch VOICE_CHANNEL_SELECT: use
@@ -321,6 +327,64 @@ export const PopoutActions = {
 
 // #endregion
 
+// #region navigation and the call screen
+
+/** ChannelRouter.transitionToChannel: records the channel and shows it (SelectedChannelStore.getChannelId()), as Discord does. */
+export const ChannelRouter = {
+    transitions: [] as string[],
+    transitionToChannel(channelId: string) {
+        ChannelRouter.transitions.push(channelId);
+        SelectedChannelStore.setChannel(channelId);
+    },
+    transitionToThread(_channel: unknown) { },
+    reset() {
+        ChannelRouter.transitions.length = 0;
+    }
+};
+
+/** NavigationRouter.transitionTo: records the path (no routing: nothing in the fake reads it). */
+export const NavigationRouter = {
+    paths: [] as string[],
+    transitionTo(path: string) {
+        NavigationRouter.paths.push(path);
+    },
+    transitionToGuild(guildId: string) {
+        NavigationRouter.paths.push(`/channels/${guildId}`);
+    },
+    back() { },
+    forward() { },
+    reset() {
+        NavigationRouter.paths.length = 0;
+    }
+};
+
+/**
+ * ChannelRTCStore: the focused (selected) tile of each call. Like Discord's store, it handles the
+ * CHANNEL_RTC_SELECT_PARTICIPANT action ({ channelId, id }, id null = none) dispatched through the fake FluxDispatcher.
+ */
+class FakeChannelRTCStore extends FakeStore {
+    readonly selected = new Map<string, string>();
+
+    getSelectedParticipantId(channelId: string): string | null {
+        return this.selected.get(channelId) ?? null;
+    }
+
+    /** Test helper (and the store's handler of CHANNEL_RTC_SELECT_PARTICIPANT): focus `id`'s tile in `channelId`. */
+    selectParticipant(channelId: string, id: string | null) {
+        if (id) this.selected.set(channelId, id);
+        else this.selected.delete(channelId);
+        this.emitChange();
+    }
+
+    reset() {
+        this.selected.clear();
+    }
+}
+
+export const ChannelRTCStore = new FakeChannelRTCStore();
+
+// #endregion
+
 // #region FluxDispatcher
 
 export interface FluxAction {
@@ -345,9 +409,10 @@ class FakeFluxDispatcher {
         this.subs.get(type)?.delete(fn);
     }
 
-    /** Calls the subscribers of action.type synchronously (like Discord's dispatcher). */
+    /** Calls the subscribers of action.type synchronously (like Discord's dispatcher), after the fake stores' handlers. */
     dispatch(action: FluxAction): Promise<void> {
         this.dispatched.push(action);
+        if (action.type === "CHANNEL_RTC_SELECT_PARTICIPANT") ChannelRTCStore.selectParticipant(String(action.channelId), (action.id as string | null) ?? null);
         for (const fn of [...(this.subs.get(action.type) ?? [])]) fn(action);
         return Promise.resolve();
     }
@@ -378,5 +443,8 @@ export function resetStores() {
     RelationshipStore.reset();
     PopoutWindowStore.reset();
     PopoutActions.reset();
+    ChannelRouter.reset();
+    NavigationRouter.reset();
+    ChannelRTCStore.reset();
     FluxDispatcher.reset();
 }

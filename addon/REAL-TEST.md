@@ -175,7 +175,8 @@ CSP (optional): `const w = new WebSocket("wss://nos.lol"); setTimeout(() => w.cl
 ## 7. Functional test (two PCs, as before)
 
 Both PCs need Telinha (the friend can keep the fork build). In the same voice channel: stream a window with audio, then
-the whole screen with audio; the other side clicks the TELINHA tag and also watches inside the call view. Afterwards
+the whole screen with audio; the other side clicks the TELINHA tag (Discord goes to the call view with the friend's tile
+focused and the stream plays in it, no separate window) and also tries the tile's own "Assistir". Afterwards
 "Copiar diagnóstico" on both sides if anything looked wrong.
 
 ## 8. Restart / update survival (quick)

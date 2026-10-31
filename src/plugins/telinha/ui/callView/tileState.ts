@@ -13,15 +13,19 @@
 // - Audio: com o mesmo stream em varias tiles (ex.: call no pop-out do Discord e na janela principal), so a primeira
 //   tile montada toca o som; janela do visualizador aberta = o som fica so na janela.
 // - O volume por usuario do Discord nao fica aqui: e um so para a tile e para a janela do visualizador (ui/volumes.ts).
+// - Etiqueta TELINHA da lista de voz (watchInCall.ts): assiste na tile como o "Assistir"; se nenhuma tile daquele amigo
+//   montar logo (expectTile), a sessao vai para o painel flutuante dentro do Discord.
 
 import { unwatch, watch } from "@plugins/telinha/actions";
 import { getState, subscribe as subscribeState } from "@plugins/telinha/store";
 import type { PeerId } from "@plugins/telinha/types";
 import { logger, runAction } from "@plugins/telinha/ui/common";
-import { closeViewer, isViewerOpen } from "@plugins/telinha/ui/viewerWindows";
+import { closeViewer, isViewerOpen, openViewer } from "@plugins/telinha/ui/viewerWindows";
 import { React, showToast } from "@webpack/common";
 
 const UNMOUNT_GRACE_MS = 4000;
+/** Quanto a etiqueta espera a tile do amigo aparecer na tela da call antes de cair no painel flutuante */
+export const NO_TILE_FALLBACK_MS = 3000;
 
 interface Owned {
     /** a sessao ja apareceu no estado (watch publica num microtask) */
@@ -31,6 +35,7 @@ interface Owned {
 const tileOwned = new Map<PeerId, Owned>();
 const mounts = new Map<PeerId, symbol[]>();
 const graceTimers = new Map<PeerId, ReturnType<typeof setTimeout>>();
+const noTileTimers = new Map<PeerId, ReturnType<typeof setTimeout>>();
 
 let version = 0;
 const listeners = new Set<() => void>();
@@ -104,6 +109,23 @@ export function releaseToWindow(peerId: PeerId) {
     if (tileOwned.delete(peerId)) emit();
 }
 
+/**
+ * A etiqueta da lista de voz acabou de abrir a tela da call para assistir na tile desse amigo. Se nenhuma tile dele
+ * montar em NO_TILE_FALLBACK_MS (o patch da tile nao aplicou, o Discord esconde quem esta sem camera, a tela da call
+ * nao abriu...), a sessao passa para o painel flutuante dentro do Discord. Uma tile que monta antes cancela; sem
+ * sessao da tile (parou, falhou ao pedir, foi para uma janela) nao ha o que mover.
+ */
+export function expectTile(peerId: PeerId) {
+    if (mounts.has(peerId) || noTileTimers.has(peerId)) return;
+    noTileTimers.set(peerId, setTimeout(() => {
+        noTileTimers.delete(peerId);
+        if (mounts.has(peerId) || !tileOwned.has(peerId) || isViewerOpen(peerId)) return;
+        logger.warn(`Nenhuma tile de ${peerId} apareceu na tela da call em ${NO_TILE_FALLBACK_MS / 1000} s: usando o painel flutuante`);
+        releaseToWindow(peerId);
+        openViewer(peerId, { inApp: true });
+    }, NO_TILE_FALLBACK_MS));
+}
+
 export function registerTile(peerId: PeerId): symbol {
     ensureSubscribed();
     const token = Symbol(peerId);
@@ -111,10 +133,12 @@ export function registerTile(peerId: PeerId): symbol {
     list.push(token);
     mounts.set(peerId, list);
 
-    const timer = graceTimers.get(peerId);
-    if (timer) {
-        clearTimeout(timer);
-        graceTimers.delete(peerId);
+    for (const timers of [graceTimers, noTileTimers]) {
+        const timer = timers.get(peerId);
+        if (timer) {
+            clearTimeout(timer);
+            timers.delete(peerId);
+        }
     }
     emit();
     return token;
@@ -156,8 +180,9 @@ export function setLocalPreviewHidden(hidden: boolean) {
 
 /** Plugin parado: esquece tudo (stopSession ja encerrou as sessoes) */
 export function resetTileState() {
-    for (const t of graceTimers.values()) clearTimeout(t);
+    for (const t of [...graceTimers.values(), ...noTileTimers.values()]) clearTimeout(t);
     graceTimers.clear();
+    noTileTimers.clear();
     tileOwned.clear();
     unsubscribeState?.();
     unsubscribeState = null;
