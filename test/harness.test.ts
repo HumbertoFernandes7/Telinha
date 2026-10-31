@@ -84,7 +84,7 @@ describe("harness: the core through the fakes", () => {
         const pc = room.peers.get("peerA") as unknown as FakeRTCPeerConnection;
         const sender = await eventually(() => pc.getSenders().find(s => s.setCalls.length));
         assert.equal(sender.encoding.maxBitrate, 20_000_000);
-        assert.equal(sender.params.degradationPreference, "maintain-framerate");
+        assert.equal(sender.params.degradationPreference, "maintain-framerate-and-resolution");
         await eventually(() => getState().local?.viewers.includes("peerA"));
     });
 

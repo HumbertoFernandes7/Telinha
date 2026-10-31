@@ -54,7 +54,8 @@ O teste "igual ao Telinha hoje" repete o plugin:
 - `core/sdp.ts`: o mesmo perfil na frente do SDP remoto, mais `x-google-start-bitrate`/`x-google-max-bitrate`;
 - `core/streaming.ts` e `core/quality/levels.ts`: `contentHint "motion"`, `maxBitrate`, `maxFramerate`,
   `scaleResolutionDownBy` par (`evenScale`), `priority`/`networkPriority "high"` e
-  `degradationPreference "maintain-framerate"`.
+  `degradationPreference "maintain-framerate-and-resolution"` (senão `"maintain-framerate"`), e o
+  `x-google-start-bitrate` fixo em 4000.
 
 O perfil pedido entra no SDP dos dois lados (setCodecPreferences + munging) e é conferido no
 `getStats` (`codecId` → `sdpFmtpLine`, a coluna `neg` do resultado). Cada teste lê o `getStats` uma vez por

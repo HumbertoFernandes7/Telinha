@@ -16,7 +16,8 @@
     O teste "igual ao Telinha hoje" repete o plugin (src/plugins/telinha/core): codec.ts (setCodecPreferences com o
     perfil H.264 42001f na frente), sdp.ts (o mesmo perfil na frente do SDP remoto + x-google-start/max-bitrate),
     streaming.ts e quality/levels.ts (contentHint "motion", maxBitrate, maxFramerate, scaleResolutionDownBy par,
-    priority/networkPriority "high", degradationPreference "maintain-framerate"). Mantenha em sincronia.
+    priority/networkPriority "high", degradationPreference "maintain-framerate-and-resolution", senao
+    "maintain-framerate", senao nenhuma; x-google-start-bitrate fixo em 4000). Mantenha em sincronia.
 -->
 <html lang="pt-BR">
 
@@ -579,13 +580,13 @@
             /**
              * Degraus do Telinha (streaming.ts → QUALITY, quality/levels.ts → LEVELS e sendPlanFor): maxKbps vai no
              * encodings[0].maxBitrate; startKbps e xMaxKbps no x-google-start-bitrate/x-google-max-bitrate do SDP remoto.
-             * 720p30 e o degrau da qualidade automatica abaixo de 1080p60: o x-google-max fica no teto (20000) e o
-             * start = min(10000, 6000 * 0,5).
+             * 720p30 e o degrau da qualidade automatica abaixo de 1080p60: o x-google-max fica no teto (20000). O start e o
+             * mesmo em todos (streaming.ts → START_KBPS, desde a 0.2.10).
              */
             const LEVEL = {
-                "1080p60": { width: 1920, height: 1080, fps: 60, maxKbps: 20000, startKbps: 10000, xMaxKbps: 20000 },
-                "1080p30": { width: 1920, height: 1080, fps: 30, maxKbps: 12000, startKbps: 6000, xMaxKbps: 12000 },
-                "720p30": { width: 1280, height: 720, fps: 30, maxKbps: 6000, startKbps: 3000, xMaxKbps: 20000 }
+                "1080p60": { width: 1920, height: 1080, fps: 60, maxKbps: 20000, startKbps: 4000, xMaxKbps: 20000 },
+                "1080p30": { width: 1920, height: 1080, fps: 30, maxKbps: 12000, startKbps: 4000, xMaxKbps: 12000 },
+                "720p30": { width: 1280, height: 720, fps: 30, maxKbps: 6000, startKbps: 4000, xMaxKbps: 20000 }
             };
 
             /**
@@ -1251,21 +1252,24 @@
             async function applySenderParams(sender, test, capture) {
                 const lv = LEVEL[test.level];
                 const scale = capture.height > lv.height * 1.02 ? evenScale(capture.width, capture.height, lv.height) : 1;
-                const build = withDegradation => {
+                const build = preference => {
                     const p = sender.getParameters();
                     if (!p.encodings || !p.encodings.length) p.encodings = [{}];
                     Object.assign(p.encodings[0], { maxBitrate: lv.maxKbps * 1000, maxFramerate: lv.fps, scaleResolutionDownBy: scale, priority: "high", networkPriority: "high" });
-                    if (withDegradation) p.degradationPreference = "maintain-framerate";
+                    if (preference) p.degradationPreference = preference;
                     return p;
                 };
-                try {
-                    await T(sender.setParameters(build(true)), "setParameters");
-                    return { scale, degradation: true };
-                } catch (e) {
-                    if (e instanceof Timeout) throw e;
-                    await T(sender.setParameters(build(false)), "setParameters");
-                    return { scale, degradation: false };
+                // streaming.ts → DEGRADATION_PREFERENCES: a primeira que o sender aceitar; a ultima tentativa vai sem nenhuma
+                for (const preference of ["maintain-framerate-and-resolution", "maintain-framerate"]) {
+                    try {
+                        await T(sender.setParameters(build(preference)), "setParameters");
+                        return { scale, degradation: true };
+                    } catch (e) {
+                        if (e instanceof Timeout) throw e;
+                    }
                 }
+                await T(sender.setParameters(build(null)), "setParameters");
+                return { scale, degradation: false };
             }
 
             /**
