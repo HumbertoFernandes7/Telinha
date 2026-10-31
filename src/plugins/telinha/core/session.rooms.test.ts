@@ -111,7 +111,7 @@ describe("sessao: sala do canal de voz", () => {
             assert.equal(rt.certFingerprint, cert.fingerprint);
             assert.equal(room.config.rtcPolyfill, getPeerConnectionClass());
             assert.equal(room.callbacks.handshakeTimeoutMs, 15_000);
-            assert.deepEqual([...room.actions.keys()].sort(), ["identity", "presence", "watch"]);
+            assert.deepEqual([...room.actions.keys()].sort(), ["codec", "identity", "presence", "watch"]);
             assert.equal(typeof room.onPeerJoin, "function");
             assert.equal(typeof room.onPeerStream, "function");
             await eventually(() => getState().inRoom && getState().channelId === VOICE_CHANNEL_ID);

@@ -9,9 +9,9 @@
 // presenca; despacho para streaming/viewing.
 
 import {
-    ACTION_IDENTITY, ACTION_PRESENCE, ACTION_WATCH, APP_ID, deriveRoomId, type HelloMessage, ICE_SERVERS, type IdentityMessage, isIdentityMessage,
-    isPresenceMessage, parseHello, parseWatchReply, parseWatchRequest, type PresenceMessage, PROTOCOL_VERSION, RELAY_URLS, sanitizePresence,
-    type WatchActionMessage
+    ACTION_CODEC, ACTION_IDENTITY, ACTION_PRESENCE, ACTION_WATCH, APP_ID, type CodecRequestMessage, deriveRoomId, type HelloMessage, ICE_SERVERS,
+    type IdentityMessage, isIdentityMessage, isPresenceMessage, parseCodecRequest, parseHello, parseWatchReply, parseWatchRequest, type PresenceMessage,
+    PROTOCOL_VERSION, RELAY_URLS, sanitizePresence, type WatchActionMessage
 } from "@plugins/telinha/protocol";
 import { settings } from "@plugins/telinha/settings";
 import { resetState } from "@plugins/telinha/store";
@@ -257,8 +257,10 @@ function joinNow(roomId: string, reason: string, identity: PreparedIdentity) {
     rt.room = room;
     rt.presenceAction = room.makeAction<PresenceMessage>(ACTION_PRESENCE);
     rt.watchAction = room.makeAction<WatchActionMessage>(ACTION_WATCH);
+    rt.codecAction = room.makeAction<CodecRequestMessage>(ACTION_CODEC);
     rt.presenceAction.onMessage = onPresence;
     rt.watchAction.onMessage = onWatch;
+    rt.codecAction.onMessage = onCodec;
     if (isIdentityConfigured()) {
         rt.identityAction = room.makeAction<IdentityMessage>(ACTION_IDENTITY);
         rt.identityAction.onMessage = onIdentity;
@@ -280,7 +282,7 @@ function leaveRoom(reason: string) {
     streaming.onRoomClosing(reason);
     viewing.clearAll();
     rt.room = null;
-    rt.presenceAction = rt.watchAction = rt.identityAction = null;
+    rt.presenceAction = rt.watchAction = rt.identityAction = rt.codecAction = null;
     rt.certFingerprint = null;
     rt.peers.clear();
     helloByPeer.clear();
@@ -451,6 +453,19 @@ function onWatch(data: WatchActionMessage, { peerId }: { peerId: string; }) {
         if (reply) viewing.onWatchReply(peerId, reply);
     } catch (e) {
         logThrottled(`watch-msg:${peerId}`, "warn", `Mensagem "watch" de ${peerLabel(peerId)} ignorada: ${errorText(e)}`);
+    }
+}
+
+/** Acao "codec" (protocol.ts, passo 8): quem assiste nao decodificou nenhum quadro em H.264 e pede VP9. */
+function onCodec(data: CodecRequestMessage, { peerId }: { peerId: string; }) {
+    // dado do peer e hostil: so o campo conhecido, e nada lanca para fora do handler do Trystero
+    try {
+        const entry = rt.peers.get(peerId);
+        if (!entry?.hello || entry.incompatible || isFake(entry)) return;
+        const request = parseCodecRequest(data);
+        if (request) streaming.onCodecRequest(peerId, request);
+    } catch (e) {
+        logThrottled(`codec-msg:${peerId}`, "warn", `Mensagem "codec" de ${peerLabel(peerId)} ignorada: ${errorText(e)}`);
     }
 }
 

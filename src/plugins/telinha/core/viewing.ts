@@ -51,6 +51,8 @@ function clearPasswordState(v: ViewerEntry) {
 }
 const FIRST_FRAME_TIMEOUT_MS = 45_000;
 const FIRST_FRAME_POLL_MS = 150;
+/** Stream em H.264 sem nenhum quadro decodificado ate aqui: pede VP9 ao transmissor (askForVp9). */
+export const NO_FRAME_HINT_MS = 10_000;
 
 function sendWatch(peerId: PeerId, message: WatchMessage) {
     return rt.watchAction?.send(message, { target: peerId }) ?? Promise.resolve();
@@ -316,6 +318,26 @@ function onFirstFrame(v: ViewerEntry, s: InboundSample) {
     publish();
 }
 
+/**
+ * O stream chegou ha NO_FRAME_HINT_MS, o video vem em H.264 (codec do inbound-rtp) e nenhum quadro foi decodificado:
+ * pede ao transmissor para mandar VP9 so para nos (acao "codec", protocol.ts passo 8). Visto em 31/10: o H.264 de um PC
+ * com placa AMD nunca virou imagem do outro lado, e em VP9 o 1o quadro chegou em menos de 1 s. Um pedido por
+ * "assistir" (v.codecRequested). Quem decide e o transmissor (so com o codec dele no automatico); versoes sem a acao a
+ * ignoram. O aviso de 45 s e a espera continuam como estao. Sem codec nas estatisticas (nenhum pacote chegou), nao pede:
+ * o transmissor confere o proprio encoder (streaming.ts → checkStall).
+ */
+function askForVp9(v: ViewerEntry, s: InboundSample, streamAt: number) {
+    if (v.codecRequested || performance.now() - streamAt < NO_FRAME_HINT_MS || !s.codec || !/^video\/h264$/i.test(s.codec)) return;
+    const action = rt.codecAction;
+    if (!action) return;
+    v.codecRequested = true;
+    const received = s.log.framesReceived != null ? `${s.log.framesReceived} quadros recebidos` : `${Math.round(s.bytes / 1000)} kB recebidos`;
+    log.warn(`Assistir ${peerLabel(v.peerId)}: nenhum quadro do vídeo em H.264 decodificado em ${Math.round((performance.now() - streamAt) / 1000)} s `
+        + `(${received}${s.decoder ? `, decodificador ${s.decoder}` : ""}); pedindo ao transmissor para mandar VP9`);
+    action.send({ codec: "vp9" }, { target: v.peerId })
+        .catch(e => logThrottled(`codec-send:${v.peerId}`, "warn", `Falha ao pedir VP9 a ${peerLabel(v.peerId)}: ${errorText(e)}`));
+}
+
 function attachStream(v: ViewerEntry, stream: MediaStream) {
     runCleanup(v.streamCleanup);
     v.stream = stream;
@@ -367,10 +389,13 @@ function attachStream(v: ViewerEntry, stream: MediaStream) {
         busy = true;
         try {
             const s = await sample(v);
-            if (s && s.framesDecoded > 0 && v.stream === stream && v.firstFrameAt == null) {
+            if (!s || v.stream !== stream || v.firstFrameAt != null) return;
+            if (s.framesDecoded > 0) {
                 clearInterval(poll);
                 onFirstFrame(v, s);
+                return;
             }
+            askForVp9(v, s, startedAt);
         } catch { } finally {
             busy = false;
         }
