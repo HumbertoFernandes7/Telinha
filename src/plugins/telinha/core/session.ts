@@ -456,7 +456,7 @@ function onWatch(data: WatchActionMessage, { peerId }: { peerId: string; }) {
     }
 }
 
-/** Acao "codec" (protocol.ts, passo 8): quem assiste nao decodificou nenhum quadro em H.264 e pede VP9. */
+/** Acao "codec" (protocol.ts, passo 8): quem assiste nao decodificou nenhum quadro (video em H.264, ou nenhum pacote) e pede VP9. */
 function onCodec(data: CodecRequestMessage, { peerId }: { peerId: string; }) {
     // dado do peer e hostil: so o campo conhecido, e nada lanca para fora do handler do Trystero
     try {
