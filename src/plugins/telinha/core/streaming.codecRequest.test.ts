@@ -7,7 +7,9 @@
 // Testes do pedido de codec do espectador, do lado de quem transmite (acao "codec", protocol.ts passo 8 →
 // core/session.ts → core/streaming.ts → onCodecRequest): quem assiste recebeu o H.264 e nao decodificou nenhum quadro, e
 // pede VP9. Com o codec no automatico, so o envio para ele vira VP9 (sem reconectar) e isso NAO conta como queda do
-// H.264 deste PC (pode ser o decodificador dele); fixado em H.264, so loga; quem nao esta assistindo e ignorado.
+// H.264 deste PC (pode ser o decodificador dele); fixado em H.264, so loga; quem nao esta assistindo e ignorado; com a
+// captura parada (janela minimizada) ou sem contador de quadros, ignorado (o VP9 so pesaria a CPU). O contador da
+// captura vem do media-source das estatisticas do envio, lidas pelo tick a cada segundo: os pedidos esperam 2 leituras.
 // Do lado de quem assiste (quando pedir), ver viewing.codecRequest.test.ts.
 // Rodar:  pnpm test:file src/plugins/telinha/core/streaming.codecRequest.test.ts  (todos: pnpm test:unit)
 
@@ -30,22 +32,46 @@ const NVENC = "MediaFoundationVideoEncodeAccelerator (NVIDIA H.264 Encoder MFT)"
 let rig: StreamingRig;
 let seq = 0;
 
+/** A captura vista no media-source do envio: quadros por segundo (0 = parada, janela minimizada; null = sem contador). */
+interface Capture {
+    fps: number | null;
+}
+
 interface TestViewer {
     peerId: string;
     label: string;
     sender: FakeRTCRtpSender;
+    capture: Capture;
+}
+
+/**
+ * Estatisticas de um envio que ja sai do PC (5 MB enviados: o checkStall nao age), com o contador de quadros da captura
+ * seguindo o relogio (`capture.fps`, mudavel no meio).
+ */
+function senderStats(hw: boolean, capture: Capture) {
+    let frames = 0;
+    let at = rig.clock.now();
+    return () => {
+        const now = rig.clock.now();
+        frames += Math.round((now - at) / 1000 * (capture.fps ?? 0));
+        at = now;
+        return videoSenderStats({
+            mimeType: hw ? "video/H264" : "video/VP9", encoderImplementation: hw ? NVENC : "libvpx", powerEfficientEncoder: hw, framesEncoded: 600,
+            bytesSent: 5_000_000, sourceFrames: capture.fps == null ? null : frames, sourceFps: capture.fps
+        });
+    };
 }
 
 /** Um espectador novo que pede para assistir; `hw`: decodifica H.264 por hardware (presenca). Os quadros saem daqui. */
-async function watcher(name: string, hw = true): Promise<TestViewer> {
+async function watcher(name: string, hw = true, capture: Capture = { fps: 60 }): Promise<TestViewer> {
     seq++;
     const peerId = `c${name}`;
     const pc = await connectViewer(rig, peerId, String(820_000_000_000_000_000n + BigInt(seq)), name, { h264HwDecode: hw });
     rig.room.receive("watch", { op: "start" }, peerId);
     await turns();
     const sender = videoSenderOf(pc)!;
-    sender.stats = videoSenderStats({ mimeType: hw ? "video/H264" : "video/VP9", encoderImplementation: hw ? NVENC : "libvpx", powerEfficientEncoder: hw, framesEncoded: 600 });
-    return { peerId, label: `${name} (${peerId.slice(0, 6)})`, sender };
+    sender.stats = senderStats(hw, capture);
+    return { peerId, label: `${name} (${peerId.slice(0, 6)})`, sender, capture };
 }
 
 /** O espectador pede VP9 (o que viewing.ts → askForVp9 manda). */
@@ -91,7 +117,7 @@ describe("pedido de VP9 de quem assiste (acao \"codec\")", () => {
         const a = await watcher("pediu");
         const b = await watcher("vizinho");
         const c = await watcher("outro");
-        await seconds(rig, 1);
+        await seconds(rig, 2); // 2 leituras: a captura andou
         const since = logMark();
         await asks(a);
         assert.equal(sentCodec(a.sender), "video/VP9");
@@ -118,6 +144,27 @@ describe("pedido de VP9 de quem assiste (acao \"codec\")", () => {
         assert.deepEqual(about(again(), a), []);
     });
 
+    test("captura parada (janela minimizada) ou sem contador de quadros: ignorado com uma linha, continua em H.264; com a captura de volta, troca", async () => {
+        const idle = await watcher("parada", true, { fps: 0 });
+        const blind = await watcher("semcontador", true, { fps: null });
+        await seconds(rig, 3);
+        const since = logMark();
+        await asks(idle);
+        await asks(blind);
+        for (const v of [idle, blind]) {
+            assert.equal(v.sender.encoding.codec, undefined, v.label);
+            assert.equal(sendPlanFor(v.peerId)?.codec, "h264", v.label);
+            assert.deepEqual(about(since(), v), [`Pedido de VP9 de ${v.label} ignorado: a captura não está entregando quadros (janela minimizada?)`], v.label);
+        }
+
+        // o pedido ignorado nao fica marcado: com a captura de volta, um pedido novo (passado o intervalo minimo) troca como hoje
+        idle.capture.fps = 60;
+        await seconds(rig, 5);
+        await asks(idle);
+        assert.equal(sentCodec(idle.sender), "video/VP9");
+        assert.equal(getLocalCaps().h264HwEncode, true, "nenhuma queda contada");
+    });
+
     test("quem nao esta assistindo, ou ja recebe VP9: ignorado (um aviso no maximo por minuto)", async () => {
         const vp9 = await watcher("vp9", false);
         assert.equal(sendPlanFor(vp9.peerId)?.codec, "vp9");
@@ -139,6 +186,7 @@ describe("pedido de VP9 de quem assiste (acao \"codec\")", () => {
 
     test("pedido malformado: ignorado sem log; da mesma conexao, um pedido a cada 5 s no maximo", async () => {
         const v = await watcher("spam");
+        await seconds(rig, 2);
         const since = logMark();
         for (const bad of [null, "vp9", { codec: "av1" }, { codec: 9 }]) await asks(v, bad);
         assert.equal(v.sender.encoding.codec, undefined);
@@ -154,6 +202,7 @@ describe("pedido de VP9 de quem assiste (acao \"codec\")", () => {
         rig.room.receive("watch", { op: "start" }, peerId);
         await turns();
         const sender = videoSenderOf(pc)!;
+        sender.stats = senderStats(true, { fps: 60 });
         await asks({ peerId });
         assert.equal(sender.encoding.codec, undefined, "a menos de 5 s do anterior: ignorado");
         await seconds(rig, 5);
@@ -166,6 +215,7 @@ describe("pedido de VP9 de quem assiste (acao \"codec\")", () => {
         try {
             const v = await watcher("fixado");
             assert.equal(sendPlanFor(v.peerId)?.codec, "h264");
+            await seconds(rig, 2);
             const since = logMark();
             await asks(v);
             assert.equal(v.sender.encoding.codec, undefined, "sem troca");

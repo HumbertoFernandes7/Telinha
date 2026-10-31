@@ -83,6 +83,8 @@ interface ViewerSend {
     stall?: StallWatch;
     /** o espectador ja pediu outro codec (onCodecRequest): um pedido por envio */
     codecRequested?: boolean;
+    /** a captura vista nas estatisticas deste envio (tick → noteCapture): o contador e quando ele andou por ultimo */
+    capture?: { frames: number; movedAt: number | null; };
 }
 
 /** Janela da checagem do H.264 que nao sai (checkStall). Contadores de quadros da captura (capturedFrames). */
@@ -1058,6 +1060,18 @@ function capturedFrames(local: LocalCapture, source: any): number | null {
     return typeof frames === "number" && Number.isFinite(frames) ? frames : null;
 }
 
+/** Guarda o contador de quadros da captura (capturedFrames) visto neste envio e quando ele andou por ultimo. */
+function noteCapture(send: ViewerSend, frames: number | null) {
+    const prev = send.capture;
+    send.capture = frames == null ? undefined : { frames, movedAt: prev && frames > prev.frames ? performance.now() : prev?.movedAt ?? null };
+}
+
+/** A captura entregou quadros novos nos ultimos SOURCE_IDLE_MS (o criterio do checkStall). Sem contador, nao. */
+function captureLive(send: ViewerSend) {
+    const movedAt = send.capture?.movedAt;
+    return movedAt != null && performance.now() - movedAt < SOURCE_IDLE_MS;
+}
+
 /** Um contador das estatisticas, ou null se nao veio (ou nao e numero). */
 const counter = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : null;
 
@@ -1182,10 +1196,12 @@ async function switchSendCodec(peerId: PeerId, local: LocalCapture, send: Viewer
 
 /**
  * Acao "codec" (protocol.ts, passo 8): quem assiste recebeu o stream e nao decodificou nenhum quadro, com o video em H.264
- * ou sem nenhum pacote de video (viewing.ts → askForVp9). Atendido so com o codec no automatico, para quem esta recebendo a transmissao em H.264, uma vez por envio:
- * troca so o envio para ele (switchSendCodec, como uma queda), mas NAO conta como queda do H.264 deste PC
- * (noteH264Fallback): os quadros podem estar saindo e o problema ser o decodificador dele. Codec fixado em H.264: so
- * loga. Um pedido a cada CODEC_REQUEST_MIN_MS por conexao; quem nao esta recebendo a transmissao e ignorado.
+ * ou sem nenhum pacote de video (viewing.ts → askForVp9). Atendido so com o codec no automatico, para quem esta recebendo
+ * a transmissao em H.264, com a captura entregando quadros (captureLive), uma vez por envio: troca so o envio para ele
+ * (switchSendCodec, como uma queda), mas NAO conta como queda do H.264 deste PC (noteH264Fallback): os quadros podem estar
+ * saindo e o problema ser o decodificador dele. Captura parada ou sem contador: ignorado com uma linha no log. Codec
+ * fixado em H.264: so loga. Um pedido a cada CODEC_REQUEST_MIN_MS por conexao; quem nao esta recebendo a transmissao e
+ * ignorado.
  */
 export function onCodecRequest(peerId: PeerId, request: CodecRequestMessage) {
     const now = performance.now();
@@ -1202,6 +1218,13 @@ export function onCodecRequest(peerId: PeerId, request: CodecRequestMessage) {
     }
     // ja atendido, ou o envio ja nao e H.264 (ex.: trocou para VP9 por uma queda do encoder)
     if (send.codecRequested || send.decision.codec !== "h264") return;
+    // captura parada (ex.: janela minimizada desde o comeco) ou sem contador: quem assiste fica sem quadro por causa dela,
+    // nao do H.264, e o VP9 so pesaria a CPU. Nao marca codecRequested (quem assiste so pede uma vez por "assistir"; um
+    // pedido novo com a captura no ar e atendido); se o H.264 nao sair quando a captura voltar, o checkStall pega.
+    if (!captureLive(send)) {
+        log.info(`Pedido de ${wanted} de ${label} ignorado: a captura não está entregando quadros (janela minimizada?)`);
+        return;
+    }
     send.codecRequested = true;
     const why = `${label} não decodificou nenhum quadro do vídeo em H.264 e pediu ${wanted}`;
     const next = chooseCodec(rt.peers.get(peerId)?.presence?.caps, settings.store.codec as CodecSetting, { ...getLocalCaps(), h264HwEncode: false });
@@ -1304,8 +1327,11 @@ export function tick() {
                 if (s.type === "outbound-rtp" && s.kind === "video") out = s;
                 else if (s.type === "media-source" && s.kind === "video") source = s;
             });
+            if (sends.get(peerId) !== send) return;
+            const frames = capturedFrames(local, source);
+            noteCapture(send, frames);
             const codec = out?.codecId ? (report.get(out.codecId) as any)?.mimeType : undefined;
-            if (!codec || sends.get(peerId) !== send) return;
+            if (!codec) return;
             const enc: EncoderReport = {
                 mimeType: codec, implementation: out.encoderImplementation, powerEfficient: out.powerEfficientEncoder, framesEncoded: out.framesEncoded,
                 width: out.frameWidth, height: out.frameHeight, limitation: out.qualityLimitationReason
@@ -1318,7 +1344,7 @@ export function tick() {
                 else log.warn(`${msg} — esperado ${send.decision.codec.toUpperCase()}`);
             }
             checkEncoder(peerId, local, send, enc);
-            checkStall(peerId, local, send, enc, capturedFrames(local, source), { frames: counter(out.framesSent), bytes: counter(out.bytesSent) });
+            checkStall(peerId, local, send, enc, frames, { frames: counter(out.framesSent), bytes: counter(out.bytesSent) });
         }).catch(() => { });
     }
 }
