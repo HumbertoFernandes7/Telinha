@@ -223,7 +223,7 @@ pnpm check             # typecheck, lint, lint-styles, test:unit, build:addon e 
 
   e abra `http://localhost:8788`. Detalhes em [`tools/telinha-peer/README.md`](tools/telinha-peer/README.md).
 - As constantes do protocolo estão duplicadas entre o plugin e o amigo virtual; mantenha as duas em sincronia.
-- **Teste da placa de vídeo** para mandar a um amigo: [`tools/teste-placa/teste-placa.html`](tools/teste-placa/teste-placa.html), um arquivo só que abre direto do disco no Chrome ou no Edge, testa o encoder de vídeo da placa (WebCodecs e WebRTC em loopback) e gera um texto para colar de volta. Detalhes em [`tools/teste-placa/README.md`](tools/teste-placa/README.md).
+- **Teste da placa de vídeo** para mandar a um amigo: [`tools/teste-placa/teste-placa.html`](tools/teste-placa/teste-placa.html), um arquivo só que abre direto do disco no Chrome ou no Edge, testa o encoder de vídeo da placa em 2 passos (WebCodecs e WebRTC em loopback com uma animação, depois com a tela) e gera um texto para colar de volta. Detalhes em [`tools/teste-placa/README.md`](tools/teste-placa/README.md).
 
 ## Créditos e licença
 

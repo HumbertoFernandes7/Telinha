@@ -405,25 +405,25 @@
 <body>
     <main>
         <h1>Teste da placa de vídeo</h1>
-        <p class="lead">Esta página testa se a sua placa de vídeo consegue gerar o vídeo que o Telinha transmite. Leva uns 2 minutos e não envia nada pela internet.</p>
+        <p class="lead">Esta página testa se a sua placa de vídeo consegue gerar o vídeo que o Telinha transmite. São 2 passos de 1 a 2 minutos cada, e nada é enviado pela internet.</p>
 
         <section id="intro">
             <ol class="steps">
-                <li>Abra esta página no <b>Chrome</b> ou no <b>Edge</b>.</li>
-                <li>Não transmita nada no Discord enquanto o teste roda.</li>
-                <li>Clique no botão azul e deixe esta página aberta na frente até terminar.</li>
-                <li>No fim, clique em <b>Copiar resultado</b> e cole na conversa do Discord com quem te mandou esta página.</li>
+                <li>Abra esta página no <b>Chrome</b> ou no <b>Edge</b>. Não transmita nada no Discord enquanto o teste roda.</li>
+                <li><b>Passo 1:</b> clique no botão azul e deixe esta página na frente até terminar.</li>
+                <li><b>Passo 2:</b> clique em “Passo 2”. O navegador pergunta o que compartilhar: escolha <b>Tela inteira</b> e deixe esta página aparecendo.</li>
+                <li>No fim, coloque a versão do driver (se achar) e clique em <b>Copiar resultado</b>. Cole na conversa do Discord com quem te mandou esta página.</li>
             </ol>
             <div class="notice warn">
                 <strong>Se o navegador travar</strong>
-                <p>Feche o navegador. Se ele não fechar, aperte <b>Ctrl+Shift+Esc</b> (Gerenciador de Tarefas), clique no Chrome ou no Edge e em <b>Finalizar tarefa</b>. Depois abra esta página de novo: o que já foi testado fica guardado.</p>
+                <p>Se aparecer “Página sem resposta”, clique em <b>Sair das páginas</b>. Se o navegador inteiro travar, feche ele; se não fechar, aperte <b>Ctrl+Shift+Esc</b> (Gerenciador de Tarefas), clique no Chrome ou no Edge e em <b>Finalizar tarefa</b>. Depois abra esta página de novo: o que já foi testado fica guardado.</p>
             </div>
             <div id="notice" class="notice" hidden></div>
-            <button id="btnAnim" class="big" type="button">Testar minha placa de vídeo</button>
-            <div class="row-links"><button id="btnAnimRestart" class="link" type="button" hidden>Começar este teste do zero</button></div>
-            <button id="btnTela" class="second" type="button">Testar também com a minha tela (opcional)</button>
-            <div class="row-links"><button id="btnTelaRestart" class="link" type="button" hidden>Começar o teste da tela do zero</button></div>
-            <p class="hint" id="telaHint">O teste com a tela repete a parte 2 usando a sua tela de verdade: ele pede para compartilhar, escolha a <b>tela inteira</b> e deixe esta página aparecendo. Ele também mostra se o vídeo saiu da placa de vídeo ou do processador.</p>
+            <button id="btnAnim" class="big" type="button">Passo 1: testar minha placa de vídeo</button>
+            <div class="row-links"><button id="btnAnimRestart" class="link" type="button" hidden>Começar o passo 1 do zero</button></div>
+            <button id="btnTela" class="second" type="button">Passo 2: testar com a minha tela (escolha Tela inteira)</button>
+            <div class="row-links"><button id="btnTelaRestart" class="link" type="button" hidden>Começar o passo 2 do zero</button></div>
+            <p class="hint" id="telaHint">O passo 2 repete a transmissão de teste com a sua tela de verdade e mostra se o vídeo saiu da placa de vídeo ou do processador (só dá para ver isso com a tela compartilhada).</p>
         </section>
 
         <section id="live" hidden>
@@ -445,7 +445,8 @@
             <h2>Resultados</h2>
             <div id="final" class="notice" hidden></div>
             <div id="runs"></div>
-            <label class="field" for="driver">Versão do driver da placa de vídeo (opcional). Para achar: digite <b>chrome://gpu</b> (ou <b>edge://gpu</b>) na barra de endereço e procure “Driver version”. Ou abra o AMD Software / NVIDIA App.
+            <h3>Último passo</h3>
+            <label class="field" for="driver">Versão do driver da placa de vídeo (se conseguir achar). AMD: abra o <b>AMD Software</b> → engrenagem (Configurações) → <b>Sistema</b> → Versão do driver. NVIDIA: abra o <b>NVIDIA App</b> → <b>Drivers</b>. Ou digite <b>edge://gpu</b> (ou <b>chrome://gpu</b>) na barra de endereço e procure “Driver version”.
                 <input id="driver" type="text" autocomplete="off" spellcheck="false" maxlength="120">
             </label>
             <button id="btnCopy" class="big" type="button" style="margin-top:16px">Copiar resultado</button>
@@ -456,7 +457,7 @@
         <details>
             <summary>O que esta página faz?</summary>
             <p>Parte 1: pede para a placa de vídeo gerar alguns segundos de vídeo, de vários tipos, e confere se saiu alguma coisa.</p>
-            <p>Parte 2: cria uma transmissão de mentirinha dentro da própria página (uma animação, ou a sua tela, enviada de uma conexão para outra no mesmo computador; nada sai para a internet) e confere se a imagem chegou do outro lado.</p>
+            <p>Parte 2: cria uma transmissão de mentirinha dentro da própria página (uma animação no passo 1, a sua tela no passo 2, enviada de uma conexão para outra no mesmo computador; nada sai para a internet) e confere se a imagem chegou do outro lado.</p>
             <p>Se um teste travar ou não gerar imagem, a página para ali de propósito, para não travar o navegador. O que já foi testado fica guardado neste navegador.</p>
         </details>
         <noscript><p>Esta página precisa de JavaScript ligado.</p></noscript>
@@ -553,8 +554,15 @@
     <script>
         "use strict";
         (() => {
-            const VERSION = "teste-placa v2";
+            const VERSION = "teste-placa v3";
+            /** progresso: IndexedDB (cada transacao confirmada, sobrevive a matar o navegador) + localStorage de reserva */
             const STORE_KEY = "telinha-teste-placa-v1";
+            const IDB_NAME = "telinha-teste-placa";
+            const IDB_STORE = "state";
+            /** parte 2 com a aba escondida: espera ela voltar no maximo isto durante um teste (antes de um teste, sem limite) */
+            const VISIBLE_WAIT_MS = 60000;
+            /** parte 2: a aba sumiu durante a medicao: refaz a medicao no maximo tantas vezes */
+            const MAX_RESAMPLES = 3;
             /** getStats, createOffer/Answer, set*Description, setParameters, replaceTrack: sem resposta nisto = TRAVOU */
             const STEP_TIMEOUT_MS = 4000;
             /** parte 1: o Worker sem dar sinal nisto (em qualquer fase) = TRAVOU */
@@ -584,7 +592,8 @@
              * Do mais seguro ao mais arriscado. Parte 1 (wc): o WebCodecs confere o NIVEL H.264 contra o tamanho (42001f,
              * nivel 3.1, e recusado em 1080p), entao 1080p usa 42002a: o mesmo perfil Baseline do Telinha, nivel 4.2. Na
              * parte 2 (rtc) o Chromium nao passa o nivel do SDP para a placa, so o perfil. Os niveis 5.2 da parte 2 ficam
-             * por ultimo (variantes de nivel, pouco provaveis).
+             * por ultimo (variantes de nivel, pouco provaveis). No passo 1 (animacao) a parte 2 so tem os testes com
+             * `anim`: com o canvas o Chromium esconde o encoderImplementation; a lista inteira roda no passo 2 (tela).
              */
             const TESTS = [
                 { kind: "wc", id: "wc-vp9-720p30", codec: "vp09.00.10.08", level: "720p30", accel: "no-preference", sub: "controle: VP9, feito pelo processador" },
@@ -596,10 +605,10 @@
                 { kind: "wc", id: "wc-640028-1080p60-hw", codec: "avc1.640028", level: "1080p60", accel: "prefer-hardware" },
                 { kind: "wc", id: "wc-640034-1080p60-hw", codec: "avc1.640034", level: "1080p60", accel: "prefer-hardware" },
                 { kind: "wc", id: "wc-42002a-1080p60-auto", codec: "avc1.42002a", level: "1080p60", accel: "no-preference", sub: "sem exigir a placa" },
-                { kind: "rtc", id: "rtc-vp9-1080p60", codec: "VP9", level: "1080p60", sub: "controle: o tipo de vídeo que já funciona" },
+                { kind: "rtc", id: "rtc-vp9-1080p60", codec: "VP9", level: "1080p60", anim: true, sub: "controle: o tipo de vídeo que já funciona" },
                 { kind: "rtc", id: "rtc-42001f-720p30", codec: "H264", plid: "42001f", level: "720p30" },
                 { kind: "rtc", id: "rtc-42001f-1080p30", codec: "H264", plid: "42001f", level: "1080p30" },
-                { kind: "rtc", id: "rtc-42001f-1080p60", codec: "H264", plid: "42001f", level: "1080p60", telinha: true, sub: "igual ao Telinha hoje" },
+                { kind: "rtc", id: "rtc-42001f-1080p60", codec: "H264", plid: "42001f", level: "1080p60", telinha: true, anim: true, sub: "igual ao Telinha hoje" },
                 { kind: "rtc", id: "rtc-42e01f-720p30", codec: "H264", plid: "42e01f", level: "720p30" },
                 { kind: "rtc", id: "rtc-4d0034-1080p60", codec: "H264", plid: "4d0034", level: "1080p60" },
                 { kind: "rtc", id: "rtc-640034-1080p60", codec: "H264", plid: "640034", level: "1080p60" },
@@ -617,10 +626,11 @@
                 SEM_CONEXAO: { code: "SEM CONEXÃO", ui: "A conexão de teste não abriu", tone: "warn" },
                 NAO_SUPORTA: { code: "NÃO SUPORTADO", ui: "Não disponível", tone: "" },
                 PULADO: { code: "PULADO", ui: "Pulado", tone: "" },
-                ERRO: { code: "ERRO", ui: "Deu erro", tone: "warn" }
+                ERRO: { code: "ERRO", ui: "Deu erro", tone: "warn" },
+                REPETIR: { code: "REPETIR", ui: "Repetir (a aba ficou escondida)", tone: "warn" }
             };
 
-            const SOURCES = { anim: "Com a animação", tela: "Com a sua tela" };
+            const SOURCES = { anim: "Passo 1: com a animação", tela: "Passo 2: com a sua tela" };
             const PART = { wc: "Parte 1: a placa de vídeo gerando vídeo sozinha", rtc: "Parte 2: uma transmissão de teste, como no Discord" };
             const H264_PROFILE = { "42e0": "Constrained Baseline", 4200: "Baseline", "4d00": "Main", 6400: "High" };
 
@@ -628,8 +638,8 @@
             const sleep = ms => new Promise(r => setTimeout(r, ms));
             const errText = e => (e && e.message) ? `${e.name && e.name !== "Error" ? e.name + ": " : ""}${e.message}` : String(e);
 
-            /** Testes de cada rodada: a da tela so repete a parte 2 (o WebCodecs nao usa a fonte). */
-            const testsFor = source => TESTS.map((t, i) => i).filter(i => source === "anim" || TESTS[i].kind === "rtc");
+            /** Testes de cada passo: 1 = parte 1 + controle e "=Telinha" da parte 2; 2 (tela) = a parte 2 inteira. */
+            const testsFor = source => TESTS.map((t, i) => i).filter(i => source === "anim" ? (TESTS[i].kind === "wc" || TESTS[i].anim) : TESTS[i].kind === "rtc");
 
             // ------------------------------------------------------------------ tempo-limite
 
@@ -658,25 +668,96 @@
 
             // ------------------------------------------------------------------ estado guardado
 
-            let state = load();
+            let state = { v: 1, runs: {} };
             /**
              * Algo nesta pagina ficou preso de proposito (Worker com encoder parado, RTCPeerConnection que nao gera
              * imagem): nenhum teste novo ate reabrir o navegador, e nada encosta neles.
              */
             const leftAlone = [];
 
-            function load() {
+            /**
+             * O localStorage do Chromium grava no disco em lote (o 1o depois de ~5 s, depois com limite de ritmo): matar o
+             * navegador pelo Gerenciador de Tarefas perde o que estava pendente. Por isso o estado vai para o IndexedDB,
+             * uma transacao "strict" por gravacao, esperada antes de cada fase arriscada; o localStorage fica de reserva.
+             */
+            const storage = { db: null, idb: false, ls: false };
+
+            function parseState(text) {
                 try {
-                    const s = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
+                    const s = JSON.parse(text || "null");
                     if (s && s.v === 1 && s.runs && typeof s.runs === "object") return s;
                 } catch { }
-                return { v: 1, runs: {} };
+                return null;
             }
 
-            function save() {
+            function openIdb() {
+                return new Promise(resolve => {
+                    try {
+                        const req = indexedDB.open(IDB_NAME, 1);
+                        req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+                        req.onsuccess = () => resolve(req.result);
+                        req.onerror = () => resolve(null);
+                        req.onblocked = () => resolve(null);
+                    } catch {
+                        resolve(null);
+                    }
+                });
+            }
+
+            function idbGet(db) {
+                return new Promise(resolve => {
+                    try {
+                        const req = db.transaction(IDB_STORE, "readonly").objectStore(IDB_STORE).get(STORE_KEY);
+                        req.onsuccess = () => resolve(req.result ?? null);
+                        req.onerror = () => resolve(null);
+                    } catch {
+                        resolve(null);
+                    }
+                });
+            }
+
+            /** true quando a transacao foi confirmada (oncomplete). */
+            function idbPut(db, text) {
+                return new Promise(resolve => {
+                    try {
+                        const tx = db.transaction(IDB_STORE, "readwrite", { durability: "strict" });
+                        tx.objectStore(IDB_STORE).put(text, STORE_KEY);
+                        tx.oncomplete = () => resolve(true);
+                        tx.onerror = () => resolve(false);
+                        tx.onabort = () => resolve(false);
+                        tx.commit?.();
+                    } catch {
+                        resolve(false);
+                    }
+                });
+            }
+
+            /** Le o estado guardado: o mais novo entre IndexedDB e localStorage. */
+            async function loadState() {
+                storage.db = await soft(openIdb, 3000);
+                storage.idb = !!storage.db;
                 try {
-                    localStorage.setItem(STORE_KEY, JSON.stringify(state));
+                    localStorage.setItem(STORE_KEY + "-t", "1");
+                    localStorage.removeItem(STORE_KEY + "-t");
+                    storage.ls = true;
                 } catch { }
+                const fromIdb = storage.db ? parseState(await soft(() => idbGet(storage.db), 2000)) : null;
+                let fromLs = null;
+                try {
+                    fromLs = parseState(localStorage.getItem(STORE_KEY));
+                } catch { }
+                const pick = [fromIdb, fromLs].filter(Boolean).sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0))[0];
+                if (pick) state = pick;
+            }
+
+            /** Grava nos dois; a promessa termina quando o IndexedDB confirmou (ou desistiu em 2 s). */
+            function save() {
+                state.savedAt = Date.now();
+                const text = JSON.stringify(state);
+                try {
+                    localStorage.setItem(STORE_KEY, text);
+                } catch { }
+                return storage.db ? soft(() => idbPut(storage.db, text), 2000) : Promise.resolve(false);
             }
 
             /** Rodada que estava no meio de um teste quando a pagina morreu/travou: esse teste vira TRAVOU. */
@@ -686,8 +767,8 @@
                     if (!run || !run.running) continue;
                     const { index, phase } = run.running;
                     const test = TESTS[index];
-                    if (test && !run.results.some(r => r.id === test.id)) {
-                        run.results.push({
+                    if (test && !run.results.some(r => r.id === test.id && r.verdict !== "REPETIR")) {
+                        run.results = run.results.filter(r => r.id !== test.id).concat({
                             n: index + 1, id: test.id, verdict: "TRAVOU", pageDied: true,
                             note: `a página parou durante "${phase}" (fechada ou travada)`
                         });
@@ -988,6 +1069,8 @@
                     neg: negSummary(last.mime, last.fmtp)
                 });
                 if (first.cap != null && last.cap != null) res.cap = last.cap - first.cap;
+                // quadros que a captura ja entregou a este envio desde o comeco (0 = nada chegou ao encoder)
+                if (last.cap != null) res.capTotal = last.cap;
                 res.series = samples.slice(1).map((s, i) => s.encoded - samples[i].encoded);
                 const secs = (last.t - first.t) / 1000;
                 if (secs > 0.5) res.kbps = Math.round(((last.bytes - first.bytes) * 8) / secs / 1000);
@@ -1001,7 +1084,37 @@
                 const stopped = s.length >= 3 && s[s.length - 1] === 0 && s[s.length - 2] === 0 && (res.encoded ?? 0) > 0 && capOk;
                 if ((res.decoded ?? 0) > 0) return stopped ? "PAROU" : "OK";
                 if ((res.encoded ?? 0) > 0) return stopped ? "PAROU" : "NAO_CHEGA";
+                // nenhum quadro chegou ao encoder: nao diz nada da placa, e fechar e seguro; repete o teste
+                if (res.capTotal === 0) return "REPETIR";
                 return capOk ? "SEM_IMAGEM" : "SEM_CAPTURA";
+            }
+
+            /** Pode fechar estas conexoes: funcionou, nenhum quadro chegou ao encoder, ou o encoder gerou quadros. */
+            function safeToClose(res) {
+                return res.verdict === "OK" || res.verdict === "REPETIR";
+            }
+
+            /**
+             * Espera a aba voltar a aparecer (com ela escondida o Chromium segura os timers em ~1 por segundo e a animacao
+             * vira 1 fps). true = visivel; false = estourou `capMs`.
+             */
+            function waitVisible(index, capMs) {
+                if (document.visibilityState === "visible") return Promise.resolve(true);
+                const title = document.title;
+                document.title = "Volte para esta aba — teste da placa";
+                setStatus(index, "Volte para esta aba para continuar");
+                return new Promise(resolve => {
+                    let timer = null;
+                    const done = ok => {
+                        clearTimeout(timer);
+                        document.removeEventListener("visibilitychange", onVis);
+                        document.title = title;
+                        resolve(ok);
+                    };
+                    const onVis = () => { if (document.visibilityState === "visible") done(true); };
+                    document.addEventListener("visibilitychange", onVis);
+                    if (Number.isFinite(capMs)) timer = setTimeout(() => done(document.visibilityState === "visible"), capMs);
+                });
             }
 
             // ------------------------------------------------------------------ parte 1: WebCodecs num Worker
@@ -1017,7 +1130,7 @@
              * Um teste de WebCodecs num Worker novo. O Worker avisa cada fase; WC_TIMEOUT_MS sem sinal = TRAVOU, e o Worker
              * fica como esta (terminate() derrubaria o encoder preso, o que pode travar o processo da placa de video).
              */
-            function runWcTest(index, run, mark) {
+            async function runWcTest(index, run, mark) {
                 const test = TESTS[index];
                 const lv = LEVEL[test.level];
                 const res = { n: index + 1, id: test.id };
@@ -1029,15 +1142,17 @@
                 if (typeof VideoEncoder === "undefined") {
                     res.verdict = "PULADO";
                     res.note = "este navegador não tem WebCodecs";
-                    return Promise.resolve(res);
+                    return res;
                 }
+                // a marca do teste fica no disco antes de o encoder existir
+                await mark("início");
                 let worker;
                 try {
                     worker = newWorker();
                 } catch (e) {
                     res.verdict = "ERRO";
                     res.note = `Worker: ${errText(e)}`.slice(0, 200);
-                    return Promise.resolve(res);
+                    return res;
                 }
                 const t0 = performance.now();
                 return new Promise(resolve => {
@@ -1178,15 +1293,14 @@
                 let track = null;
                 let sender = null;
                 let sendStreamExists = false;
-                const samples = [];
-                let hidden = document.hidden;
-                const onVis = () => { if (document.hidden) hidden = true; };
-                document.addEventListener("visibilitychange", onVis);
+                let samples = [];
+                let frameCb = null;
+                let measuring = true;
                 const dst = $("dst");
                 const t0 = performance.now();
 
                 try {
-                    mark("preparando");
+                    await mark("preparando");
                     track = await source.makeTrack(test);
                     track.contentHint = "motion";
                     const capture = source.size(track);
@@ -1202,7 +1316,7 @@
                     const transceiver = pc1.getTransceivers().find(t => t.sender === sender);
                     res.prefs = applyCodecPreferences(transceiver, test);
 
-                    mark("negociando");
+                    await mark("negociando");
                     const lv = LEVEL[test.level];
                     const offer = await T(pc1.createOffer(), "createOffer");
                     await T(pc1.setLocalDescription(offer), "setLocalDescription (oferta)");
@@ -1214,12 +1328,12 @@
                     await T(pc1.setRemoteDescription({ type: "answer", sdp: mungeSdp(answer.sdp, test, { startKbps: lv.startKbps, maxKbps: lv.xMaxKbps }) }), "setRemoteDescription (resposta)");
                     flushTo1();
 
-                    mark("ajustando o envio");
+                    await mark("ajustando o envio");
                     const params = await applySenderParams(sender, test, capture);
                     res.scale = params.scale;
                     if (!params.degradation) res.noDegradation = true;
 
-                    mark("conectando");
+                    await mark("conectando");
                     if (!(await waitConnected(pc1, CONNECT_TIMEOUT_MS))) {
                         res.verdict = "SEM_CONEXAO";
                         res.note = `estado ${pc1.connectionState}/${pc1.iceConnectionState} depois de ${CONNECT_TIMEOUT_MS / 1000} s`;
@@ -1227,19 +1341,59 @@
                     }
                     const tConnected = performance.now();
                     if (typeof dst.requestVideoFrameCallback === "function") {
-                        dst.requestVideoFrameCallback(() => { res.firstMs = Math.round(performance.now() - tConnected); });
+                        frameCb = dst.requestVideoFrameCallback(() => {
+                            frameCb = null;
+                            if (measuring) res.firstMs = Math.round(performance.now() - tConnected);
+                        });
                     }
 
-                    mark("medindo");
-                    samples.push(await readStats(pc1, pc2));
-                    for (let i = 0; i < SAMPLE_SECONDS; i++) {
-                        await sleep(1000);
-                        samples.push(await readStats(pc1, pc2));
-                        const s = samples[samples.length - 1];
-                        setStatus(index, `medindo (${i + 1} de ${SAMPLE_SECONDS} s)`, `quadros gerados ${s.encoded} · recebidos ${s.decoded}${s.w ? ` · ${s.w}x${s.h}` : ""}`);
+                    await mark("medindo");
+                    // so mede com a aba na frente: escondida, a animacao cai para ~1 fps; sumiu no meio = mede de novo
+                    let hiddenTooLong = false;
+                    for (let attempt = 0; ; attempt++) {
+                        if (!(await waitVisible(index, VISIBLE_WAIT_MS))) {
+                            hiddenTooLong = true;
+                            break;
+                        }
+                        let hid = false;
+                        const onHide = () => { if (document.hidden) hid = true; };
+                        document.addEventListener("visibilitychange", onHide);
+                        try {
+                            samples = [await readStats(pc1, pc2)];
+                            for (let i = 0; i < SAMPLE_SECONDS && !hid; i++) {
+                                await sleep(1000);
+                                if (hid) break;
+                                samples.push(await readStats(pc1, pc2));
+                                const s = samples[samples.length - 1];
+                                setStatus(index, `medindo (${i + 1} de ${SAMPLE_SECONDS} s)`, `quadros gerados ${s.encoded} · recebidos ${s.decoded}${s.w ? ` · ${s.w}x${s.h}` : ""}`);
+                            }
+                        } finally {
+                            document.removeEventListener("visibilitychange", onHide);
+                        }
+                        if (!hid) break;
+                        res.resampled = attempt + 1;
+                        if (attempt + 1 >= MAX_RESAMPLES) {
+                            hiddenTooLong = true;
+                            break;
+                        }
                     }
-                    summarize(res, samples);
-                    res.verdict = judge(res, test);
+                    if (hiddenTooLong) {
+                        // so os totais: os numeros com a aba escondida nao valem
+                        samples = [await readStats(pc1, pc2)];
+                        summarize(res, samples);
+                        res.hidden = true;
+                        if (res.encoded === 0 && (res.capTotal ?? 1) > 0) {
+                            res.verdict = "SEM_IMAGEM";
+                            res.note = `a aba ficou escondida, mas a placa recebeu ${res.capTotal ?? "?"} quadros e não gerou nenhum`;
+                        } else {
+                            res.verdict = "REPETIR";
+                            res.note = "a aba ficou escondida";
+                        }
+                    } else {
+                        summarize(res, samples);
+                        res.verdict = judge(res, test);
+                        if (res.verdict === "REPETIR") res.note = "nenhum quadro chegou ao encoder (a página ficou escondida?)";
+                    }
                 } catch (e) {
                     summarize(res, samples);
                     if (e instanceof Timeout) {
@@ -1250,17 +1404,22 @@
                         res.note = errText(e).slice(0, 200);
                     }
                 } finally {
-                    document.removeEventListener("visibilitychange", onVis);
-                    if (hidden) res.hidden = true;
-                    res.ms = Math.round(performance.now() - t0);
-                    if (res.verdict === "OK" || !sendStreamExists) {
+                    measuring = false;
+                    if (frameCb !== null) {
                         try {
-                            mark("fechando");
+                            dst.cancelVideoFrameCallback(frameCb);
+                        } catch { }
+                    }
+                    res.ms = Math.round(performance.now() - t0);
+                    if (safeToClose(res) || !sendStreamExists) {
+                        try {
+                            await mark("fechando");
                             res.closeMs = await teardown(pc1, pc2, sender, track, dst);
                         } catch (e) {
                             res.verdict = "TRAVOU";
                             res.note = (res.note ? res.note + "; " : "") + errText(e);
                             res.leftOpen = true;
+                            leftAlone.push(pc1, pc2);
                         }
                     } else {
                         // nao gera imagem (ou travou): nada encosta mais nestas conexoes
@@ -1336,10 +1495,21 @@
             let busy = false;
             let liveRun = null;
 
-            /** Primeiro teste da rodada ainda sem resultado (null = todos feitos). */
+            /** Primeiro teste da rodada ainda sem resultado (REPETIR conta como sem resultado; null = todos feitos). */
             function nextIndex(run, source) {
-                const done = new Set((run?.results || []).map(r => r.id));
+                const done = new Set((run?.results || []).filter(r => r.verdict !== "REPETIR").map(r => r.id));
                 return testsFor(source).find(i => !done.has(TESTS[i].id)) ?? null;
+            }
+
+            /**
+             * Um teste de WebCodecs com a placa (prefer-hardware) que nao gerou nada ou travou: os H.264 seguintes da
+             * parte 1 sao pulados (o "automatico" tambem, porque tenta a placa primeiro). Cada um travaria de novo.
+             */
+            function wcHardwareFailure(run) {
+                return run.results.find(r => {
+                    const t = TESTS[r.n - 1];
+                    return t && t.kind === "wc" && t.accel === "prefer-hardware" && (r.verdict === "SEM_IMAGEM" || r.verdict === "TRAVOU");
+                }) || null;
             }
 
             /** Para a rodada: travou, nao gera imagem, sem conexao ou um envio deixado aberto. */
@@ -1374,7 +1544,7 @@
                     run.capture = { w: s.width, h: s.height };
                 }
                 liveRun = sourceName;
-                save();
+                await save();
                 hideNotice();
                 $("final").hidden = true;
                 $("live").hidden = false;
@@ -1385,22 +1555,36 @@
 
                 let stop = null;
                 for (const i of testsFor(sourceName)) {
-                    if (run.results.some(r => r.id === TESTS[i].id)) continue;
+                    if (run.results.some(r => r.id === TESTS[i].id && r.verdict !== "REPETIR")) continue;
                     if (source.base && source.base.readyState === "ended") {
                         stop = { kind: "tela", n: i + 1 };
                         break;
                     }
                     const test = TESTS[i];
                     drawLabel = `${i + 1}. ${testShort(test)}`;
-                    const mark = phase => {
+                    const mark = async phase => {
                         run.running = { index: i, phase, at: Date.now() };
-                        save();
                         setStatus(i, phase);
+                        await save();
                     };
-                    const res = test.kind === "wc" ? await runWcTest(i, run, mark) : await runRtcTest(i, run, source, mark);
+                    let res;
+                    const failed = test.kind === "wc" && test.codec.startsWith("avc1.") ? wcHardwareFailure(run) : null;
+                    if (failed) {
+                        res = { n: i + 1, id: test.id, verdict: "PULADO", note: `a placa não gerou imagem no teste ${failed.n}: não tentei de novo para não travar` };
+                    } else if (test.kind === "wc") {
+                        res = await runWcTest(i, run, mark);
+                    } else {
+                        // com a aba escondida a animacao cai para ~1 fps: so comeca com ela na frente
+                        for (let attempt = 0; attempt < 2; attempt++) {
+                            await waitVisible(i, Infinity);
+                            res = await runRtcTest(i, run, source, mark);
+                            if (attempt) res.retried = attempt;
+                            if (res.verdict !== "REPETIR") break;
+                        }
+                    }
                     run.results = run.results.filter(r => r.id !== res.id).concat(res);
                     run.running = null;
-                    save();
+                    await save();
                     render();
                     if (stopsRun(res)) {
                         run.halted = { n: res.n, why: res.verdict === "TRAVOU" ? "TRAVOU" : res.leftOpen ? `${VERDICT[res.verdict].code}, parei para não travar` : VERDICT[res.verdict].code };
@@ -1412,10 +1596,10 @@
 
                 stopDrawing();
                 if (!stop || !leftAlone.length) source.stop();
-                if (!stop) run.done = true;
+                if (!stop) run.done = !run.results.some(r => r.verdict === "REPETIR");
                 liveRun = null;
                 busy = false;
-                save();
+                await save();
                 $("live").hidden = true;
                 render();
                 showFinal(sourceName, stop);
@@ -1444,9 +1628,8 @@
                         env.uaData = `${brands.join(", ")} | ${ua.platform || "?"} ${ua.platformVersion || "?"} ${ua.architecture || ""}${ua.bitness ? "-" + ua.bitness : ""}`.trim();
                     }
                     if (navigator.gpu) {
-                        const plain = await adapterText(undefined);
-                        const fast = await adapterText({ powerPreference: "high-performance" });
-                        env.webgpu = (plain || "sem adaptador") + (fast && fast !== plain ? ` | alto desempenho: ${fast}` : "");
+                        // powerPreference e ignorado no Windows (crbug.com/369219127): um adaptador so
+                        env.webgpu = (await adapterText(undefined)) || "sem adaptador";
                     } else env.webgpu = "sem WebGPU";
                     try {
                         const c = document.createElement("canvas");
@@ -1495,7 +1678,8 @@
             function runStatus(run, source) {
                 if (run.done) return "completo";
                 if (run.halted) return `parou no teste ${run.halted.n} (${run.halted.why})`;
-                return `incompleto (${run.results.length} de ${testsFor(source).length})`;
+                const again = run.results.filter(r => r.verdict === "REPETIR").length;
+                return `incompleto (${run.results.length - again} de ${testsFor(source).length}${again ? `, ${again} para repetir` : ""})`;
             }
 
             function levelText(level) {
@@ -1530,7 +1714,8 @@
                     const p = [`${pad(x.n)} ${testShort(test)}: ${v.code}`];
                     if (x.supported != null) p.push(x.supported ? "suportado" : "não suportado");
                     if (x.note) p.push(x.note);
-                    if (x.sent) p.push(`${x.sent} quadros → ${x.chunks ?? 0} pacotes (${x.keyframes ?? 0} chave) ${((x.bytes ?? 0) / 1e6).toFixed(2)}MB`);
+                    if (x.sent && x.bytes == null) p.push(`${x.sent} quadros → ${x.chunks ?? 0} pacotes até parar`);
+                    else if (x.sent) p.push(`${x.sent} quadros → ${x.chunks ?? 0} pacotes (${x.keyframes ?? 0} chave) ${(x.bytes / 1e6).toFixed(2)}MB`);
                     if (x.firstChunkMs != null) p.push(`1o pacote ${x.firstChunkMs}ms`);
                     if (x.queueMax) p.push(`fila máx ${x.queueMax}`);
                     if (x.encodeMs != null) p.push(`${x.encodeMs}ms`);
@@ -1555,18 +1740,21 @@
                 if (x.noDegradation) p.push("sem degradationPreference");
                 if (x.prefs && x.prefs !== "sender") p.push(`prefs ${x.prefs}`);
                 if (x.hidden) p.push("aba escondida");
+                if (x.resampled) p.push(`medido de novo ${x.resampled}x (a aba sumiu)`);
+                if (x.retried) p.push("repetido do zero (a aba ficou escondida mais de 1 min)");
                 if (x.leftOpen) p.push("conexão deixada aberta");
                 if (x.closeMs != null && x.closeMs > 300) p.push(`close ${x.closeMs}ms`);
                 return p.join(" | ");
             }
 
-            /** Tira qualquer coisa com cara de endereco de rede (o loopback nao tem, mas por garantia). */
+            /**
+             * Nenhum SDP entra no texto; por garantia some qualquer linha de candidato ICE e nome mDNS. Sem regra de IP
+             * "solta": ela comia versoes de driver com 4 partes (32.0.12.19).
+             */
             function sanitize(text) {
                 return text
                     .replace(/^.*candidate:.*$/gim, "[linha removida]")
-                    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.local\b/gi, "[mdns]")
-                    .replace(/(?<![\w./])(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?![\w.])/g, "[ip]")
-                    .replace(/(?<![\w:])(?:[0-9a-f]{0,4}:){3,7}[0-9a-f]{0,4}(?![\w:])/gi, "[ip]");
+                    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.local\b/gi, "[mdns]");
             }
 
             function buildText() {
@@ -1581,6 +1769,7 @@
                 L.push(`CPU ${navigator.hardwareConcurrency ?? "?"} threads${navigator.deviceMemory ? ` · ${navigator.deviceMemory} GB+` : ""} | tela ${screen.width}x${screen.height} @${devicePixelRatio}`);
                 L.push(`H.264 pm1 envia: ${env.h264Send ?? "?"} | recebe: ${env.h264Recv ?? "?"} | outros: ${env.other ?? "?"}`);
                 L.push(`Sonda do Telinha (encodingInfo 1080p60 8M): ${env.probe ?? "?"}`);
+                L.push(`Progresso guardado em: ${[storage.idb && "IndexedDB", storage.ls && "localStorage"].filter(Boolean).join(" + ") || "nada (sem armazenamento)"}`);
                 let any = false;
                 for (const name of Object.keys(SOURCES)) {
                     const run = state.runs[name];
@@ -1652,6 +1841,7 @@
             function detailFor(r) {
                 const test = TESTS[r.n - 1];
                 if (r.verdict === "PULADO" || r.verdict === "SEM_CONEXAO" || r.verdict === "ERRO" || r.verdict === "NAO_SUPORTA") return r.note || "";
+                if (r.verdict === "REPETIR") return `${r.note || "a aba ficou escondida"}: clique em Continuar com esta página na frente`;
                 if (test.kind === "wc") {
                     const parts = [];
                     if (r.sent) parts.push(`${r.sent} quadros enviados, ${r.chunks ?? 0} prontos`);
@@ -1668,7 +1858,7 @@
                 if (r.verdict === "SEM_CAPTURA") parts.push("a animação parou (a página ficou escondida?)");
                 if (r.verdict === "TRAVOU" && r.note) parts.push(r.note);
                 if (r.leftOpen) parts.push("parei aqui para não travar");
-                if (r.hidden && r.verdict !== "SEM_CAPTURA") parts.push("a página ficou escondida em algum momento");
+                if (r.resampled) parts.push("medido de novo depois que você voltou para a aba");
                 return parts.join(" · ");
             }
 
@@ -1717,6 +1907,8 @@
                 renderButtons();
             }
 
+            const TELA_LABEL = "Passo 2: testar com a minha tela (escolha Tela inteira)";
+
             function renderButtons() {
                 const blocked = busy || leftAlone.length > 0;
                 for (const name of Object.keys(SOURCES)) {
@@ -1726,24 +1918,46 @@
                     const next = nextIndex(run, name);
                     const resumable = !!run && run.results.length > 0 && !run.done && next !== null;
                     btn.disabled = blocked;
-                    if (name === "anim") btn.textContent = resumable ? `Continuar do teste ${next + 1}` : "Testar minha placa de vídeo";
-                    else btn.textContent = resumable ? `Continuar o teste da tela (do teste ${next + 1})` : "Testar também com a minha tela (opcional)";
+                    if (name === "anim") btn.textContent = resumable ? `Continuar o passo 1 (do teste ${next + 1})` : "Passo 1: testar minha placa de vídeo";
+                    else btn.textContent = resumable ? `Continuar o passo 2 (do teste ${next + 1}, escolha Tela inteira)` : TELA_LABEL;
                     btn.dataset.resume = resumable ? "1" : "";
                     restart.hidden = !(run && run.results.length) || blocked;
                 }
+                // depois do passo 1, o passo 2 vira o botao principal
+                const step1Started = !!state.runs.anim?.results.length;
+                $("btnTela").className = step1Started && !state.runs.tela?.done ? "big second" : "second";
+                $("btnAnim").className = step1Started && !state.runs.tela?.done ? "second" : "big";
+                const inline = $("btnTelaFinal");
+                if (inline) inline.disabled = blocked;
+            }
+
+            /** O passo 2 ainda nao mostrou nenhum nome de encoder (sem ele nao da para saber placa x processador). */
+            function step2Missing() {
+                const tela = state.runs.tela;
+                return !tela || !(tela.results || []).some(r => r.enc);
             }
 
             function showFinal(sourceName, stop) {
                 const f = $("final");
                 f.hidden = false;
-                const reopen = "feche o navegador inteiro (se ele não fechar: Ctrl+Shift+Esc, clique no Chrome ou no Edge e em Finalizar tarefa), abra esta página de novo e clique em <b>Continuar</b>. O que já foi testado fica guardado.";
-                if (!stop) {
-                    const hasEnc = (state.runs[sourceName]?.results || []).some(r => r.enc);
+                const closeHow = "Feche esta aba (se aparecer “Página sem resposta”, clique em <b>Sair das páginas</b>) ou o navegador inteiro (se ele não fechar: Ctrl+Shift+Esc, clique no Chrome ou no Edge e em <b>Finalizar tarefa</b>).";
+                const next = sourceName === "anim" && step2Missing()
+                    ? "Depois abra esta página de novo e faça o <b>passo 2</b> (o que já foi testado fica guardado)."
+                    : "Se quiser ajudar mais, abra esta página de novo e clique em <b>Continuar</b> (o que já foi testado fica guardado).";
+                const again = (state.runs[sourceName]?.results || []).filter(r => r.verdict === "REPETIR").length;
+                if (!stop && again) {
+                    f.className = "notice warn";
+                    f.innerHTML = `<strong>Falta repetir ${again === 1 ? "1 teste" : again + " testes"}: a aba ficou escondida.</strong><p>Clique em <b>Continuar</b> lá em cima e deixe esta página na frente até terminar.</p>`;
+                } else if (!stop && sourceName === "anim" && step2Missing()) {
+                    f.className = "notice";
+                    f.innerHTML = "<strong>Passo 1 pronto! Falta o passo 2.</strong>"
+                        + "<p>Clique no botão abaixo. O navegador vai perguntar o que compartilhar: escolha <b>Tela inteira</b> e deixe esta página aparecendo. É ele que mostra se o vídeo saiu da placa de vídeo ou do processador.</p>"
+                        + `<button id="btnTelaFinal" class="big" type="button">${TELA_LABEL}</button>`;
+                    $("btnTelaFinal").addEventListener("click", () => onButton("tela", false));
+                } else if (!stop) {
                     f.className = "notice ok";
-                    f.innerHTML = "<strong>Pronto!</strong><p>Clique em <b>Copiar resultado</b> e cole na conversa do Discord com quem te mandou esta página.</p>"
-                        + (sourceName === "anim" && !hasEnc && !state.runs.tela?.done
-                            ? "<p>Se puder, faça também o <b>teste com a sua tela</b> (botão lá em cima): ele mostra se o vídeo saiu da placa de vídeo ou do processador.</p>"
-                            : "");
+                    f.innerHTML = "<strong>Pronto!</strong><p>Coloque a versão do driver logo abaixo (se achar), clique em <b>Copiar resultado</b> e cole na conversa do Discord com quem te mandou esta página.</p>"
+                        + (sourceName === "tela" && !state.runs.anim?.results.length ? "<p>Se ainda não fez, faça também o <b>passo 1</b> (botão lá em cima).</p>" : "");
                 } else if (stop.kind === "TRAVOU" || stop.kind === "PRESO") {
                     f.className = "notice bad";
                     const what = stop.kind === "TRAVOU" ? "travou"
@@ -1751,8 +1965,7 @@
                             : "não gerou imagem";
                     f.innerHTML = `<strong>O teste ${stop.n} ${what}: parei aqui para não travar o navegador.</strong>`
                         + "<p>Isso já é a resposta que a gente precisava. Faça assim:</p>"
-                        + "<p>1. Clique em <b>Copiar resultado</b> e mande no Discord.<br>2. Depois pode fechar esta aba ou o navegador.<br>"
-                        + `3. Se quiser ajudar mais: ${reopen}</p>`;
+                        + `<p>1. Clique em <b>Copiar resultado</b> e mande no Discord.<br>2. ${closeHow}<br>3. ${next}</p>`;
                 } else if (stop.kind === "SEM_CONEXAO") {
                     f.className = "notice warn";
                     f.innerHTML = "<strong>A conexão de teste não abriu.</strong><p>Isso não é a placa de vídeo: o navegador não deixou a página conversar com ela mesma. Copie o resultado e mande assim mesmo. Para tentar de novo, feche o navegador e abra esta página de novo.</p>";
@@ -1798,25 +2011,47 @@
             $("btnAnimRestart").addEventListener("click", () => onButton("anim", true));
             $("btnTelaRestart").addEventListener("click", () => onButton("tela", true));
             $("btnCopy").addEventListener("click", () => { copyResult(); });
-            $("driver").value = state.driver || "";
             $("driver").addEventListener("input", e => {
                 state.driver = e.target.value.trim().slice(0, 120);
                 save();
             });
 
-            const ok = checkBrowser();
-            const interrupted = recoverInterrupted();
-            render();
-            draw();
-            if (interrupted.length) {
-                const it = interrupted[0];
-                showNotice("bad", `Da última vez, a página travou no teste ${it.n}`,
-                    "<p>Isso já é uma resposta útil. Clique em <b>Copiar resultado</b> (lá embaixo) e mande no Discord.</p>"
-                    + "<p>Para continuar do próximo teste: se você não fechou o navegador inteiro depois do travamento, feche e abra de novo antes. Depois clique em <b>Continuar</b>.</p>");
-            } else if (ok && Object.values(state.runs).some(r => r && r.results.length)) {
-                showNotice("", "Resultados guardados", "<p>Os resultados do último teste estão lá embaixo. Dá para copiar, continuar ou começar de novo.</p>");
-            }
-            if (ok) collectEnv();
+            (async () => {
+                // nada roda antes de o estado guardado ser lido (o clique espera)
+                busy = true;
+                draw();
+                const ok = checkBrowser();
+                await loadState();
+                busy = false;
+                $("driver").value = state.driver || "";
+                const interrupted = recoverInterrupted();
+                if (interrupted.length) await save();
+                render();
+                if (!ok) {
+                    $("btnAnim").disabled = true;
+                    $("btnTela").disabled = true;
+                    return;
+                }
+                const noStorage = !storage.idb
+                    ? "<p><b>Atenção:</b> não consigo guardar o progresso neste navegador. Se travar, me diga em qual teste parou.</p>"
+                    : "";
+                if (interrupted.length) {
+                    const it = interrupted[0];
+                    const canContinue = nextIndex(state.runs[it.source], it.source) !== null;
+                    const step2 = it.source === "anim" && step2Missing();
+                    const then = canContinue
+                        ? `clique em <b>Continuar</b>${step2 ? " e depois faça o <b>passo 2</b>" : ""}`
+                        : step2 ? "faça o <b>passo 2</b>" : "copie o resultado";
+                    showNotice("bad", `Da última vez, a página travou no teste ${it.n}`,
+                        "<p>Isso já é uma resposta útil. Clique em <b>Copiar resultado</b> (lá embaixo) e mande no Discord.</p>"
+                        + `<p>Para seguir: se você não fechou o navegador inteiro depois do travamento, feche e abra de novo antes. Depois ${then}.</p>` + noStorage);
+                } else if (Object.values(state.runs).some(r => r && r.results.length)) {
+                    showNotice("", "Resultados guardados", "<p>Os resultados do último teste estão lá embaixo. Dá para copiar, continuar ou começar de novo.</p>" + noStorage);
+                } else if (noStorage) {
+                    showNotice("warn", "Não consigo guardar o progresso", "<p>Se travar, me diga em qual teste parou.</p>");
+                }
+                collectEnv();
+            })();
         })();
     </script>
 </body>
