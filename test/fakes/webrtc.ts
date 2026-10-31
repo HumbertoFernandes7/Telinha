@@ -548,11 +548,40 @@ export interface VideoSenderStatsInit {
     currentRoundTripTime?: number;
     localCandidateType?: string;
     remoteCandidateType?: string;
+    /** more outbound-rtp counters (the stats log reads them); each one is left out unless given */
+    extra?: OutboundRtpExtra;
+    /** remote-inbound-rtp of the video (what the viewer reports over RTCP); left out unless given */
+    remoteInbound?: RemoteInboundInit;
+}
+
+/** outbound-rtp counters only the stats log (core/statsLog.ts) reads. */
+export interface OutboundRtpExtra {
+    /** bits per second */
+    targetBitrate?: number;
+    packetsSent?: number;
+    retransmittedPacketsSent?: number;
+    retransmittedBytesSent?: number;
+    /** seconds */
+    totalPacketSendDelay?: number;
+    nackCount?: number;
+    pliCount?: number;
+    keyFramesEncoded?: number;
+    qpSum?: number;
+}
+
+/** remote-inbound-rtp (times in seconds, as Chromium reports them). */
+export interface RemoteInboundInit {
+    packetsLost?: number;
+    fractionLost?: number;
+    jitter?: number;
+    roundTripTime?: number;
+    totalRoundTripTime?: number;
+    roundTripTimeMeasurements?: number;
 }
 
 /**
  * The stats of one sending video RTCRtpSender, as Chromium reports them: outbound-rtp (+ its codec), media-source,
- * transport with the selected candidate pair, and both candidates.
+ * transport with the selected candidate pair, and both candidates (+ remote-inbound-rtp when `remoteInbound` is given).
  */
 export function videoSenderStats(init: VideoSenderStatsInit = {}): StatsEntry[] {
     const durations = init.qualityLimitationDurations === undefined
@@ -564,7 +593,8 @@ export function videoSenderStats(init: VideoSenderStatsInit = {}): StatsEntry[] 
         frameWidth: init.frameWidth ?? 1920, frameHeight: init.frameHeight ?? 1080, framesPerSecond: init.framesPerSecond ?? 60,
         qualityLimitationReason: init.qualityLimitationReason ?? "none",
         ...(durations ? { qualityLimitationDurations: { none: 0, cpu: 0, bandwidth: 0, other: 0, ...durations } } : {}),
-        encoderImplementation: init.encoderImplementation ?? "libvpx", powerEfficientEncoder: init.powerEfficientEncoder ?? false
+        encoderImplementation: init.encoderImplementation ?? "libvpx", powerEfficientEncoder: init.powerEfficientEncoder ?? false,
+        ...init.extra
     };
     for (const field of init.omit ?? []) delete out[field];
     const entries: StatsEntry[] = [
@@ -584,6 +614,7 @@ export function videoSenderStats(init: VideoSenderStatsInit = {}): StatsEntry[] 
         { id: "IL01", type: "local-candidate", candidateType: init.localCandidateType ?? "host" },
         { id: "IR01", type: "remote-candidate", candidateType: init.remoteCandidateType ?? "host" }
     ];
+    if (init.remoteInbound) entries.push({ id: "RI01V", type: "remote-inbound-rtp", kind: "video", localId: "OT01V", codecId: "COT01_96", ...init.remoteInbound });
     return entries;
 }
 
@@ -597,6 +628,23 @@ export interface VideoReceiverStatsInit {
     mimeType?: string;
     decoderImplementation?: string;
     powerEfficientDecoder?: boolean;
+    /** more inbound-rtp counters (the stats log reads them); each one is left out unless given */
+    extra?: InboundRtpExtra;
+}
+
+/** inbound-rtp video counters only the stats log (core/statsLog.ts) reads (times in seconds). */
+export interface InboundRtpExtra {
+    framesDropped?: number;
+    freezeCount?: number;
+    totalFreezesDuration?: number;
+    jitterBufferDelay?: number;
+    jitterBufferEmittedCount?: number;
+    totalInterFrameDelay?: number;
+    totalSquaredInterFrameDelay?: number;
+    packetsLost?: number;
+    packetsReceived?: number;
+    nackCount?: number;
+    pliCount?: number;
 }
 
 /** inbound-rtp (+ codec) of one receiving video track. */
@@ -606,10 +654,25 @@ export function videoReceiverStats(init: VideoReceiverStatsInit = {}): StatsEntr
             id: "IT01V", type: "inbound-rtp", kind: "video", mediaType: "video", codecId: "CIT01_96",
             framesDecoded: init.framesDecoded ?? 0, framesReceived: init.framesReceived ?? init.framesDecoded ?? 0, bytesReceived: init.bytesReceived ?? 0,
             frameWidth: init.frameWidth ?? 1920, frameHeight: init.frameHeight ?? 1080, framesPerSecond: init.framesPerSecond ?? 60,
-            decoderImplementation: init.decoderImplementation ?? "libvpx", powerEfficientDecoder: init.powerEfficientDecoder ?? false
+            decoderImplementation: init.decoderImplementation ?? "libvpx", powerEfficientDecoder: init.powerEfficientDecoder ?? false,
+            ...init.extra
         },
         { id: "CIT01_96", type: "codec", mimeType: init.mimeType ?? "video/VP9", payloadType: 96, clockRate: 90000 }
     ];
+}
+
+export interface AudioReceiverStatsInit {
+    bytesReceived?: number;
+    totalSamplesReceived?: number;
+    concealedSamples?: number;
+}
+
+/** inbound-rtp of one receiving audio track (Opus). */
+export function audioReceiverStats(init: AudioReceiverStatsInit = {}): StatsEntry[] {
+    return [{
+        id: "IT01A", type: "inbound-rtp", kind: "audio", mediaType: "audio", bytesReceived: init.bytesReceived ?? 0,
+        totalSamplesReceived: init.totalSamplesReceived ?? 0, concealedSamples: init.concealedSamples ?? 0
+    }];
 }
 
 /** What the encoder does per second; EncoderSim integrates it over the (fake) clock. */
@@ -631,7 +694,29 @@ export interface EncoderRates {
     mimeType: string;
     implementation: string;
     powerEfficient: boolean;
+    /** the network side (RTCP, pacer, retransmissions); null = not reported (as before) */
+    link: LinkRates | null;
 }
+
+/** What the network does per second (EncoderSim reports it in outbound-rtp extras + remote-inbound-rtp). */
+export interface LinkRates {
+    targetKbps: number;
+    rtxKbps: number;
+    /** % of the media packets lost */
+    lossPct: number;
+    rttMs: number;
+    jitterMs: number;
+    naksPerSecond: number;
+    plisPerSecond: number;
+    keyframesPerSecond: number;
+    /** average QP of the encoded frames */
+    qp: number;
+    /** average wait of a packet in the pacer */
+    pacerMs: number;
+}
+
+/** bytes per RTP packet in the sim */
+const SIM_PACKET_BYTES = 1200;
 
 /**
  * A sending encoder whose cumulative counters follow performance.now(): every getStats integrates the current rates
@@ -647,12 +732,14 @@ export class EncoderSim {
     bytesSent = 0;
     sourceFrames = 0;
     limited = { none: 0, cpu: 0, bandwidth: 0, other: 0 };
+    /** link counters (only reported with rates.link) */
+    net = { packets: 0, rtxPackets: 0, rtxBytes: 0, lost: 0, sendDelay: 0, nacks: 0, plis: 0, keyframes: 0, qpSum: 0, rttTotal: 0, rttCount: 0 };
     private lastAt: number;
 
     constructor(rates: Partial<EncoderRates> = {}) {
         this.rates = {
             fps: 60, sourceFps: 60, width: 1920, height: 1080, kbps: 8000, encodeBusy: 0.2, availableKbps: 20000, limitation: "none",
-            mimeType: "video/VP9", implementation: "libvpx", powerEfficient: false, ...rates
+            mimeType: "video/VP9", implementation: "libvpx", powerEfficient: false, link: null, ...rates
         };
         this.lastAt = performance.now();
     }
@@ -667,6 +754,21 @@ export class EncoderSim {
         this.bytesSent += Math.round(r.kbps * 1000 / 8 * dt);
         if (r.sourceFps != null) this.sourceFrames += Math.round(r.sourceFps * dt);
         this.limited[r.limitation] += dt;
+        if (!r.link) return;
+        const n = this.net;
+        const media = r.kbps * 1000 / 8 / SIM_PACKET_BYTES * dt;
+        const rtx = r.link.rtxKbps * 1000 / 8 * dt;
+        n.packets += media + rtx / SIM_PACKET_BYTES;
+        n.rtxPackets += rtx / SIM_PACKET_BYTES;
+        n.rtxBytes += rtx;
+        n.lost += media * r.link.lossPct / 100;
+        n.sendDelay += (media + rtx / SIM_PACKET_BYTES) * r.link.pacerMs / 1000;
+        n.nacks += r.link.naksPerSecond * dt;
+        n.plis += r.link.plisPerSecond * dt;
+        n.keyframes += r.link.keyframesPerSecond * dt;
+        n.qpSum += r.fps * dt * r.link.qp;
+        n.rttTotal += r.link.rttMs / 1000 * dt;
+        n.rttCount += dt;
     }
 
     set(patch: Partial<EncoderRates>) {
@@ -677,13 +779,25 @@ export class EncoderSim {
     stats(): StatsEntry[] {
         this.integrate();
         const r = this.rates;
+        const n = this.net;
         return videoSenderStats({
             framesEncoded: this.framesEncoded, totalEncodeTime: this.totalEncodeTime, bytesSent: this.bytesSent,
             frameWidth: r.width, frameHeight: r.height, framesPerSecond: r.fps,
             qualityLimitationReason: r.limitation, qualityLimitationDurations: { ...this.limited },
             mimeType: r.mimeType, encoderImplementation: r.implementation, powerEfficientEncoder: r.powerEfficient,
             sourceFrames: r.sourceFps != null ? this.sourceFrames : null, sourceFps: r.sourceFps,
-            availableOutgoingBitrate: r.availableKbps != null ? r.availableKbps * 1000 : null
+            availableOutgoingBitrate: r.availableKbps != null ? r.availableKbps * 1000 : null,
+            ...(r.link ? {
+                extra: {
+                    targetBitrate: r.link.targetKbps * 1000, packetsSent: Math.round(n.packets), retransmittedPacketsSent: Math.round(n.rtxPackets),
+                    retransmittedBytesSent: Math.round(n.rtxBytes), totalPacketSendDelay: n.sendDelay, nackCount: Math.round(n.nacks),
+                    pliCount: Math.round(n.plis), keyFramesEncoded: Math.round(n.keyframes), qpSum: Math.round(n.qpSum)
+                },
+                remoteInbound: {
+                    packetsLost: Math.round(n.lost), fractionLost: r.link.lossPct / 100, jitter: r.link.jitterMs / 1000, roundTripTime: r.link.rttMs / 1000,
+                    totalRoundTripTime: n.rttTotal, roundTripTimeMeasurements: Math.round(n.rttCount)
+                }
+            } : {})
         });
     }
 

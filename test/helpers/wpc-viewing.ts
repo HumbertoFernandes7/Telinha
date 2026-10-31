@@ -36,11 +36,12 @@ export interface StreamerOptions {
     noHello?: boolean;
 }
 
-/** A room as session.ts leaves it in `rt` (room + "watch" action). Call closeRoom() after the test. */
+/** A room as session.ts leaves it in `rt` (room + "watch" and "codec" actions). Call closeRoom() after the test. */
 export function openRoom(): FakeRoom {
     const room = joinRoom({ appId: "telinha-v1" }, "wpc-room");
     rt.room = room as unknown as typeof rt.room;
     rt.watchAction = room.makeAction("watch") as unknown as typeof rt.watchAction;
+    rt.codecAction = room.makeAction("codec") as unknown as typeof rt.codecAction;
     return room;
 }
 
@@ -49,6 +50,7 @@ export function closeRoom() {
     clearAll();
     rt.room = null;
     rt.watchAction = null;
+    rt.codecAction = null;
     rt.peers.clear();
     resetState();
 }
