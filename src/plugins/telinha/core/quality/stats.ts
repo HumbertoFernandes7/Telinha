@@ -177,8 +177,17 @@ export async function readSenderSample(sender: RTCRtpSender): Promise<SenderSamp
         availableKbps: available != null ? available / 1000 : null,
         powerEfficient: typeof out.powerEfficientEncoder === "boolean" ? out.powerEfficientEncoder : null,
         implementation: typeof out.encoderImplementation === "string" ? out.encoderImplementation : null,
-        log: logCounters(report, out, remote, pair)
+        log: safeLogCounters(report, out, remote, pair)
     };
+}
+
+/** logCounters sem nunca derrubar a leitura: o log e so diagnostico, a qualidade automatica precisa do resto. */
+function safeLogCounters(report: RTCStatsReport, out: any, remote: any, pair: any): SenderLogCounters | undefined {
+    try {
+        return logCounters(report, out, remote, pair);
+    } catch {
+        return undefined;
+    }
 }
 
 const clamp01 = (v: number) => Math.max(0, Math.min(1, v));

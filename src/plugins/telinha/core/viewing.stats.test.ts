@@ -17,9 +17,9 @@ import { type FakeClock, flushPromises, useFakeClock } from "@test/fakes/clock";
 import type { FakeRoom } from "@test/fakes/trystero";
 import { FRIEND_ID } from "@test/fakes/vencord";
 import { audioReceiverStats, type FakeMediaStreamTrack, type FakeRTCPeerConnection, videoReceiverStats } from "@test/fakes/webrtc";
-import { addStreamer, closeRoom, incomingStream, logMark, openRoom, receiveOn } from "@test/helpers/wpc-viewing";
+import { addStreamer, closeRoom, incomingStream, logMark, openRoom, receiveOn, viewerOf } from "@test/helpers/wpc-viewing";
 
-import { STATS_LINE_RE } from "./statsLog";
+import { ReceiverLog, STATS_LINE_RE } from "./statsLog";
 import { onPeerStream, onPresence, sampleStats, unwatch, watch } from "./viewing";
 
 let room: FakeRoom;
@@ -112,4 +112,31 @@ test("sem transmissao assistida: nenhuma linha", async t => {
     watch("peerA");
     await every2s(clock, 9);
     assert.deepEqual(lines().filter(l => STATS_LINE_RE.test(l)), [], "pedido sem stream: nada a medir");
+});
+
+test("o log de estatisticas quebrado (o ReceiverLog lanca): o 1o quadro, os numeros da tela e o parar seguem; um aviso so", async t => {
+    const boom = () => {
+        throw new Error("falha de teste no log");
+    };
+    t.mock.method(ReceiverLog.prototype, "add", boom);
+    t.mock.method(ReceiverLog.prototype, "summary", boom);
+    const clock = useFakeClock(t);
+    const pc = addStreamer(room, "peerA");
+    watch("peerA");
+    const lines = logMark();
+    playing(clock, pc);
+
+    await read();
+    await every2s(clock, 6);
+    const v = await viewerOf("peerA");
+    assert.equal(v?.status, "playing");
+    assert.deepEqual({ ...v?.stats, fps: 0 }, { width: 1280, height: 720, fps: 0, kbps: 1000 }, "a tela continua recebendo os numeros");
+
+    unwatch("peerA");
+    assert.equal((await viewerOf("peerA")), undefined, "parou de assistir");
+    assert.equal(lines().at(-1), "Parou de assistir amigo (peerA)");
+    assert.deepEqual(lines().filter(l => STATS_LINE_RE.test(l)), []);
+    assert.deepEqual(lines().filter(l => l.startsWith("O log de estatísticas falhou")), [
+        "O log de estatísticas falhou (só diagnóstico: a transmissão e a recepção continuam): Error: falha de teste no log"
+    ]);
 });

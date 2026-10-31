@@ -30,7 +30,7 @@
 // de CPU (o tempo deles nao e processador); encoders por software seguem so a logica de CPU, como antes.
 
 import { log, logThrottled } from "@plugins/telinha/core/log";
-import { type SenderLevels, SenderLog } from "@plugins/telinha/core/statsLog";
+import { guardStatsLog, type SenderLevels, SenderLog } from "@plugins/telinha/core/statsLog";
 import type { AutoQualityState, AutoQualityViewer, PeerId, Quality, QualityLevel, QualityReason } from "@plugins/telinha/types";
 
 import { inBandwidthGrace, LEVELS, levelText, meet, pixelRate, rank, stepDown, stepUp } from "./levels";
@@ -348,7 +348,7 @@ export class QualityController {
             v.fresh = false;
             if (!s) return;
             const m = v.prev ? diffSamples(v.prev, s) : null;
-            v.log.add(v.prev, s);
+            guardStatsLog(() => v.log.add(v.prev, s));
             v.prev = s;
             if (m) {
                 v.metrics = m;
@@ -366,7 +366,7 @@ export class QualityController {
 
     // #endregion
 
-    // #region log de estatisticas (so diagnostico: nada aqui entra nas decisoes)
+    // #region log de estatisticas (so diagnostico: nada aqui entra nas decisoes, e uma excecao daqui nao sai: guardStatsLog)
 
     private levelsOf(v: ViewerState): SenderLevels {
         return { level: this.levelFor(v.peerId), bw: v.bwLevel, global: this.global, auto: this.deps.enabled() };
@@ -375,8 +375,10 @@ export class QualityController {
     /** Depois de cada avaliacao: a linha periodica de quem completou a janela do log (core/statsLog.ts → STATS_LOG_MS). */
     private logStats() {
         for (const v of this.viewers.values()) {
-            const line = v.fresh && v.prev && v.log.line(v.prev, this.deps.label(v.peerId), this.levelsOf(v));
-            if (line) log.info(line);
+            guardStatsLog(() => {
+                const line = v.fresh && v.prev && v.log.line(v.prev, this.deps.label(v.peerId), this.levelsOf(v));
+                if (line) log.info(line);
+            });
         }
     }
 
@@ -387,14 +389,18 @@ export class QualityController {
     private noteLevels() {
         const now = performance.now();
         for (const v of this.viewers.values()) {
-            const line = v.log.trackLevel(this.levelFor(v.peerId), now) && v.prev && v.log.line(v.prev, this.deps.label(v.peerId), this.levelsOf(v), true);
-            if (line) log.info(line);
+            guardStatsLog(() => {
+                const line = v.log.trackLevel(this.levelFor(v.peerId), now) && v.prev && v.log.line(v.prev, this.deps.label(v.peerId), this.levelsOf(v), true);
+                if (line) log.info(line);
+            });
         }
     }
 
     private logSummary(v: ViewerState) {
-        const line = v.log.summary(this.deps.label(v.peerId), performance.now());
-        if (line) log.info(line);
+        guardStatsLog(() => {
+            const line = v.log.summary(this.deps.label(v.peerId), performance.now());
+            if (line) log.info(line);
+        });
     }
 
     // #endregion

@@ -13,7 +13,7 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 
-import { STATS_LINE_RE } from "@plugins/telinha/core/statsLog";
+import { SenderLog, STATS_LINE_RE } from "@plugins/telinha/core/statsLog";
 import { useFakeClock } from "@test/fakes/clock";
 import { EncoderSim, installWebRtc, type LinkRates, type WebRtcEnv } from "@test/fakes/webrtc";
 import { logsDuring, qualityHarness, qualityLines } from "@test/helpers/wpb-quality";
@@ -97,4 +97,34 @@ test("espectador que para antes de alguma medida: sem resumo", async t => {
     await h.runUntil(2000);
     assert.deepEqual(await logsDuring(() => h.controller.removeViewer("A")), []);
     h.controller.removeViewer("A");
+});
+
+test("o log de estatisticas quebrado (toda chamada do SenderLog lanca): as decisoes e os applies seguem; um aviso so", async t => {
+    const boom = () => {
+        throw new Error("falha de teste no log");
+    };
+    for (const m of ["add", "line", "trackLevel", "summary"] as const) t.mock.method(SenderLog.prototype, m, boom);
+    const clock = useFakeClock(t);
+    const a = new EncoderSim({ limitation: "bandwidth", width: 1066, height: 600, link: LINK });
+    const h = qualityHarness(clock, { A: a, B: new EncoderSim({ link: LINK }) });
+
+    const lines = await logsDuring(async () => {
+        await h.join("A");
+        await h.join("B");
+        await h.runUntil(BW_GRACE_MS + 4000);
+    });
+    assert.deepEqual(qualityLines(lines), ["Qualidade automática: 1080p 60 fps → 720p 60 fps para A (banda: o WebRTC reduziu para 600p por banda (degrau 1080p))"]);
+    assert.equal(h.lastApplied("A"), "720p60", "o degrau novo chegou no encoder");
+    assert.equal(h.lastApplied("B"), "1080p60");
+    assert.deepEqual(statsLines(lines), []);
+    assert.deepEqual(lines.filter(l => l.startsWith("O log de estatísticas falhou")), [
+        "O log de estatísticas falhou (só diagnóstico: a transmissão e a recepção continuam): Error: falha de teste no log"
+    ]);
+
+    // parar um espectador e acabar a transmissao tambem nao lancam (e o aviso nao repete)
+    const end = await logsDuring(() => {
+        h.controller.removeViewer("B");
+        h.controller.dispose();
+    });
+    assert.deepEqual(end, []);
 });

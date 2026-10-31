@@ -13,11 +13,28 @@
 
 import type { QualityLevel } from "@plugins/telinha/types";
 
+import { errorText, logThrottled } from "./log";
 import { LEVELS } from "./quality/levels";
 import { diffSamples, type SenderLogCounters, type SenderSample, type WindowMetrics } from "./quality/stats";
 
 /** Intervalo das linhas periodicas (por envio e por transmissao assistida). */
 export const STATS_LOG_MS = 10_000;
+/** Uma falha do log de estatisticas sai no log no maximo uma vez neste intervalo (as repeticoes so contam). */
+const STATS_LOG_ERROR_MS = 10 * 60_000;
+
+/**
+ * Roda um gancho do log de estatisticas (quality/controller.ts, viewing.ts). O log e so diagnostico: uma excecao dele
+ * nunca chega em quem chamou (as decisoes da qualidade automatica, os applies, a recepcao seguem); sai um aviso no log,
+ * no maximo um a cada STATS_LOG_ERROR_MS. undefined = o gancho falhou.
+ */
+export function guardStatsLog<T>(fn: () => T): T | undefined {
+    try {
+        return fn();
+    } catch (e) {
+        logThrottled("stats-log", "warn", `O log de estatísticas falhou (só diagnóstico: a transmissão e a recepção continuam): ${errorText(e)}`, STATS_LOG_ERROR_MS);
+        return undefined;
+    }
+}
 /** As leituras sao a cada ~2 s e atrasam alguns ms: uma janela a menos de 1 s de STATS_LOG_MS ja fecha. */
 const STATS_LOG_SLACK_MS = 1000;
 /** Janelas de ~2 s guardadas para as medianas do resumo (~11 h); depois disso as medianas ficam com as primeiras. */

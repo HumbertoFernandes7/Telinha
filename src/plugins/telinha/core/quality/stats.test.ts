@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { FakeRTCRtpSender, type StatsEntry, videoSenderStats, videoTrack } from "@test/fakes/webrtc";
+import { FakeRTCRtpSender, FakeStatsReport, type StatsEntry, videoSenderStats, videoTrack } from "@test/fakes/webrtc";
 
 import { diffSamples, isHardwareEncoder, readSenderSample, type SenderLogCounters, type SenderSample } from "./stats";
 
@@ -147,6 +147,21 @@ describe("readSenderSample", () => {
         const s = await readSenderSample(senderWith(videoSenderStats({ qualityLimitationDurations: null, qualityLimitationReason: "cpu" })));
         assert.equal(s?.limitation, null);
         assert.equal(s?.reason, "cpu");
+    });
+
+    test("um campo so do log que lanca ao ser lido: a leitura sai sem os contadores do log, o resto inteiro", async () => {
+        const report = new FakeStatsReport(withOutbound({ framesEncoded: 600, bytesSent: 1_000_000, frameWidth: 1280, frameHeight: 720 }));
+        Object.defineProperty(report.get("OT01V"), "targetBitrate", {
+            get() {
+                throw new Error("falha de teste");
+            }
+        });
+        const sender = new FakeRTCRtpSender(videoTrack());
+        sender.getStats = async () => report;
+        const s = await readSenderSample(sender as unknown as RTCRtpSender);
+        assert.ok(s);
+        assert.equal(s.log, undefined);
+        assert.deepEqual([s.framesEncoded, s.bytesSent, s.frameWidth, s.frameHeight], [600, 1_000_000, 1280, 720]);
     });
 });
 
