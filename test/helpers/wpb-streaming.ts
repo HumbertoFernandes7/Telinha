@@ -31,7 +31,11 @@ import { type FakeRTCPeerConnection, type FakeRTCRtpSender, installWebRtc, type 
 // only the side-effect `import "@test/fakes/dom"` at its top (that import must load before @test/fakes/webrtc)
 export { canvas2d, media } from "@test/fakes/dom";
 
-/** Lets `n` real macrotask turns run (promise chains, crypto.subtle, the fakes' async methods). */
+/**
+ * Lets `n` real macrotask turns run (promise chains, the fakes' async methods). Not for crypto.subtle: it runs on
+ * libuv's threadpool in real time, so no number of turns is enough on a loaded machine (CI with coverage). Wait for
+ * what it leads to with eventually(), or count the calls that finished (streaming.access.test.ts → trackProofChecks).
+ */
 export async function turns(n = 10): Promise<void> {
     for (let i = 0; i < n; i++) await new Promise(resolve => setImmediate(resolve));
 }
