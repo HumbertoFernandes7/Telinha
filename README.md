@@ -122,11 +122,11 @@ Na primeira vez, o Telinha pede para você autorizá-lo no Discord (a janela é 
 **Assistir** (qualquer uma destas formas)
 
 - Clique em **Assistir** no quadradinho da pessoa, na tela da call. A transmissão toca ali mesmo.
-- Clique na etiqueta **TELINHA** ao lado do nome da pessoa na lista do canal de voz.
+- Clique na etiqueta **TELINHA** ao lado do nome da pessoa na lista do canal de voz. O Discord vai para a tela da call, com o quadradinho dela em destaque, e a transmissão toca ali mesmo.
 - Clique em **Assistir** na barra do Telinha.
 - Menu da caixa de ferramentas do Vencord (topo do Discord) > **Quem está transmitindo**.
 
-A transmissão também pode abrir em uma **janela separada** (no quadradinho da call, use **Abrir em janela**; pelas outras formas ela já abre assim), com tela cheia, volume e "Parar de assistir".
+A transmissão também pode abrir em uma **janela separada** (no quadradinho da call, use **Abrir em janela**; pela barra do Telinha e pelo menu ela já abre assim), com tela cheia, volume e "Parar de assistir".
 
 **Quem está assistindo**
 

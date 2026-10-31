@@ -20,7 +20,7 @@
 //   ...:null,e2,$self.renderCallTileStream(u,u.type===ek.lp.USER),R?null:...
 //
 // Se o Discord mudar esse trecho o patch simplesmente nao aplica (o Vencord so avisa no console) e a call fica como
-// era; a janela propria continua funcionando.
+// era; a janela propria continua funcionando, e a etiqueta TELINHA da lista de voz cai no painel flutuante.
 
 export const callViewPatches = [
     {

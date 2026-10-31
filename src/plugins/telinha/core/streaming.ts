@@ -18,7 +18,7 @@
 // Recusas 2-4 respondem { op: "denied" } na acao "watch" (protocol.ts, passos 5 e 7). Mudar o modo com a
 // transmissao no ar vale so para pedidos novos: quem ja assiste continua (e fica aprovado).
 
-import { isStreamAccess, STREAM_KIND_SCREEN, type WatchDeniedReason, type WatchMessage, type WatchReplyMessage } from "@plugins/telinha/protocol";
+import { type CodecRequestMessage, isStreamAccess, STREAM_KIND_SCREEN, type WatchDeniedReason, type WatchMessage, type WatchReplyMessage } from "@plugins/telinha/protocol";
 import { type CodecSetting, settings } from "@plugins/telinha/settings";
 import type { AccessMode, BlockReason, CaptureSource, PeerId, Quality, QualityLevel, StreamInfo, StreamOptions } from "@plugins/telinha/types";
 import { RelationshipStore } from "@webpack/common";
@@ -77,6 +77,23 @@ interface ViewerSend {
     fellBack?: boolean;
     /** o H.264 esta no OpenH264 de passagem (o WebRTC reduziu a resolucao para um tamanho que a placa nao aceita) */
     transientSoftware?: boolean;
+    /** o encoder deste envio ja codificou algum quadro: a checagem do H.264 que nao sai (checkStall) acabou */
+    encoded?: boolean;
+    /** checkStall: desde quando a conexao esta no ar e a captura entrega quadros sem o encoder codificar nenhum */
+    stall?: StallWatch;
+    /** o espectador ja pediu outro codec (onCodecRequest): um pedido por envio */
+    codecRequested?: boolean;
+}
+
+/** Janela da checagem do H.264 que nao sai (checkStall). Contadores de quadros da captura (capturedFrames). */
+interface StallWatch {
+    /** performance.now() do inicio da janela */
+    since: number;
+    /** quadros da captura no inicio da janela e na ultima leitura */
+    from: number;
+    last: number;
+    /** performance.now() da ultima leitura em que a captura tinha entregado quadros novos */
+    lastChange: number;
 }
 
 /** Qualidade automatica (core/quality/controller.ts) e monitor de imagem preta/congelada da captura atual. */
@@ -93,7 +110,18 @@ interface CaptureExtras {
 /** Depois de a janela capturada mudar de tamanho: OpenH264 nesse meio tempo e a reducao antiga, sendo reaplicada (checkEncoder). */
 const RESIZE_GRACE_MS = 5000;
 
+/** H.264 sem nenhum quadro codificado por este tempo, com a conexao e a captura no ar: o encoder nao sai (checkStall). */
+export const H264_STALL_MS = 8000;
+/** A captura sem quadro novo por este tempo parou (janela minimizada, tela parada): a janela do checkStall recomeca. */
+const SOURCE_IDLE_MS = 2500;
+/** Quadros que a captura precisa entregar na janela do checkStall (1 por segundo em media) para culpar o encoder. */
+const STALL_MIN_SOURCE_FRAMES = 8;
+/** Pedidos de codec (onCodecRequest) de uma mesma conexao: no maximo um a cada este tempo; o resto e ignorado. */
+const CODEC_REQUEST_MIN_MS = 5000;
+
 const sends = new Map<PeerId, ViewerSend>();
+/** performance.now() do ultimo pedido de codec de cada conexao (onCodecRequest) */
+const codecRequestAt = new Map<PeerId, number>();
 let starting = false;
 let extras: CaptureExtras | null = null;
 let tickCount = 0;
@@ -974,10 +1002,21 @@ function checkEncoder(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc
 
     const next = softwareFallback(enc, false, rt.peers.get(peerId)?.presence?.caps, settings.store.codec as CodecSetting, getLocalCaps());
     if (!next) return;
+    fallBack(peerId, local, send, next,
+        `O H.264 para ${label} está sendo codificado por software (${enc.implementation || "sem aceleração"}, ${size}), não pela placa de vídeo, e a imagem pode travar`);
+}
+
+/**
+ * O H.264 deste envio falhou de verdade (checkEncoder: software num tamanho que a placa aceita; checkStall: nenhum quadro
+ * codificado): conta a queda na sessao do Discord (noteH264Fallback: na 2a, o H.264 automatico desliga para os proximos)
+ * e passa so ESTE espectador para `next` (o que chooseCodec escolhe sem a placa: VP9), sem reconectar. Com o codec fixado
+ * em H.264 (`next` tambem H.264), so loga. Uma vez por espectador (send.fellBack). `why`: a frase do problema, sem ponto.
+ */
+function fallBack(peerId: PeerId, local: LocalCapture, send: ViewerSend, next: CodecDecision, why: string) {
     send.fellBack = true;
+    const label = peerLabel(peerId);
     const name = next.codec.toUpperCase();
     const { count, disabledNow } = noteH264Fallback();
-    const why = `O H.264 para ${label} está sendo codificado por software (${enc.implementation || "sem aceleração"}, ${size}), não pela placa de vídeo, e a imagem pode travar`;
     if (next.codec === send.decision.codec) {
         const session = disabledNow ? ` Foi a ${count}ª queda nesta sessão: o H.264 automático fica desligado.` : "";
         log.warn(`${why}. Continua em H.264 porque o codec está fixado nas configurações.${session}`);
@@ -988,6 +1027,73 @@ function checkEncoder(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc
         : getLocalCaps().h264HwEncode ? " Os próximos espectadores ainda tentam a placa de vídeo." : "";
     log.warn(`${why}: trocando para ${name} só para ${label}.${others}`);
     void switchSendCodec(peerId, local, send, next);
+}
+
+/**
+ * Quadros que a captura ja entregou: MediaStreamTrack.stats.totalFrames (Chromium recente; conta o que o capturador
+ * entrega, sem depender do encoder) ou, sem ele, o `frames` do media-source deste envio. null = nenhum dos dois.
+ */
+function capturedFrames(local: LocalCapture, source: any): number | null {
+    let total: unknown;
+    try {
+        total = (local.stream.getVideoTracks()[0] as any)?.stats?.totalFrames;
+    } catch { }
+    if (typeof total === "number" && Number.isFinite(total)) return total;
+    const frames = source?.frames;
+    return typeof frames === "number" && Number.isFinite(frames) ? frames : null;
+}
+
+/**
+ * H.264 que nao sai (tick, a cada segundo, ate o 1o quadro codificado). Visto em 31/10 (Telinha 0.2.6, Chromium 152,
+ * placa AMD): "Codificando para ...: video/H264" sem encoderImplementation e o espectador sem nenhum quadro em 45 s,
+ * quatro vezes seguidas (tambem depois de reiniciar o PC), enquanto o H.264 da NVIDIA do outro lado chegava na mesma
+ * conexao; com o codec fixado em VP9, o 1o quadro chegou em 493 ms.
+ *
+ * Com a conexao no ar ("connected": antes disso o WebRTC segura os quadros antes do encoder, com banda zero) e a captura
+ * entregando quadros (capturedFrames subindo; parada por SOURCE_IDLE_MS, a janela recomeca: janela minimizada nao e o
+ * encoder), framesEncoded 0 (ou ausente) por H264_STALL_MS com pelo menos STALL_MIN_SOURCE_FRAMES quadros da captura =
+ * o encoder H.264 nao sai: fallBack (VP9 so para este espectador, conta como queda; fixado em H.264, so loga). Um
+ * encoder lento que solta o 1o quadro antes disso (ex.: 5 s) encerra a checagem (send.encoded). Sem contador de quadros
+ * da captura, nao age (nao da para separar do caso sem captura). Se os quadros saem e quem nao decodifica e o
+ * espectador, ele pede VP9 (viewing.ts → askForVp9; aqui, onCodecRequest).
+ */
+function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: EncoderReport, frames: number | null) {
+    if (send.fellBack || send.encoded || !/^video\/h264$/i.test(enc.mimeType)) return;
+    if ((enc.framesEncoded ?? 0) > 0) {
+        send.encoded = true;
+        send.stall = undefined;
+        return;
+    }
+    const now = performance.now();
+    if (frames == null || getPc(peerId)?.connectionState !== "connected") {
+        send.stall = undefined;
+        return;
+    }
+    const w = send.stall;
+    if (!w || frames < w.last) {
+        // comeco, ou contador que voltou (outra faixa): conta a partir de agora
+        send.stall = { since: now, from: frames, last: frames, lastChange: now };
+        return;
+    }
+    const idle = now - w.lastChange >= SOURCE_IDLE_MS;
+    if (frames === w.last) {
+        if (idle) return; // a captura parou: o encoder sem quadro nao diz nada
+    } else if (idle) {
+        // a captura voltou depois de parada: conta a partir de agora
+        send.stall = { since: now, from: w.last, last: frames, lastChange: now };
+        return;
+    } else {
+        w.last = frames;
+        w.lastChange = now;
+    }
+    const delivered = w.last - w.from;
+    if (now - w.since < H264_STALL_MS || delivered < STALL_MIN_SOURCE_FRAMES) return;
+
+    const size = enc.width && enc.height ? `${enc.width}x${enc.height}` : "tamanho desconhecido";
+    const next = chooseCodec(rt.peers.get(peerId)?.presence?.caps, settings.store.codec as CodecSetting, { ...getLocalCaps(), h264HwEncode: false });
+    fallBack(peerId, local, send, next, `O encoder H.264 para ${peerLabel(peerId)} não codificou nenhum quadro em ${Math.round((now - w.since) / 1000)} s, `
+        + `com a conexão no ar e a captura entregando quadros (${delivered} quadros da captura, ${enc.framesEncoded ?? 0} codificados, `
+        + `${enc.implementation ? `encoder ${enc.implementation}` : "encoder não informado pelo Chromium"}, ${size})`);
 }
 
 /**
@@ -1031,6 +1137,40 @@ async function switchSendCodec(peerId: PeerId, local: LocalCapture, send: Viewer
 
 // #region eventos vindos da sessao
 
+/**
+ * Acao "codec" (protocol.ts, passo 8): quem assiste recebeu o stream em H.264 e nao decodificou nenhum quadro (viewing.ts →
+ * askForVp9). Atendido so com o codec no automatico, para quem esta recebendo a transmissao em H.264, uma vez por envio:
+ * troca so o envio para ele (switchSendCodec, como uma queda), mas NAO conta como queda do H.264 deste PC
+ * (noteH264Fallback): os quadros podem estar saindo e o problema ser o decodificador dele. Codec fixado em H.264: so
+ * loga. Um pedido a cada CODEC_REQUEST_MIN_MS por conexao; quem nao esta recebendo a transmissao e ignorado.
+ */
+export function onCodecRequest(peerId: PeerId, request: CodecRequestMessage) {
+    const now = performance.now();
+    const last = codecRequestAt.get(peerId);
+    if (last !== undefined && now - last < CODEC_REQUEST_MIN_MS) return;
+    codecRequestAt.set(peerId, now);
+    const label = peerLabel(peerId);
+    const wanted = request.codec.toUpperCase();
+    const { local } = rt;
+    const send = sends.get(peerId);
+    if (!local || !send || !local.viewers.has(peerId)) {
+        logThrottled(`codec-request-idle:${peerId}`, "info", `${label} pediu ${wanted} (nenhum quadro em H.264 do lado dele), mas não está recebendo a sua transmissão: ignorado`, 60_000);
+        return;
+    }
+    // ja atendido, ou o envio ja nao e H.264 (ex.: trocou para VP9 por uma queda do encoder)
+    if (send.codecRequested || send.decision.codec !== "h264") return;
+    send.codecRequested = true;
+    const why = `${label} não decodificou nenhum quadro do vídeo em H.264 e pediu ${wanted}`;
+    const next = chooseCodec(rt.peers.get(peerId)?.presence?.caps, settings.store.codec as CodecSetting, { ...getLocalCaps(), h264HwEncode: false });
+    if (next.codec === send.decision.codec) {
+        log.warn(`${why}: continua em H.264 porque o codec está fixado nas configurações`);
+        return;
+    }
+    send.fellBack = true;
+    log.warn(`${why}: trocando para ${next.codec.toUpperCase()} só para ${label}. Não conta como queda do H.264 deste PC (pode ser o decodificador dele).`);
+    void switchSendCodec(peerId, local, send, next);
+}
+
 export function onWatchRequest(peerId: PeerId, request: WatchMessage) {
     if (request.op === "stop") {
         challenges.delete(peerId);
@@ -1061,6 +1201,7 @@ export function onWatchRequest(peerId: PeerId, request: WatchMessage) {
 
 export function onPeerGone(peerId: PeerId) {
     sends.delete(peerId);
+    codecRequestAt.delete(peerId);
     rt.approved.delete(peerId);
     challenges.delete(peerId);
     cancelPending(peerId, null);
@@ -1081,13 +1222,14 @@ export function onRoomClosing(reason: string) {
     if (rt.local) stopStreaming(reason);
     endOfStreamGuards();
     rt.blocked.clear();
+    codecRequestAt.clear();
 }
 
 /**
  * Uma vez por segundo: confere que todo espectador ainda pode receber (defesa extra: expulso, recusado,
  * identidade duplicada ou fora da call nunca fica recebendo), loga o codec que o encoder realmente usa
- * por espectador (uma vez), confere se um envio H.264 caiu no encoder por software (checkEncoder), se a captura mudou
- * de tamanho (checkCaptureSize) e, a cada 2 s, roda a qualidade automatica.
+ * por espectador (uma vez), confere se um envio H.264 caiu no encoder por software (checkEncoder) ou nao codifica nenhum
+ * quadro (checkStall), se a captura mudou de tamanho (checkCaptureSize) e, a cada 2 s, roda a qualidade automatica.
  */
 export function tick() {
     const { local } = rt;
@@ -1114,8 +1256,10 @@ export function tick() {
         if (!sender) continue;
         sender.getStats().then(report => {
             let out: any;
+            let source: any;
             report.forEach((s: any) => {
                 if (s.type === "outbound-rtp" && s.kind === "video") out = s;
+                else if (s.type === "media-source" && s.kind === "video") source = s;
             });
             const codec = out?.codecId ? (report.get(out.codecId) as any)?.mimeType : undefined;
             if (!codec || sends.get(peerId) !== send) return;
@@ -1131,6 +1275,7 @@ export function tick() {
                 else log.warn(`${msg} — esperado ${send.decision.codec.toUpperCase()}`);
             }
             checkEncoder(peerId, local, send, enc);
+            checkStall(peerId, local, send, enc, capturedFrames(local, source));
         }).catch(() => { });
     }
 }

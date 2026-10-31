@@ -101,7 +101,7 @@ describe("sem Client ID: o recurso de identidade desligado (v0.1.0)", () => {
         test("sala sem certificado proprio e sem a acao identity; o hello vai sem token; quem manda token entra direto", async () => {
             assert.equal("certificates" in room.config.rtcConfig, false);
             assert.equal(rt.certFingerprint, null);
-            assert.deepEqual([...room.actions.keys()].sort(), ["presence", "watch"]);
+            assert.deepEqual([...room.actions.keys()].sort(), ["codec", "presence", "watch"]);
             assert.equal(generated, 0);
 
             const { sentHello } = await room.connectPeer(AMIGO, { hello: hello(FRIEND_ID, "amigo", "a.b.c") });

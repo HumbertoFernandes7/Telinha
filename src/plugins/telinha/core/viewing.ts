@@ -18,6 +18,7 @@ import { computePasswordProof, isValidPassword, normalizePassword } from "./acce
 import { getPc, peerLabel, publish, rt, type ViewerEntry } from "./context";
 import { errorText, log, logThrottled } from "./log";
 import { me } from "./presence";
+import { emptyReceiverCounters, guardStatsLog, readAudioInbound, readVideoInbound, ReceiverLog, type ReceiverSample } from "./statsLog";
 
 const RESPONSE_TIMEOUT_MS = 20_000;
 /** o transmissor pediu para esperar a aprovacao dele (60 s do lado dele + folga de rede) */
@@ -50,6 +51,8 @@ function clearPasswordState(v: ViewerEntry) {
 }
 const FIRST_FRAME_TIMEOUT_MS = 45_000;
 const FIRST_FRAME_POLL_MS = 150;
+/** Stream em H.264 sem nenhum quadro decodificado ate aqui: pede VP9 ao transmissor (askForVp9). */
+export const NO_FRAME_HINT_MS = 10_000;
 
 function sendWatch(peerId: PeerId, message: WatchMessage) {
     return rt.watchAction?.send(message, { target: peerId }) ?? Promise.resolve();
@@ -267,15 +270,9 @@ function videoReceiver(v: ViewerEntry) {
     return getPc(v.peerId)?.getReceivers().find(r => r.track === track) ?? null;
 }
 
-interface InboundSample {
-    framesDecoded: number;
-    width: number;
-    height: number;
+/** Uma leitura do receiver (statsLog.ts → ReceiverSample, com os contadores do log) e o fps relatado. */
+interface InboundSample extends ReceiverSample {
     fps: number | null;
-    bytes: number;
-    codec: string | null;
-    decoder: string | null;
-    powerEfficient: boolean | null;
 }
 
 async function sample(v: ViewerEntry): Promise<InboundSample | null> {
@@ -286,12 +283,15 @@ async function sample(v: ViewerEntry): Promise<InboundSample | null> {
     const video = videoReceiver(v);
     if (!video) return null;
 
-    const out: InboundSample = { framesDecoded: 0, width: 0, height: 0, fps: null, bytes: 0, codec: null, decoder: null, powerEfficient: null };
+    const out: InboundSample = {
+        at: 0, framesDecoded: 0, width: 0, height: 0, fps: null, bytes: 0, codec: null, decoder: null, powerEfficient: null, log: emptyReceiverCounters()
+    };
     for (const r of receivers) {
         const report = await r.getStats();
         report.forEach((s: any) => {
             if (s.type !== "inbound-rtp") return;
             out.bytes += s.bytesReceived ?? 0;
+            if (s.kind === "audio") guardStatsLog(() => readAudioInbound(out.log, s));
             if (r !== video || s.kind !== "video") return;
             out.framesDecoded = s.framesDecoded ?? 0;
             out.width = s.frameWidth ?? 0;
@@ -300,8 +300,10 @@ async function sample(v: ViewerEntry): Promise<InboundSample | null> {
             out.decoder = s.decoderImplementation ?? null;
             out.powerEfficient = typeof s.powerEfficientDecoder === "boolean" ? s.powerEfficientDecoder : null;
             if (s.codecId) out.codec = (report.get(s.codecId) as any)?.mimeType ?? null;
+            guardStatsLog(() => readVideoInbound(out.log, s));
         });
     }
+    out.at = performance.now();
     return out;
 }
 
@@ -314,6 +316,26 @@ function onFirstFrame(v: ViewerEntry, s: InboundSample) {
     const dec = s.decoder ? `, decodificador ${s.decoder}${s.powerEfficient ? " (hardware)" : ""}` : "";
     log.info(`Assistir ${peerLabel(v.peerId)}: primeiro quadro em ${ms} ms (${s.codec ?? "codec ?"}, ${s.width}x${s.height}${dec})`);
     publish();
+}
+
+/**
+ * O stream chegou ha NO_FRAME_HINT_MS, o video vem em H.264 (codec do inbound-rtp) e nenhum quadro foi decodificado:
+ * pede ao transmissor para mandar VP9 so para nos (acao "codec", protocol.ts passo 8). Visto em 31/10: o H.264 de um PC
+ * com placa AMD nunca virou imagem do outro lado, e em VP9 o 1o quadro chegou em menos de 1 s. Um pedido por
+ * "assistir" (v.codecRequested). Quem decide e o transmissor (so com o codec dele no automatico); versoes sem a acao a
+ * ignoram. O aviso de 45 s e a espera continuam como estao. Sem codec nas estatisticas (nenhum pacote chegou), nao pede:
+ * o transmissor confere o proprio encoder (streaming.ts → checkStall).
+ */
+function askForVp9(v: ViewerEntry, s: InboundSample, streamAt: number) {
+    if (v.codecRequested || performance.now() - streamAt < NO_FRAME_HINT_MS || !s.codec || !/^video\/h264$/i.test(s.codec)) return;
+    const action = rt.codecAction;
+    if (!action) return;
+    v.codecRequested = true;
+    const received = s.log.framesReceived != null ? `${s.log.framesReceived} quadros recebidos` : `${Math.round(s.bytes / 1000)} kB recebidos`;
+    log.warn(`Assistir ${peerLabel(v.peerId)}: nenhum quadro do vídeo em H.264 decodificado em ${Math.round((performance.now() - streamAt) / 1000)} s `
+        + `(${received}${s.decoder ? `, decodificador ${s.decoder}` : ""}); pedindo ao transmissor para mandar VP9`);
+    action.send({ codec: "vp9" }, { target: v.peerId })
+        .catch(e => logThrottled(`codec-send:${v.peerId}`, "warn", `Falha ao pedir VP9 a ${peerLabel(v.peerId)}: ${errorText(e)}`));
 }
 
 function attachStream(v: ViewerEntry, stream: MediaStream) {
@@ -330,6 +352,14 @@ function attachStream(v: ViewerEntry, stream: MediaStream) {
     v.firstFrameAt = null;
     v.meter = null;
     log.info(`Assistir ${peerLabel(v.peerId)}: stream recebido em ${Math.round(performance.now() - v.requestedAt)} ms (${stream.getVideoTracks().length} vídeo, ${stream.getAudioTracks().length} áudio)`);
+
+    // log de estatisticas deste stream: as linhas saem em sampleStats; o resumo, quando o stream sai (fim, parar, recusa...)
+    const statsLog = new ReceiverLog(performance.now());
+    v.statsLog = statsLog;
+    v.streamCleanup.push(() => guardStatsLog(() => {
+        const line = statsLog.summary(peerLabel(v.peerId), performance.now());
+        if (line) log.info(line);
+    }));
 
     const onRemoveTrack = () => {
         if (v.stream === stream && !stream.getVideoTracks().some(t => t.readyState === "live")) end(v, "a transmissão foi encerrada");
@@ -359,10 +389,13 @@ function attachStream(v: ViewerEntry, stream: MediaStream) {
         busy = true;
         try {
             const s = await sample(v);
-            if (s && s.framesDecoded > 0 && v.stream === stream && v.firstFrameAt == null) {
+            if (!s || v.stream !== stream || v.firstFrameAt != null) return;
+            if (s.framesDecoded > 0) {
                 clearInterval(poll);
                 onFirstFrame(v, s);
+                return;
             }
+            askForVp9(v, s, startedAt);
         } catch { } finally {
             busy = false;
         }
@@ -409,7 +442,10 @@ export function onIdentityInvalid(peerId: PeerId) {
     if (v) fail(v, INVALID_IDENTITY_TEXT);
 }
 
-/** A cada 2 s: largura, altura, fps e kbps de cada stream assistido; tambem recupera de um timeout de 1o quadro. */
+/**
+ * A cada 2 s: largura, altura, fps e kbps de cada stream assistido; tambem recupera de um timeout de 1o quadro. A mesma
+ * leitura alimenta o log de estatisticas (uma linha a cada STATS_LOG_MS por stream, core/statsLog.ts).
+ */
 export function sampleStats() {
     for (const v of rt.viewing.values()) {
         if (!v.stream || (v.status !== "playing" && v.status !== "waiting-first-frame" && v.status !== "error")) continue;
@@ -420,6 +456,10 @@ export function sampleStats() {
             const prev = v.meter;
             v.meter = { bytes: s.bytes, frames: s.framesDecoded, at: now };
             if (s.framesDecoded > 0 && v.firstFrameAt == null) onFirstFrame(v, s);
+            guardStatsLog(() => {
+                const line = v.statsLog?.add(s, peerLabel(v.peerId));
+                if (line) log.info(line);
+            });
             if (!prev || now <= prev.at) return;
             const dt = (now - prev.at) / 1000;
             const fps = s.fps ?? Math.max(0, (s.framesDecoded - prev.frames) / dt);

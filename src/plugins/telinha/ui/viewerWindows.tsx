@@ -6,7 +6,8 @@
 
 // One viewer per watched stream. Each opens in its own Discord pop-out window (a real OS window that can go to
 // another monitor); if the pop-out does not render within MOUNT_TIMEOUT_MS, it falls back to a draggable floating
-// panel inside Discord. Closing the window/panel (by any means) calls unwatch(peerId) exactly once.
+// panel inside Discord (openViewer(peerId, { inApp: true }) opens that panel right away, without the pop-out).
+// Closing the window/panel (by any means) calls unwatch(peerId) exactly once.
 
 import ErrorBoundary from "@components/ErrorBoundary";
 import { unwatch, watch } from "@plugins/telinha/actions";
@@ -251,8 +252,11 @@ function focusViewer(rec: ViewerRecord) {
     }
 }
 
-/** Starts watching `peerId` and opens its viewer window (or focuses it if it is already open) */
-export function openViewer(peerId: PeerId) {
+/**
+ * Starts watching `peerId` and opens its viewer window (or focuses it if it is already open). `inApp`: straight to the
+ * floating panel inside Discord, no pop-out window (the voice tag uses it when the call screen shows no tile).
+ */
+export function openViewer(peerId: PeerId, opts: { inApp?: boolean; } = {}) {
     const existing = viewers.get(peerId);
     if (existing && !existing.closed) {
         focusViewer(existing);
@@ -264,7 +268,7 @@ export function openViewer(peerId: PeerId) {
         peerId,
         key: popoutKey(peerId),
         title: `${peerName(peer)} — Telinha`,
-        mode: "popout",
+        mode: opts.inApp ? "floating" : "popout",
         mounted: false,
         sawOpen: false,
         switching: false,
@@ -277,6 +281,11 @@ export function openViewer(peerId: PeerId) {
         finalize(rec, "watch falhou");
     });
     if (rec.closed) return;
+
+    if (opts.inApp) {
+        openFloating(rec);
+        return;
+    }
 
     ensureStoreListener();
 

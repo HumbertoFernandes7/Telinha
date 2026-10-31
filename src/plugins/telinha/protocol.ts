@@ -70,6 +70,14 @@
 //    Compatibilidade: a v0.1.0 ignora `stream.access` e { op: "password" } (parseWatchReply dela so conhece
 //    pending/denied): como espectadora de uma transmissao com senha, o pedido dela expira sem resposta; os
 //    motivos novos viram "declined" nela.
+// 8. Pedido de codec (depois da v0.2.6, adicionado sem mudar PROTOCOL_VERSION): acao ACTION_CODEC ("codec"),
+//    espectador → transmissor, { codec: "vp9" } (CodecRequestMessage): o stream chegou, o video vem em H.264 e
+//    nenhum quadro foi decodificado em ~10 s (core/viewing.ts → NO_FRAME_HINT_MS). No maximo um por "assistir".
+//    O transmissor atende so se o codec dele estiver no automatico e o peer estiver recebendo a transmissao em
+//    H.264: troca so o envio para ele (sem renegociar, como a queda do H.264 por software; core/streaming.ts →
+//    onCodecRequest), sem contar como falha do encoder deste PC (pode ser o decodificador de quem pediu).
+//    Compatibilidade: versoes sem o pedido (a v0.2.6 e anteriores, o amigo virtual) nao registram a acao e a
+//    mensagem expira sozinha no Trystero; codec diferente de "vp9" e ignorado.
 // ============================================================================
 
 /** Versao do protocolo; vai no handshake (`v`) e na presenca (`v`). */
@@ -106,6 +114,7 @@ export const ICE_SERVERS: RTCIceServer[] = [
 export const ACTION_PRESENCE = "presence";
 export const ACTION_WATCH = "watch";
 export const ACTION_IDENTITY = "identity";
+export const ACTION_CODEC = "codec";
 
 /** Marcador da mensagem de handshake (onPeerHandshake). */
 export const HELLO_TYPE = "telinha-hello";
@@ -191,6 +200,11 @@ export type WatchReplyMessage =
 
 /** Tudo o que trafega na acao "watch". */
 export type WatchActionMessage = WatchMessage | WatchReplyMessage;
+
+/** Acao "codec" (passo 8): o espectador nao decodificou nenhum quadro em H.264 e pede para receber em `codec`. */
+export type CodecRequestMessage = {
+    codec: "vp9";
+};
 
 const SNOWFLAKE_RE = /^\d{1,25}$/;
 const MAX_NAME = 64;
@@ -328,6 +342,11 @@ export function parseWatchReply(data: unknown): WatchReplyMessage | null {
     if (data.op !== "denied") return null;
     const reason = DENIED_REASONS.find(r => r === data.reason) ?? "declined";
     return { op: "denied", reason };
+}
+
+/** Pedido de codec do espectador (passo 8), so com o campo conhecido. null se nao for um objeto com codec "vp9". Nunca lanca. */
+export function parseCodecRequest(data: unknown): CodecRequestMessage | null {
+    return isObject(data) && data.codec === "vp9" ? { codec: "vp9" } : null;
 }
 
 export function truncateName(name: string) {

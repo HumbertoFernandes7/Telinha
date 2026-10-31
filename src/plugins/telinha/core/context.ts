@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import type { HelloMessage, IdentityMessage, PresenceMessage, WatchActionMessage } from "@plugins/telinha/protocol";
+import type { CodecRequestMessage, HelloMessage, IdentityMessage, PresenceMessage, WatchActionMessage } from "@plugins/telinha/protocol";
 import { setState } from "@plugins/telinha/store";
 import type {
     AccessMode, AutoQualityState, BlockedViewer, BlockReason, CaptureSource, IdentityAlert, PeerId, PendingViewer, Quality, RemotePeer, StreamInfo,
@@ -16,6 +16,7 @@ import { isIdentityConfigured } from "./identity/config";
 import type { PeerIdentity } from "./identity/policy";
 import type { IdentityFailure } from "./identity/verify";
 import { shortId } from "./log";
+import type { ReceiverLog } from "./statsLog";
 
 // Estado mutavel do nucleo. A UI nunca ve isto: publish() monta um snapshot imutavel para o store.
 
@@ -106,6 +107,10 @@ export interface ViewerEntry {
     firstFrameAt: number | null;
     /** ultima leitura para calcular kbps/fps */
     meter: { bytes: number; frames: number; at: number; } | null;
+    /** log de estatisticas do stream atual (core/statsLog.ts): linhas a cada STATS_LOG_MS e o resumo quando ele acaba */
+    statsLog?: ReceiverLog;
+    /** ja pediu VP9 ao transmissor nesta visualizacao (nenhum quadro em H.264; viewing.ts → askForVp9): uma vez so */
+    codecRequested?: boolean;
     /** limpeza dos timers do pedido (timeout de resposta) */
     requestCleanup: (() => void)[];
     /** limpeza dos listeners/timers do stream atual */
@@ -118,6 +123,8 @@ export const rt = {
     watchAction: null as MessageAction<WatchActionMessage> | null,
     /** acao "identity" (so com Client ID) */
     identityAction: null as MessageAction<IdentityMessage> | null,
+    /** acao "codec": o espectador sem quadro em H.264 pede VP9 (protocol.ts, passo 8) */
+    codecAction: null as MessageAction<CodecRequestMessage> | null,
     /** fingerprint do certificado DTLS que a sala atual usa (rtcConfig.certificates); null = o do Chromium */
     certFingerprint: null as string | null,
     channelId: null as string | null,
