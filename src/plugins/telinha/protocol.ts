@@ -81,6 +81,32 @@
 //    onCodecRequest), sem contar como falha do encoder deste PC (pode ser o decodificador de quem pediu).
 //    Compatibilidade: versoes sem o pedido (a v0.2.6 e anteriores, o amigo virtual) nao registram a acao e a
 //    mensagem expira sozinha no Trystero; codec diferente de "vp9" e ignorado.
+// 9. Diagnostico compartilhado (depois da v0.2.8, adicionado sem mudar PROTOCOL_VERSION; core/diagShare.ts): opcao
+//    "Compartilhar diagnóstico para ajudar a depurar", desligada por padrao. As duas pontas precisam dela ligada.
+//    - a presenca anuncia `caps.diag: true` enquanto a opcao estiver ligada (ausente = desligada ou versao antiga);
+//    - acao ACTION_DIAG ("diag"), DiagMessage:
+//        quem pede → quem manda   { op: "subscribe" }     comecar a mandar o registro do Telinha deste PC
+//        quem pede → quem manda   { op: "unsubscribe" }   parar
+//        quem manda → quem pede   { op: "lines", lines: [{ t, level, text }], dropped? }
+//          t = hora local de quem manda ("HH:MM:SS.mmm"; nas linhas da sessao anterior "AAAA-MM-DD HH:MM:SS.mmm"),
+//          level = "info" | "warn" | "error", text = a linha (ate DIAG_MAX_LINE_CHARS caracteres, sem caracteres de
+//          controle, IPs, caminhos de usuario, ids numericos do Discord, o nome da janela capturada nem tokens; os nomes
+//          de quem esta na call ficam); ate DIAG_MAX_LINES_PER_MESSAGE linhas por mensagem; dropped = quantas linhas
+//          ficaram de fora pelos limites desde a mensagem anterior (inclusive com mais de 10 mensagens esperando o canal).
+//    - quem manda so aceita "subscribe" de um peer admitido, no seu canal de voz, com a identidade do Discord verificada
+//      e com caps.diag. Depois do "subscribe", sem pergunta nem aviso (so uma linha nas configuracoes e no log), na
+//      ordem: as ultimas linhas da sessao anterior (%APPDATA%\Telinha\logs\renderer.log), o mesmo texto do "Copiar
+//      diagnóstico" (no maximo uma vez a cada ~30 s por pessoa) e, dali em diante, cada linha nova do log do Telinha
+//      (no maximo DIAG_MAX_LINES_PER_SECOND por segundo; o excesso so conta em dropped). Para quando chega
+//      "unsubscribe", quando quem pede sai da sala ou do canal de voz, perde a caps.diag ou deixa de passar nas regras,
+//      quando a opcao e desligada aqui ou quando qualquer um recarrega o Discord (a conexao cai).
+//    - quem pede so aceita "lines" de uma conexao a qual mandou "subscribe" e escreve cada linha no console com o
+//      prefixo "[Telinha] [diag <nome>]" (vai para o renderer_js.log do Discord), com a hora de la e a daqui; o que
+//      ficou de fora vira no maximo um aviso por segundo. Cada ponta recebe mensagens de ate 1 MB (joinRoom
+//      maxReceiveBytes, core/session.ts → MAX_RECEIVE_BYTES; a maior "lines" fica abaixo de ~620 KB).
+//    Compatibilidade: versoes sem a acao (a v0.2.8 e anteriores, o amigo virtual) nunca anunciam caps.diag, entao
+//    nenhuma mensagem "diag" vai para elas; o sanitizePresence delas descarta o campo novo. Mensagem, linha ou campo
+//    malformado e ignorado (parseDiagMessage).
 // ============================================================================
 
 /** Versao do protocolo; vai no handshake (`v`) e na presenca (`v`). */
@@ -118,6 +144,7 @@ export const ACTION_PRESENCE = "presence";
 export const ACTION_WATCH = "watch";
 export const ACTION_IDENTITY = "identity";
 export const ACTION_CODEC = "codec";
+export const ACTION_DIAG = "diag";
 
 /** Marcador da mensagem de handshake (onPeerHandshake). */
 export const HELLO_TYPE = "telinha-hello";
@@ -181,7 +208,8 @@ export type PresenceMessage = {
     username: string;
     streaming: boolean;
     stream?: PresenceStream;
-    caps: { h264HwDecode: boolean; };
+    /** diag: "Compartilhar diagnóstico" ligado (passo 9); ausente = desligado ou versao antiga */
+    caps: { h264HwDecode: boolean; diag?: boolean; };
 };
 
 /**
@@ -208,6 +236,34 @@ export type WatchActionMessage = WatchMessage | WatchReplyMessage;
 export type CodecRequestMessage = {
     codec: "vp9";
 };
+
+/** Nivel de uma linha do diagnostico compartilhado (passo 9): o mesmo do log do Telinha. */
+export const DIAG_LEVELS = ["info", "warn", "error"] as const;
+export type DiagLevel = typeof DIAG_LEVELS[number];
+
+/** Uma linha do registro do Telinha de quem manda (passo 9). */
+export type DiagLine = {
+    /** hora local de quem manda: "HH:MM:SS.mmm", ou "AAAA-MM-DD HH:MM:SS.mmm" (sessao anterior) */
+    t: string;
+    level: DiagLevel;
+    text: string;
+};
+
+/** Acao "diag" (passo 9). */
+export type DiagMessage =
+    | { op: "subscribe"; }
+    | { op: "unsubscribe"; }
+    | { op: "lines"; lines: DiagLine[]; dropped?: number; };
+
+/** Mais linhas que isto numa mensagem "lines": o resto e descartado (e contado em dropped). */
+export const DIAG_MAX_LINES_PER_MESSAGE = 200;
+/** Maior linha aceita; quem manda corta antes, com "…". */
+export const DIAG_MAX_LINE_CHARS = 1000;
+/** Linhas novas (ao vivo) que quem manda envia por segundo, no maximo. */
+export const DIAG_MAX_LINES_PER_SECOND = 30;
+const DIAG_TIME_RE = /^(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2}:\d{2}\.\d{3}$/;
+/** maior `dropped` aceito */
+const MAX_DROPPED_FIELD = 1_000_000;
 
 const SNOWFLAKE_RE = /^\d{1,25}$/;
 const MAX_NAME = 64;
@@ -303,7 +359,7 @@ export function sanitizePresence(data: PresenceMessage): PresenceMessage {
         username: data.username.slice(0, MAX_NAME),
         streaming: data.streaming,
         ...(stream ? { stream } : {}),
-        caps: { h264HwDecode: caps.h264HwDecode === true }
+        caps: { h264HwDecode: caps.h264HwDecode === true, ...(caps.diag === true ? { diag: true } : {}) }
     };
 }
 
@@ -350,6 +406,33 @@ export function parseWatchReply(data: unknown): WatchReplyMessage | null {
 /** Pedido de codec do espectador (passo 8), so com o campo conhecido. null se nao for um objeto com codec "vp9". Nunca lanca. */
 export function parseCodecRequest(data: unknown): CodecRequestMessage | null {
     return isObject(data) && data.codec === "vp9" ? { codec: "vp9" } : null;
+}
+
+function isDiagLine(data: unknown): data is DiagLine {
+    return isObject(data)
+        && typeof data.t === "string" && DIAG_TIME_RE.test(data.t)
+        && DIAG_LEVELS.some(l => l === data.level)
+        && typeof data.text === "string" && data.text.length <= DIAG_MAX_LINE_CHARS;
+}
+
+/**
+ * Mensagem da acao "diag" (passo 9), so com os campos conhecidos. Em "lines", cada linha malformada (hora fora do
+ * formato, nivel desconhecido, texto que nao e texto ou longo demais) e as que passam de DIAG_MAX_LINES_PER_MESSAGE
+ * ficam de fora e somam em `dropped`; `dropped` que nao e inteiro de 0 a 1.000.000 e descartado. null se nao for
+ * subscribe/unsubscribe/lines, ou "lines" sem nenhuma linha valida e sem nada descartado. Nunca lanca.
+ */
+export function parseDiagMessage(data: unknown): DiagMessage | null {
+    if (!isObject(data)) return null;
+    if (data.op === "subscribe" || data.op === "unsubscribe") return { op: data.op };
+    if (data.op !== "lines" || !Array.isArray(data.lines)) return null;
+    const lines: DiagLine[] = [];
+    const considered = data.lines.slice(0, DIAG_MAX_LINES_PER_MESSAGE);
+    for (const l of considered) if (isDiagLine(l)) lines.push({ t: l.t, level: l.level, text: l.text });
+    const { dropped } = data;
+    const declared = Number.isInteger(dropped) && (dropped as number) >= 0 && (dropped as number) <= MAX_DROPPED_FIELD ? dropped as number : 0;
+    const total = declared + (data.lines.length - lines.length);
+    if (!lines.length && !total) return null;
+    return { op: "lines", lines, ...(total ? { dropped: total } : {}) };
 }
 
 export function truncateName(name: string) {

@@ -4,11 +4,11 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import type { CodecRequestMessage, HelloMessage, IdentityMessage, PresenceMessage, WatchActionMessage } from "@plugins/telinha/protocol";
+import type { CodecRequestMessage, DiagMessage, HelloMessage, IdentityMessage, PresenceMessage, WatchActionMessage } from "@plugins/telinha/protocol";
 import { setState } from "@plugins/telinha/store";
 import type {
-    AccessMode, AutoQualityState, BlockedViewer, BlockReason, CaptureSource, IdentityAlert, PeerId, PendingViewer, Quality, RemotePeer, StreamInfo,
-    TelinhaState, ViewDeniedReason, ViewerSession, ViewerStatus
+    AccessMode, AutoQualityState, BlockedViewer, BlockReason, CaptureSource, DiagShareState, IdentityAlert, PeerId, PendingViewer, Quality, RemotePeer,
+    StreamInfo, TelinhaState, ViewDeniedReason, ViewerSession, ViewerStatus
 } from "@plugins/telinha/types";
 import type { MessageAction, Room } from "trystero";
 
@@ -120,6 +120,38 @@ export interface ViewerEntry {
     streamCleanup: (() => void)[];
 }
 
+/** Quem recebe o diagnostico deste PC (core/diagShare.ts, lado de quem manda): uma entrada por conexao que pediu. */
+export interface DiagSubscriber {
+    peerId: PeerId;
+    discordUserId: string;
+    username: string;
+    /** a primeira parte (sessao anterior + "Copiar diagnóstico") ja esta na fila; antes disso as linhas novas esperam */
+    ready: boolean;
+    /** numero da ultima linha do log ja enviada (ou coberta pelo texto do "Copiar diagnóstico") */
+    sentSeq: number;
+    /** envios em ordem: a primeira parte pode ser mais de uma mensagem */
+    chain: Promise<void>;
+    /** mensagens na fila (no maximo DIAG_MAX_QUEUED_MESSAGES; o resto so conta em `dropped`) */
+    queued: number;
+    /** linhas que ficaram de fora da fila, para o `dropped` da proxima mensagem */
+    dropped: number;
+}
+
+/** Uma conexao da qual pedimos o diagnostico (core/diagShare.ts, lado de quem pede). */
+export interface DiagSubscription {
+    peerId: PeerId;
+    discordUserId: string;
+    username: string;
+    /** ja chegou alguma linha */
+    receiving: boolean;
+    /** limite de recepcao: linhas que ainda cabem agora (balde que enche com o tempo) */
+    tokens: number;
+    /** Date.now() da ultima recarga do balde */
+    refilledAt: number;
+    /** linhas que ficaram de fora (de la ou pelo balde) desde o ultimo aviso no console (um aviso por segundo, no tick) */
+    droppedPending: number;
+}
+
 export const rt = {
     room: null as Room | null,
     presenceAction: null as MessageAction<PresenceMessage> | null,
@@ -141,7 +173,15 @@ export const rt = {
     /** conexoes aprovadas nesta transmissao (Permitir, ou ja assistiam quando a regra mudou) */
     approved: new Set<PeerId>(),
     /** pedidos esperando aprovacao */
-    pending: new Map<PeerId, PendingEntry>()
+    pending: new Map<PeerId, PendingEntry>(),
+    /** acao "diag": diagnostico compartilhado (protocol.ts, passo 9; so com Client ID) */
+    diagAction: null as MessageAction<DiagMessage> | null,
+    /** conexoes que estao recebendo o diagnostico deste PC */
+    diagSending: new Map<PeerId, DiagSubscriber>(),
+    /** de quem pedimos o diagnostico ("Receber diagnóstico" ligado): discordUserId → nome */
+    diagRequested: new Map<string, string>(),
+    /** conexoes as quais mandamos "subscribe" */
+    diagReceiving: new Map<PeerId, DiagSubscription>()
 };
 
 /** Bloqueio que vale para esta conexao: pelo discordUserId anunciado ou pela propria conexao. */
@@ -210,7 +250,8 @@ function buildSnapshot(): TelinhaState {
             inVoice: p.inVoice,
             ...(p.duplicate ? { duplicateIdentity: true } : {}),
             ...(block ? { blocked: block.reason } : {}),
-            ...(configured ? { identity: p.identity } : {})
+            ...(configured ? { identity: p.identity } : {}),
+            ...(pres?.caps.diag === true ? { diagShare: true } : {})
         });
         if (p.duplicate) {
             const kind = p.impostor ? "impostor" : "duplicate";
@@ -240,6 +281,13 @@ function buildSnapshot(): TelinhaState {
         };
     }
 
+    const diag: DiagShareState = {
+        sendingTo: [...rt.diagSending.values()].map(s => s.username),
+        requested: [...rt.diagRequested.keys()],
+        receivingFrom: [...new Set([...rt.diagReceiving.values()].filter(s => s.receiving).map(s => s.discordUserId))]
+    };
+    const hasDiag = diag.sendingTo.length > 0 || diag.requested.length > 0 || diag.receivingFrom.length > 0;
+
     const { local } = rt;
     return {
         inRoom: !!rt.room,
@@ -261,7 +309,8 @@ function buildSnapshot(): TelinhaState {
         viewing,
         lastError: rt.lastError,
         blocked,
-        identityAlerts: [...alerts.values()]
+        identityAlerts: [...alerts.values()],
+        ...(hasDiag ? { diag } : {})
     };
 }
 

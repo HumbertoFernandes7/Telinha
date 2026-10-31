@@ -9,9 +9,9 @@
 // presenca; despacho para streaming/viewing.
 
 import {
-    ACTION_CODEC, ACTION_IDENTITY, ACTION_PRESENCE, ACTION_WATCH, APP_ID, type CodecRequestMessage, deriveRoomId, type HelloMessage, ICE_SERVERS,
-    type IdentityMessage, isIdentityMessage, isPresenceMessage, parseCodecRequest, parseHello, parseWatchReply, parseWatchRequest, type PresenceMessage,
-    PROTOCOL_VERSION, RELAY_URLS, sanitizePresence, type WatchActionMessage
+    ACTION_CODEC, ACTION_DIAG, ACTION_IDENTITY, ACTION_PRESENCE, ACTION_WATCH, APP_ID, type CodecRequestMessage, deriveRoomId, type DiagMessage,
+    type HelloMessage, ICE_SERVERS, type IdentityMessage, isIdentityMessage, isPresenceMessage, parseCodecRequest, parseDiagMessage, parseHello,
+    parseWatchReply, parseWatchRequest, type PresenceMessage, PROTOCOL_VERSION, RELAY_URLS, sanitizePresence, type WatchActionMessage
 } from "@plugins/telinha/protocol";
 import { settings } from "@plugins/telinha/settings";
 import { resetState } from "@plugins/telinha/store";
@@ -21,6 +21,7 @@ import { getRelaySockets, type HandshakeReceiver, type HandshakeSender, joinRoom
 
 import { probeLocalCaps } from "./codec";
 import { getPc, type PeerEntry, peerLabel, publish, rt, setLastError } from "./context";
+import * as diag from "./diagShare";
 import { getLocalIdToken, type PreparedIdentity, prepareIdentity, type RemoteIdentity, renewIdentity, subscribeLocalIdentity, verifyRemoteIdentity } from "./identity";
 import { isIdentityConfigured } from "./identity/config";
 import { type DuplicateCandidate, type DuplicateGroup, findDuplicates, IDENTITY_FAILURE_TEXT, initialPeerIdentity, nextPeerIdentity, type PeerIdentity } from "./identity/policy";
@@ -42,6 +43,13 @@ const IDENTITY_CHECK_TIMEOUT_MS = 10_000;
 const IDENTITY_RETRY_MS = 1500;
 /** acao "identity" do mesmo peer: no maximo uma verificacao neste intervalo */
 const IDENTITY_RENEWAL_MIN_MS = 10_000;
+/**
+ * Maior mensagem que o Trystero aceita receber (o padrao, 256 MB, aloca e decodifica antes do nosso parser). As nossas:
+ * presenca, "watch", "codec" e "identity" (id_token <= 8 KB) cabem em poucos KB, o hello do handshake tambem; a maior e
+ * uma "lines" do diagnostico (200 linhas de ate 1000 caracteres sem caracteres de controle: ~620 KB no pior caso). As
+ * internas do Trystero: SDP da renegociacao (dezenas de KB) e metadados de stream/track (ele mesmo limita em 64 KB).
+ */
+export const MAX_RECEIVE_BYTES = 1024 * 1024;
 const NO_IDENTITY: PreparedIdentity = { certificates: [], fingerprint: null };
 
 let active = false;
@@ -237,6 +245,7 @@ function joinNow(roomId: string, reason: string, identity: PreparedIdentity) {
         {
             appId: APP_ID,
             password,
+            maxReceiveBytes: MAX_RECEIVE_BYTES,
             relayConfig: { urls: RELAY_URLS },
             // certificado DTLS persistente em TODAS as conexoes (o nonce do id_token aponta para ele); sem ele, o do Chromium
             rtcConfig: { iceServers: ICE_SERVERS, ...(identity.certificates.length ? { certificates: identity.certificates } : {}) },
@@ -264,6 +273,9 @@ function joinNow(roomId: string, reason: string, identity: PreparedIdentity) {
     if (isIdentityConfigured()) {
         rt.identityAction = room.makeAction<IdentityMessage>(ACTION_IDENTITY);
         rt.identityAction.onMessage = onIdentity;
+        // diagnostico compartilhado: exige identidade verificada, entao so com Client ID
+        rt.diagAction = room.makeAction<DiagMessage>(ACTION_DIAG);
+        rt.diagAction.onMessage = onDiag;
     }
     room.onPeerJoin = onPeerJoin;
     room.onPeerLeave = onPeerLeave;
@@ -281,8 +293,9 @@ function leaveRoom(reason: string) {
     if (!room) return;
     streaming.onRoomClosing(reason);
     viewing.clearAll();
+    diag.onDiagRoomClosing();
     rt.room = null;
-    rt.presenceAction = rt.watchAction = rt.identityAction = rt.codecAction = null;
+    rt.presenceAction = rt.watchAction = rt.identityAction = rt.codecAction = rt.diagAction = null;
     rt.certFingerprint = null;
     rt.peers.clear();
     helloByPeer.clear();
@@ -399,6 +412,7 @@ function onPeerLeave(peerId: PeerId) {
     if (entry?.hello && entry.admitted) log.info(`${peerLabel(peerId)} saiu da sala`);
     streaming.onPeerGone(peerId);
     viewing.onPeerGone(peerId);
+    diag.onDiagPeerGone(peerId);
     rt.peers.delete(peerId);
     helloByPeer.delete(peerId);
     selfClaims.delete(peerId);
@@ -466,6 +480,19 @@ function onCodec(data: CodecRequestMessage, { peerId }: { peerId: string; }) {
         if (request) streaming.onCodecRequest(peerId, request);
     } catch (e) {
         logThrottled(`codec-msg:${peerId}`, "warn", `Mensagem "codec" de ${peerLabel(peerId)} ignorada: ${errorText(e)}`);
+    }
+}
+
+/** Acao "diag" (protocol.ts, passo 9): diagnostico compartilhado (pedido, parada ou linhas; regras em core/diagShare.ts). */
+function onDiag(data: DiagMessage, { peerId }: { peerId: string; }) {
+    // dado do peer e hostil: so campos conhecidos, e nada lanca para fora do handler do Trystero
+    try {
+        const entry = rt.peers.get(peerId);
+        if (!entry?.hello || entry.incompatible || isFake(entry)) return;
+        const msg = parseDiagMessage(data);
+        if (msg) diag.onDiagMessage(peerId, msg);
+    } catch (e) {
+        logThrottled(`diag-msg:${peerId}`, "warn", `Mensagem "diag" de ${peerLabel(peerId)} ignorada: ${errorText(e)}`);
     }
 }
 
@@ -669,6 +696,7 @@ function tick() {
     tickCount++;
     if (rt.room) checkIdentities();
     streaming.tick();
+    diag.tickDiagShare();
     if (tickCount % 2 === 0) viewing.sampleStats();
 }
 
@@ -699,6 +727,7 @@ export function startSession() {
     }
 
     setPcHooks({ planFor: pc => streaming.sendPlanFor(peerIdOfPc(pc)) });
+    diag.startDiagShare();
     void probeLocalCaps(line => log.info(line)).then(() => {
         if (active) sendPresence();
     });
@@ -738,6 +767,7 @@ export function stopSession() {
 
     streaming.stopStreaming("plugin desligado");
     viewing.clearAll();
+    diag.stopDiagShare();
     setPcHooks(null);
     getNativeOrNull()?.resetDisplayMedia().catch(() => { });
 

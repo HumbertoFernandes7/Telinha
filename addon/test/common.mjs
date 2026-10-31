@@ -23,6 +23,12 @@ export const SCRATCH = join(tmpdir(), `tl-addon-${createHash("sha1").update(REPO
 
 export const argValue = name => (process.argv.includes(name) ? resolve(process.argv[process.argv.indexOf(name) + 1]) : null);
 
+/** The natives the plugin's native.ts exports (sorted): what the loader registers and VencordNative.pluginHelpers.Telinha shows. */
+export const PLUGIN_NATIVES = [
+    "appendDiagLog", "clearDiagLog", "finishDisplayMedia", "listSources", "prepareDisplayMedia", "readDiagLog", "readScreenAudio", "resetDisplayMedia",
+    "screenAudioStatus", "startScreenAudio", "stopScreenAudio"
+];
+
 export function pickVencordDist() {
     const dir = argValue("--vencord-dist") ?? VENCORD_DIST;
     if (!["patcher.js", "preload.js", "renderer.js"].every(f => existsSync(join(dir, f)))) {

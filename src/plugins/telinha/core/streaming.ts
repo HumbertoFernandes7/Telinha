@@ -35,7 +35,7 @@ import {
 import { blockOf, getPc, type LocalCapture, peerLabel, publish, rt, setLastError } from "./context";
 import { isIdentityConfigured } from "./identity/config";
 import { type ApprovalInput, identityRequiresApproval } from "./identity/policy";
-import { errorText, log, logThrottled } from "./log";
+import { errorText, log, logThrottled, notePrivateTitle } from "./log";
 import { getNative } from "./nativeApi";
 import type { SendPlan } from "./peerConnection";
 import { me, sendPresence } from "./presence";
@@ -232,6 +232,8 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
 
     try {
         const native = getNative();
+        // o nome fica no log local; no diagnostico compartilhado sai como "[janela]" (log.ts → maskPrivate)
+        notePrivateTitle(source.name);
         log.info(`Iniciando transmissão: ${kind === "screen" ? "tela" : "janela"} "${source.name}" em ${opts.quality}${wantAudio || wantScreenAudio ? " com áudio" : " sem áudio"}`);
 
         // Nada de await longo entre o clique e o getDisplayMedia: a busca do PID para o audio roda no

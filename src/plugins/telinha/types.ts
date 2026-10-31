@@ -57,6 +57,18 @@ export interface RemotePeer {
      * Conexoes "invalid" nao aparecem em `peers` (so em identityAlerts, kind "fake").
      */
     identity?: PeerIdentityStatus;
+    /** esta pessoa ligou "Compartilhar diagnóstico" (presenca caps.diag); ausente = desligado ou versao antiga */
+    diagShare?: boolean;
+}
+
+/** Diagnostico compartilhado (core/diagShare.ts). Ausente em TelinhaState = nada acontecendo. */
+export interface DiagShareState {
+    /** nomes de quem esta recebendo o diagnostico deste PC agora */
+    sendingTo: string[];
+    /** discordUserIds com "Receber diagnóstico" ligado */
+    requested: string[];
+    /** discordUserIds de quem o diagnostico ja esta chegando */
+    receivingFrom: string[];
 }
 
 /**
@@ -191,4 +203,6 @@ export interface TelinhaState {
     blocked?: BlockedViewer[];
     /** conexoes com identidade suspeita agora */
     identityAlerts?: IdentityAlert[];
+    /** diagnostico compartilhado; ausente = ninguem recebendo o seu nem pedido a ninguem */
+    diag?: DiagShareState;
 }
