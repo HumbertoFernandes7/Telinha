@@ -26,7 +26,10 @@ type Codec = RTCRtpCodec;
 export interface LocalCodecCaps {
     /** decodificacao H.264 eficiente (hardware); vai na presenca como caps.h264HwDecode */
     h264HwDecode: boolean;
-    /** codificacao H.264 eficiente (hardware) neste PC; desligada no resto da sessao na 2a queda do encoder para software no ar */
+    /**
+     * codificacao H.264 eficiente (hardware) neste PC; desligada no resto da sessao na 2a queda do encoder para software no
+     * ar, e quando a placa de video travou com H.264 (setH264HwStuck: nesta sessao, ou neste PC com o mesmo ambiente)
+     */
     h264HwEncode: boolean;
     /** profile-level-id (minusculo) do primeiro perfil H.264 que este PC codifica por hardware, ex.: "42001f"; null = nenhum */
     h264HwProfile: string | null;
@@ -51,6 +54,12 @@ export const PROBE_TIMING: ProbeTiming = { callMs: 3000, totalMs: 6000 };
 
 let localCaps: LocalCodecCaps = { h264HwDecode: false, h264HwEncode: false, h264HwProfile: null, sendable: new Set() };
 let probing: Promise<LocalCodecCaps> | null = null;
+/** o que a sonda mediu (null = ainda nao mediu): o H.264 automatico volta para isto quando deixa de estar travado */
+let measured: LocalCodecCaps | null = null;
+/** a placa de video travou com H.264 nesta sessao, ou neste PC com o mesmo ambiente (core/stuckEncoder.ts) */
+let h264HwStuck = false;
+/** a sonda WebCodecs do H.264 da placa esta rodando (core/encoderProbe.ts): ate ela acabar, o automatico vai de VP9 */
+let h264HwProbing = false;
 
 export function getLocalCaps(): LocalCodecCaps {
     return localCaps;
@@ -144,10 +153,38 @@ export function describeLocalCaps(caps: LocalCodecCaps): string {
 /** Mede uma vez por sessao do Discord. `report` recebe a linha de log da medicao (so na primeira chamada). */
 export function probeLocalCaps(report?: (line: string) => void): Promise<LocalCodecCaps> {
     return probing ??= measureLocalCaps().then(caps => {
-        localCaps = caps;
+        measured = caps;
+        localCaps = h264HwStuck || h264HwProbing ? { ...caps, h264HwEncode: false } : caps;
         report?.(describeLocalCaps(caps));
         return caps;
     });
+}
+
+/** h264HwEncode de novo a partir do que a sonda mediu, das travas (placa travada, sonda WebCodecs rodando) e das quedas. */
+function recomputeHwEncode() {
+    const hw = !h264HwStuck && !h264HwProbing && !!measured?.h264HwEncode && h264Fallbacks < H264_FALLBACKS_TO_DISABLE;
+    if (localCaps.h264HwEncode !== hw) localCaps = { ...localCaps, h264HwEncode: hw };
+}
+
+/**
+ * A placa de video travou com H.264 (core/stuckEncoder.ts): `stuck` true = o automatico trata o H.264 da placa como
+ * indisponivel (h264HwEncode false: chooseCodec escolhe VP9 e nenhum encoder H.264 da placa e criado; fixado em H.264
+ * continua). Vale antes da sonda terminar tambem. false = volta ao que a sonda mediu, sem desfazer as quedas para
+ * software desta sessao (noteH264Fallback).
+ */
+export function setH264HwStuck(stuck: boolean) {
+    h264HwStuck = stuck;
+    recomputeHwEncode();
+}
+
+/** A sonda WebCodecs do H.264 da placa esta rodando (true): enquanto isso, o automatico vai de VP9. */
+export function setH264HwProbing(running: boolean) {
+    h264HwProbing = running;
+    recomputeHwEncode();
+}
+
+export function isH264HwStuck() {
+    return h264HwStuck;
 }
 
 /** Na N-esima queda do H.264 para software numa sessao do Discord, o H.264 automatico desliga (noteH264Fallback). */

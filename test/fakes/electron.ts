@@ -87,6 +87,13 @@ export function ipcEvent(s: FakeSession = session.defaultSession): any {
 export const app = {
     getPath: (name: string) => `C:\\fake\\${name}`,
     getVersion: () => "1.0.9002",
+    /** what getGPUInfo("basic") resolves with (default: one active NVIDIA RTX 3070) */
+    gpuInfo: { gpuDevice: [{ active: true, vendorId: 0x10DE, deviceId: 0x2484, driverVersion: "32.0.15.6094" }] } as unknown,
+    /** replace to make getGPUInfo reject or hang */
+    getGPUInfoImpl: null as ((infoType: string) => Promise<unknown>) | null,
+    getGPUInfo(infoType: string): Promise<unknown> {
+        return app.getGPUInfoImpl ? app.getGPUInfoImpl(infoType) : Promise.resolve(app.gpuInfo);
+    },
     on() { },
     relaunch() { },
     exit() { }

@@ -114,6 +114,8 @@ export interface ViewerEntry {
      * o stream chegou (1 = o de 10 s, 2 = o de 20 s...); 0 ou ausente = nenhum. Zerado a cada stream novo (attachStream).
      */
     codecAskSlot?: number;
+    /** o transmissor avisou que a placa de video dele travou no envio para nos ({ op: "stuck" }, protocol.ts passo 10) */
+    streamerStuck?: boolean;
     /** limpeza dos timers do pedido (timeout de resposta) */
     requestCleanup: (() => void)[];
     /** limpeza dos listeners/timers do stream atual */

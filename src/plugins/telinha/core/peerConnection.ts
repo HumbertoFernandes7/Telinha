@@ -17,6 +17,20 @@
 //   e corta a rampa inicial de bitrate (~12 s de 320x180 ate 720p no spike).
 //
 // Se o SDP ajustado for recusado, aplica o original (nunca derruba a conexao por causa do ajuste).
+//
+// Conexao contida (containPeerConnection, Telinha 0.2.9): um envio de video dela travou na placa de video
+// (streaming.ts → containStuck; core/stuckEncoder.ts). Desmontar esse envio faz o Chromium destruir o VideoSendStream
+// na thread WebRTC_W_and_N, que todas as conexoes do Discord usam, e esperar o encoder travado para sempre: todas as
+// conexoes caem e a proxima chamada sincrona congela o Discord. Por isso, ate o Discord reiniciar:
+// - close() nao fecha (o Trystero fecha a conexao quando o outro lado sai da sala, quando a nossa sala fecha e quando o
+//   data channel cai; e a unica forma de segurar isso sem mexer no Trystero: ele so ve esta classe). O data channel o
+//   proprio Trystero fecha antes, entao o outro lado ve a saida normal; a conexao fica aberta, sem ninguem, ate o ICE cair
+//   sozinho, e guardada aqui (nao vira lixo coletado);
+// - removeTrack() nao tira nada (o removeStream do Trystero, inclusive o da sala que fecha, terminaria em renegociacao);
+// - renegociacoes que o outro lado pedir usam o plano congelado no ultimo SDP aplicado (mesmo codec, mesma ordem, mesmos
+//   x-google-*): a negociacao nao troca o codec nem os parametros do envio travado.
+// Limite: o resto do Chromium nao passa por aqui. Recarregar a pagina (Ctrl+R) fecha a conexao por dentro e trava; por
+// isso o aviso pede para fechar o Discord por completo.
 
 import { applyCodecPreferences } from "./codec";
 import { errorText, log, logThrottled } from "./log";
@@ -42,9 +56,56 @@ let PeerConnectionClass: typeof RTCPeerConnection | null = null;
 /** transceiver → "codec:perfil" ja aplicado com setCodecPreferences */
 const appliedPrefs = new WeakMap<RTCRtpTransceiver, string>();
 const loggedMunge = new WeakMap<RTCPeerConnection, string>();
+/** o ultimo plano usado numa negociacao desta conexao (vira o plano congelado se ela for contida) */
+const lastPlans = new WeakMap<RTCPeerConnection, SendPlan>();
+
+interface Contained {
+    /** plano das negociacoes daqui em diante: o da ultima negociacao (null = nenhuma, nada e reordenado) */
+    plan: SendPlan | null;
+    /** objetos ligados ao envio travado (sender, stream...): guardados com a conexao ate o Discord reiniciar */
+    keep: unknown[];
+}
+
+/** Conexoes contidas (ver o topo). Referencia forte de proposito: nunca sai daqui. */
+const contained = new Map<RTCPeerConnection, Contained>();
 
 export function setPcHooks(next: PcHooks | null) {
     hooks = next;
+}
+
+/**
+ * Contem esta conexao (um envio de video dela travou na placa de video): close/removeTrack viram nada e as
+ * renegociacoes usam o plano da ultima negociacao. `keep`: objetos a guardar junto. Para sempre (ate o Discord reiniciar).
+ */
+export function containPeerConnection(pc: RTCPeerConnection, keep: unknown[] = []) {
+    const entry = contained.get(pc);
+    if (entry) {
+        entry.keep.push(...keep);
+        return;
+    }
+    let plan = lastPlans.get(pc) ?? null;
+    try {
+        plan ??= hooks?.planFor(pc) ?? null;
+    } catch { }
+    contained.set(pc, { plan, keep: [...keep] });
+}
+
+export function isContained(pc: RTCPeerConnection | null | undefined): boolean {
+    return !!pc && contained.has(pc);
+}
+
+/** Quantas conexoes estao contidas nesta sessao do Discord (diagnostico). */
+export function containedCount(): number {
+    return contained.size;
+}
+
+/** Plano de envio desta conexao: o congelado, se ela estiver contida; senao, o do streaming.ts. */
+function planOf(pc: RTCPeerConnection): SendPlan | null {
+    const c = contained.get(pc);
+    if (c) return c.plan;
+    const plan = hooks?.planFor(pc) ?? null;
+    if (plan) lastPlans.set(pc, plan);
+    return plan;
 }
 
 function sendingTransceivers(pc: RTCPeerConnection, kind: "audio" | "video") {
@@ -56,7 +117,7 @@ function sendingTransceivers(pc: RTCPeerConnection, kind: "audio" | "video") {
 }
 
 function prepareLocalDescription(pc: RTCPeerConnection) {
-    const plan = hooks?.planFor(pc);
+    const plan = planOf(pc);
     if (!plan?.codec) return;
     const key = `${plan.codec}:${plan.h264Profile ?? ""}`;
     for (const t of sendingTransceivers(pc, "video")) {
@@ -68,7 +129,7 @@ function prepareLocalDescription(pc: RTCPeerConnection) {
 
 function mungeRemoteDescription(pc: RTCPeerConnection, description: RTCSessionDescriptionInit): RTCSessionDescriptionInit {
     if (!description?.sdp || (description.type !== "offer" && description.type !== "answer" && description.type !== "pranswer")) return description;
-    const plan = hooks?.planFor(pc);
+    const plan = planOf(pc);
     if (!plan) return description;
 
     const mids = (kind: "audio" | "video") => new Set(sendingTransceivers(pc, kind).map(t => t.mid).filter((m): m is string => !!m));
@@ -111,6 +172,26 @@ export function getPeerConnectionClass(): typeof RTCPeerConnection {
                 log.warn("O Chromium recusou o SDP ajustado; aplicando o original: " + errorText(e));
                 return super.setRemoteDescription(description);
             });
+        }
+
+        /** Contida: nao fecha (fechar desmonta o envio travado e trava o Discord). Ver o topo. */
+        override close(): void {
+            if (contained.has(this)) {
+                logThrottled("pc-close-contained", "warn", "Uma conexão com o envio travado pela placa de vídeo não foi fechada (fechar travaria o Discord): "
+                    + "ela fica aberta, sem uso, até o Discord reiniciar", 60_000);
+                return;
+            }
+            super.close();
+        }
+
+        /** Contida: nao tira a faixa (o removeTrack termina numa renegociacao que desmonta o envio travado). */
+        override removeTrack(sender: RTCRtpSender): void {
+            if (contained.has(this)) {
+                logThrottled("pc-remove-contained", "warn", "Uma faixa da conexão com o envio travado pela placa de vídeo não foi removida "
+                    + "(remover travaria o Discord)", 60_000);
+                return;
+            }
+            super.removeTrack(sender);
         }
     };
 }

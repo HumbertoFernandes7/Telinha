@@ -31,6 +31,8 @@ import {
 //                                         "timeout" | "duplicate" | "friendsOnly" | "notVerified" |
 //                                         "tooManyAttempts"; desconhecido vira "declined"
 //              (ver o passo 5 e parseWatchReply em protocol.ts)
+//              { op: "stuck" }            (transmissor -> espectador, passo 10) a placa de video dele travou no
+//                                         envio para mim: nada vai chegar ate ele reiniciar o Discord
 //   "Quem pode assistir" (passo 7): presenca com stream.access = "all" | "friends" | "approval" | "password";
 //   com senha, desafio-resposta na acao "watch" (a senha nunca trafega; prova em ./password-proof.js):
 //              { op: "password", nonce, attemptsLeft?, wrong? }   (transmissor -> espectador)
@@ -100,6 +102,8 @@ const WATCH_DENIED_REASONS = ["kicked", "declined", "timeout", "duplicate", "fri
 function parseWatchReply(data) {
     if (!isObject(data)) return null;
     if (data.op === "pending") return { op: "pending" };
+    // passo 10 (v0.2.9): a placa de video do transmissor travou no envio para mim
+    if (data.op === "stuck") return { op: "stuck" };
     if (data.op === "password") {
         if (typeof data.nonce !== "string" || !PASSWORD_NONCE_RE.test(data.nonce)) return null;
         const left = data.attemptsLeft;
@@ -1026,6 +1030,13 @@ function onWatchReply(reply, peerId) {
     }
     if (reply.op === "denied") return denyWatch(w, reply.reason);
     if (reply.op === "password") return onPasswordRequest(w, reply);
+    if (reply.op === "stuck") {
+        // a placa de video dele travou com H.264: nada vai chegar ate ele reiniciar o Discord
+        if (!w.stuck) logEvent("warn", "midia", `A placa de vídeo de ${peerName(peerId)} travou; ele precisa reiniciar o Discord.`);
+        w.stuck = true;
+        render();
+        return;
+    }
     // "pending": o transmissor espera a aprovacao dele. Depois que o stream chegou, nao significa mais nada.
     if (w.stream) {
         logEvent("warn", "midia", `“pending” de ${peerName(peerId)} ignorado (o stream já chegou)`);
@@ -1139,6 +1150,7 @@ function releaseWatch(w) {
 // Linha de estado do card: o que o espectador esta esperando.
 function watchStatus(w) {
     if (w.denied) return { cls: "err", text: WATCH_DENIED_TEXT[w.denied] };
+    if (w.stuck && w.firstFrameMs == null) return { cls: "err", text: `A placa de vídeo de ${peerName(w.peerId)} travou; ele precisa reiniciar o Discord.` };
     if (w.stream || w.ended) return { cls: "", text: "" };
     if (w.pwAsk) {
         const left = w.pwAsk.attemptsLeft == null ? "" : ` (restam ${w.pwAsk.attemptsLeft} tentativas)`;

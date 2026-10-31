@@ -19,7 +19,6 @@ import type { PeerId } from "@plugins/telinha/types";
 import { ChannelStore, FluxDispatcher, SelectedChannelStore, UserStore, VoiceStateStore } from "@webpack/common";
 import { getRelaySockets, type HandshakeReceiver, type HandshakeSender, joinRoom, type JsonValue } from "trystero";
 
-import { probeLocalCaps } from "./codec";
 import { getPc, type PeerEntry, peerLabel, publish, rt, setLastError } from "./context";
 import * as diag from "./diagShare";
 import { getLocalIdToken, type PreparedIdentity, prepareIdentity, type RemoteIdentity, renewIdentity, subscribeLocalIdentity, verifyRemoteIdentity } from "./identity";
@@ -30,6 +29,7 @@ import { getNativeOrNull } from "./nativeApi";
 import { getPeerConnectionClass, setPcHooks } from "./peerConnection";
 import { computeAdmitted, me, selfHello, sendPresence } from "./presence";
 import * as streaming from "./streaming";
+import { startLocalCaps } from "./stuckEncoder";
 import * as viewing from "./viewing";
 
 const HANDSHAKE_TIMEOUT_MS = 15_000;
@@ -728,7 +728,8 @@ export function startSession() {
 
     setPcHooks({ planFor: pc => streaming.sendPlanFor(peerIdOfPc(pc)) });
     diag.startDiagShare();
-    void probeLocalCaps(line => log.info(line)).then(() => {
+    // a placa de video que ja travou com H.264 neste PC (core/stuckEncoder.ts) entra antes da sonda de codecs
+    void startLocalCaps(line => log.info(line)).then(() => {
         if (active) sendPresence();
     });
 

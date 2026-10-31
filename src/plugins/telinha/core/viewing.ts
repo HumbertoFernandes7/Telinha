@@ -170,7 +170,27 @@ export function submitPassword(peerId: PeerId, raw: string): boolean {
     return true;
 }
 
-/** Resposta do transmissor a um pedido nosso (protocol.ts, passos 5 e 7). Sem sessao para esse peer: ignorada. */
+/** Aviso de quem assiste quando a placa de video de quem transmite travou (protocol.ts, passo 10). */
+export function stuckText(peerId: PeerId): string {
+    const p = rt.peers.get(peerId);
+    const name = p?.presence?.username ?? p?.hello?.username ?? "quem transmite";
+    return `A placa de vídeo de ${name} travou; ele precisa reiniciar o Discord.`;
+}
+
+/**
+ * { op: "stuck" } (protocol.ts, passo 10): a placa de video de quem transmite travou no envio para nos e nada vai chegar.
+ * Para de esperar e mostra o motivo em vez do aviso generico de 45 s; com o stream ja recebido, ele fica (o audio dele
+ * continua) e para de pedir VP9 (quem transmite nao vai trocar o codec). Tambem troca o aviso de 45 s, se ele ja saiu.
+ * Uma vez por sessao de assistir; com a imagem ja chegando, ignorado.
+ */
+function onStuck(v: ViewerEntry) {
+    const waiting = v.status === "connecting" || v.status === "waiting-first-frame" || (v.status === "error" && !!v.stream && v.firstFrameAt == null);
+    if (v.streamerStuck || !waiting) return;
+    v.streamerStuck = true;
+    fail(v, stuckText(v.peerId), !!v.stream);
+}
+
+/** Resposta do transmissor a um pedido nosso (protocol.ts, passos 5, 7 e 10). Sem sessao para esse peer: ignorada. */
 export function onWatchReply(peerId: PeerId, reply: WatchReplyMessage) {
     const v = rt.viewing.get(peerId);
     if (!v) return;
@@ -180,6 +200,10 @@ export function onWatchReply(peerId: PeerId, reply: WatchReplyMessage) {
     }
     if (reply.op === "password") {
         onPasswordChallenge(v, reply);
+        return;
+    }
+    if (reply.op === "stuck") {
+        onStuck(v);
         return;
     }
     if (v.status !== "connecting" || v.awaitingApproval) return;
@@ -338,7 +362,7 @@ function askForVp9(v: ViewerEntry, s: InboundSample, streamAt: number) {
     // 1 aos 10 s, 2 aos 20 s...: uma leitura atrasada nunca manda dois pedidos seguidos
     const slot = Math.floor(elapsed / NO_FRAME_HINT_MS);
     const last = v.codecAskSlot ?? 0;
-    if (slot <= last || (s.codec && !/^video\/h264$/i.test(s.codec))) return;
+    if (v.streamerStuck || slot <= last || (s.codec && !/^video\/h264$/i.test(s.codec))) return;
     const action = rt.codecAction;
     if (!action) return;
     v.codecAskSlot = slot;
@@ -404,7 +428,8 @@ function attachStream(v: ViewerEntry, stream: MediaStream) {
         if (busy || v.stream !== stream || v.firstFrameAt != null) return;
         if (performance.now() - startedAt > FIRST_FRAME_TIMEOUT_MS) {
             clearInterval(poll);
-            fail(v, "Nenhum quadro de vídeo chegou em 45 s (rede ou decodificador travado). Continua tentando.", true);
+            // a placa de quem transmite travou: o aviso certo ja esta na tela (onStuck)
+            if (!v.streamerStuck) fail(v, "Nenhum quadro de vídeo chegou em 45 s (rede ou decodificador travado). Continua tentando.", true);
             return;
         }
         busy = true;
