@@ -508,8 +508,9 @@ function slimRelease(r) {
  * @param {() => number} [o.now]
  * @param {string} [o.logFile]      main.log (main.js's own log): its last "update" lines go into "Copiar diagnóstico"
  * @param {() => Map<number, string>} [o.processNames]  pid -> image name of every running process (tests replace it)
+ * @param {Record<string, string | undefined>} [o.env]  APPDATA, LOCALAPPDATA, USERPROFILE: masked in recentLog()
  */
-function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThis.fetch, apiBase = API_BASE, now = Date.now, userAgent, logFile = null, processNames = () => listProcessNames() } = {}) {
+function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThis.fetch, apiBase = API_BASE, now = Date.now, userAgent, logFile = null, processNames = () => listProcessNames(), env = process.env } = {}) {
     const home = path.dirname(addonDir);
     const P = {
         home,
@@ -667,7 +668,8 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
         for (const { pid, file } of alive) {
             const exe = running?.get(pid) ?? null;
             if (running && !isDiscordExe(exe)) {
-                log("update: run marker of a Discord that is gone, dropped (its pid now belongs to another program)", { pid, exe });
+                // only the pid: the name of some other program on the user's PC has no business in main.log
+                log("update: run marker of a Discord that is gone, dropped (its pid now belongs to a program that is not Discord)", { pid });
                 tryRemove(file);
             } else others.push({ pid, exe });
         }
@@ -683,10 +685,17 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
 
     /**
      * Why the last swap / rollback attempt of this start did not happen ({ reason, detail }), set where it gave up:
-     * "locked" (swap.lock), "in-use" (addon\ could not be moved aside), "activate-failed" (the new folder could not be
-     * moved in). startup() records it in state.json for the plugin (status().waiting).
+     * "locked" (a fresh swap.lock: another start is moving the folders), "lock-stuck" (an old swap.lock that cannot be
+     * removed), "in-use" (addon\ could not be moved aside), "activate-failed" (the new folder could not be moved in).
+     * startup() records it (state.json `waiting`, and ownWaiting for this process's status()).
      */
     let blocked = null;
+    /**
+     * What startup() of THIS process recorded: the only `waiting` status() reports. state.json is shared by every
+     * Discord using the add-on (a second Discord.exe started while this one is open runs startup() too, before Discord's
+     * single-instance check makes it quit), so a record found there may describe another process's start.
+     */
+    let ownWaiting = null;
     const errCode = err => ({ code: typeof err?.code === "string" ? err.code : null });
 
     /** One process at a time moves the add-on folders (two flavors starting together). */
@@ -712,7 +721,7 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
         }
         if (fd === undefined) {
             log("update: an old swap.lock could not be removed; the add-on folders wait for the next start");
-            blocked = { reason: "locked", detail: null };
+            blocked = { reason: "lock-stuck", detail: null };
             return null;
         }
         try {
@@ -856,14 +865,21 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
     }
 
     /**
-     * state.json `waiting`: why the staged update did not go in at this start, for the plugin (status().waiting: the
-     * notice, the settings line, "Copiar diagnóstico"). `starts` counts the starts in a row it waited for this version.
+     * Why the staged update did not go in at this start: kept for this process's status() (the plugin's notice, settings
+     * line and "Copiar diagnóstico") and in state.json `waiting` (the raw record, with the pid that wrote it). `starts`
+     * counts the starts in a row it waited for this version. A record written by a Discord that is still open (its pid
+     * is one of `others`) is left alone: this start is then a second Discord.exe that Discord's single-instance check is
+     * about to close, or another flavor, and must neither take over that record nor count as one more try.
+     * Returns whether state.json changed.
      */
-    function noteWait(s, reason, detail = null) {
+    function noteWait(s, reason, detail, others) {
         const version = peekManifest(P.staged)?.version ?? null;
         const prev = s.waiting && typeof s.waiting === "object" ? s.waiting : null;
         const starts = prev?.version === version && Number.isSafeInteger(prev.starts) && prev.starts > 0 ? prev.starts + 1 : 1;
-        s.waiting = { version, reason, detail, at: iso(now()), starts };
+        ownWaiting = { version, reason, detail, at: iso(now()), starts };
+        if (prev && others.some(o => o.pid === prev.pid)) return false;
+        s.waiting = { ...ownWaiting, pid: process.pid };
+        return true;
     }
 
     /**
@@ -879,6 +895,7 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
             return null;
         }
         if (!actions) return null;
+        ownWaiting = null;
         cleanLeftovers();
         const s = readState();
         let dirty = false;
@@ -895,9 +912,7 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
         }
         const others = s.trial?.armed || staged ? othersRunning() : [];
         const wait = (reason, detail = null) => {
-            if (!staged) return;
-            noteWait(s, reason, detail);
-            dirty = true;
+            if (staged && noteWait(s, reason, detail, others)) dirty = true;
         };
 
         if (s.trial?.armed) {
@@ -1260,11 +1275,10 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
             s = { bad: {} };
         }
         const ready = rt.phase === "checking" || rt.phase === "downloading" ? null : stagedVersion(s);
-        const w = s.waiting;
-        // why this very version did not go in at the last start (a version staged since has not tried yet)
-        const waiting = ready && w && typeof w === "object" && w.version === ready && typeof w.reason === "string"
-            ? { reason: w.reason, detail: w.detail ?? null, at: w.at ?? null, starts: Number.isSafeInteger(w.starts) && w.starts > 0 ? w.starts : 1 }
-            : null;
+        // why this very version did not go in when THIS Discord started (a version staged since has not tried yet; a
+        // record in state.json may come from another Discord's start, see ownWaiting)
+        const w = ownWaiting;
+        const waiting = ready && w?.version === ready ? { reason: w.reason, detail: w.detail, at: w.at, starts: w.starts } : null;
         return {
             supported: true,
             installed: installed ? { version: installed.version, commit: installed.commit ?? null } : null,
@@ -1280,9 +1294,30 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
     }
 
     /**
+     * The user's folders as they may appear in main.log (as written, JSON-escaped, with forward slashes), longest first,
+     * each with the placeholder it becomes: the Telinha home, %LOCALAPPDATA%, %APPDATA%, %USERPROFILE% and the home
+     * folder (they can differ from C:\Users\<name>: a redirected folder, a roaming profile).
+     */
+    function privateFolders() {
+        let userHome = "";
+        try {
+            userHome = os.homedir();
+        } catch { }
+        const folders = [[P.home, "%TELINHA%"], [env.LOCALAPPDATA, "%LOCALAPPDATA%"], [env.APPDATA, "%APPDATA%"], [env.USERPROFILE, "~"], [userHome, "~"]];
+        const forms = [];
+        for (const [dir, label] of folders) {
+            const d = typeof dir === "string" ? dir.replace(/[\\/]+$/, "") : "";
+            if (d.length < 4) continue; // never "C:" or "C:\"
+            for (const f of new Set([d, JSON.stringify(d).slice(1, -1), d.replace(/\\/g, "/")]))
+                forms.push([new RegExp(f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), label, f.length]);
+        }
+        return forms.sort((a, b) => b[2] - a[2]);
+    }
+
+    /**
      * The last "update" lines of main.log (main.log.1 when main.log has too few), oldest first, for "Copiar diagnóstico".
-     * The user's own folder (C:\Users\<name>) shows as ~ and IPv4 addresses (a proxy in an error) as x.x.x.x, like the
-     * rest of the diagnostic. [] without a log file.
+     * The user's folders show as placeholders (privateFolders: ~, %APPDATA%...) and IPv4 addresses (a proxy in an error)
+     * as x.x.x.x, like the rest of the diagnostic. [] without a log file.
      */
     function recentLog(max = RECENT_LOG_LINES) {
         const lines = [];
@@ -1298,14 +1333,10 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
             const found = text.split(/\r?\n/).filter(l => /^\S+ \[\d+\] (?:ERROR )?update/.test(l));
             lines.unshift(...found.slice(-(max - lines.length)));
         }
-        let userHome = "";
-        try {
-            userHome = os.homedir();
-        } catch { }
-        const forms = userHome ? [JSON.stringify(userHome).slice(1, -1), userHome] : [];
+        const forms = privateFolders();
         return lines.map(l => {
             let out = l;
-            for (const f of forms) out = out.split(f).join("~");
+            for (const [re, label] of forms) out = out.replace(re, label);
             out = out.replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "x.x.x.x");
             return out.length > RECENT_LOG_LINE_MAX ? `${out.slice(0, RECENT_LOG_LINE_MAX)}…` : out;
         });

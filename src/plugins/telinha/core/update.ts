@@ -17,10 +17,12 @@ export type UpdatePhase = "idle" | "checking" | "downloading" | "up-to-date" | "
 /**
  * Por que a versão pronta não entrou no último início do Discord (updater.js startup(), state.json `waiting`):
  *   trial            a versão atual ainda não confirmou que abriu direito
- *   others           outro Discord aberto usando o Telinha (detail: pids e, quando deu pra ver, os programas)
+ *   others           outro Discord estava aberto quando este abriu (detail: pids e, quando deu pra ver, os programas)
  *   in-use           um arquivo da pasta do Telinha estava em uso (detail.code: EPERM, EBUSY...)
  *   activate-failed  a pasta da versão nova não pôde ser posta no lugar (antivírus?)
- *   locked           outro início do Discord estava trocando a versão ao mesmo tempo (swap.lock)
+ *   locked           outro início do Discord estava trocando a versão ao mesmo tempo (swap.lock recente)
+ *   lock-stuck       um swap.lock antigo que não pôde ser apagado
+ * Só o início DESTE Discord: o loader não repassa o que outro Discord gravou no state.json.
  */
 export interface UpdateWaiting {
     reason: string;
@@ -204,7 +206,7 @@ export function explainWaiting(w: UpdateWaiting | null | undefined): { why: stri
             const exes = (w.detail?.exes ?? []).filter((e): e is string => typeof e === "string" && e.length > 0);
             const names = [...new Set(exes.map(e => FLAVORS[e.toLowerCase()] ?? e))];
             return {
-                why: `outro Discord está aberto com o Telinha${names.length ? ` (${names.join(", ")})` : ""}`,
+                why: `outro Discord estava aberto quando este abriu${names.length ? ` (${names.join(", ")})` : ""}`,
                 fix: "Feche todos os Discords, inclusive pelo ícone perto do relógio (botão direito → Sair do Discord), e abra de novo."
             };
         }
@@ -214,11 +216,21 @@ export function explainWaiting(w: UpdateWaiting | null | undefined): { why: stri
             return { why: "o Windows não deixou pôr a versão nova no lugar (antivírus?)", fix: CLOSE_AND_REOPEN };
         case "locked":
             return { why: "outro Discord estava trocando de versão ao mesmo tempo", fix: "Feche o Discord por completo e abra de novo." };
+        case "lock-stuck":
+            return { why: "uma trava antiga da atualização não pôde ser apagada", fix: "Reinicie o computador e abra o Discord de novo." };
         case "trial":
             return { why: "a versão atual ainda não tinha confirmado que abriu direito", fix: "Reinicie o Discord mais uma vez." };
         default:
             return { why: "não deu pra trocar desta vez", fix: "Reinicie o Discord mais uma vez." };
     }
+}
+
+/**
+ * Rótulo do botão que reinicia o Discord (aviso e configurações). Com outro Discord aberto, reiniciar só este não
+ * resolve: o botão lembra de fechar os outros antes.
+ */
+export function restartLabel(w: UpdateWaiting | null | undefined): string {
+    return w?.reason === "others" ? "Fechei os outros, reiniciar" : "Reiniciar agora";
 }
 
 /** Linha de status da página de configurações: em dia / baixando / pronto, reinicie / erro curto. */

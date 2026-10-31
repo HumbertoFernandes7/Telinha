@@ -21,7 +21,7 @@ import { pluginSettings, resetVencordFakes } from "@test/fakes/vencord";
 
 import {
     type AddonUpdateStatus, checkForUpdateNow, describeUpdate, downloadUpdateNow, explainWaiting, getUpdateStatus, refreshUpdateLog, refreshUpdateStatus, relaunchDiscord,
-    startUpdateChecks, stopUpdateChecks, subscribeUpdates, updateDiagnostics, updatesSupported, type UpdateWaiting
+    restartLabel, startUpdateChecks, stopUpdateChecks, subscribeUpdates, updateDiagnostics, updatesSupported, type UpdateWaiting
 } from "./update";
 
 const asStatus = (patch: Parameters<typeof statusOf>[0]) => statusOf(patch) as AddonUpdateStatus;
@@ -79,7 +79,7 @@ describe("frases do status (describeUpdate)", () => {
             describeUpdate(asStatus({ phase: "ready", ready: "0.2.8", waiting: { reason, detail, at: "2026-10-31T05:53:00Z", starts } }));
         assert.equal(
             stuck("others", { pids: [1234], exes: ["DiscordPTB.exe"] }),
-            "Versão 0.2.8 pronta, mas não entrou ao reiniciar: outro Discord está aberto com o Telinha (Discord PTB). Feche todos os Discords, inclusive pelo ícone perto do relógio (botão direito → Sair do Discord), e abra de novo."
+            "Versão 0.2.8 pronta, mas não entrou ao reiniciar: outro Discord estava aberto quando este abriu (Discord PTB). Feche todos os Discords, inclusive pelo ícone perto do relógio (botão direito → Sair do Discord), e abra de novo."
         );
         assert.equal(
             stuck("in-use", { code: "EBUSY" }, 3),
@@ -90,7 +90,11 @@ describe("frases do status (describeUpdate)", () => {
             "Versão 0.2.8 pronta, mas não entrou ao reiniciar: o Windows não deixou pôr a versão nova no lugar (antivírus?). Feche o Discord por completo e abra de novo. Se não resolver, reinicie o computador."
         );
         assert.equal(stuck("locked"), "Versão 0.2.8 pronta, mas não entrou ao reiniciar: outro Discord estava trocando de versão ao mesmo tempo. Feche o Discord por completo e abra de novo.");
-        assert.equal(stuck("trial"), "Versão 0.2.8 pronta, mas não entrou ao reiniciar: a versão atual ainda não tinha confirmado que abriu direito. Reinicie o Discord mais uma vez.");
+        assert.equal(
+            stuck("lock-stuck"),
+            "Versão 0.2.8 pronta, mas não entrou ao reiniciar: uma trava antiga da atualização não pôde ser apagada. Reinicie o computador e abra o Discord de novo."
+        );
+        assert.equal(stuck("trial"),"Versão 0.2.8 pronta, mas não entrou ao reiniciar: a versão atual ainda não tinha confirmado que abriu direito. Reinicie o Discord mais uma vez.");
         assert.equal(stuck("algo-novo"), "Versão 0.2.8 pronta, mas não entrou ao reiniciar: não deu pra trocar desta vez. Reinicie o Discord mais uma vez.");
     });
 
@@ -120,15 +124,22 @@ describe("por que a versao nao entrou (explainWaiting)", () => {
         assert.equal(explainWaiting(undefined), null);
     });
 
+    test("botao de reiniciar: com outro Discord aberto lembra de fechar os outros; nos outros casos, 'Reiniciar agora'", () => {
+        assert.equal(restartLabel(w("others", { pids: [1] })), "Fechei os outros, reiniciar");
+        for (const reason of ["in-use", "activate-failed", "locked", "lock-stuck", "trial", "algo-novo"]) assert.equal(restartLabel(w(reason)), "Reiniciar agora", reason);
+        assert.equal(restartLabel(null), "Reiniciar agora");
+        assert.equal(restartLabel(undefined), "Reiniciar agora");
+    });
+
     test("outro Discord: o nome de cada tipo de Discord, sem repetir; programa desconhecido sai como veio; sem nomes, so a frase", () => {
         const why = (detail: UpdateWaiting["detail"]) => explainWaiting(w("others", detail))!.why;
-        assert.equal(why({ pids: [1, 2], exes: ["Discord.exe", "discordcanary.EXE"] }), "outro Discord está aberto com o Telinha (Discord, Discord Canary)");
-        assert.equal(why({ pids: [1, 2], exes: ["DiscordPTB.exe", "DiscordPTB.exe"] }), "outro Discord está aberto com o Telinha (Discord PTB)");
-        assert.equal(why({ pids: [1], exes: ["DiscordDevelopment.exe"] }), "outro Discord está aberto com o Telinha (Discord Development)");
-        assert.equal(why({ pids: [1], exes: ["Estranho.exe"] }), "outro Discord está aberto com o Telinha (Estranho.exe)");
-        assert.equal(why({ pids: [1], exes: [null, ""] }), "outro Discord está aberto com o Telinha");
-        assert.equal(why({ pids: [1] }), "outro Discord está aberto com o Telinha");
-        assert.equal(why(null), "outro Discord está aberto com o Telinha");
+        assert.equal(why({ pids: [1, 2], exes: ["Discord.exe", "discordcanary.EXE"] }), "outro Discord estava aberto quando este abriu (Discord, Discord Canary)");
+        assert.equal(why({ pids: [1, 2], exes: ["DiscordPTB.exe", "DiscordPTB.exe"] }), "outro Discord estava aberto quando este abriu (Discord PTB)");
+        assert.equal(why({ pids: [1], exes: ["DiscordDevelopment.exe"] }), "outro Discord estava aberto quando este abriu (Discord Development)");
+        assert.equal(why({ pids: [1], exes: ["Estranho.exe"] }), "outro Discord estava aberto quando este abriu (Estranho.exe)");
+        assert.equal(why({ pids: [1], exes: [null, ""] }), "outro Discord estava aberto quando este abriu");
+        assert.equal(why({ pids: [1] }), "outro Discord estava aberto quando este abriu");
+        assert.equal(why(null), "outro Discord estava aberto quando este abriu");
     });
 });
 
@@ -428,7 +439,7 @@ describe("texto do diagnostico", () => {
         await refreshUpdateStatus();
         assert.deepEqual(await refreshUpdateLog(), log, "so texto");
         const lines = updateDiagnostics().split("\n");
-        assert.match(lines[0], /atualização: Versão 0\.2\.8 pronta, mas não entrou ao reiniciar \(2 tentativas\): outro Discord está aberto com o Telinha \(Discord PTB\)\./);
+        assert.match(lines[0], /atualização: Versão 0\.2\.8 pronta, mas não entrou ao reiniciar \(2 tentativas\): outro Discord estava aberto quando este abriu \(Discord PTB\)\./);
         assert.equal(lines[1], 'atualização esperando: others; 2 início(s) seguido(s); último 2026-10-31T05:53:12.000Z; {"pids":[1234],"exes":["DiscordPTB.exe"]}');
         assert.equal(lines[2], "main.log (últimas linhas de atualização):");
         assert.deepEqual(lines.slice(3), log.map(l => `  ${l}`));

@@ -6,7 +6,8 @@
 
 // Avisos de atualização dentro do Discord, com a notificação do Vencord (a mesma que o atualizador do Vencord usa):
 //   - pronta (baixada e conferida):            "Telinha X.Y.Z pronto"     Reiniciar agora / Depois
-//     (se ela já não entrou num início, o texto diz por quê e o que fazer: outro Discord aberto, arquivo em uso...)
+//     (se ela já não entrou num início, o texto diz por quê e o que fazer: outro Discord aberto, arquivo em uso...;
+//     com outro Discord aberto o botão vira "Fechei os outros, reiniciar")
 //   - disponível (atualização automática off): "Telinha X.Y.Z disponível"  Atualizar / Depois
 // Nunca no meio de uma transmissão (sua ou que você está assistindo): o aviso espera ela acabar. Também espera o
 // Discord estar em foco, para aparecer dentro dele com os botões. Um aviso por versão por sessão. Erros (rede, limite
@@ -16,7 +17,7 @@
 import { showNotification } from "@api/Notifications";
 import { Button } from "@components/Button";
 import { log } from "@plugins/telinha/core/log";
-import { downloadUpdateNow, explainWaiting, getUpdateStatus, relaunchDiscord, subscribeUpdates, type UpdateWaiting } from "@plugins/telinha/core/update";
+import { downloadUpdateNow, explainWaiting, getUpdateStatus, relaunchDiscord, restartLabel, subscribeUpdates, type UpdateWaiting } from "@plugins/telinha/core/update";
 import { getState, subscribe } from "@plugins/telinha/store";
 import { showToast } from "@webpack/common";
 
@@ -76,7 +77,7 @@ function show(n: Notice) {
             body: stuck
                 ? `Não deu pra trocar de versão: ${stuck.why}.`
                 : ready ? "Reinicie o Discord para usar a versão nova." : "Abra Configurações → Vencord → Plugins → Telinha para atualizar.",
-            richBody: <NoticeBody text={text} primary={ready ? "Reiniciar agora" : "Atualizar"} onPrimary={ready ? restartNow : updateNow} />,
+            richBody: <NoticeBody text={text} primary={ready ? restartLabel(n.waiting) : "Atualizar"} onPrimary={ready ? restartNow : updateNow} />,
             permanent: true,
             noPersist: true
         }).catch(e => logger.warn("Aviso de atualização do Telinha falhou", e));
