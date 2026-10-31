@@ -135,21 +135,14 @@ export function runEncoderProbe(profile: string): Promise<ProbeResult> {
         let chunks = false;
         let encoderError: string | null = null;
         let timer: ReturnType<typeof setTimeout> | undefined;
-        let finished = false;
+        // chamado uma vez: depois dele os handlers do Worker saem (nada mais chega) e o prazo e cancelado
         const finish = (result: ProbeResult, hung: boolean) => {
-            if (finished) return;
-            finished = true;
             clearTimeout(timer);
             worker.onmessage = null;
             worker.onerror = null;
-            if (hung) {
-                // o encoder preso fica la dentro: terminar o Worker desmontaria o encoder (o mesmo risco do WebRTC)
-                leftAlone.push(worker);
-            } else {
-                try {
-                    worker.terminate();
-                } catch { }
-            }
+            // o encoder preso fica la dentro: terminar o Worker desmontaria o encoder (o mesmo risco do WebRTC)
+            if (hung) leftAlone.push(worker);
+            else worker.terminate();
             release();
             resolve(hung ? { ...result, hung } : result);
         };
@@ -160,7 +153,7 @@ export function runEncoderProbe(profile: string): Promise<ProbeResult> {
         // ate o configure: sem resposta e inconclusiva (nao deu para saber se a placa aceita), mas o Worker fica
         arm(ENCODER_PROBE_TIMING.configureMs, () => finish({ verdict: "unknown", detail: `${phase} sem resposta em ${ENCODER_PROBE_TIMING.configureMs / 1000} s` }, true));
         worker.onmessage = ({ data }: MessageEvent) => {
-            if (finished || !data || typeof data !== "object") return;
+            if (!data || typeof data !== "object") return;
             if (data.ev === "phase") {
                 phase = String(data.phase);
                 if (data.phase === "encode") {

@@ -14,6 +14,7 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
 
+import { rt } from "@plugins/telinha/core/context";
 import { parseWatchReply, parseWatchRequest, STREAM_KIND_SCREEN } from "@plugins/telinha/protocol";
 import { useFakeClock } from "@test/fakes/clock";
 import type { FakeRoom } from "@test/fakes/trystero";
@@ -87,6 +88,16 @@ test("o aviso generico de 45 s ja saiu e o { op: \"stuck\" } chega depois: troca
     await clock.tickAsync(300, 150);
     stuck();
     assert.equal((await viewerOf("peerA"))?.status, "playing");
+});
+
+test("o nome na frase: o da presenca, senao o do handshake, senao \"quem transmite\"", () => {
+    addStreamer(room, "peerA");
+    const entry = rt.peers.get("peerA")!;
+    entry.presence = { ...entry.presence!, username: "Gupi" };
+    assert.equal(stuckText("peerA"), "A placa de vídeo de Gupi travou; ele precisa reiniciar o Discord.");
+    entry.presence = null;
+    assert.equal(stuckText("peerA"), STUCK, "o nome do handshake");
+    assert.equal(stuckText("ninguem"), "A placa de vídeo de quem transmite travou; ele precisa reiniciar o Discord.");
 });
 
 test("assistir enquanto a placa dele continua travada: a resposta e o { op: \"stuck\" }, sem esperar 20 s", async () => {

@@ -15,17 +15,18 @@
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 
+import { settings } from "@plugins/telinha/settings";
 import { getEventLog, type TelinhaEvent } from "@plugins/telinha/store";
 import { installNative, type NativeEnv } from "@test/fakes/native";
 import { pluginSettings } from "@test/fakes/vencord";
 import { installWebRtc, type WebRtcEnv } from "@test/fakes/webrtc";
 import { healthyProbe, installWorker, stuckProbe, type WorkerEnv } from "@test/fakes/worker";
 
-import { chooseCodec, getLocalCaps, type LocalCodecCaps } from "./codec";
+import { chooseCodec, getLocalCaps } from "./codec";
 import { ENCODER_PROBE_TIMING } from "./encoderProbe";
 import {
-    describeEnv, type EncoderEnv, envChanges, forgetStuckEncoder, noteStreamStarting, noteStuckEncoder, PROBE_START, probeRecord, runStartupProbe, startLocalCaps,
-    stuckEncoderDiagnostics, stuckInThisSession, stuckLine, stuckRecord
+    describeEnv, type EncoderEnv, envChanges, forgetStuckEncoder, measureEnvironment, noteStreamStarting, noteStuckEncoder, PROBE_START, probeRecord, runStartupProbe,
+    startLocalCaps, stuckEncoderDiagnostics, stuckInThisSession, stuckLine, stuckRecord
 } from "./stuckEncoder";
 
 /** O PC do amigo em 31/10: Radeon RX 9070 XT. */
@@ -35,7 +36,6 @@ const STUCK_AT = new Date(2026, 9, 31, 2, 54).getTime();
 let rtc: WebRtcEnv;
 let native: NativeEnv;
 let workers: WorkerEnv | null = null;
-let caps: LocalCodecCaps;
 const timing = { ...ENCODER_PROBE_TIMING };
 
 function logMark() {
@@ -72,7 +72,7 @@ describe("placa de video que trava com H.264: lembrada neste PC", () => {
         workers = installWorker(healthyProbe());
         const lines: string[] = [];
         await startLocalCaps(line => lines.push(line));
-        caps = getLocalCaps();
+        const caps = getLocalCaps();
         assert.equal(caps.h264HwProfile, "42001f", "a sonda de codecs mediu a placa");
         assert.equal(caps.h264HwEncode, false, "mas o automatico trata o H.264 da placa como indisponivel");
         assert.equal(chooseCodec({ h264HwDecode: true }, "auto").codec, "vp9");
@@ -116,7 +116,7 @@ describe("placa de video que trava com H.264: lembrada neste PC", () => {
 describe("sonda WebCodecs (runStartupProbe)", () => {
     test("ok: enquanto roda o automatico vai de VP9; depois, nada muda (o resultado fica salvo com o ambiente)", async () => {
         workers = installWorker(healthyProbe(30));
-        const run = runStartupProbe(AMD_ENV, caps);
+        const run = runStartupProbe(AMD_ENV, "42001f");
         assert.equal(getLocalCaps().h264HwEncode, false, "durante a sonda: VP9");
         await run;
         assert.equal(getLocalCaps().h264HwEncode, true);
@@ -129,7 +129,7 @@ describe("sonda WebCodecs (runStartupProbe)", () => {
 
     test("inconclusiva (a placa nao aceita o perfil): nada muda", async () => {
         workers = installWorker(w => w.emit({ ev: "done", verdict: "unsupported" }));
-        await runStartupProbe(AMD_ENV, caps);
+        await runStartupProbe(AMD_ENV, "42001f");
         assert.equal(getLocalCaps().h264HwEncode, true);
         assert.equal(stuckRecord(), null);
         assert.equal(probeRecord()?.verdict, "unknown");
@@ -140,7 +140,7 @@ describe("sonda WebCodecs (runStartupProbe)", () => {
         workers = installWorker(stuckProbe());
         noteStreamStarting(true);
         try {
-            await runStartupProbe(AMD_ENV, caps);
+            await runStartupProbe(AMD_ENV, "42001f");
         } finally {
             noteStreamStarting(false);
         }
@@ -154,7 +154,7 @@ describe("sonda WebCodecs (runStartupProbe)", () => {
     test("travou (o 31/10 no navegador): marca o PC antes de qualquer transmissao, e o Worker preso fica (nunca terminado)", async () => {
         workers = installWorker(stuckProbe());
         const since = logMark();
-        await runStartupProbe(AMD_ENV, caps);
+        await runStartupProbe(AMD_ENV, "42001f");
         assert.equal(getLocalCaps().h264HwEncode, false);
         assert.equal(chooseCodec({ h264HwDecode: true }, "auto").codec, "vp9", "a 1a transmissao ja vai em VP9");
         const record = stuckRecord()!;
@@ -224,5 +224,87 @@ describe("ambiente e registros salvos", () => {
         assert.equal(probeRecord(), null, "veredito desconhecido");
         pluginSettings.set("hwH264Probe", { at: 1, env: {}, verdict: "ok" });
         assert.equal(probeRecord()?.detail, "");
+    });
+
+    test("o diagnostico avisa quando o ambiente mudou desde o travamento salvo", () => {
+        pluginSettings.set("stuckHwH264", { at: STUCK_AT, env: { ...AMD_ENV, driver: "31.0.1" } });
+        assert.ok(stuckEncoderDiagnostics().includes("driver 31.0.1; Chromium 152.0.7444.59; Discord 1.0.9266) — o ambiente mudou desde então"));
+        pluginSettings.set("stuckHwH264", null);
+    });
+
+    test("nao deu para salvar nas configuracoes: so um aviso no log (nunca lanca no meio do travamento)", () => {
+        const plain = settings.plain as Record<string, unknown>;
+        Object.defineProperty(plain, "stuckHwH264", {
+            configurable: true,
+            get: () => undefined,
+            set: () => {
+                throw new Error("disco cheio");
+            }
+        });
+        const since = logMark();
+        try {
+            forgetStuckEncoder();
+        } finally {
+            delete plain.stuckHwH264;
+        }
+        assert.ok(since().includes("warn: Não deu para salvar nas configurações que a placa de vídeo travou: Error: disco cheio"));
+    });
+});
+
+describe("leitura do ambiente (measureEnvironment)", () => {
+    const nav = globalThis.navigator as unknown as Record<string, unknown>;
+    const gpu = (requestAdapter: () => unknown) => Object.defineProperty(nav, "gpu", { configurable: true, value: { requestAdapter } });
+
+    after(() => {
+        delete nav.gpu;
+        delete nav.userAgent;
+    });
+
+    test("o main manda lixo ou um motivo: placa desconhecida; sem WebGPU; Chromium e Discord pelo userAgent", async () => {
+        Object.defineProperty(nav, "userAgent", { configurable: true, value: "Mozilla/5.0 (Windows NT 10.0) Chrome/152.0.7444.59 discord/1.0.9266 Electron/44.9.3" });
+        native.restore();
+        native = installNative({ gpuEnvironment: async () => ({ vendorId: "x", deviceId: 70_000, driverVersion: 5, chrome: null, discord: null, error: "getGPUInfo sem gpuDevice" }) });
+        assert.deepEqual(await measureEnvironment(), { vendorId: null, deviceId: null, driver: null, chrome: "152.0.7444.59", discord: "1.0.9266" });
+        assert.ok(stuckEncoderDiagnostics().includes("(placa via getGPUInfo sem gpuDevice; sem WebGPU)"));
+    });
+
+    test("o main nao responde ou lanca; sem a funcao nativa (Discord nao reiniciado depois da atualizacao)", async () => {
+        native.restore();
+        native = installNative({ gpuEnvironment: async () => null });
+        await measureEnvironment();
+        assert.ok(stuckEncoderDiagnostics().includes("(placa via o processo main não respondeu; sem WebGPU)"));
+
+        native.restore();
+        native = installNative({
+            gpuEnvironment: async () => {
+                throw new Error("No handler registered");
+            }
+        });
+        await measureEnvironment();
+        assert.ok(stuckEncoderDiagnostics().includes("(placa via Error: No handler registered; sem WebGPU)"));
+
+        native.restore();
+        native = installNative();
+        await measureEnvironment();
+        assert.ok(stuckEncoderDiagnostics().includes("(placa via parte nativa sem gpuEnvironment (Discord ainda não reiniciado depois da atualização); sem WebGPU)"));
+    });
+
+    test("WebGPU como plano B: fabricante pelo nome (ou o nome cru), device id quando vem, nada sem fabricante, erro", async () => {
+        gpu(async () => ({ info: { vendor: "Qualcomm", device: "0x73DF" } }));
+        assert.deepEqual(await measureEnvironment(), { vendorId: "5143", deviceId: "73df", driver: null, chrome: "152.0.7444.59", discord: "1.0.9266" });
+        assert.ok(stuckEncoderDiagnostics().includes("(placa via webgpu)"));
+
+        gpu(async () => ({ info: { vendor: "acme", device: "" } }));
+        assert.equal((await measureEnvironment()).vendorId, "acme");
+
+        gpu(async () => ({ info: { vendor: "" } }));
+        await measureEnvironment();
+        assert.ok(stuckEncoderDiagnostics().includes("sem WebGPU)"));
+
+        gpu(() => {
+            throw new Error("WebGPU desligado");
+        });
+        await measureEnvironment();
+        assert.ok(stuckEncoderDiagnostics().includes("; WebGPU: Error: WebGPU desligado)"));
     });
 });

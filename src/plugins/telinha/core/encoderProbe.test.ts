@@ -93,6 +93,10 @@ describe("sonda WebCodecs do H.264 da placa", () => {
                 w.emit({ ev: "error", error: "EncodingError: z" });
                 w.emit({ ev: "done", verdict: "finished", chunks: 0 });
             }, "erro do encoder sem nenhum pacote: EncodingError: z"],
+            [w => {
+                w.emit({ ev: "error" });
+                w.emit({ ev: "done", verdict: "finished", chunks: 0 });
+            }, "erro do encoder sem nenhum pacote: erro"],
             [w => w.fail("boom"), "o Worker falhou: boom"],
             [w => w.fail(""), "o Worker falhou: erro"]
         ];

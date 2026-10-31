@@ -15,7 +15,7 @@ import { after, before, beforeEach, describe, test } from "node:test";
 import { audioTrack, type FakeRTCPeerConnection, installWebRtc, videoTrack, type WebRtcEnv } from "@test/fakes/webrtc";
 import { logged, logMark } from "@test/helpers/wpa-session";
 
-import { getPeerConnectionClass, type SendPlan, setPcHooks } from "./peerConnection";
+import { containPeerConnection, getPeerConnectionClass, isContained, type SendPlan, setPcHooks } from "./peerConnection";
 
 type TestPc = FakeRTCPeerConnection & RTCPeerConnection;
 
@@ -236,5 +236,66 @@ describe("TelinhaPeerConnection", () => {
             };
             await assert.rejects(pc.setRemoteDescription(remote()), /SDP invalido/);
         });
+    });
+});
+
+// Conexao contida (envio travado na placa de video; streaming.ts → containStuck): o resto em streaming.stuck.test.ts.
+describe("conexao contida", () => {
+    let rtc: WebRtcEnv;
+
+    before(() => {
+        rtc = installWebRtc();
+    });
+
+    after(() => {
+        setPcHooks(null);
+        rtc.restore();
+    });
+
+    /** pc que envia video (mid "1", como no SDP remoto) e audio (mid "0"). */
+    function sendingPc() {
+        const pc = new (getPeerConnectionClass())({}) as unknown as TestPc;
+        const video = pc.addSendingTrack(videoTrack());
+        const audio = pc.addSendingTrack(audioTrack());
+        video.mid = "1";
+        audio.mid = "0";
+        return { pc, video };
+    }
+
+    const videoLine = (pc: TestPc) => /^m=video .*$/m.exec(pc.descriptionCalls.at(-1)!.description!.sdp!)?.[0];
+
+    test("close e removeTrack viram nada so na contida; conter de novo guarda tudo junto", () => {
+        const free = sendingPc();
+        const stuck = sendingPc();
+        containPeerConnection(stuck.pc as unknown as RTCPeerConnection, ["sender"]);
+        containPeerConnection(stuck.pc as unknown as RTCPeerConnection, ["stream"]);
+        assert.equal(isContained(stuck.pc as unknown as RTCPeerConnection), true);
+        assert.equal(isContained(free.pc as unknown as RTCPeerConnection), false);
+        assert.equal(isContained(null), false);
+
+        free.pc.removeTrack(free.video.sender);
+        stuck.pc.removeTrack(stuck.video.sender);
+        assert.equal(free.video.sender.track, null, "a saudavel tira a faixa");
+        assert.ok(stuck.video.sender.track, "a contida nao");
+        free.pc.close();
+        stuck.pc.close();
+        assert.equal(free.pc.connectionState, "closed");
+        assert.equal(stuck.pc.connectionState, "connected");
+    });
+
+    test("sem negociacao registrada: congela o plano de agora (o de depois nao vale); sem ganchos, nada e reordenado", async () => {
+        let plan: SendPlan = { codec: "vp9", bitrate: { startKbps: 5000, maxKbps: 20000 }, label: "amigo" };
+        setPcHooks({ planFor: () => plan });
+        const frozen = sendingPc();
+        containPeerConnection(frozen.pc as unknown as RTCPeerConnection);
+        plan = { codec: "vp8", bitrate: null, label: "amigo" };
+        await frozen.pc.setRemoteDescription({ type: "offer", sdp: REMOTE_SDP });
+        assert.equal(videoLine(frozen.pc), "m=video 9 UDP/TLS/RTP/SAVPF 98 96", "o VP9 congelado na frente");
+
+        setPcHooks(null);
+        const none = sendingPc();
+        containPeerConnection(none.pc as unknown as RTCPeerConnection);
+        await none.pc.setRemoteDescription({ type: "offer", sdp: REMOTE_SDP });
+        assert.equal(none.pc.descriptionCalls.at(-1)!.description!.sdp, REMOTE_SDP);
     });
 });

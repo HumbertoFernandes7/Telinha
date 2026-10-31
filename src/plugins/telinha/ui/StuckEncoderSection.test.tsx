@@ -14,15 +14,17 @@ import "@test/fakes/dom";
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
-import { act, fireEvent, render, screen, settle } from "@test/fakes/render";
+import { noteStuckEncoder, stuckEncoderDiagnostics } from "@plugins/telinha/core/stuckEncoder";
+import { act, fireEvent, render, screen, settle, waitFor } from "@test/fakes/render";
 import { pluginSettings, resetVencordFakes, toasts } from "@test/fakes/vencord";
 
 import { StuckEncoderSection } from "./StuckEncoderSection";
 
 afterEach(() => resetVencordFakes());
 
-test("sem travamento lembrado: nada aparece", () => {
+test("sem travamento lembrado: nada aparece (e o diagnostico diz que o ambiente ainda nao foi lido)", () => {
     pluginSettings.load({});
+    assert.ok(stuckEncoderDiagnostics().startsWith("ambiente do encoder: ainda lendo\nH.264 da placa travado neste PC: não;"));
     const { container } = render(<StuckEncoderSection />);
     assert.equal(container.textContent, "");
 });
@@ -38,4 +40,15 @@ test("com o travamento: a linha e o botao; o botao esquece, avisa e a linha some
     assert.equal(pluginSettings.get("stuckHwH264"), null);
     assert.deepEqual(toasts.map(t => t.text), ["Pronto: a próxima pessoa que assistir recebe o H.264 da placa de vídeo de novo."]);
     assert.equal(screen.queryByText(/A placa de vídeo travou/), null);
+});
+
+test("travou nesta sessao (ha um envio contido): o botao vale so depois de reiniciar o Discord", async () => {
+    noteStuckEncoder();
+    await waitFor(() => assert.ok(pluginSettings.get("stuckHwH264")));
+    render(<StuckEncoderSection />);
+    act(() => {
+        fireEvent.click(screen.getByRole("button", { name: "Tentar a placa de vídeo de novo" }));
+    });
+    await settle();
+    assert.deepEqual(toasts.map(t => t.text), ["Pronto: a placa de vídeo volta a ser usada depois que você reiniciar o Discord."]);
 });

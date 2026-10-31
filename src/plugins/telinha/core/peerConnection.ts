@@ -83,11 +83,8 @@ export function containPeerConnection(pc: RTCPeerConnection, keep: unknown[] = [
         entry.keep.push(...keep);
         return;
     }
-    let plan = lastPlans.get(pc) ?? null;
-    try {
-        plan ??= hooks?.planFor(pc) ?? null;
-    } catch { }
-    contained.set(pc, { plan, keep: [...keep] });
+    // sem negociacao registrada (nao acontece: o envio passou por uma), o plano de agora
+    contained.set(pc, { plan: lastPlans.get(pc) ?? hooks?.planFor(pc) ?? null, keep: [...keep] });
 }
 
 export function isContained(pc: RTCPeerConnection | null | undefined): boolean {

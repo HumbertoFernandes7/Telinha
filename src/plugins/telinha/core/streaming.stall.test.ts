@@ -25,13 +25,15 @@ import { after, before, describe, test } from "node:test";
 import { rt } from "@plugins/telinha/core/context";
 import { pluginSettings } from "@test/fakes/vencord";
 import { type FakeRTCPeerConnection, type FakeRTCRtpSender, type StatsEntry, videoSenderStats } from "@test/fakes/webrtc";
-import { connectViewer, createRig, destroyRig, enterCall, logMark, repliesTo, screenOptions, seconds, type StreamingRig, turns, videoSenderOf } from "@test/helpers/wpb-streaming";
+import {
+    connectViewer, createRig, destroyRig, enterCall, logMark, removalsFrom, repliesTo, screenOptions, seconds, type StreamingRig, turns, videoSenderOf
+} from "@test/helpers/wpb-streaming";
 
 import { getLocalCaps } from "./codec";
 import { isContained } from "./peerConnection";
 import { STATS_LINE_RE } from "./statsLog";
 import { H264_STALL_MS, sendPlanFor, SENT_MIN_BYTES, startStreaming, stopStreaming } from "./streaming";
-import { STUCK_NOTICE, STUCK_NOTICE_PINNED, stuckRecord } from "./stuckEncoder";
+import { STUCK_NOTICE, STUCK_NOTICE_PINNED, stuckEncoderDiagnostics, stuckRecord } from "./stuckEncoder";
 
 /** O encoder do log das 02:54 (placa AMD, Telinha 0.2.6). */
 const AMD = "MediaFoundationVideoEncodeAccelerator (AMDh264Encoder)";
@@ -240,9 +242,17 @@ describe("H.264 que nao sai do PC (checkStall)", () => {
         assert.equal(stalls(since(), v).length, 1);
         assertContained(v);
 
+        assert.ok(stuckEncoderDiagnostics().includes("travou nesta sessão: sim (1 conexão contida)"));
+
         // os proximos ja comecam em VP9 (nenhum encoder H.264 da placa e criado)
         const next = await watcher("depois");
         assert.equal(sendPlanFor(next.peerId)?.codec, "vp9");
+
+        // ele para de assistir: sem removeStream (a transmissao e so de tela, sem audio para cortar)
+        stopWatching(v);
+        await turns();
+        assert.equal(removalsFrom(rig.room, v.peerId).length, 0);
+        assert.ok(v.sender.track, "a faixa continua no envio travado");
     });
 
     test("log das 02:54 (codec fixado em H.264): o encoder AMD codifica, mas nada sai (0 enviados, 0 kB) → travou, contido; o aviso pede o Automatico", async () => {
