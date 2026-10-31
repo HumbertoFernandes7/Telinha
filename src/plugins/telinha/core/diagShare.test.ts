@@ -24,7 +24,9 @@ import {
 import { formatDiagnostics, getEventLog, getState } from "@plugins/telinha/store";
 import type { FakeAction } from "@test/fakes/trystero";
 import { ME_ID, pluginSettings } from "@test/fakes/vencord";
-import { connectViewer, createRig, destroyRig, enterCall, leaveCall, seconds, setMembers, type StreamingRig, turns, windowOptions } from "@test/helpers/wpb-streaming";
+import {
+    connectViewer, createRig, destroyRig, enterCall, leaveCall, screenOptions, seconds, setMembers, type StreamingRig, turns, windowOptions
+} from "@test/helpers/wpb-streaming";
 
 import { rt } from "./context";
 import { diagLogSession } from "./diagLog";
@@ -547,6 +549,25 @@ describe("quem manda: limites e mascara das linhas ao vivo", () => {
         assert.equal(texts.some(t => t.includes("salários") || t.includes(f.id)), false);
         assert.ok(getEventLog().some(e => e.msg === `Iniciando transmissão: janela "${title.replace("10.0.0.7", "[ip]")}" em 1080p60 sem áudio`), "no log local, o nome fica");
     });
+
+    test("janela de uma palavra so (\"Discord\") e tela inteira: so a linha da captura e mascarada, as palavras das outras linhas ficam", async () => {
+        const f = await live();
+        pluginSettings.set("autoQuality", false);
+        try {
+            await startStreaming(windowOptions({ source: { id: "window:1234:0", name: "Discord", kind: "window" } }));
+            stopStreaming();
+            await startStreaming(screenOptions({ source: { id: "screen:0:0", name: "Monitor Dell Principal", kind: "screen" } }));
+            log.info("identidade do Discord verificada; Monitor Dell Principal em 60 Hz");
+            await seconds(rig);
+        } finally {
+            stopStreaming();
+            pluginSettings.set("autoQuality", true);
+        }
+        const texts = textsTo(f);
+        assert.ok(texts.includes("Iniciando transmissão: janela \"[janela]\" em 1080p60 sem áudio"), texts.join("\n"));
+        assert.ok(texts.includes("Iniciando transmissão: tela \"[janela]\" em 1080p60 sem áudio"));
+        assert.ok(texts.includes("identidade do Discord verificada; Monitor Dell Principal em 60 Hz"));
+    });
 });
 
 describe("quem manda: o fim da sessao anterior (registro em arquivo)", () => {
@@ -598,14 +619,21 @@ describe("quem manda: o fim da sessao anterior (registro em arquivo)", () => {
         assert.doesNotMatch(appended(), /isto nao vai/);
     });
 
-    test("desligada sem o onChange (configuracao sincronizada): o tick para de gravar (sem apagar)", async () => {
+    test("a opcao muda sem o onChange (configuracao sincronizada): o tick faz o mesmo com o arquivo (desligada apaga, ligada volta)", async () => {
         const before = clears();
         pluginSettings.load({ shareDiagnostics: false });
         await seconds(rig);
+        assert.equal(clears(), before + 1, "desligada: para e apaga, como no onChange");
         log.info("depois da sincronizacao");
         await seconds(rig, 3);
         assert.doesNotMatch(appended(), /depois da sincronizacao/);
-        assert.equal(clears(), before, "so o onChange apaga");
+        assert.equal(clears(), before + 1, "uma vez so");
+
+        pluginSettings.load({ shareDiagnostics: true });
+        await seconds(rig);
+        log.info("ligada de novo pela sincronizacao");
+        await seconds(rig, 3);
+        assert.match(appended(), / info ligada de novo pela sincronizacao\n/, "ligada: volta a gravar");
     });
 });
 

@@ -19,31 +19,41 @@ export function stripIps(text: string): string {
 
 // O que sai do PC no diagnostico compartilhado (core/diagShare.ts) passa tambem por estes: a pasta do usuario
 // (C:\Users\<nome>\..., inclusive com a barra dobrada do JSON, /home/<nome>, /Users/<nome>), os ids numericos do Discord
-// (17 a 20 digitos: "discord 1234..." vira "discord [id]"; canal, app...), o nome da janela/tela capturada (a linha
-// "Iniciando transmissão: janela "..."" de qualquer sessao, e o nome em qualquer outra linha desta sessao: notePrivateTitle)
-// e qualquer coisa com cara de token (JWT como o id_token, token de conta do Discord, "Bearer x", "access_token=x"...). O
-// nucleo nunca loga tokens: isto e so a segunda barreira. O console e o log locais ficam como estao; os nomes de quem esta
-// na call tambem (sao o que se precisa para depurar).
+// (17 a 20 digitos: "discord 1234..." vira "discord [id]"; o canal tambem; so o Client ID do app na linha da identidade,
+// "(app 1234...)", fica: e publico e diz qual build o amigo usa), o nome da janela/tela capturada (a linha "Iniciando
+// transmissão: janela "..."" de qualquer sessao, e o nome de uma janela em qualquer outra linha desta sessao:
+// notePrivateTitle) e qualquer coisa com cara de token (JWT como o id_token, token de conta do Discord, "Bearer x",
+// "access_token=x"...). O nucleo nunca loga tokens: isto e so a segunda barreira. O console e o log locais ficam como
+// estao; os nomes de quem esta na call tambem (sao o que se precisa para depurar).
 const WIN_USER_DIR_RE = /\b([a-z]:(?:\\{1,2}|\/)(?:users|documents and settings)(?:\\{1,2}|\/))[^\\/:*?"<>|\r\n]+/gi;
 const UNIX_USER_DIR_RE = /(\/(?:home|Users)\/)[^/\s"'<>]+/g;
 const JWT_RE = /\beyJ[\w-]{4,}\.[\w-]{4,}\.[\w-]*/g;
 const DISCORD_TOKEN_RE = /\b[\w-]{23,28}\.[\w-]{6}\.[\w-]{27,40}\b/g;
 const NAMED_SECRET_RE = /\b(access_token|refresh_token|id_token|client_secret|code_verifier)(["']?\s*[=:]\s*["']?)[^\s"'&,;]+/gi;
 const BEARER_RE = /\b(bearer\s+)[\w.~+/-]+=*/gi;
-const DISCORD_ID_RE = /\b\d{17,20}\b/g;
+/** menos o Client ID do app na linha da identidade (core/identity → localIdentityDiagnostics: "configurada (app <id>)") */
+const DISCORD_ID_RE = /(?<!\(app )\b\d{17,20}\b/g;
 /** a linha de streaming.ts → startStreaming; o nome vai ate o ultimo `" em <qualidade> com/sem áudio` (pode ter aspas) */
 const CAPTURE_LINE_RE = /(Iniciando transmissão: (?:tela|janela) )".*"(?= em \S+ (?:com|sem) áudio)/g;
 const PRIVATE_TITLE = "[janela]";
 /** nomes mais curtos que isto nao sao mascarados soltos (mascarariam palavras comuns); na linha da captura, sempre */
 const MIN_TITLE_CHARS = 4;
+/**
+ * so nomes com mais de uma palavra sao mascarados soltos: uma palavra so ("Discord", "Spotify", "Steam") apagaria essa
+ * palavra de todas as linhas ("identidade do [janela] verificada"); a linha da captura cobre esses
+ */
+const MULTI_WORD_RE = /\S\s+\S/;
 const MAX_TITLES = 20;
 /** nomes capturados nesta sessao (os mais recentes), como foram e como ficam no log (sem IPs) */
 const privateTitles: string[] = [];
 
-/** O nome da janela/tela que vai ser capturada (streaming.ts): sai deste PC como "[janela]" (maskPrivate). */
+/**
+ * O nome da janela que vai ser capturada (streaming.ts; tela inteira nao, a linha da captura ja cobre "Tela 1"): sai deste
+ * PC como "[janela]" (maskPrivate). Nome de uma palavra so ou curto demais fica so na regra da linha da captura.
+ */
 export function notePrivateTitle(title: string) {
     for (const t of new Set([title.trim(), stripIps(title.trim())])) {
-        if (t.length < MIN_TITLE_CHARS || privateTitles.includes(t)) continue;
+        if (t.length < MIN_TITLE_CHARS || !MULTI_WORD_RE.test(t) || privateTitles.includes(t)) continue;
         privateTitles.push(t);
         if (privateTitles.length > MAX_TITLES) privateTitles.shift();
     }
