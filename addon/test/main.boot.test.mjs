@@ -180,10 +180,11 @@ describe("the log file (%APPDATA%\\Telinha\\logs\\main.log)", () => {
 });
 
 describe("the updater inside the loader", () => {
-    test("createUpdater gets this folder, a logger into main.log, the loader's fetch and the test API base (if any)", t => {
+    test("createUpdater gets this folder, a logger into main.log (and its path), the loader's fetch and the test API base (if any)", t => {
         const { tree } = boot(t, { installed: OLD({ replace: { "updater.js": STUB_UPDATER } }), before: () => { process.env.TELINHA_UPDATE_API = "http://127.0.0.1:4321"; } });
         const [created] = globalThis.__updStub.created;
         assert.equal(created.addonDir, tree.addonDir);
+        assert.equal(created.logFile, tree.logFile, "recentLog() reads the very main.log the logger writes");
         assert.equal(created.apiBase, "http://127.0.0.1:4321");
         assert.equal(typeof created.fetch, "function");
         created.log("plain message");

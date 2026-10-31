@@ -110,6 +110,28 @@ describe("com o loader do add-on", () => {
         assert.ok(button("Reiniciar agora"));
     });
 
+    test("pronta, mas nao entrou por causa de outro Discord: a linha diz por que, e o botao lembra de fechar os outros", async () => {
+        next = statusOf({ phase: "ready", ready: "0.3.0", waiting: { reason: "others", detail: { pids: [1234], exes: ["DiscordCanary.exe"] }, at: "x", starts: 2 } });
+        withLoader();
+        render(<UpdateSection />);
+        await settle();
+        assert.ok(screen.getByText("Versão 0.3.0 pronta, mas não entrou ao reiniciar (2 tentativas): outro Discord estava aberto quando este abriu (Discord Canary). Feche todos os Discords, inclusive pelo ícone perto do relógio (botão direito → Sair do Discord), e abra de novo."));
+        assert.equal(screen.queryByRole("button", { name: "Reiniciar agora" }), null);
+        const relaunch = mock.fn();
+        g.DiscordNative = { app: { relaunch } };
+        fireEvent.click(button("Fechei os outros, reiniciar"));
+        assert.equal(relaunch.mock.callCount(), 1);
+    });
+
+    test("pronta, mas nao entrou por outro motivo: o botao continua 'Reiniciar agora'", async () => {
+        next = statusOf({ phase: "ready", ready: "0.3.0", waiting: { reason: "in-use", detail: { code: "EBUSY" }, at: "x", starts: 1 } });
+        withLoader();
+        render(<UpdateSection />);
+        await settle();
+        assert.ok(screen.getByText(/^Versão 0\.3\.0 pronta, mas não entrou ao reiniciar: um arquivo do Telinha estava em uso/));
+        assert.ok(button("Reiniciar agora"));
+    });
+
     test("main ocupado (baixando): os botoes ficam travados mesmo sem clique", async () => {
         next = statusOf({ phase: "downloading", latest: { version: "0.3.0", tag: "v0.3.0" } });
         withLoader();

@@ -22,8 +22,10 @@
  */
 "use strict";
 
+const childProcess = require("child_process");
 const crypto = require("crypto");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const zlib = require("zlib");
 
@@ -48,6 +50,12 @@ const HEARTBEAT_MS = 5 * 60_000; // run markers: a live Discord touches its mark
 const RUN_STALE_MS = 12 * 60 * 60_000; // ...so a marker this old belongs to a dead process whose pid was reused
 const LOCK_STALE_MS = 2 * 60_000;
 const UNARMED_LIMIT = 5; // a trial whose renderer never loaded in this many starts is dropped (kept, not rolled back)
+// The main executable of every Discord flavor (installer/internal/core discordExeNames, PAYLOAD.md 4.1): only these boot
+// our stub, so only these can own a run marker.
+const DISCORD_EXES = new Set(["discord.exe", "discordptb.exe", "discordcanary.exe", "discorddevelopment.exe"]);
+const TASKLIST_TIMEOUT_MS = 3000;
+const RECENT_LOG_LINES = 10; // "update" lines of main.log in "Copiar diagnóstico"
+const RECENT_LOG_LINE_MAX = 400;
 
 // ------------------------------------------------------------------------------------------- small helpers
 
@@ -105,6 +113,35 @@ function exists(p) {
     } catch {
         return false;
     }
+}
+
+// ------------------------------------------------------------------------------------------- running programs (Windows)
+
+const isDiscordExe = name => typeof name === "string" && DISCORD_EXES.has(name.toLowerCase());
+
+/** `tasklist /FO CSV /NH` output -> Map pid -> image name ("Discord.exe"). Throws when no line reads as a process. */
+function parseTasklist(text) {
+    const names = new Map();
+    for (const line of String(text ?? "").split(/\r?\n/)) {
+        const m = /^"([^"]+)","(\d+)"/.exec(line.trim());
+        if (m) names.set(Number(m[2]), m[1]);
+    }
+    if (!names.size) throw new Error("tasklist listed no process");
+    return names;
+}
+
+/**
+ * The image name of every running process, from Windows' own tasklist (about 0.1-0.3 s). Only called when a run
+ * marker's pid answers, i.e. with an update waiting and maybe another Discord open. Throws when the list cannot be read
+ * (not Windows, tasklist missing or slower than 3 s): the caller then counts the marker as before.
+ */
+function listProcessNames({ platform = process.platform, spawnSync = childProcess.spawnSync, env = process.env } = {}) {
+    if (platform !== "win32") throw new Error(`no process list on ${platform}`);
+    const exe = path.win32.join(env.SystemRoot || env.windir || "C:\\Windows", "System32", "tasklist.exe");
+    const r = spawnSync(exe, ["/FO", "CSV", "/NH"], { encoding: "utf8", windowsHide: true, timeout: TASKLIST_TIMEOUT_MS, maxBuffer: 8 << 20 });
+    if (r.error) throw r.error;
+    if (r.status !== 0) throw new Error(`tasklist exited with ${r.status ?? r.signal}`);
+    return parseTasklist(r.stdout);
 }
 
 function readLimited(file, limit) {
@@ -469,8 +506,11 @@ function slimRelease(r) {
  * @param {typeof fetch} [o.fetch]  Electron net.fetch in production (follows redirects to GitHub's asset CDN)
  * @param {string} [o.apiBase]      only a loopback http:// base is accepted besides api.github.com (offline tests)
  * @param {() => number} [o.now]
+ * @param {string} [o.logFile]      main.log (main.js's own log): its last "update" lines go into "Copiar diagnóstico"
+ * @param {() => Map<number, string>} [o.processNames]  pid -> image name of every running process (tests replace it)
+ * @param {Record<string, string | undefined>} [o.env]  APPDATA, LOCALAPPDATA, USERPROFILE: masked in recentLog()
  */
-function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThis.fetch, apiBase = API_BASE, now = Date.now, userAgent } = {}) {
+function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThis.fetch, apiBase = API_BASE, now = Date.now, userAgent, logFile = null, processNames = () => listProcessNames(), env = process.env } = {}) {
     const home = path.dirname(addonDir);
     const P = {
         home,
@@ -581,6 +621,7 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
      * Other live processes using the add-on: a second Discord.exe started while one is already open (it boots
      * through our stub before Discord's single-instance check makes it quit), or another flavor (PTB, Canary).
      * Swapping under them would mix versions, so startup() waits for the next start when it finds one.
+     * Returns [{ pid, exe }] (exe: the program's name, null when the list of programs could not be read).
      */
     function othersRunning() {
         const alive = [];
@@ -609,11 +650,53 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
                     live = err?.code === "EPERM";
                 }
             }
-            if (fresh && live) alive.push(pid);
+            if (fresh && live) alive.push({ pid, file });
             else tryRemove(file);
         }
-        return alive;
+        if (!alive.length) return [];
+        // A marker outlives a Discord that ended without 'exit' (a crash, End task, a power cut, Windows shutting down),
+        // and Windows soon gives its pid to another process (a service answers EPERM): only a Discord program can own it.
+        let running = null;
+        try {
+            running = processNames();
+            if (!(running instanceof Map)) throw new Error("no list of programs");
+        } catch (err) {
+            running = null;
+            log("update: could not list the running programs; the run markers count as other Discords", String(err?.message ?? err));
+        }
+        const others = [];
+        for (const { pid, file } of alive) {
+            const exe = running?.get(pid) ?? null;
+            if (running && !isDiscordExe(exe)) {
+                // only the pid: the name of some other program on the user's PC has no business in main.log
+                log("update: run marker of a Discord that is gone, dropped (its pid now belongs to a program that is not Discord)", { pid });
+                tryRemove(file);
+            } else others.push({ pid, exe });
+        }
+        return others;
     }
+
+    /** What a staged update / rollback waiting on other Discords logs and records: their pids, and names when known. */
+    function othersDetail(others) {
+        const detail = { pids: others.map(o => o.pid) };
+        if (others.some(o => o.exe)) detail.exes = others.map(o => o.exe);
+        return detail;
+    }
+
+    /**
+     * Why the last swap / rollback attempt of this start did not happen ({ reason, detail }), set where it gave up:
+     * "locked" (a fresh swap.lock: another start is moving the folders), "lock-stuck" (an old swap.lock that cannot be
+     * removed), "in-use" (addon\ could not be moved aside), "activate-failed" (the new folder could not be moved in).
+     * startup() records it (state.json `waiting`, and ownWaiting for this process's status()).
+     */
+    let blocked = null;
+    /**
+     * What startup() of THIS process recorded: the only `waiting` status() reports. state.json is shared by every
+     * Discord using the add-on (a second Discord.exe started while this one is open runs startup() too, before Discord's
+     * single-instance check makes it quit), so a record found there may describe another process's start.
+     */
+    let ownWaiting = null;
+    const errCode = err => ({ code: typeof err?.code === "string" ? err.code : null });
 
     /** One process at a time moves the add-on folders (two flavors starting together). */
     function withLock(fn) {
@@ -628,11 +711,19 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
                 try {
                     stale = now() - fs.statSync(P.lock).mtimeMs > LOCK_STALE_MS;
                 } catch { }
-                if (!stale) return null;
+                if (!stale) {
+                    log("update: swap.lock is held by another Discord start (under 2 minutes old); the add-on folders wait for the next start");
+                    blocked = { reason: "locked", detail: null };
+                    return null;
+                }
                 tryRemove(P.lock);
             }
         }
-        if (fd === undefined) return null;
+        if (fd === undefined) {
+            log("update: an old swap.lock could not be removed; the add-on folders wait for the next start");
+            blocked = { reason: "lock-stuck", detail: null };
+            return null;
+        }
         try {
             return fn();
         } finally {
@@ -668,6 +759,7 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
             rename(P.addon, P.old);
         } catch (err) {
             log("update: the add-on folder is in use; the update waits for the next start", String(err?.message ?? err));
+            blocked = { reason: "in-use", detail: errCode(err) };
             return null;
         }
         try {
@@ -679,6 +771,7 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
                 log("update: ERROR could not put the add-on folder back", String(err2?.message ?? err2));
             }
             log("update: could not activate the staged add-on; it waits for the next start", String(err?.message ?? err));
+            blocked = { reason: "activate-failed", detail: errCode(err) };
             return null;
         }
         try {
@@ -696,6 +789,7 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
             previousRecord: rec ? { version: rec.version ?? null, commit: rec.commit ?? null, source: rec.source ?? null } : null
         };
         delete s.staged;
+        delete s.waiting;
         writeState(s);
         updateRecord({
             version: m.version, commit: m.commit ?? "",
@@ -725,6 +819,7 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
             rename(P.addon, P.old);
         } catch (err) {
             log("update: rollback postponed, the add-on folder is in use", String(err?.message ?? err));
+            blocked = { reason: "in-use", detail: errCode(err) };
             return null;
         }
         try {
@@ -734,6 +829,7 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
                 rename(P.old, P.addon);
             } catch { }
             log("update: rollback postponed, could not restore addon.prev", String(err?.message ?? err));
+            blocked = { reason: "activate-failed", detail: errCode(err) };
             return null;
         }
         tryRemove(P.old); // the failed version is not kept as addon.prev
@@ -741,6 +837,7 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
         s.bad[t.version] = { commit: t.commit ?? null, at, reason };
         s.lastRollback = { version: t.version, to: prev.version, at, reason };
         delete s.trial;
+        delete s.waiting;
         if (s.staged?.version === t.version) delete s.staged;
         writeState(s);
         const pr = t.previousRecord;
@@ -768,9 +865,28 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
     }
 
     /**
+     * Why the staged update did not go in at this start: kept for this process's status() (the plugin's notice, settings
+     * line and "Copiar diagnóstico") and in state.json `waiting` (the raw record, with the pid that wrote it). `starts`
+     * counts the starts in a row it waited for this version. A record written by a Discord that is still open (its pid
+     * is one of `others`) is left alone: this start is then a second Discord.exe that Discord's single-instance check is
+     * about to close, or another flavor, and must neither take over that record nor count as one more try.
+     * Returns whether state.json changed.
+     */
+    function noteWait(s, reason, detail, others) {
+        const version = peekManifest(P.staged)?.version ?? null;
+        const prev = s.waiting && typeof s.waiting === "object" ? s.waiting : null;
+        const starts = prev?.version === version && Number.isSafeInteger(prev.starts) && prev.starts > 0 ? prev.starts + 1 : 1;
+        ownWaiting = { version, reason, detail, at: iso(now()), starts };
+        if (prev && others.some(o => o.pid === prev.pid)) return false;
+        s.waiting = { ...ownWaiting, pid: process.pid };
+        return true;
+    }
+
+    /**
      * Runs at every Discord start, before the add-on's hooks: rolls back a version that never confirmed a good start,
      * or activates a staged update. Returns what changed in addon\ ({ kind: "swapped" | "rolledBack" }) or null.
-     * Never throws for expected failures (locked files, another Discord running): those wait for the next start.
+     * Never throws for expected failures (locked files, another Discord running): those wait for the next start, and
+     * the reason is kept in state.json (`waiting`) so the plugin can say why.
      */
     function startup({ actions = true } = {}) {
         registerRun();
@@ -779,6 +895,7 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
             return null;
         }
         if (!actions) return null;
+        ownWaiting = null;
         cleanLeftovers();
         const s = readState();
         let dirty = false;
@@ -788,15 +905,27 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
             delete s.trial;
             dirty = true;
         }
-        const others = s.trial?.armed || exists(P.staged) ? othersRunning() : [];
+        const staged = exists(P.staged);
+        if (!staged && s.waiting) {
+            delete s.waiting;
+            dirty = true;
+        }
+        const others = s.trial?.armed || staged ? othersRunning() : [];
+        const wait = (reason, detail = null) => {
+            if (staged && noteWait(s, reason, detail, others)) dirty = true;
+        };
 
         if (s.trial?.armed) {
             // The renderer was served in an earlier start but never reported a good start: the boot marker was left set.
             if (others.length) {
-                log("update: rollback waits, another Discord is running from this add-on", { pids: others });
+                log("update: rollback waits, another Discord is running from this add-on", othersDetail(others));
+                wait("others", othersDetail(others));
             } else {
+                blocked = null;
                 const done = withLock(() => rollbackLocked(s, `Telinha ${s.trial.version} did not confirm a good start (boot marker left set)`));
                 if (done) return done;
+                // no usable addon.prev: the trial was dropped, the staged update is tried at the next start
+                wait(blocked?.reason ?? "trial", blocked?.detail ?? null);
             }
             if (dirty) writeState(s);
             return null;
@@ -810,12 +939,19 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
             dirty = true;
         }
 
-        if (exists(P.staged)) {
-            if (s.trial) log("update: staged update waits until the current version confirms a good start");
-            else if (others.length) log("update: staged update waits, another Discord is running from this add-on", { pids: others });
-            else {
+        if (staged) {
+            if (s.trial) {
+                log("update: staged update waits until the current version confirms a good start");
+                wait("trial");
+            } else if (others.length) {
+                log("update: staged update waits, another Discord is running from this add-on", othersDetail(others));
+                wait("others", othersDetail(others));
+            } else {
+                blocked = null;
                 const done = withLock(() => swapLocked(s));
                 if (done) return done;
+                if (exists(P.staged)) wait(blocked?.reason ?? "unknown", blocked?.detail ?? null);
+                else delete s.waiting; // discarded (invalid, not newer): nothing waits anymore
                 dirty = true;
             }
         }
@@ -1139,17 +1275,71 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
             s = { bad: {} };
         }
         const ready = rt.phase === "checking" || rt.phase === "downloading" ? null : stagedVersion(s);
+        // why this very version did not go in when THIS Discord started (a version staged since has not tried yet; a
+        // record in state.json may come from another Discord's start, see ownWaiting)
+        const w = ownWaiting;
+        const waiting = ready && w?.version === ready ? { reason: w.reason, detail: w.detail, at: w.at, starts: w.starts } : null;
         return {
             supported: true,
             installed: installed ? { version: installed.version, commit: installed.commit ?? null } : null,
             phase: ready ? "ready" : rt.phase,
             latest: rt.latest,
             ready,
+            waiting,
             error: ready ? null : rt.error,
             checkedAt: rt.checkedAt,
             skipped: rt.skipped,
             lastRollback: s.lastRollback ?? null
         };
+    }
+
+    /**
+     * The user's folders as they may appear in main.log (as written, JSON-escaped, with forward slashes), longest first,
+     * each with the placeholder it becomes: the Telinha home, %LOCALAPPDATA%, %APPDATA%, %USERPROFILE% and the home
+     * folder (they can differ from C:\Users\<name>: a redirected folder, a roaming profile).
+     */
+    function privateFolders() {
+        let userHome = "";
+        try {
+            userHome = os.homedir();
+        } catch { }
+        const folders = [[P.home, "%TELINHA%"], [env.LOCALAPPDATA, "%LOCALAPPDATA%"], [env.APPDATA, "%APPDATA%"], [env.USERPROFILE, "~"], [userHome, "~"]];
+        const forms = [];
+        for (const [dir, label] of folders) {
+            const d = typeof dir === "string" ? dir.replace(/[\\/]+$/, "") : "";
+            if (d.length < 4) continue; // never "C:" or "C:\"
+            for (const f of new Set([d, JSON.stringify(d).slice(1, -1), d.replace(/\\/g, "/")]))
+                forms.push([new RegExp(f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), label, f.length]);
+        }
+        return forms.sort((a, b) => b[2] - a[2]);
+    }
+
+    /**
+     * The last "update" lines of main.log (main.log.1 when main.log has too few), oldest first, for "Copiar diagnóstico".
+     * The user's folders show as placeholders (privateFolders: ~, %APPDATA%...) and IPv4 addresses (a proxy in an error)
+     * as x.x.x.x, like the rest of the diagnostic. [] without a log file.
+     */
+    function recentLog(max = RECENT_LOG_LINES) {
+        const lines = [];
+        if (!logFile) return lines;
+        for (const file of [logFile, `${logFile}.1`]) {
+            if (lines.length >= max) break;
+            let text;
+            try {
+                text = readLimited(file, MAX_SMALL).toString("utf8");
+            } catch {
+                continue;
+            }
+            const found = text.split(/\r?\n/).filter(l => /^\S+ \[\d+\] (?:ERROR )?update/.test(l));
+            lines.unshift(...found.slice(-(max - lines.length)));
+        }
+        const forms = privateFolders();
+        return lines.map(l => {
+            let out = l;
+            for (const [re, label] of forms) out = out.replace(re, label);
+            out = out.replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "x.x.x.x");
+            return out.length > RECENT_LOG_LINE_MAX ? `${out.slice(0, RECENT_LOG_LINE_MAX)}…` : out;
+        });
     }
 
     /** Looks for a newer release; with autoDownload, also downloads and stages it. Concurrent calls share one run. */
@@ -1174,12 +1364,13 @@ function createUpdater({ addonDir, log = () => { }, fetch: fetchImpl = globalThi
         return check({ autoDownload: true, manual: true });
     }
 
-    return { paths: P, installed, startup, rollbackNow, markServed, confirmBoot, status, check, download, readState };
+    return { paths: P, installed, startup, rollbackNow, markServed, confirmBoot, status, recentLog, check, download, readState };
 }
 
 module.exports = {
     createUpdater,
     // pure helpers, exported for the offline tests
     compareSemver, plainVersion, validName, validateManifest, verifyDir, readPayloadZip, zipEntries, crc32,
-    hashFromSumFile, hashFromReleaseBody, hashFromVersionJson, pickAsset, PayloadError, UpdateError
+    hashFromSumFile, hashFromReleaseBody, hashFromVersionJson, pickAsset, parseTasklist, listProcessNames, isDiscordExe,
+    PayloadError, UpdateError
 };

@@ -19,10 +19,11 @@
  */
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 
-import { fakeKill, fsError, makeHome, makePayload, updaterFor, wrapFs } from "./fake/update-kit.mjs";
+import { fakeKill, fsError, makeHome, makePayload, processList, upd, updaterFor, wrapFs, writePayload } from "./fake/update-kit.mjs";
 
 const V010 = () => makePayload({ version: "0.1.0", commit: "base0100" });
 const V011 = () => makePayload({ version: "0.1.1", commit: "new00101" });
@@ -416,11 +417,14 @@ describe("startup(): activating a staged update", () => {
             if (from === h.addonDir) throw fsError("EBUSY");
             return orig(from, to);
         });
-        const u = start(h);
+        const u = start(h, { now: () => Date.parse("2026-10-31T03:00:00Z") });
         assert.equal(u.result, null);
         assert.equal(h.versionOf(h.addonDir), "0.1.0");
         assert.equal(h.versionOf(h.staged), "0.1.1");
-        assert.deepEqual(h.state(), { format: 1, bad: {} }, "no trial, no staged entry: nothing recorded");
+        assert.deepEqual(h.state(), {
+            format: 1, bad: {},
+            waiting: { version: "0.1.1", reason: "in-use", detail: { code: "EBUSY" }, at: "2026-10-31T03:00:00.000Z", starts: 1, pid: process.pid }
+        }, "no trial, no staged entry: only why it waits (and which process wrote it)");
     });
 
     test("addon.new cannot be put in place: the old addon\\ is moved back, the staged copy waits", t => {
@@ -1097,6 +1101,472 @@ describe("builds without a commit, and an install.json that says little", () => 
             assert.equal(u.installed, null, JSON.stringify(text));
             assert.equal(u.startup(), null);
         }
+    });
+});
+
+/** A run marker of another process (update\run\<pid>). */
+const runMarker = (h, pid) => {
+    fs.mkdirSync(h.runDir, { recursive: true });
+    const file = join(h.runDir, String(pid));
+    fs.writeFileSync(file, "{}");
+    return file;
+};
+const NOW = Date.parse("2026-10-31T03:00:00Z");
+const V012 = () => makePayload({ version: "0.1.2", commit: "n2" });
+const armedOn011 = (t, extra = {}) => {
+    const cur = V011();
+    return home(t, { installed: cur, prev: V010(), staged: V012(), state: { format: 1, bad: {}, trial: trialFor(cur, V010(), { armed: true }) }, ...extra });
+};
+
+describe("run markers: only a Discord program can own one (a crash leaves the marker, Windows reuses the pid)", () => {
+    const staged = t => home(t, { staged: V011() });
+
+    test("a live pid that is not a Discord program: the stale marker is dropped and the swap goes ahead", t => {
+        const h = staged(t);
+        const file = runMarker(h, 4242);
+        fakeKill(t, { alive: [4242] });
+        const u = start(h, { processNames: processList({ 4242: "svchost.exe", [process.pid]: "node.exe" }) });
+        assert.equal(u.result.kind, "swapped");
+        assert.equal(fs.existsSync(file), false);
+        assert.ok(u.lines.some(l => l.endsWith('run marker of a Discord that is gone, dropped (its pid now belongs to a program that is not Discord) {"pid":4242}')), u.lines.join("\n"));
+        assert.ok(!u.lines.some(l => /svchost/i.test(l)), "the name of another program on the PC never goes into main.log");
+        assert.equal(h.state().waiting, undefined);
+    });
+
+    test("...a service that answers EPERM, and a pid that left the list meanwhile: both dropped", t => {
+        const h = staged(t);
+        const service = runMarker(h, 4343);
+        const gone = runMarker(h, 4444);
+        fakeKill(t, { eperm: [4343], alive: [4444] });
+        const u = start(h, { processNames: processList({ 4343: "MsMpEng.exe" }) });
+        assert.equal(u.result.kind, "swapped");
+        assert.deepEqual([fs.existsSync(service), fs.existsSync(gone)], [false, false]);
+        assert.ok(u.lines.some(l => l.endsWith('(its pid now belongs to a program that is not Discord) {"pid":4444}')), u.lines.join("\n"));
+        assert.ok(!u.lines.some(l => /MsMpEng/i.test(l)));
+    });
+
+    test("a real Discord program (every flavor, any letter case) keeps its marker: the swap waits and says which", t => {
+        fakeKill(t, { alive: [4242] });
+        for (const exe of ["Discord.exe", "DISCORDPTB.EXE", "DiscordCanary.exe", "discorddevelopment.exe"]) {
+            const h = staged(t);
+            const file = runMarker(h, 4242);
+            const u = start(h, { processNames: processList({ 4242: exe }) });
+            assert.equal(u.result, null, exe);
+            assert.ok(fs.existsSync(file), exe);
+            assert.equal(h.versionOf(h.staged), "0.1.1", exe);
+            assert.ok(u.lines.some(l => /staged update waits, another Discord is running from this add-on/.test(l) && l.includes(`{"pids":[4242],"exes":["${exe}"]}`)), exe);
+            assert.deepEqual({ ...h.state().waiting, at: null }, { version: "0.1.1", reason: "others", detail: { pids: [4242], exes: [exe] }, at: null, starts: 1, pid: process.pid }, exe);
+        }
+    });
+
+    test("a stale marker next to a real Discord: the stale one goes, the swap still waits for the Discord", t => {
+        const h = staged(t);
+        const discord = runMarker(h, 4242);
+        const stale = runMarker(h, 4343);
+        fakeKill(t, { alive: [4242, 4343] });
+        const u = start(h, { processNames: processList({ 4242: "Discord.exe", 4343: "chrome.exe" }) });
+        assert.equal(u.result, null);
+        assert.deepEqual([fs.existsSync(discord), fs.existsSync(stale)], [true, false]);
+        assert.deepEqual(h.state().waiting.detail, { pids: [4242], exes: ["Discord.exe"] });
+    });
+
+    test("the list of programs cannot be read (tasklist failed): the marker counts as another Discord, as before, and it is logged", t => {
+        const h = staged(t);
+        const file = runMarker(h, 4242);
+        fakeKill(t, { alive: [4242] });
+        const u = start(h); // updaterFor's default: no list of programs
+        assert.equal(u.result, null);
+        assert.ok(fs.existsSync(file));
+        assert.ok(u.lines.some(l => /could not list the running programs; the run markers count as other Discords "no process list in the unit tests"/.test(l)), u.lines.join("\n"));
+        assert.ok(u.lines.some(l => /staged update waits, another Discord is running/.test(l) && l.includes('{"pids":[4242]}')));
+        assert.deepEqual(h.state().waiting.detail, { pids: [4242] }, "no program names when they could not be read");
+    });
+
+    test("an answer that is not a list of programs counts as unreadable too", t => {
+        const h = staged(t);
+        runMarker(h, 4242);
+        fakeKill(t, { alive: [4242] });
+        const u = start(h, { processNames: () => ({ 4242: "svchost.exe" }) });
+        assert.equal(u.result, null);
+        assert.ok(u.lines.some(l => /could not list the running programs.*"no list of programs"/.test(l)));
+    });
+
+    test("the list is read once per start, and only when some marker's pid answers", t => {
+        fakeKill(t, { alive: [4242, 4343] });
+        let calls = 0;
+        const names = () => {
+            calls++;
+            return new Map([[4242, "Discord.exe"], [4343, "DiscordPTB.exe"]]);
+        };
+        const h = staged(t);
+        runMarker(h, 4242);
+        runMarker(h, 4343);
+        start(h, { processNames: names });
+        assert.equal(calls, 1);
+        assert.deepEqual(h.state().waiting.detail, { pids: [4242, 4343], exes: ["Discord.exe", "DiscordPTB.exe"] });
+        const h2 = staged(t);
+        runMarker(h2, 999999);
+        assert.equal(start(h2, { processNames: names }).result.kind, "swapped");
+        assert.equal(calls, 1, "a dead pid needs no list");
+        start(home(t), { processNames: names });
+        assert.equal(calls, 1, "nothing staged and no trial: the markers are not even read");
+    });
+
+    test("an armed trial and a real Discord: the rollback waits (the trial is kept) and the staged update says why", t => {
+        const h = armedOn011(t);
+        runMarker(h, 4242);
+        fakeKill(t, { alive: [4242] });
+        const u = start(h, { processNames: processList({ 4242: "DiscordCanary.exe" }) });
+        assert.equal(u.result, null);
+        assert.ok(u.lines.some(l => /rollback waits, another Discord is running from this add-on/.test(l) && l.includes('"exes":["DiscordCanary.exe"]')));
+        assert.equal(h.state().trial.armed, true);
+        assert.equal(h.state().waiting.reason, "others");
+        assert.equal(h.versionOf(h.addonDir), "0.1.1");
+    });
+
+    test("an armed trial whose marker pid is not a Discord anymore: the rollback goes ahead", t => {
+        const h = armedOn011(t);
+        const file = runMarker(h, 4242);
+        fakeKill(t, { alive: [4242] });
+        assert.equal(start(h, { processNames: processList({ 4242: "explorer.exe" }) }).result.kind, "rolledBack");
+        assert.equal(fs.existsSync(file), false);
+    });
+
+    test("by default the updater asks tasklist (Windows): the test runner that started this file is no Discord", t => {
+        if (process.platform !== "win32") return t.skip("tasklist is Windows only");
+        const h = staged(t);
+        const file = runMarker(h, process.ppid);
+        const lines = [];
+        const u = upd.createUpdater({ addonDir: h.addonDir, log: (m, d) => lines.push(`${m} ${JSON.stringify(d)}`) });
+        assert.equal(u.startup().kind, "swapped", lines.join("\n"));
+        assert.equal(fs.existsSync(file), false);
+        assert.ok(lines.some(l => /run marker of a Discord that is gone, dropped/.test(l) && l.includes(`"pid":${process.ppid}`)), lines.join("\n"));
+    });
+});
+
+describe("why a staged update waits (state.json `waiting`, handed to the plugin by status())", () => {
+    const at = { now: () => NOW };
+
+    test("another Discord: reason 'others', and status() gives it with the ready version", t => {
+        const h = home(t, { staged: V011() });
+        runMarker(h, 4242);
+        fakeKill(t, { alive: [4242] });
+        const u = start(h, { ...at, processNames: processList({ 4242: "DiscordPTB.exe" }) });
+        const s = u.status();
+        assert.deepEqual([s.phase, s.ready], ["ready", "0.1.1"]);
+        assert.deepEqual(s.waiting, { reason: "others", detail: { pids: [4242], exes: ["DiscordPTB.exe"] }, at: "2026-10-31T03:00:00.000Z", starts: 1 });
+    });
+
+    test("each start in a row that waits for the same version counts; a newer staged version starts over at 1", t => {
+        const h = home(t, { staged: V011() });
+        runMarker(h, 4242);
+        fakeKill(t, { alive: [4242] });
+        const names = processList({ 4242: "Discord.exe" });
+        for (let n = 1; n <= 3; n++) {
+            start(h, { processNames: names });
+            assert.equal(h.state().waiting.starts, n);
+        }
+        fs.rmSync(h.staged, { recursive: true, force: true });
+        writePayload(h.staged, V012());
+        const u = start(h, { processNames: names });
+        assert.deepEqual([h.state().waiting.version, h.state().waiting.starts], ["0.1.2", 1]);
+        assert.equal(u.status().waiting.starts, 1);
+    });
+
+    test("a previous record with a counter that makes no sense starts over at 1", t => {
+        for (const waiting of ["text", { version: "0.1.1", reason: "others", starts: "many" }, { version: "0.1.1", reason: "others", starts: 0 }]) {
+            const h = home(t, { staged: V011(), state: { format: 1, bad: {}, waiting } });
+            runMarker(h, 4242);
+            const kill = fakeKill(t, { alive: [4242] });
+            start(h, { processNames: processList({ 4242: "Discord.exe" }) });
+            kill.mock.restore();
+            assert.equal(h.state().waiting.starts, 1, JSON.stringify(waiting));
+        }
+    });
+
+    test("the current version still on trial: reason 'trial'", t => {
+        const cur = V011();
+        const h = home(t, { installed: cur, staged: V012(), prev: V010(), state: { format: 1, bad: {}, trial: trialFor(cur, V010()) } });
+        const u = start(h, at);
+        assert.deepEqual(u.status().waiting, { reason: "trial", detail: null, at: "2026-10-31T03:00:00.000Z", starts: 1 });
+    });
+
+    test("a staged folder whose version.json cannot be read: recorded without a version, so status() shows no reason", t => {
+        const cur = V011();
+        const h = home(t, { installed: cur, staged: V012(), prev: V010(), state: { format: 1, bad: {}, trial: trialFor(cur, V010()) } });
+        fs.writeFileSync(join(h.staged, "version.json"), "{ not json");
+        const u = start(h);
+        assert.deepEqual([h.state().waiting.version, h.state().waiting.reason], [null, "trial"]);
+        assert.equal(u.status().waiting, null);
+    });
+
+    test("addon.new cannot be moved in (antivirus): reason 'activate-failed' with the error code", t => {
+        const h = home(t, { staged: V011() });
+        t.mock.method(Atomics, "wait", () => "timed-out");
+        wrapFs(t, fs, "renameSync", (orig, from, to) => {
+            if (from === h.staged) throw fsError("EPERM");
+            return orig(from, to);
+        });
+        assert.equal(start(h).result, null);
+        assert.deepEqual([h.state().waiting.reason, h.state().waiting.detail], ["activate-failed", { code: "EPERM" }]);
+    });
+
+    test("a failure without an error code is recorded with code null", t => {
+        const h = home(t, { staged: V011() });
+        wrapFs(t, fs, "renameSync", (orig, from, to) => {
+            if (from === h.addonDir) throw "not an Error";
+            return orig(from, to);
+        });
+        start(h);
+        assert.deepEqual([h.state().waiting.reason, h.state().waiting.detail], ["in-use", { code: null }]);
+    });
+
+    test("swap.lock held by another start: reason 'locked', and now a log line (it used to be silent)", t => {
+        const h = home(t, { staged: V011() });
+        fs.mkdirSync(h.updateDir, { recursive: true });
+        fs.writeFileSync(h.lock, "");
+        const u = start(h);
+        assert.equal(u.result, null);
+        assert.ok(u.lines.some(l => /swap\.lock is held by another Discord start \(under 2 minutes old\); the add-on folders wait for the next start/.test(l)), u.lines.join("\n"));
+        assert.deepEqual([h.state().waiting.reason, h.state().waiting.detail], ["locked", null]);
+    });
+
+    test("an old swap.lock that cannot be removed: logged, its own reason 'lock-stuck' (closing Discord does not help)", t => {
+        const h = home(t, { staged: V011() });
+        t.mock.method(Atomics, "wait", () => "timed-out");
+        fs.mkdirSync(h.updateDir, { recursive: true });
+        fs.writeFileSync(h.lock, "");
+        fs.utimesSync(h.lock, new Date(Date.now() - 5 * 60_000), new Date(Date.now() - 5 * 60_000));
+        wrapFs(t, fs, "rmSync", (orig, p, ...rest) => {
+            if (p === h.lock) throw fsError("EPERM");
+            return orig(p, ...rest);
+        });
+        const u = start(h);
+        assert.ok(u.lines.some(l => /an old swap\.lock could not be removed; the add-on folders wait for the next start/.test(l)), u.lines.join("\n"));
+        assert.equal(h.state().waiting.reason, "lock-stuck");
+        assert.equal(u.status().waiting.reason, "lock-stuck");
+    });
+
+    test("a staged copy that does not verify and cannot even be deleted: reason 'unknown'", t => {
+        const h = home(t, { staged: V011() });
+        t.mock.method(Atomics, "wait", () => "timed-out");
+        fs.writeFileSync(join(h.staged, "main.js"), "tampered");
+        wrapFs(t, fs, "rmSync", (orig, p, ...rest) => {
+            if (p === h.staged) throw fsError("EPERM");
+            return orig(p, ...rest);
+        });
+        start(h);
+        assert.deepEqual([h.state().waiting.reason, h.state().waiting.detail], ["unknown", null]);
+    });
+
+    test("the swap goes through, the staged copy is discarded, or addon.new is gone: an old reason is cleared", t => {
+        const old = { version: "0.1.1", reason: "others", detail: { pids: [1] }, at: "x", starts: 2 };
+        const swapped = home(t, { staged: V011(), state: { format: 1, bad: {}, waiting: old } });
+        assert.equal(start(swapped).result.kind, "swapped");
+        assert.equal(swapped.state().waiting, undefined);
+
+        const tampered = home(t, { staged: V011(), state: { format: 1, bad: {}, waiting: old } });
+        fs.writeFileSync(join(tampered.staged, "main.js"), "tampered");
+        start(tampered);
+        assert.equal(tampered.state().waiting, undefined);
+
+        const gone = home(t, { state: { format: 1, bad: {}, waiting: old } });
+        assert.equal(start(gone).result, null);
+        assert.deepEqual(gone.state(), { format: 1, bad: {} });
+    });
+
+    test("a rollback blocked by swap.lock, by addon\\ in use or by addon.prev that will not move: each reason recorded", t => {
+        const locked = armedOn011(t);
+        fs.mkdirSync(locked.updateDir, { recursive: true });
+        fs.writeFileSync(locked.lock, "");
+        start(locked);
+        assert.equal(locked.state().waiting.reason, "locked");
+
+        t.mock.method(Atomics, "wait", () => "timed-out");
+        const inUse = armedOn011(t);
+        const prevStuck = armedOn011(t);
+        wrapFs(t, fs, "renameSync", (orig, from, to) => {
+            if (from === inUse.addonDir) throw fsError("EBUSY");
+            if (from === prevStuck.prev) throw fsError("EACCES");
+            return orig(from, to);
+        });
+        start(inUse);
+        assert.deepEqual([inUse.state().waiting.reason, inUse.state().waiting.detail], ["in-use", { code: "EBUSY" }]);
+        start(prevStuck);
+        assert.deepEqual([prevStuck.state().waiting.reason, prevStuck.state().waiting.detail], ["activate-failed", { code: "EACCES" }]);
+        assert.equal(prevStuck.state().trial.armed, true, "the rollback rule is unchanged: still pending");
+    });
+
+    test("no usable addon.prev: the trial is dropped and the staged update waits one start (reason 'trial')", t => {
+        const h = armedOn011(t, { prev: null });
+        start(h);
+        assert.equal(h.state().trial, undefined);
+        assert.equal(h.state().waiting.reason, "trial");
+    });
+
+    test("a rollback that goes through clears an old reason (the staged update is tried again at the next start)", t => {
+        const h = armedOn011(t);
+        const s = h.state();
+        fs.writeFileSync(h.stateFile, JSON.stringify({ ...s, waiting: { version: "0.1.2", reason: "others", starts: 1 } }));
+        assert.equal(start(h).result.kind, "rolledBack");
+        assert.equal(h.state().waiting, undefined);
+    });
+
+    test("an armed trial waiting on another Discord with nothing staged records no reason", t => {
+        const h = armedOn011(t, { staged: null });
+        runMarker(h, 4242);
+        fakeKill(t, { alive: [4242] });
+        start(h, { processNames: processList({ 4242: "Discord.exe" }) });
+        assert.equal(h.state().waiting, undefined);
+    });
+
+    test("status() reports only what THIS process's startup() recorded, never a record it finds in state.json", t => {
+        const h = home(t, { staged: V011(), state: { format: 1, bad: {}, waiting: { version: "0.1.1", reason: "others", detail: { pids: [1] }, at: "a", starts: 3, pid: 4242 } } });
+        const u = updaterFor(h);
+        assert.deepEqual([u.status().ready, u.status().waiting], ["0.1.1", null], "no startup() in this process");
+    });
+
+    test("a second Discord.exe that waits (Discord's single-instance check closes it) does not change what the open one shows", t => {
+        // the open Discord: started before 0.1.1 was staged (it was downloaded during its session), nothing recorded
+        const h = home(t);
+        const open = start(h);
+        assert.equal(open.result, null);
+        writePayload(h.staged, V011());
+        assert.deepEqual([open.status().ready, open.status().waiting], ["0.1.1", null]);
+        // a second Discord.exe (shortcut clicked again): it boots our stub, sees the open one's marker and waits
+        runMarker(h, 4242);
+        fakeKill(t, { alive: [4242] });
+        const second = start(h, { processNames: processList({ 4242: "Discord.exe" }) });
+        assert.equal(second.status().waiting.reason, "others", "the second one knows why it waited");
+        assert.equal(h.state().waiting.reason, "others", "the raw record stays in state.json for the diagnostic");
+        assert.deepEqual([open.status().ready, open.status().waiting], ["0.1.1", null], "the open Discord does not show it about itself");
+    });
+
+    test("a record written by a Discord that is still open is left alone: a second Discord.exe neither takes it over nor counts a try", t => {
+        // the open Discord (pid 4242 here) waited for a Discord PTB (5555) when it started
+        const record = { version: "0.1.1", reason: "others", detail: { pids: [5555], exes: ["DiscordPTB.exe"] }, at: "2026-10-31T02:53:23.000Z", starts: 1, pid: 4242 };
+        const h = home(t, { staged: V011(), state: { format: 1, bad: {}, waiting: record } });
+        runMarker(h, 4242);
+        runMarker(h, 5555);
+        const kill = fakeKill(t, { alive: [4242, 5555] });
+        const names = processList({ 4242: "Discord.exe", 5555: "DiscordPTB.exe" });
+        for (let i = 0; i < 3; i++) {
+            const second = start(h, { processNames: names, now: () => NOW });
+            assert.equal(second.result, null);
+            assert.equal(second.status().waiting.reason, "others");
+            assert.deepEqual(h.state().waiting, record, `double click ${i + 1}: the open Discord's record is untouched`);
+        }
+        // the open Discord is closed (its marker goes with it) and opened again: that start counts
+        kill.mock.restore();
+        fs.rmSync(join(h.runDir, "4242"));
+        fakeKill(t, { alive: [5555] });
+        const reopened = start(h, { processNames: names, now: () => NOW });
+        assert.deepEqual({ ...h.state().waiting }, { ...record, detail: { pids: [5555], exes: ["DiscordPTB.exe"] }, at: "2026-10-31T03:00:00.000Z", starts: 2, pid: process.pid });
+        assert.equal(reopened.status().waiting.starts, 2);
+    });
+
+    test("an older record without a pid (written before this field existed) is simply replaced", t => {
+        const h = home(t, { staged: V011(), state: { format: 1, bad: {}, waiting: { version: "0.1.1", reason: "in-use", starts: 2 } } });
+        runMarker(h, 4242);
+        fakeKill(t, { alive: [4242] });
+        start(h, { processNames: processList({ 4242: "Discord.exe" }) });
+        assert.deepEqual([h.state().waiting.reason, h.state().waiting.starts, h.state().waiting.pid], ["others", 3, process.pid]);
+    });
+});
+
+describe("recentLog(): the last update lines of main.log for 'Copiar diagnóstico'", () => {
+    const line = (n, msg) => `2026-10-31T03:00:${String(n).padStart(2, "0")}.000Z [1234] ${msg}`;
+    const withLogs = (t, files) => {
+        const h = home(t);
+        const dir = join(h.home, "logs");
+        fs.mkdirSync(dir, { recursive: true });
+        for (const [name, lines] of Object.entries(files)) fs.writeFileSync(join(dir, name), lines.join("\n") + "\n");
+        return updaterFor(h, { logFile: join(dir, "main.log"), env });
+    };
+    let env = {};
+    beforeEach(() => {
+        env = {};
+    });
+
+    test("without a log file (or none on disk): []", t => {
+        assert.deepEqual(updaterFor(home(t)).recentLog(), []);
+        assert.deepEqual(updaterFor(home(t), { logFile: join(os.tmpdir(), "tl-no-such-dir", "main.log") }).recentLog(), []);
+    });
+
+    test("the last 10 'update' lines, oldest first; ERROR update lines kept; every other line skipped", t => {
+        const lines = [line(0, "boot {}")];
+        for (let i = 1; i <= 12; i++) lines.push(line(i, `update: step ${i}`));
+        lines.push(line(13, "ERROR update startup: Error: boom"), "    at stack (frame)", line(14, "loaded {}"), line(15, "renderer served {}"));
+        const u = withLogs(t, { "main.log": lines });
+        assert.deepEqual(u.recentLog(), [...[4, 5, 6, 7, 8, 9, 10, 11, 12].map(i => line(i, `update: step ${i}`)), line(13, "ERROR update startup: Error: boom")]);
+        assert.deepEqual(u.recentLog(2), [line(12, "update: step 12"), line(13, "ERROR update startup: Error: boom")]);
+    });
+
+    test("main.log with too few: topped up from main.log.1 (older), never more than asked; main.log.1 alone works too", t => {
+        const u = withLogs(t, { "main.log.1": [1, 2, 3, 4, 5].map(i => line(i, `update: old ${i}`)), "main.log": [6, 7, 8].map(i => line(i, `update: new ${i}`)) });
+        assert.deepEqual(u.recentLog(5), [line(4, "update: old 4"), line(5, "update: old 5"), line(6, "update: new 6"), line(7, "update: new 7"), line(8, "update: new 8")]);
+        assert.equal(u.recentLog().length, 8);
+        const only = withLogs(t, { "main.log.1": [line(1, "update: rotated")] });
+        assert.deepEqual(only.recentLog(), [line(1, "update: rotated")]);
+    });
+
+    test("the user's folder shows as ~ (plain and as JSON), IPv4 addresses as x.x.x.x, long lines are cut", t => {
+        t.mock.method(os, "homedir", () => "C:\\Users\\Joao");
+        const u = withLogs(t, {
+            "main.log": [
+                line(1, "update: the add-on folder is in use; the update waits for the next start \"EPERM: operation not permitted, rename 'C:\\Users\\Joao\\AppData\\Roaming\\Telinha\\addon'\""),
+                line(2, 'update: install.json not updated "C:\\\\Users\\\\Joao\\\\AppData\\\\Roaming\\\\Telinha\\\\install.json"'),
+                line(3, "update: check failed (offline) \"connect ECONNREFUSED 192.168.0.10:8080\" 0.2.7"),
+                line(4, `update: ${"x".repeat(1000)}`)
+            ]
+        });
+        const [a, b, c, d] = u.recentLog();
+        assert.ok(a.includes("rename '~\\AppData\\Roaming\\Telinha\\addon'") && !a.includes("Joao"), a);
+        assert.ok(b.includes('"~\\\\AppData\\\\Roaming\\\\Telinha\\\\install.json"') && !b.includes("Joao"), b);
+        assert.ok(c.includes("ECONNREFUSED x.x.x.x:8080") && c.endsWith("0.2.7"), c);
+        assert.equal(d.length, 401);
+        assert.ok(d.endsWith("…"));
+    });
+
+    test("also %APPDATA%, %LOCALAPPDATA%, %USERPROFILE% and the Telinha home (a redirected folder, a roaming profile), any letter case, with / too", t => {
+        t.mock.method(os, "homedir", () => "C:\\Users\\Joao");
+        env = { APPDATA: "\\\\server\\perfis\\joao.silva\\AppData\\Roaming\\", LOCALAPPDATA: "D:\\Local\\joao.silva", USERPROFILE: "E:\\Perfil\\joao.silva", SystemRoot: "C:\\Windows" };
+        const lines = [
+            line(1, "update: a \\\\server\\perfis\\joao.silva\\AppData\\Roaming\\Vencord b"),
+            line(2, "update: a d:\\local\\JOAO.SILVA\\Temp b"),
+            line(3, "update: a E:/Perfil/joao.silva/x b"),
+            line(4, "update: a {\"p\":\"E:\\\\Perfil\\\\joao.silva\\\\y\"} b"),
+            line(5, "update: a C:\\Windows\\System32 b")
+        ];
+        const h = home(t);
+        const dir = join(h.home, "logs");
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(join(dir, "main.log"), [...lines, line(6, `update: a ${join(h.home, "addon")} b`)].join("\n"));
+        const out = updaterFor(h, { logFile: join(dir, "main.log"), env }).recentLog();
+        assert.deepEqual(out, [
+            line(1, "update: a %APPDATA%\\Vencord b"),
+            line(2, "update: a %LOCALAPPDATA%\\Temp b"),
+            line(3, "update: a ~/x b"),
+            line(4, "update: a {\"p\":\"~\\\\y\"} b"),
+            line(5, "update: a C:\\Windows\\System32 b"),
+            line(6, "update: a %TELINHA%\\addon b")
+        ]);
+        assert.ok(!out.some(l => /joao/i.test(l)), out.join("\n"));
+    });
+
+    test("a folder variable that is missing, empty or just a drive is never used as a mask", t => {
+        t.mock.method(os, "homedir", () => "");
+        env = { APPDATA: "C:\\", LOCALAPPDATA: "", USERPROFILE: undefined };
+        const u = withLogs(t, { "main.log": [line(1, "update: C:\\Users\\x")] });
+        assert.deepEqual(u.recentLog(), [line(1, "update: C:\\Users\\x")]);
+    });
+
+    test("no known home folder (os.homedir fails): the lines stay as they are", t => {
+        t.mock.method(os, "homedir", () => {
+            throw new Error("no home");
+        });
+        const u = withLogs(t, { "main.log": [line(1, "update: C:\\Users\\Joao\\x")] });
+        assert.deepEqual(u.recentLog(), [line(1, "update: C:\\Users\\Joao\\x")]);
     });
 });
 

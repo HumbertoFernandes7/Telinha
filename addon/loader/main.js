@@ -269,6 +269,7 @@ function addonNatives() {
     const opts = o => (o && typeof o === "object" ? { autoDownload: o.autoDownload === true, manual: o.manual === true } : {});
     return {
         updateStatus: () => updater.status(),
+        updateLog: () => updater.recentLog(),
         updateCheck: (_event, o) => updater.check(opts(o)),
         updateDownload: () => updater.download(),
         bootOk: (_event, info) => {
@@ -426,6 +427,7 @@ function initUpdater() {
         updater = updaterModule.createUpdater({
             addonDir: __dirname,
             log: (msg, data) => (data === undefined ? log(msg) : log(msg, data)),
+            logFile: LOG_FILE,
             fetch: mainFetch,
             // offline tests only: updater.js ignores anything but a loopback http:// base
             apiBase: process.env.TELINHA_UPDATE_API || undefined

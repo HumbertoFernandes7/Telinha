@@ -43,6 +43,8 @@ export interface FakeUpdateStatus {
     phase: string;
     latest: { version: string; tag: string; } | null;
     ready: string | null;
+    /** why `ready` did not go in at the last start (left out = an older loader) */
+    waiting?: { reason: string; detail: Record<string, unknown> | null; at: string | null; starts: number; } | null;
     error: { kind: string; message: string; quiet: boolean; } | null;
     checkedAt: number | null;
     skipped: string | null;
@@ -60,7 +62,8 @@ export function defaultAddonNatives(): Record<string, AnyFn> {
     return {
         updateStatus: async () => updateStatus(),
         updateCheck: async () => updateStatus(),
-        updateDownload: async () => updateStatus({ phase: "ready", ready: "0.2.4", latest: { version: "0.2.4", tag: "v0.2.4" } })
+        updateDownload: async () => updateStatus({ phase: "ready", ready: "0.2.4", latest: { version: "0.2.4", tag: "v0.2.4" } }),
+        updateLog: async () => []
     };
 }
 

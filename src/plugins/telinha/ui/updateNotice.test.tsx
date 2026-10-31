@@ -110,6 +110,53 @@ describe("quando avisa", () => {
     });
 });
 
+describe("pronta, mas nao entrou ao reiniciar (o loader diz por que)", () => {
+    const stuck = (version: string, reason: string, detail: Record<string, unknown> | null = null) =>
+        mainSays({ phase: "ready", ready: version, waiting: { reason, detail, at: "2026-10-31T05:53:12.000Z", starts: 1 } });
+
+    test("outro Discord aberto: o aviso diz qual e o que fazer, e nao promete que 'entra sozinha'", async () => {
+        await stuck("1.0.0", "others", { pids: [1234], exes: ["DiscordPTB.exe"] });
+        const [n] = notifications;
+        assert.equal(n.title, "Telinha 1.0.0 pronto");
+        assert.equal(n.body, "Não deu pra trocar de versão: outro Discord estava aberto quando este abriu (Discord PTB).");
+        render(n.richBody as ReactElement);
+        assert.ok(screen.getByText("Não deu pra trocar de versão: outro Discord estava aberto quando este abriu (Discord PTB). Feche todos os Discords, inclusive pelo ícone perto do relógio (botão direito → Sair do Discord), e abra de novo."));
+        assert.equal(screen.queryByText(/entra sozinha/), null);
+        assert.equal(screen.queryByRole("button", { name: "Reiniciar agora" }), null, "reiniciar so este Discord nao resolve");
+        assert.ok(screen.getByRole("button", { name: "Fechei os outros, reiniciar" }));
+        assert.ok(screen.getByRole("button", { name: "Depois" }));
+    });
+
+    test("'Fechei os outros, reiniciar' reinicia este Discord", async () => {
+        const relaunch = mock.fn();
+        g.DiscordNative = { app: { relaunch } };
+        await stuck("1.0.3", "others", { pids: [1234] });
+        render(notifications[0].richBody as ReactElement);
+        fireEvent.click(screen.getByRole("button", { name: "Fechei os outros, reiniciar" }));
+        assert.equal(relaunch.mock.callCount(), 1);
+    });
+
+    test("arquivo em uso: fechar o Discord por completo, e se nao resolver reiniciar o computador; o botao continua 'Reiniciar agora'", async () => {
+        await stuck("1.0.1", "in-use", { code: "EBUSY" });
+        render(notifications[0].richBody as ReactElement);
+        assert.ok(screen.getByText("Não deu pra trocar de versão: um arquivo do Telinha estava em uso (o ajudante de áudio ou o antivírus). Feche o Discord por completo e abra de novo. Se não resolver, reinicie o computador."));
+        assert.ok(screen.getByRole("button", { name: "Reiniciar agora" }));
+    });
+
+    test("trava antiga que nao sai: reiniciar o computador", async () => {
+        await stuck("1.0.4", "lock-stuck");
+        assert.equal(notifications[0].body, "Não deu pra trocar de versão: uma trava antiga da atualização não pôde ser apagada.");
+        render(notifications[0].richBody as ReactElement);
+        assert.ok(screen.getByText("Não deu pra trocar de versão: uma trava antiga da atualização não pôde ser apagada. Reinicie o computador e abra o Discord de novo."));
+    });
+
+    test("um aviso por versao: o motivo nao repete o aviso da mesma versao", async () => {
+        await ready("1.0.2");
+        await stuck("1.0.2", "locked");
+        assert.equal(notifications.length, 1);
+    });
+});
+
 describe("nunca no meio de uma transmissao", () => {
     test("transmitindo: espera; quando a transmissao acaba, aparece", async () => {
         setState({ ...EMPTY, local: LOCAL });

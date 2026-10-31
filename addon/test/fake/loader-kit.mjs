@@ -63,6 +63,7 @@ exports.createUpdater = opts => {
         markServed: () => { calls.push(["markServed"]); },
         confirmBoot: a => { calls.push(["confirmBoot", a]); return stub.confirm ?? { confirmed: !!(a && a.healthy) }; },
         status: () => { calls.push(["status"]); return { phase: "idle" }; },
+        recentLog: () => { calls.push(["recentLog"]); return ["a [1] update: line"]; },
         check: o => { calls.push(["check", o]); return Promise.resolve({ phase: "checked" }); },
         download: () => { calls.push(["download"]); return Promise.resolve({ phase: "downloaded" }); }
     };
