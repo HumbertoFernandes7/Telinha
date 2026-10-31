@@ -198,7 +198,13 @@ export function describeEnv(env: EncoderEnv): string {
 
 /** Uma chave privada salva, com `at` valido e o ambiente so com os campos conhecidos. null = nada (ou estragado). */
 function readSaved(key: keyof PrivateStore): { raw: Record<string, unknown>; at: number; env: EncoderEnv; } | null {
-    const raw: unknown = privateSettings().store[key];
+    let raw: unknown;
+    try {
+        raw = privateSettings().store[key];
+    } catch {
+        // configuracoes indisponiveis: a pagina do plugin e o diagnostico continuam (sem o registro)
+        return null;
+    }
     if (!raw || typeof raw !== "object") return null;
     const r = raw as Record<string, unknown>;
     if (typeof r.at !== "number" || !Number.isFinite(r.at)) return null;
