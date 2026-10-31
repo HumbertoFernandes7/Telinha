@@ -17,6 +17,7 @@ import type { PeerIdentity } from "./identity/policy";
 import type { IdentityFailure } from "./identity/verify";
 import { shortId } from "./log";
 import type { ReceiverLog } from "./statsLog";
+import type { TeredoSide } from "./teredo";
 
 // Estado mutavel do nucleo. A UI nunca ve isto: publish() monta um snapshot imutavel para o store.
 
@@ -47,6 +48,8 @@ export interface PeerEntry {
     identityChecking: boolean;
     /** Date.now() da ultima verificacao iniciada (limita a acao "identity") */
     identityCheckedAt: number;
+    /** o par de candidatos em uso passa pelo Teredo (core/teredoWatch.ts); ausente = nao */
+    teredo?: TeredoSide;
 }
 
 /** Expulso/recusado: bloqueia o discordUserId anunciado E as conexoes (peerIds) que foram expulsas. */
@@ -253,7 +256,8 @@ function buildSnapshot(): TelinhaState {
             ...(p.duplicate ? { duplicateIdentity: true } : {}),
             ...(block ? { blocked: block.reason } : {}),
             ...(configured ? { identity: p.identity } : {}),
-            ...(pres?.caps.diag === true ? { diagShare: true } : {})
+            ...(pres?.caps.diag === true ? { diagShare: true } : {}),
+            ...(p.teredo ? { teredo: p.teredo } : {})
         });
         if (p.duplicate) {
             const kind = p.impostor ? "impostor" : "duplicate";

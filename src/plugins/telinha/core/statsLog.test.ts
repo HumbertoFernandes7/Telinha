@@ -30,7 +30,8 @@ function assertClean(line: string) {
 
 const senderLog = (patch: Partial<SenderLogCounters> = {}): SenderLogCounters => ({
     mimeType: "video/VP9", targetKbps: 1800, packetsSent: 0, retransmittedPacketsSent: 0, retransmittedBytesSent: 0, packetSendDelay: 0, nackCount: 0,
-    pliCount: 0, keyFramesEncoded: 0, qpSum: 0, packetsLost: 0, fractionLost: 0, rttMs: 30, rttTotal: 0, rttCount: 0, jitterMs: 5, route: "host/srflx",
+    pliCount: 0, keyFramesEncoded: 0, qpSum: 0, packetsLost: 0, fractionLost: 0, rttMs: 30, rttTotal: 0, rttCount: 0, jitterMs: 5, route: "host/srflx", teredo: null,
+    resolutionChanges: null,
     ...patch
 });
 
@@ -174,11 +175,13 @@ describe("envio: cadencia e resumo (SenderLog)", () => {
             if (i === 11) assert.equal(log.trackLevel("720p60", 20_000), true);
             log.add(steady(i - 1), steady(i));
         }
-        assert.equal(log.summary("A", 40_000), "Resumo do envio p/ A: 40 s · 1 troca de nível · 1080p60 50%, 720p60 50% · 60 fps 100%, 30 fps 0% · "
-            + "60,0 fps em média · est mediana 9000 enviado mediana 8000 kbps · perda média 1,0% rtt médio 30 ms · kf 4 · rota host/srflx");
+        assert.equal(log.summary("A", 40_000), "Resumo do envio p/ A: 40 s · 1 troca de nível: 1080p60→720p60 aos 20 s · 1080p60 50%, 720p60 50% · "
+            + "60 fps 100%, 30 fps 0% · tamanho 1920x1080 100% · fps medido 60 100% · 60,0 fps em média · est mediana 9000 enviado mediana 8000 kbps · "
+            + "perda média 1,0% rtt médio 30 ms · kf 4 · rota host/srflx");
 
-        log.trackLevel("720p30", 50_000);
-        assert.match(log.summary("A", 60_000) ?? "", /· 2 trocas de nível · 1080p60 33%, 720p60 50%, 720p30 17% · 60 fps 83%, 30 fps 17% ·/);
+        log.trackLevel("720p30", 50_000, "banda: perda");
+        assert.match(log.summary("A", 60_000) ?? "",
+            /· 2 trocas de nível: 1080p60→720p60 aos 20 s, 720p60→720p30 \(banda: perda\) aos 50 s · 1080p60 33%, 720p60 50%, 720p30 17% · 60 fps 83%, 30 fps 17% ·/);
     });
 
     test("resumo sem nenhuma janela medida: nada; sem degrau nem contadores do log: so o que existe", () => {
@@ -191,8 +194,66 @@ describe("envio: cadencia e resumo (SenderLog)", () => {
         bare.add(null, plain(0));
         bare.add(plain(0), plain(1));
         const line = bare.summary("A", 2000)!;
-        assert.equal(line, "Resumo do envio p/ A: 2 s · 0 trocas de nível · 60,0 fps em média · enviado mediana 8000 kbps");
+        assert.equal(line, "Resumo do envio p/ A: 2 s · 0 trocas de nível · tamanho 1920x1080 100% · fps medido 60 100% · 60,0 fps em média · enviado mediana 8000 kbps");
         assertClean(line);
+
+        // sem o tamanho codificado (Chromium antigo): sem "tamanho"
+        const sizeless = new SenderLog(0);
+        const noSize = (i: number) => ({ ...plain(i), frameWidth: 0, frameHeight: 0 });
+        sizeless.add(null, noSize(0));
+        sizeless.add(noSize(0), noSize(1));
+        assert.doesNotMatch(sizeless.summary("A", 2000)!, /tamanho/);
+    });
+
+    test("trocas de nivel com o motivo: a linha logo depois da troca diz de onde veio (uma vez); o resumo lista as 6 primeiras", () => {
+        const log = new SenderLog(0);
+        log.trackLevel("1080p60", 0);
+        log.add(null, steady(0));
+        log.add(steady(0), steady(1));
+        assert.equal(log.trackLevel("720p60", 2000, "banda: perda"), true);
+        const forced = log.line(steady(1), "A", { level: "720p60", bw: "720p60", global: "1080p60", auto: true }, true);
+        assert.match(forced ?? "", / · nível 720p60 \(banda 720p60, geral 1080p60\), antes 1080p60 \(banda: perda\) · rota host\/srflx$/);
+        log.add(steady(1), steady(2));
+        assert.doesNotMatch(log.line(steady(2), "A", FIXED, true) ?? "", /antes/, "so a primeira linha depois da troca");
+        // sem motivo (ex.: o espectador entrou ja num degrau mais baixo): so de onde veio
+        log.trackLevel("720p30", 4000);
+        assert.match(log.line(steady(3), "A", AUTO_720P30, true) ?? "", / · nível 720p30, antes 720p60$/);
+        // 8 trocas: as 6 primeiras no resumo, o resto so conta
+        for (let i = 0; i < 6; i++) log.trackLevel(i % 2 ? "720p30" : "720p60", 6000 + 2000 * i, i % 2 ? "CPU" : "CPU: estável");
+        const summary = log.summary("A", 30_000)!;
+        assert.match(summary, /· 8 trocas de nível: 1080p60→720p60 \(banda: perda\) aos 2 s, 720p60→720p30 aos 4 s, 720p30→720p60 \(CPU: estável\) aos 6 s, /);
+        assert.match(summary, /720p60→720p30 \(CPU\) aos 12 s \(\+2\) · /);
+    });
+
+    test("tamanho e fps medidos: o que o encoder codificou, os de mais tempo primeiro e o resto em 'outros'; trocas de resolucao do WebRTC", () => {
+        const log = new SenderLog(0);
+        const at = (i: number, width: number, changes: number | null) => sender({
+            at: 2000 * i, framesEncoded: 120 * i, bytesSent: 2_000_000 * i, frameWidth: width, frameHeight: width * 9 / 16, log: senderLog({ resolutionChanges: changes })
+        });
+        // a leitura i codifica widths[i]: 1920 por 4 s e mais 5 tamanhos de 2 s; os 4 de mais tempo listados, o resto em "outros"
+        const widths = [1920, 1920, 1920, 1280, 960, 640, 480, 320];
+        const changes = (i: number) => Math.max(0, i - 2);
+        log.add(null, at(0, widths[0], 0));
+        for (let i = 1; i < widths.length; i++) log.add(at(i - 1, widths[i - 1], changes(i - 1)), at(i, widths[i], changes(i)));
+        const summary = log.summary("A", 14_000)!;
+        assert.match(summary, /· tamanho 1920x1080 29%, 1280x720 14%, 960x540 14%, 640x360 14%, outros 29% · fps medido 60 100% · /);
+        assert.match(summary, /· res WebRTC 5 · /, "a soma das trocas de resolucao do proprio WebRTC");
+
+        const w = senderWindow(at(0, 1920, 2), at(1, 1920, 5))!;
+        assert.equal(w.resChanges, 3);
+        assert.match(formatSenderLine("A", w, FIXED, null), / · lim banda 0% cpu 0% res WebRTC 3 · /);
+        const back = senderWindow(at(0, 1920, 5), at(1, 1920, 2))!;
+        assert.equal(back.resChanges, null, "contador que voltou fica de fora");
+    });
+
+    test("rota pelo Teredo: o marcador sai em toda linha e no resumo, sem endereco", () => {
+        const log = new SenderLog(0);
+        const via = (i: number) => steady(i, { teredo: "local" });
+        log.add(null, via(0));
+        for (let i = 1; i <= 10; i++) log.add(via(i - 1), via(i));
+        assert.match(log.line(via(5), "A", FIXED) ?? "", / · rota host\/srflx via Teredo \(este PC\)$/);
+        assert.match(log.line(via(10), "A", FIXED) ?? "", / · nível 1080p60 fixo · rota via Teredo \(este PC\)$/, "o tipo nao repete, o Teredo sim");
+        assert.match(log.summary("A", 20_000) ?? "", / · rota host\/srflx via Teredo \(este PC\)$/);
     });
 
     test("duracao legivel", () => {
@@ -256,10 +317,25 @@ describe("recepcao: uma janela e a linha", () => {
         assert.equal(receiverWindow(receiver({ bytes: 10 }), receiver({ at: 2000 })), null);
     });
 
+    test("colchao contra engasgos e Teredo: o atraso que o jitter buffer mirou, o colchao pedido e o marcador da rota", () => {
+        const a = receiverLog({ ...zero, jitterBufferTarget: 0 });
+        const b = receiverLog({ ...full, jitterBufferTarget: 298 * 0.21 });
+        const cur = receiver({ at: 10_000, framesDecoded: 298, bytes: 2_062_500, log: b, cushionMs: 200, teredo: "remote" });
+        const w = receiverWindow(receiver({ log: a }), cur)!;
+        assert.ok(Math.abs(w.bufferTargetMs! - 210) < 1e-6);
+        const line = formatReceiverLine("amigo (peerA)", cur, w);
+        assert.match(line, / · buffer 45 ms alvo 210 ms colchão 200 ms · /);
+        assert.match(line, / · rota via Teredo \(o outro PC\)$/);
+        // sem o colchao (desligado) e sem o alvo (Chromium antigo): so o buffer, como antes
+        const plain = formatReceiverLine("a", receiver({ log: full }), receiverWindow(receiver({ log: zero }), receiver({ at: 10_000, framesDecoded: 298, bytes: 2_062_500, log: full }))!);
+        assert.match(plain, / · buffer 45 ms · /);
+        assert.doesNotMatch(plain, /alvo|colchão|Teredo/);
+    });
+
     test("leitura do inbound-rtp: campos ausentes ou invalidos ficam null; o audio soma os inbound-rtp de audio", () => {
         const c = emptyReceiverCounters();
-        readVideoInbound(c, { framesReceived: 10, framesDropped: "x", freezeCount: NaN, totalFreezesDuration: 0.5, packetsLost: 1, packetsReceived: 99 });
-        assert.deepEqual(c, receiverLog({ framesReceived: 10, freezeSeconds: 0.5, packetsLost: 1, packetsReceived: 99 }));
+        readVideoInbound(c, { framesReceived: 10, framesDropped: "x", freezeCount: NaN, totalFreezesDuration: 0.5, packetsLost: 1, packetsReceived: 99, jitterBufferTargetDelay: 1.5 });
+        assert.deepEqual(c, receiverLog({ framesReceived: 10, freezeSeconds: 0.5, packetsLost: 1, packetsReceived: 99, jitterBufferTarget: 1.5 }));
         readAudioInbound(c, { concealedSamples: 10, totalSamplesReceived: 1000 });
         readAudioInbound(c, { concealedSamples: 5 });
         readAudioInbound(c, {});
@@ -289,6 +365,13 @@ describe("recepcao: cadencia e resumo (ReceiverLog)", () => {
         assert.equal(log.summary("A", 10_000), "Resumo da recepção de A: 10 s · VP9 libvpx 1280x720 · 30,0 fps em média · congelou 1x (0,5 s) · 5 descartados · "
             + "perda média 0,5% · mediana 1000 kbps · buffer médio 40 ms · áudio ocultado 0,1%");
         assertClean(lines[5]!);
+    });
+
+    test("resumo com o colchao, o alvo medio do jitter buffer e a rota pelo Teredo", () => {
+        const log = new ReceiverLog(0);
+        const at = (i: number) => ({ ...watching(i), cushionMs: 400, teredo: i >= 3 ? "both" as const : null, log: { ...watching(i).log, jitterBufferTarget: 60 * i * 0.405 } });
+        for (let i = 0; i <= 5; i++) log.add(at(i), "A");
+        assert.match(log.summary("A", 10_000) ?? "", / · buffer médio 40 ms alvo médio 405 ms colchão 400 ms · áudio ocultado 0,1% · rota via Teredo \(os dois PCs\)$/);
     });
 
     test("contadores que voltaram no meio (outro stream): a janela recomeca sem linha", () => {

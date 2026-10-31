@@ -10,6 +10,7 @@ import { onShareDiagnosticsChanged } from "@plugins/telinha/core/diagShare";
 import { isIdentityConfigured } from "@plugins/telinha/core/identity/config";
 import { onAdmissionSettingChanged, onPasswordChanged } from "@plugins/telinha/core/session";
 import { onApprovalPolicyChanged, onAutoQualitySettingChanged } from "@plugins/telinha/core/streaming";
+import { onJitterCushionChanged } from "@plugins/telinha/core/viewing";
 import { OptionType } from "@utils/types";
 
 export type CodecSetting = "auto" | "h264" | "vp8" | "vp9" | "av1";
@@ -70,6 +71,18 @@ export const settings = definePluginSettings({
         description: "Recomendado: a qualidade escolhida vira o máximo, e o Telinha reduz resolução/fps de quem assiste quando o seu processador, o seu upload ou a conexão do amigo não dão conta (cada espectador é mais uma codificação). Em jogos, mantém 60 fps sempre que possível e volta a subir sozinho quando estabiliza.",
         default: true,
         onChange: () => onAutoQualitySettingChanged()
+    },
+    // core/viewing.ts → applyCushion: jitterBufferTarget (ms) nos receivers de video e de audio do que voce assiste
+    jitterCushion: {
+        type: OptionType.SELECT,
+        displayName: "Colchão contra engasgos",
+        description: "Ao assistir: a imagem chega um pouco atrasada, mas não engasga em soluços da internet.",
+        options: [
+            { label: "Desligado", value: 0 },
+            { label: "0,2 s (padrão)", value: 200, default: true },
+            { label: "0,4 s", value: 400 }
+        ],
+        onChange: () => onJitterCushionChanged()
     },
     shareAudioByDefault: {
         type: OptionType.BOOLEAN,

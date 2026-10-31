@@ -41,7 +41,8 @@ import { containPeerConnection, isContained, type SendPlan } from "./peerConnect
 import { me, sendPresence } from "./presence";
 import { CaptureMonitor } from "./quality/captureMonitor";
 import { QualityController } from "./quality/controller";
-import { encodingFor, LEVELS, levelText, scaledSize } from "./quality/levels";
+import { encodingFor, levelText, scaledSize } from "./quality/levels";
+import { isHardwareEncoder } from "./quality/stats";
 import { noteStreamStarting, noteStuckEncoder, STUCK_NOTICE, STUCK_NOTICE_PINNED } from "./stuckEncoder";
 
 export interface QualityProfile {
@@ -50,15 +51,49 @@ export interface QualityProfile {
     fps: number;
     /** teto do encoder (RTCRtpSender maxBitrate) e x-google-max-bitrate */
     maxKbps: number;
-    /** x-google-start-bitrate: o estimador de banda comeca aqui em vez de ~300 kbps */
-    startKbps: number;
 }
 
-/** Perfis de qualidade. startKbps ≈ 50% do teto: sobe direto para a resolucao cheia sem estourar links medianos. */
+/** Perfis de qualidade. */
 export const QUALITY: Record<Quality, QualityProfile> = {
-    "1080p60": { width: 1920, height: 1080, fps: 60, maxKbps: 20000, startKbps: 10000 },
-    "720p60": { width: 1280, height: 720, fps: 60, maxKbps: 12000, startKbps: 6000 },
-    "1080p30": { width: 1920, height: 1080, fps: 30, maxKbps: 12000, startKbps: 6000 }
+    "1080p60": { width: 1920, height: 1080, fps: 60, maxKbps: 20000 },
+    "720p60": { width: 1280, height: 720, fps: 60, maxKbps: 12000 },
+    "1080p30": { width: 1920, height: 1080, fps: 30, maxKbps: 12000 }
+};
+
+/**
+ * x-google-start-bitrate, o MESMO em toda negociacao com todo peer (sendPlanFor). O libwebrtc so reaplica o inicio quando
+ * ele muda, e reaplicar zera a estimativa de banda da conexao: ate a 0.2.9 ele acompanhava o degrau (10000 → 3000 numa
+ * renegociacao do log de 30/10) e cada renegociacao derrubava a banda. 4000 kbps: o estimador comeca com folga para o
+ * 720p e as sondagens iniciais dele (3x e 6x o inicio = 12 e 24 Mbps, com o teto de 20 Mbps) chegam ao 1080p60 em poucos
+ * segundos num caminho bom; num caminho estreito (1,5-2,6 Mbps nos logs) estoura menos que os 10000 de antes.
+ */
+export const START_KBPS = 4000;
+
+/** Onde o encoder de um envio roda: decide a degradationPreference dele (DEGRADATION_FOR). */
+export type EncoderKind = "hardware" | "software";
+
+/**
+ * degradationPreference de um envio pelo tipo do encoder, na ordem: a primeira que o sender aceitar; recusadas todas,
+ * nenhuma (applySenderParams). Medido no Chromium 156 (Edge sem janela, RTX 3070, 1080p60 de jogo, maxBitrate cortado
+ * por 10 s; o valor e aceito e devolvido, um valor inventado da TypeError). fps mediano no corte:
+ * - placa de video (NVENC pelo Media Foundation): "maintain-framerate-and-resolution" segura 55 fps em 1080p a 3 Mbps
+ *   (QP 44) e ~42 a 2,2 Mbps; com "maintain-framerate" ou "balanced" a imagem ja cai para 540p a 3 Mbps; a 1,5 Mbps
+ *   nenhuma das tres salva (~1 fps). Num soluco: so a imagem perde nitidez, nada encolhe;
+ * - software (OpenH264, libvpx VP8/VP9): com "maintain-framerate-and-resolution" o fps desaba (OpenH264 22 → 7, VP8 30 →
+ *   9) e, sem a adaptacao de CPU do WebRTC, fica abaixo da fonte ate sem corte (OpenH264 28, VP8 42). "balanced" segura
+ *   ~55 fps encolhendo um pouco (OpenH264 960x540, VP8 1280x720) e o WebRTC volta a aliviar a CPU sozinho.
+ * Recusada (Chromium antigo): "maintain-framerate", a de antes da 0.2.10.
+ */
+export const DEGRADATION_FOR: Record<EncoderKind, readonly string[]> = {
+    hardware: ["maintain-framerate-and-resolution", "maintain-framerate"],
+    software: ["balanced", "maintain-framerate"]
+};
+
+/** O que cada preferencia faz, para o log do envio. */
+const DEGRADATION_TEXT: Record<string, string> = {
+    "maintain-framerate-and-resolution": "mantém resolução e fps (num soluço só a imagem perde nitidez)",
+    balanced: "encoder por software: equilibra resolução e fps (num soluço os dois cedem um pouco)",
+    "maintain-framerate": "prioriza fps (o WebRTC pode reduzir a resolução sozinho)"
 };
 
 const SOURCE_ID_RE = /^(screen|window):-?\d{1,20}:-?\d{1,10}$/;
@@ -72,8 +107,13 @@ interface ViewerSend {
     reportedCodec?: string;
     /** parametros de envio ja aplicados uma vez (as mudancas seguintes sao logadas pela qualidade automatica) */
     applied?: boolean;
-    /** o Chromium recusou degradationPreference neste sender: nao tenta de novo */
-    noDegradation?: boolean;
+    /**
+     * a preferencia que este sender aceitou, para o tipo de encoder `kind`: indice em DEGRADATION_FOR[kind] (as anteriores
+     * foram recusadas: nao tenta de novo; o tamanho da lista = nenhuma). Ausente, ou de outro tipo: comeca pela primeira.
+     */
+    degradation?: { kind: EncoderKind; index: number; };
+    /** onde o encoder roda, pelo 1o relato das estatisticas (depois de cada troca de codec); ausente = o esperado (encoderKindOf) */
+    encoderKind?: EncoderKind;
     /** a checagem do encoder ja agiu neste espectador (H.264 por software): nunca de novo */
     fellBack?: boolean;
     /** o H.264 esta no OpenH264 de passagem (o WebRTC reduziu a resolucao para um tamanho que a placa nao aceita) */
@@ -168,20 +208,20 @@ function captureSizeOf(local: LocalCapture): { width: number; height: number; } 
     return { width: s?.width ?? local.info.width, height: s?.height ?? local.info.height };
 }
 
-/** Plano de envio consultado pela RTCPeerConnection na negociacao (peerConnection.ts). */
+/**
+ * Plano de envio consultado pela RTCPeerConnection na negociacao (peerConnection.ts), para QUALQUER peer: a banda
+ * (x-google-start/max-bitrate) vai em toda negociacao, assistindo ou nao, para o inicio nunca mudar (START_KBPS); o codec,
+ * so para quem assiste. O x-google-max-bitrate fica no teto da qualidade escolhida (a qualidade automatica pode subir
+ * depois sem renegociar); sem transmitir, o maior (20 Mbps).
+ */
 export function sendPlanFor(peerId: PeerId | null): SendPlan | null {
+    if (!peerId) return null;
     const { local } = rt;
-    if (!peerId || !local || !local.viewers.has(peerId)) return null;
-    const send = sends.get(peerId);
-    const q = QUALITY[local.quality];
-    // o x-google-max-bitrate fica no teto (a qualidade automatica pode subir depois sem renegociar);
-    // a banda inicial acompanha o degrau atual
-    const level = qualityOf(local)?.levelFor(peerId) ?? local.quality;
-    const startKbps = level === local.quality ? q.startKbps : Math.min(q.startKbps, Math.round(LEVELS[level].maxKbps * 0.5));
+    const send = local?.viewers.has(peerId) ? sends.get(peerId) : undefined;
     return {
         codec: send?.decision.codec ?? null,
         h264Profile: send?.decision.h264Profile ?? null,
-        bitrate: { startKbps, maxKbps: q.maxKbps },
+        bitrate: { startKbps: START_KBPS, maxKbps: QUALITY[local?.quality ?? "1080p60"].maxKbps },
         label: peerLabel(peerId)
     };
 }
@@ -979,9 +1019,17 @@ function videoSender(peerId: PeerId, local: LocalCapture): RTCRtpSender | null {
 }
 
 /**
+ * Onde o encoder deste envio roda: o relatado nas estatisticas; antes disso, o esperado (H.264 com este PC codificando na
+ * placa de video = placa; o resto = software).
+ */
+function encoderKindOf(send: ViewerSend | undefined): EncoderKind {
+    return send?.encoderKind ?? (send?.decision.codec === "h264" && getLocalCaps().h264HwEncode ? "hardware" : "software");
+}
+
+/**
  * Parametros do sender de video para um espectador no degrau `level` (qualidade automatica; sem ela,
- * a qualidade escolhida): resolucao (scaleResolutionDownBy), fps e bitrate maximos, prioridade alta e
- * degradationPreference "maintain-framerate" (cai resolucao antes de fps). Sem renegociar.
+ * a qualidade escolhida): resolucao (scaleResolutionDownBy), fps e bitrate maximos, prioridade alta e a
+ * degradationPreference do tipo do encoder (DEGRADATION_FOR: a primeira que o sender aceitar). Sem renegociar.
  * Devolve false se nao aplicou (a qualidade automatica tenta de novo na proxima avaliacao).
  */
 async function applySenderParams(peerId: PeerId, local: LocalCapture, level: QualityLevel): Promise<boolean> {
@@ -996,36 +1044,45 @@ async function applySenderParams(peerId: PeerId, local: LocalCapture, level: Qua
     const send = sends.get(peerId);
     const capture = captureSizeOf(local);
     const target = encodingFor(level, capture.width, capture.height);
-    const build = (withDegradation: boolean) => {
+    const build = (preference: string | undefined) => {
         const params = sender.getParameters();
         if (!params.encodings?.length) params.encodings = [{}];
         Object.assign(params.encodings[0], { ...target, priority: "high", networkPriority: "high" });
-        if (withDegradation) (params as any).degradationPreference = "maintain-framerate";
+        if (preference) (params as any).degradationPreference = preference;
         return params;
     };
     const scaled = scaledSize(capture.width, capture.height, target.scaleResolutionDownBy);
     const desc = `${levelText(level)}, até ${Math.round(target.maxBitrate / 1000)} kbps`
         + (target.scaleResolutionDownBy > 1 ? ` (captura ${capture.width}x${capture.height} ÷${target.scaleResolutionDownBy} = ${scaled.width}x${scaled.height})` : "");
 
-    try {
-        await sender.setParameters(build(!send?.noDegradation));
-        if (!send?.applied) log.info(`Envio para ${peerLabel(peerId)}: ${desc}, prioriza fps`);
-    } catch (e) {
-        if (send?.noDegradation) {
-            logThrottled(`set-params:${peerId}`, "warn", `setParameters falhou para ${peerLabel(peerId)}: ${errorText(e)}`);
-            return false;
-        }
+    // a 1a vez (ou com o encoder de outro tipo): da primeira preferencia em diante, e a ultima tentativa vai sem nenhuma;
+    // depois, so a que o sender aceitou (uma falha dela e de outra coisa: a proxima avaliacao tenta de novo, sem trocar)
+    const label = peerLabel(peerId);
+    const kind = encoderKindOf(send);
+    const list = DEGRADATION_FOR[kind];
+    const accepted = send?.degradation?.kind === kind ? send.degradation.index : undefined;
+    const switched = !!send?.applied && accepted === undefined;
+    let error = "";
+    for (let i = accepted ?? 0; i <= (accepted ?? list.length); i++) {
+        const preference = list[i];
         try {
-            await sender.setParameters(build(false));
-            if (send) send.noDegradation = true;
-            log.warn(`Envio para ${peerLabel(peerId)}: degradationPreference recusado (${errorText(e)}); ${desc} aplicado`);
-        } catch (e2) {
-            logThrottled(`set-params:${peerId}`, "warn", `setParameters falhou para ${peerLabel(peerId)}: ${errorText(e2)}`);
-            return false;
+            await sender.setParameters(build(preference));
+        } catch (e) {
+            error = errorText(e);
+            continue;
         }
+        if (send) send.degradation = { kind, index: i };
+        if (!send?.applied || switched) {
+            // i > 0 so quando a lista foi percorrida agora: as anteriores foram recusadas
+            const what = preference ? DEGRADATION_TEXT[preference] : "sem preferência (o WebRTC escolhe)";
+            if (i > 0) log.warn(`Envio para ${label}: degradationPreference recusado (${error}); ${desc} aplicado, ${preference ? `com "${preference}": ${what}` : what}`);
+            else log.info(`Envio para ${label}: ${desc}, ${what}`);
+        }
+        if (send) send.applied = true;
+        return true;
     }
-    if (send) send.applied = true;
-    return true;
+    logThrottled(`set-params:${peerId}`, "warn", `setParameters falhou para ${label}: ${error}`);
+    return false;
 }
 
 /**
@@ -1045,7 +1102,9 @@ async function applySenderParams(peerId: PeerId, local: LocalCapture, level: Qua
  *   decodifica a 55+ fps, sem congelar nem pedir PLI). Por isso nao conta como queda (isTransientSoftwareH264): so loga.
  *   Vale tambem depois que o qualityLimitationReason volta para "none": o WebRTC so sobe a resolucao de novo depois de
  *   varios segundos sem limitacao, e nesse meio tempo o 853x480 continua no ar (log de 31/10: contava como queda 20-30 s
- *   depois, e a 2a desligava o H.264 da sessao inteira);
+ *   depois, e a 2a desligava o H.264 da sessao inteira). Desde a 0.2.10 (degradationPreference
+ *   "maintain-framerate-and-resolution" no H.264 da placa, DEGRADATION_FOR) o WebRTC nao reduz mais a resolucao sozinho, entao esses
+ *   tamanhos impares nao aparecem; o caso fica para um Chromium que recusar a preferencia (cai para "maintain-framerate");
  * - nao tiram da placa: o nosso scaleResolutionDownBy 1,5 sozinho (1080p→720p, com ou sem 12 Mbps), reconectar 3 vezes
  *   com 1,5 s de intervalo, 3 envios H.264 ao mesmo tempo;
  * - a captura nunca chega com tamanho impar (medido no mesmo dia com uma janela nossa capturada como o Telinha captura,
@@ -1481,7 +1540,15 @@ export function tick() {
                 const msg = `Codificando para ${peerLabel(peerId)}: ${codec}${enc.implementation ? ` (${enc.implementation}${enc.powerEfficient ? ", hardware" : ""})` : ""}`;
                 if (codec.toLowerCase() === expected) log.info(msg);
                 else log.warn(`${msg} — esperado ${send.decision.codec.toUpperCase()}`);
+                // onde o encoder roda decide a degradationPreference (DEGRADATION_FOR); vale o 1o relato (um OpenH264 de
+                // passagem nao troca nada)
+                if (enc.implementation || typeof enc.powerEfficient === "boolean")
+                    send.encoderKind = isHardwareEncoder(enc.powerEfficient, enc.implementation) ? "hardware" : "software";
             }
+            // aplicada para outro tipo de encoder: reaplica. No H.264 so com o video ja saindo (checkStall → sending): um
+            // setParameters num encoder da placa que ainda nao soltou nada pode ser no travado (core/stuckEncoder.ts)
+            if (send.degradation && send.degradation.kind !== encoderKindOf(send) && (!/^video\/h264$/i.test(codec) || send.sending))
+                qualityOf(local)?.reapply(peerId);
             checkEncoder(peerId, local, send, enc);
             checkStall(peerId, local, send, enc, frames, { frames: counter(out.framesSent), bytes: counter(out.bytesSent) });
         }).catch(() => { });

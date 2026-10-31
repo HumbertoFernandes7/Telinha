@@ -5,7 +5,8 @@
  */
 
 // Non-blocking heads-up for things the streamer must see even when the voice bar is out of view (e.g. in a game):
-// a watch request waiting for approval (Permitir/Recusar) and a new suspicious identity. Uses Vencord's notifications
+// a watch request waiting for approval (Permitir/Recusar), a new suspicious identity, and a connection that goes through
+// Teredo (Windows' slow IPv6 tunnel; core/teredoWatch.ts), once per person and side per Discord session. Uses Vencord's notifications
 // (in-app popup, or the system notification when Discord isn't focused, per the user's Vencord settings). The answer
 // itself (Permitir/Recusar) is in the voice bar and in "Quem está assistindo"; clicking the notification opens it.
 // Nothing runs at module load: start()/stop() are called by the plugin.
@@ -19,9 +20,22 @@ import { openViewersModal } from "./ViewersModal";
 let unsubscribe: (() => void) | null = null;
 const seenPending = new Set<string>();
 const seenAlerts = new Set<string>();
+/** "discordUserId:local|remote" already shown this session (never cleared while the plugin runs) */
+const seenTeredo = new Set<string>();
 
-function notify(title: string, body: string, icon: string | undefined) {
-    showNotification({ title, body, icon, noPersist: true, onClick: openViewersModal }).catch(e => logger.warn("Notificação do Telinha falhou", e));
+/** The Teredo notice: this PC on Teredo gets the steps to turn it off; only the friend's, a short line asking him. */
+export function teredoNotice(name: string, side: "local" | "remote" | "both"): { title: string; body: string; } {
+    return side === "remote"
+        ? { title: "Telinha: conexão do amigo pelo Teredo", body: `A conexão de ${name} passa pelo Teredo, um túnel lento do Windows. Peça para ele desligar (ele também recebe o aviso no Telinha dele).` }
+        : {
+            title: "Telinha: conexão lenta pelo Teredo",
+            body: `Sua conexão com ${name} está passando pelo Teredo, um túnel lento do Windows, e a live pode ficar ruim. Para desligar: menu Iniciar → `
+                + "digite cmd → botão direito → Executar como administrador → cole netsh interface teredo set state disabled e aperte Enter."
+        };
+}
+
+function notify(title: string, body: string, icon: string | undefined, onClick: (() => void) | null = openViewersModal) {
+    showNotification({ title, body, icon, noPersist: true, onClick: onClick ?? undefined }).catch(e => logger.warn("Notificação do Telinha falhou", e));
 }
 
 function onState() {
@@ -45,6 +59,15 @@ function onState() {
         notify("Telinha: identidade suspeita", `${identityAlertText(a)}.${identityAlertBlocksAll(a) ? " Nenhuma delas recebe a sua transmissão enquanto isso durar." : ""}`, avatarUrl(a.discordUserId, 64));
     });
     for (const k of [...seenAlerts]) if (!keys.includes(k)) seenAlerts.delete(k);
+
+    for (const p of state.peers) {
+        if (!p.teredo) continue;
+        const key = `${p.discordUserId}:${p.teredo === "remote" ? "remote" : "local"}`;
+        if (seenTeredo.has(key)) continue;
+        seenTeredo.add(key);
+        const { title, body } = teredoNotice(displayName(p.discordUserId, p.username), p.teredo);
+        notify(title, body, avatarUrl(p.discordUserId, 64), null);
+    }
 }
 
 export function startNotices() {
@@ -57,4 +80,5 @@ export function stopNotices() {
     unsubscribe = null;
     seenPending.clear();
     seenAlerts.clear();
+    seenTeredo.clear();
 }
