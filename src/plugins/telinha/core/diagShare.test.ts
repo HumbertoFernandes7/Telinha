@@ -18,15 +18,16 @@ import assert from "node:assert/strict";
 import { after, afterEach, before, beforeEach, describe, test, type TestContext } from "node:test";
 
 import {
-    DIAG_MAX_LINE_CHARS, DIAG_MAX_LINES_PER_MESSAGE, DIAG_MAX_LINES_PER_SECOND, type DiagLine, type DiagMessage, isPresenceMessage, parseDiagMessage,
-    type PresenceMessage, PROTOCOL_VERSION, sanitizePresence
+    buildHello, DIAG_MAX_LINE_CHARS, DIAG_MAX_LINES_PER_MESSAGE, DIAG_MAX_LINES_PER_SECOND, type DiagLine, type DiagMessage, isPresenceMessage,
+    parseDiagMessage, type PresenceMessage, PROTOCOL_VERSION, sanitizePresence
 } from "@plugins/telinha/protocol";
 import { formatDiagnostics, getEventLog, getState } from "@plugins/telinha/store";
 import type { FakeAction } from "@test/fakes/trystero";
-import { pluginSettings } from "@test/fakes/vencord";
+import { ME_ID, pluginSettings } from "@test/fakes/vencord";
 import { connectViewer, createRig, destroyRig, enterCall, leaveCall, seconds, setMembers, type StreamingRig, turns } from "@test/helpers/wpb-streaming";
 
 import { rt } from "./context";
+import { diagLogSession } from "./diagLog";
 import {
     DIAG_LIVE_BUFFER_LINES, DIAG_MAX_SNAPSHOT_LINES, DIAG_RECEIVE_BURST, DIAG_RECEIVE_PER_SECOND, DIAG_REFRESH_TIMEOUT_MS, DIAG_SNAPSHOT_MIN_INTERVAL_MS,
     diagEligible, diagName, diagText, formatDiagReceived, localDateTime, localTime, onShareDiagnosticsChanged, setDiagnosticsSource, setDiagRequest,
@@ -38,6 +39,7 @@ import { startSession, stopSession } from "./session";
 
 const DEFAULT_SOURCE = { refresh: () => Promise.resolve(), format: () => formatDiagnostics() };
 const PREFIX_RE = /^\[Telinha\] \[diag /;
+const NOTHING_STORED = "--- sessão anterior: nada guardado neste PC (o registro em arquivo só grava com a opção ligada) ---";
 
 let rig: StreamingRig;
 let seq = 0;
@@ -220,7 +222,8 @@ describe("quem manda: as regras (as duas pontas com a opcao, verificado, no cana
         const since = logSince();
         await asksUs(f);
         const texts = textsTo(f);
-        assert.equal(texts[0], "Telinha — diagnóstico", "o mesmo texto do botao (store.formatDiagnostics sem o index.tsx)");
+        assert.equal(texts[0], NOTHING_STORED, "primeiro a sessao anterior (o arquivo falso esta vazio)");
+        assert.equal(texts[1], "Telinha — diagnóstico", "o mesmo texto do botao (store.formatDiagnostics sem o index.tsx)");
         assert.match(texts.at(-1)!, /^--- ao vivo: cada linha nova do Telinha deste PC a partir daqui ---$/);
         assert.ok(since().some(e => e.msg === `Enviando o diagnóstico deste PC para ${label(f)} (pedido pelo "Compartilhar diagnóstico", ligado aqui)`));
         await turns();
@@ -281,10 +284,11 @@ describe("quem manda: as regras (as duas pontas com a opcao, verificado, no cana
         assert.deepEqual(diagTo(fake), []);
 
         await rig.room.connectPeer("dgIncompat", { hello: { type: "outra-coisa" } });
-        rig.room.receive("diag", { op: "subscribe" }, "dgIncompat");
-        rig.room.receive("diag", { op: "subscribe" }, "dgNinguem");
+        await rig.room.connectPeer("dgEuMesmo", { hello: buildHello(ME_ID, "eu") });
+        const ids = ["dgIncompat", "dgEuMesmo", "dgNinguem"];
+        for (const peerId of ids) rig.room.receive("diag", { op: "subscribe" }, peerId);
         await turns();
-        assert.deepEqual(rig.room.sentOn("diag", "dgIncompat").filter(m => m.target === "dgIncompat"), []);
+        assert.deepEqual(rig.room.sent.filter(m => m.namespace === "diag" && ids.includes(m.target as string)), [], "nenhuma linha para eles");
         assert.equal(rt.diagSending.size, 0);
     });
 
@@ -313,7 +317,7 @@ describe("quem manda: o 'Copiar diagnóstico' primeiro, depois as linhas novas",
         release();
         await turns();
         const first = textsTo(f);
-        assert.equal(first[0], "Telinha — diagnóstico");
+        assert.deepEqual(first.slice(0, 2), [NOTHING_STORED, "Telinha — diagnóstico"]);
         assert.ok(first.includes("durante o preparo"));
         assert.match(first.at(-1)!, /^--- ao vivo/);
 
@@ -336,8 +340,8 @@ describe("quem manda: o 'Copiar diagnóstico' primeiro, depois as linhas novas",
         const msgs = linesMsgsTo(f);
         assert.ok(msgs.every(m => m.lines.length <= DIAG_MAX_LINES_PER_MESSAGE && !m.dropped));
         const texts = textsTo(f);
-        assert.equal(texts[1], "helper: C:\\Users\\[usuário]\\AppData\\Roaming\\Telinha\\addon");
-        assert.equal(texts.length, DIAG_MAX_SNAPSHOT_LINES + 2, "1000 linhas + o aviso do corte + o marcador 'ao vivo'");
+        assert.equal(texts[2], "helper: C:\\Users\\[usuário]\\AppData\\Roaming\\Telinha\\addon");
+        assert.equal(texts.length, DIAG_MAX_SNAPSHOT_LINES + 3, "a linha da sessao anterior + 1000 linhas + o aviso do corte + o marcador 'ao vivo'");
         assert.equal(texts.at(-2), "(+12 linhas do diagnóstico ficaram de fora)");
         assert.equal(linesTo(f).at(-2)?.level, "warn");
     });
@@ -350,7 +354,7 @@ describe("quem manda: o 'Copiar diagnóstico' primeiro, depois as linhas novas",
         });
         const f = await friend();
         await asksUs(f);
-        assert.equal(textsTo(f)[0], "diagnóstico indisponível: Error: quebrou");
+        assert.equal(textsTo(f)[1], "diagnóstico indisponível: Error: quebrou");
         log.info("segue");
         await seconds(rig);
         assert.equal(textsTo(f).at(-1), "segue");
@@ -363,7 +367,7 @@ describe("quem manda: o 'Copiar diagnóstico' primeiro, depois as linhas novas",
         await seconds(rig, DIAG_REFRESH_TIMEOUT_MS / 1000 - 1);
         assert.deepEqual(diagTo(f), []);
         await seconds(rig, 2);
-        assert.equal(textsTo(f)[0], "Telinha — diagnóstico");
+        assert.equal(textsTo(f)[1], "Telinha — diagnóstico");
     });
 
     test("pediu de novo em menos de 30 s: so as linhas novas; depois de 30 s, o texto completo de novo", async () => {
@@ -385,7 +389,7 @@ describe("quem manda: o 'Copiar diagnóstico' primeiro, depois as linhas novas",
         await seconds(rig, DIAG_SNAPSHOT_MIN_INTERVAL_MS / 1000);
         const before = textsTo(f).length;
         await asksUs(f);
-        assert.equal(textsTo(f)[before], "Telinha — diagnóstico");
+        assert.equal(textsTo(f)[before + 1], "Telinha — diagnóstico");
     });
 
     test("subscribe repetido enquanto recebe: ignorado (o texto nao sai duas vezes)", async () => {
@@ -484,6 +488,52 @@ describe("quem manda: limites e mascara das linhas ao vivo", () => {
         assert.equal(paths.text, "perfil C:\\Users\\[usuário]\\Desktop, json \"C:\\\\Users\\\\[usuário]\\\\x\", /home/[usuário]/a e /Users/[usuário]/b");
         assert.equal(tokens.level, "error");
         assert.equal(tokens.text, "token [token] e Bearer [token], id_token=[token]; peer [ip] ⏎ segunda");
+    });
+});
+
+describe("quem manda: o fim da sessao anterior (registro em arquivo)", () => {
+    afterEach(() => {
+        rig.native.telinha.readDiagLog = async () => [];
+    });
+
+    test("vai antes do 'Copiar diagnóstico': so outras sessoes, com a data, mascarado, entre marcadores", async () => {
+        const at = Date.UTC(2026, 9, 28, 22, 15, 3, 7);
+        const iso = (ms: number) => new Date(at + ms).toISOString();
+        rig.native.telinha.readDiagLog = async () => [
+            `${iso(0)} 0badc0de info --- registro do Telinha em arquivo ligado (sessão 0badc0de) ---`,
+            `${iso(1000)} 0badc0de error travou com C:\\Users\\Fulano\\AppData aberto`,
+            `${iso(2000)} ${diagLogSession()} info desta sessao`
+        ];
+        const f = await friend();
+        await asksUs(f);
+        const lines = linesTo(f);
+        assert.equal(lines[0].text, "--- sessão anterior: as últimas 2 linhas do registro deste PC ---");
+        assert.deepEqual(lines[1], { t: localDateTime(at), level: "info", text: "--- registro do Telinha em arquivo ligado (sessão 0badc0de) ---" });
+        assert.deepEqual(lines[2], { t: localDateTime(at + 1000), level: "error", text: "travou com C:\\Users\\[usuário]\\AppData aberto" });
+        assert.equal(lines[3].text, "--- fim da sessão anterior; agora, o \"Copiar diagnóstico\" desta sessão ---");
+        assert.equal(lines[4].text, "Telinha — diagnóstico");
+        assert.equal(textsTo(f).includes("desta sessao"), false, "a sessao atual vai no 'Copiar diagnóstico', nao aqui");
+    });
+
+    test("o arquivo nao responde: o resto sai depois de DIAG_REFRESH_TIMEOUT_MS, sem a sessao anterior", async () => {
+        rig.native.telinha.readDiagLog = () => new Promise(() => { });
+        const f = await friend();
+        await asksUs(f);
+        assert.deepEqual(diagTo(f), []);
+        await seconds(rig, DIAG_REFRESH_TIMEOUT_MS / 1000 + 1);
+        assert.deepEqual(textsTo(f).slice(0, 2), [NOTHING_STORED, "Telinha — diagnóstico"]);
+    });
+
+    test("com a opcao ligada, o log vai para o arquivo em lotes; desligada, para", async () => {
+        const appended = () => rig.native.calls.filter(c => c.name === "appendDiagLog").map(c => String(c.args[0])).join("");
+        log.info("isto vai para o arquivo");
+        await seconds(rig, 3);
+        assert.match(appended(), new RegExp(` ${diagLogSession()} info isto vai para o arquivo\\n`));
+
+        pluginSettings.set("shareDiagnostics", false);
+        log.info("isto nao vai");
+        await seconds(rig, 3);
+        assert.doesNotMatch(appended(), /isto nao vai/);
     });
 });
 

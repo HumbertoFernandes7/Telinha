@@ -24,7 +24,7 @@ const { check, finish } = makeChecker();
 const vencordSrc = pickVencordDist();
 const payload = pickPayload();
 const stubTemplate = readFileSync(join(payload.dir, payload.version.stubTemplate), "utf8");
-const NATIVES = ["finishDisplayMedia", "listSources", "prepareDisplayMedia", "readScreenAudio", "resetDisplayMedia", "screenAudioStatus", "startScreenAudio", "stopScreenAudio"];
+const NATIVES = ["appendDiagLog", "finishDisplayMedia", "listSources", "prepareDisplayMedia", "readDiagLog", "readScreenAudio", "resetDisplayMedia", "screenAudioStatus", "startScreenAudio", "stopScreenAudio"];
 
 function copyVencord(src, name) {
     const dir = join(SCRATCH, name);

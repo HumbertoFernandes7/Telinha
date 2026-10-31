@@ -8,9 +8,10 @@
 // ligada nas duas pontas, quem esta na mesma call (admitido, no canal de voz, identidade do Discord verificada) pode
 // pedir o registro do Telinha deste PC, sem precisar pedir para a pessoa reproduzir o problema e colar o "Copiar
 // diagnóstico". Os dois papeis ficam aqui:
-// - quem manda: ao receber "subscribe" de quem passa nas regras (diagEligible), manda o mesmo texto do "Copiar
-//   diagnóstico" e, dali em diante, cada linha nova do log do Telinha (core/log.ts → store.ts subscribeEvents), no
-//   maximo DIAG_MAX_LINES_PER_SECOND por segundo (no tick da sessao). Nunca pergunta nem mostra aviso: so a linha
+// - quem manda: ao receber "subscribe" de quem passa nas regras (diagEligible), manda o fim da sessao anterior (o
+//   registro em arquivo, core/diagLog.ts, que so grava com a opcao ligada), o mesmo texto do "Copiar diagnóstico" e,
+//   dali em diante, cada linha nova do log do Telinha (core/log.ts → store.ts subscribeEvents), no maximo
+//   DIAG_MAX_LINES_PER_SECOND por segundo (no tick da sessao). Nunca pergunta nem mostra aviso: so a linha
 //   "Enviando diagnóstico para ..." na pagina do plugin e uma linha no log;
 // - quem pede: "Receber diagnóstico" (pagina do plugin) manda "subscribe" a cada conexao dessa pessoa que passa nas
 //   regras e escreve as linhas que chegam no console, com o prefixo "[Telinha] [diag <nome>]" (vai para o
@@ -28,6 +29,7 @@ import type { PeerId } from "@plugins/telinha/types";
 import type { MessageAction } from "trystero";
 
 import { type DiagSubscriber, type PeerEntry, peerLabel, publish, rt } from "./context";
+import { readPreviousSession, startDiagLog, stopDiagLog, type StoredLine } from "./diagLog";
 import { isIdentityConfigured } from "./identity/config";
 import { errorText, log, logThrottled, maskPrivate, shortId } from "./log";
 import { sendPresence } from "./presence";
@@ -185,8 +187,20 @@ function snapshotLines(text: string): DiagLine[] {
     return lines;
 }
 
+/** O fim da sessao anterior, entre marcadores (ou uma linha dizendo que nao ha nada guardado). */
+function previousLines(previous: StoredLine[] | null): DiagLine[] {
+    const now = Date.now();
+    if (!previous?.length) return [diagLine(now, "info", "--- sessão anterior: nada guardado neste PC (o registro em arquivo só grava com a opção ligada) ---")];
+    return [
+        diagLine(now, "info", `--- sessão anterior: as últimas ${previous.length} linhas do registro deste PC ---`),
+        ...previous.map(l => ({ t: localDateTime(l.at), level: l.level, text: diagText(l.text) })),
+        diagLine(now, "info", "--- fim da sessão anterior; agora, o \"Copiar diagnóstico\" desta sessão ---")
+    ];
+}
+
 /**
- * A primeira parte, antes das linhas novas: o texto do "Copiar diagnóstico" (depois de ler do main o que ele precisa).
+ * A primeira parte, antes das linhas novas: o fim da sessao anterior e o texto do "Copiar diagnóstico" (depois de ler
+ * do main o que eles precisam).
  * As linhas que entram no log enquanto isso esperam na janela e saem depois, no tick: as que o texto ja trouxe ficam
  * de fora (sentSeq no momento do texto). Pedido repetido em menos de DIAG_SNAPSHOT_MIN_INTERVAL_MS: so ao vivo.
  */
@@ -199,7 +213,10 @@ async function sendFirstPart(sub: DiagSubscriber) {
         lines = [diagLine(now, "info", `--- o diagnóstico completo saiu há ${Math.round((now - last) / 1000)} s: daqui em diante, só as linhas novas ---`)];
     } else {
         lastSnapshotAt.set(sub.discordUserId, now);
-        await withTimeout(source.refresh(), DIAG_REFRESH_TIMEOUT_MS, null);
+        const [previous] = await Promise.all([
+            withTimeout(readPreviousSession(), DIAG_REFRESH_TIMEOUT_MS, null),
+            withTimeout(source.refresh(), DIAG_REFRESH_TIMEOUT_MS, null)
+        ]);
         if (rt.diagSending.get(sub.peerId) !== sub) return;
         let text: string;
         try {
@@ -208,7 +225,7 @@ async function sendFirstPart(sub: DiagSubscriber) {
             text = "diagnóstico indisponível: " + errorText(e);
         }
         sub.sentSeq = seq;
-        lines = [...snapshotLines(text), diagLine(Date.now(), "info", "--- ao vivo: cada linha nova do Telinha deste PC a partir daqui ---")];
+        lines = [...previousLines(previous), ...snapshotLines(text), diagLine(Date.now(), "info", "--- ao vivo: cada linha nova do Telinha deste PC a partir daqui ---")];
     }
     enqueueLines(sub, lines);
     sub.ready = true;
@@ -399,6 +416,7 @@ export function startDiagShare(): void {
     if (active) return;
     active = true;
     offEvents = subscribeEvents(onEvent);
+    if (shareOn()) startDiagLog();
 }
 
 /** session.ts → stopSession (depois de sair da sala). */
@@ -410,6 +428,7 @@ export function stopDiagShare(): void {
     offEvents = null;
     live.length = 0;
     lastSnapshotAt.clear();
+    stopDiagLog();
     active = false;
 }
 
@@ -418,7 +437,9 @@ export function onShareDiagnosticsChanged(): void {
     if (!active) return;
     if (shareOn()) {
         log.info("\"Compartilhar diagnóstico\" ligado: quem também ligou e está na call, com a identidade verificada, pode pedir o registro do Telinha deste PC");
+        startDiagLog();
     } else {
+        stopDiagLog();
         for (const peerId of [...rt.diagSending.keys()]) stopSending(peerId, "você desligou \"Compartilhar diagnóstico\"");
         rt.diagRequested.clear();
         reconcileRequests();
