@@ -11,7 +11,7 @@ import { Button } from "@components/Button";
 import { Paragraph } from "@components/Paragraph";
 import {
     type AddonUpdateStatus, checkForUpdateNow, describeUpdate, downloadUpdateNow, getUpdateStatus, refreshUpdateStatus,
-    relaunchDiscord, subscribeUpdates, updatesSupported
+    relaunchDiscord, restartLabel, subscribeUpdates, updatesSupported
 } from "@plugins/telinha/core/update";
 import { showToast, useEffect, useState } from "@webpack/common";
 
@@ -59,7 +59,7 @@ export function UpdateSection() {
                 )}
                 {status?.phase === "ready" && (
                     <Button size="small" onClick={restart}>
-                        Reiniciar agora
+                        {restartLabel(status.waiting)}
                     </Button>
                 )}
             </div>

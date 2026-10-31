@@ -275,11 +275,22 @@ export function makeHome({ installed = makePayload(), staged = null, prev = null
     return t;
 }
 
-/** An updater over a home, with its log lines collected (`u.lines`) and no network unless given. */
-export function updaterFor(home, { fetch = fakeFetch(() => new TypeError("offline")), log, ...rest } = {}) {
+/** No list of running programs (the updater then counts a live run marker as another Discord, as it always did). */
+export const noProcessList = () => {
+    throw new Error("no process list in the unit tests");
+};
+
+/** A list of running programs: { pid: "Discord.exe", ... } -> the Map the updater gets from tasklist. */
+export const processList = names => () => new Map(Object.entries(names).map(([pid, exe]) => [Number(pid), exe]));
+
+/**
+ * An updater over a home, with its log lines collected (`u.lines`), no network and no list of running programs unless
+ * given (processNames: processList({...}), or upd.listProcessNames for the real tasklist).
+ */
+export function updaterFor(home, { fetch = fakeFetch(() => new TypeError("offline")), log, processNames = noProcessList, ...rest } = {}) {
     const lines = [];
     const u = upd.createUpdater({
-        addonDir: home.addonDir, fetch, log: log ?? ((m, d) => lines.push(d === undefined ? String(m) : `${m} ${JSON.stringify(d)}`)), ...rest
+        addonDir: home.addonDir, fetch, log: log ?? ((m, d) => lines.push(d === undefined ? String(m) : `${m} ${JSON.stringify(d)}`)), processNames, ...rest
     });
     u.lines = lines;
     u.fetch = fetch;

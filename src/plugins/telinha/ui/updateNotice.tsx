@@ -6,6 +6,8 @@
 
 // Avisos de atualização dentro do Discord, com a notificação do Vencord (a mesma que o atualizador do Vencord usa):
 //   - pronta (baixada e conferida):            "Telinha X.Y.Z pronto"     Reiniciar agora / Depois
+//     (se ela já não entrou num início, o texto diz por quê e o que fazer: outro Discord aberto, arquivo em uso...;
+//     com outro Discord aberto o botão vira "Fechei os outros, reiniciar")
 //   - disponível (atualização automática off): "Telinha X.Y.Z disponível"  Atualizar / Depois
 // Nunca no meio de uma transmissão (sua ou que você está assistindo): o aviso espera ela acabar. Também espera o
 // Discord estar em foco, para aparecer dentro dele com os botões. Um aviso por versão por sessão. Erros (rede, limite
@@ -15,13 +17,13 @@
 import { showNotification } from "@api/Notifications";
 import { Button } from "@components/Button";
 import { log } from "@plugins/telinha/core/log";
-import { downloadUpdateNow, getUpdateStatus, relaunchDiscord, subscribeUpdates } from "@plugins/telinha/core/update";
+import { downloadUpdateNow, explainWaiting, getUpdateStatus, relaunchDiscord, restartLabel, subscribeUpdates, type UpdateWaiting } from "@plugins/telinha/core/update";
 import { getState, subscribe } from "@plugins/telinha/store";
 import { showToast } from "@webpack/common";
 
 import { cl, logger } from "./common";
 
-type Notice = { kind: "ready" | "available"; version: string; };
+type Notice = { kind: "ready" | "available"; version: string; waiting?: UpdateWaiting | null; };
 
 const noticeKey = (n: Notice) => `${n.kind}:${n.version}`;
 const shown = new Set<string>();
@@ -59,17 +61,23 @@ function NoticeBody({ text, primary, onPrimary }: { text: string; primary: strin
 
 function show(n: Notice) {
     const ready = n.kind === "ready";
+    // pronta, mas já não entrou num início: diz por quê, e não promete que "entra sozinha"
+    const stuck = ready ? explainWaiting(n.waiting) : null;
     const title = `Telinha ${n.version} ${ready ? "pronto" : "disponível"}`;
-    const text = ready
-        ? "A versão nova entra quando o Discord reiniciar. Se preferir, ela entra sozinha na próxima vez que você abrir o Discord."
-        : "Há uma versão nova do Telinha. Atualizar baixa e confere a versão agora; ela entra quando o Discord reiniciar.";
-    log.info(`Aviso de atualização: ${title}`);
+    const text = stuck
+        ? `Não deu pra trocar de versão: ${stuck.why}. ${stuck.fix}`
+        : ready
+            ? "A versão nova entra quando o Discord reiniciar. Se preferir, ela entra sozinha na próxima vez que você abrir o Discord."
+            : "Há uma versão nova do Telinha. Atualizar baixa e confere a versão agora; ela entra quando o Discord reiniciar.";
+    log.info(`Aviso de atualização: ${title}${stuck ? ` (não entrou: ${n.waiting!.reason})` : ""}`);
     try {
         showNotification({
             title,
             // notificação do Windows (sem botões): só o texto
-            body: ready ? "Reinicie o Discord para usar a versão nova." : "Abra Configurações → Vencord → Plugins → Telinha para atualizar.",
-            richBody: <NoticeBody text={text} primary={ready ? "Reiniciar agora" : "Atualizar"} onPrimary={ready ? restartNow : updateNow} />,
+            body: stuck
+                ? `Não deu pra trocar de versão: ${stuck.why}.`
+                : ready ? "Reinicie o Discord para usar a versão nova." : "Abra Configurações → Vencord → Plugins → Telinha para atualizar.",
+            richBody: <NoticeBody text={text} primary={ready ? restartLabel(n.waiting) : "Atualizar"} onPrimary={ready ? restartNow : updateNow} />,
             permanent: true,
             noPersist: true
         }).catch(e => logger.warn("Aviso de atualização do Telinha falhou", e));
@@ -99,7 +107,7 @@ function tryShow() {
 function onUpdateStatus() {
     const s = getUpdateStatus();
     let want: Notice | null = null;
-    if (s?.phase === "ready" && s.ready) want = { kind: "ready", version: s.ready };
+    if (s?.phase === "ready" && s.ready) want = { kind: "ready", version: s.ready, waiting: s.waiting ?? null };
     else if (s?.phase === "available" && s.latest) want = { kind: "available", version: s.latest.version };
     if (!want || shown.has(noticeKey(want))) return;
     pending = want;
