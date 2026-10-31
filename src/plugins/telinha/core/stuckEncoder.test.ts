@@ -124,7 +124,7 @@ describe("placa de video que trava com H.264: lembrada neste PC", () => {
         assert.equal(getLocalCaps().h264HwEncode, true, "a sonda respondeu: o H.264 volta");
         assert.equal(chooseCodec({ h264HwDecode: true }, "auto").codec, "h264");
         assert.equal(workers.instances.length, 1);
-        assert.deepEqual(since(), ["info: Você pediu para tentar o H.264 da placa de vídeo de novo: testando a placa agora (sonda WebCodecs); o H.264 só volta se ela responder"]);
+        assert.deepEqual(since(), ["info: Você pediu para tentar o H.264 da placa de vídeo de novo: testando a placa agora (sonda WebCodecs); o H.264 só volta se ela não travar no teste"]);
         workers.restore();
 
         // sem Worker (nenhuma sonda possivel): volta ja, como antes
@@ -149,12 +149,14 @@ describe("sonda WebCodecs (runStartupProbe)", () => {
         workers.restore();
     });
 
-    test("inconclusiva (a placa nao aceita o perfil): nada muda", async () => {
+    test("inconclusiva (a placa nao aceita o perfil): nada muda, e nada fica salvo (roda de novo na proxima abertura)", async () => {
+        pluginSettings.set("hwH264Probe", null);
         workers = installWorker(w => w.emit({ ev: "done", verdict: "unsupported" }));
         await runStartupProbe(AMD_ENV, "42001f");
         assert.equal(getLocalCaps().h264HwEncode, true);
         assert.equal(stuckRecord(), null);
-        assert.equal(probeRecord()?.verdict, "unknown");
+        assert.equal(probeRecord(), null);
+        assert.ok(stuckEncoderDiagnostics().includes("sonda WebCodecs H.264 placa: inconclusiva (sem suporte: a placa não aceita avc1.42001f)"));
         workers.restore();
     });
 
@@ -168,7 +170,7 @@ describe("sonda WebCodecs (runStartupProbe)", () => {
         }
         assert.equal(workers.instances.length, 0);
         assert.equal(getLocalCaps().h264HwEncode, true);
-        assert.equal(probeRecord()?.verdict, "unknown", "o resultado salvo nao mudou");
+        assert.equal(probeRecord(), null, "nada salvo");
         assert.ok(stuckEncoderDiagnostics().includes("sonda WebCodecs H.264 placa: não feita (uma transmissão estava começando ou no ar"));
         workers.restore();
     });
@@ -204,6 +206,30 @@ describe("sonda WebCodecs (runStartupProbe)", () => {
         assert.equal(forgetStuckEncoder(), "now", "sem Worker agora: volta ja");
     });
 
+    test("travou e a 2a rodada fica presa no isConfigSupported (o driver travado pelo encoder da 1a): confirmado, fica salvo", async () => {
+        workers = workersFor(stuckProbe(), w => w.emit({ ev: "phase", phase: "isConfigSupported" }));
+        await runStartupProbe(AMD_ENV, "42001f");
+        assert.deepEqual(workers.instances.map(w => w.terminated), [false, false], "os dois presos ficam");
+        assert.equal(stuckRecord()?.source, "probe");
+        assert.deepEqual({ ...probeRecord()!, at: 0 }, { at: 0, env: AMD_ENV, verdict: "broken", detail: "isConfigSupported sem resposta em 0.04 s; confirmado na 2ª rodada" });
+        assert.equal(getLocalCaps().h264HwEncode, false);
+        workers.restore();
+        assert.equal(forgetStuckEncoder(), "now");
+    });
+
+    test("travou e a 2a rodada e inconclusiva sem nada preso: nao confirma nem libera (VP9 nesta sessao, nada salvo)", async () => {
+        workers = workersFor(stuckProbe(), w => w.emit({ ev: "done", verdict: "unsupported" }));
+        await runStartupProbe(AMD_ENV, "42001f");
+        assert.equal(workers.instances.length, 2);
+        assert.equal(getLocalCaps().h264HwEncode, false, "VP9 nesta sessao");
+        assert.equal(stuckRecord(), null, "nada salvo");
+        assert.equal(probeRecord(), null);
+        assert.ok(stuckEncoderDiagnostics().includes(`sonda WebCodecs H.264 placa: travou uma vez (${STUCK_DETAIL}); a 2ª rodada não conseguiu dizer `
+            + "(sem suporte: a placa não aceita avc1.42001f): VP9 nesta sessão"));
+        workers.restore();
+        assert.equal(forgetStuckEncoder(), "now");
+    });
+
     test("travou duas vezes (o 31/10 no navegador): marca o PC antes de qualquer transmissao, e os Workers presos ficam (nunca terminados)", async () => {
         workers = installWorker(stuckProbe());
         const since = logMark();
@@ -232,10 +258,12 @@ describe("sonda WebCodecs (runStartupProbe)", () => {
     test("travamento salvo de outro driver: a sonda deste ambiente dizendo ok esquece; inconclusiva mantem o VP9", async () => {
         const newDriver = { ...AMD_ENV, driver: "32.0.21013.1000" };
         pluginSettings.set("stuckHwH264", { at: STUCK_AT, env: AMD_ENV });
+        pluginSettings.set("hwH264Probe", null);
         workers = installWorker(w => w.emit({ ev: "done", verdict: "unsupported" }));
         const since = logMark();
         await runStartupProbe(newDriver, "42001f");
         assert.ok(stuckRecord(), "inconclusiva: continua lembrado");
+        assert.equal(probeRecord(), null, "e a inconclusiva nao fica salva: a sonda roda de novo na proxima abertura");
         assert.equal(getLocalCaps().h264HwEncode, false);
         assert.ok(since().some(l => l.endsWith("mas a sonda deste ambiente não confirmou que ela funciona (inconclusiva): continua em VP9")));
         workers.restore();

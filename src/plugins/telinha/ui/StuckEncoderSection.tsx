@@ -16,7 +16,7 @@ import { showToast } from "@webpack/common";
 
 /** O aviso depois do botao, conforme o que ele fez (core/stuckEncoder.ts → forgetStuckEncoder). */
 const RETRY_TOAST: Record<RetryOutcome, string> = {
-    testing: "Pronto: testando a placa de vídeo agora. Se ela responder, a próxima pessoa que assistir recebe o H.264 dela.",
+    testing: "Pronto: testando a placa de vídeo agora. Se ela não travar no teste, a próxima pessoa que assistir recebe o H.264 dela.",
     restart: "Pronto: a placa de vídeo é testada de novo quando você reiniciar o Discord.",
     now: "Pronto: a próxima pessoa que assistir recebe o H.264 da placa de vídeo de novo."
 };

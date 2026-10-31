@@ -477,7 +477,11 @@ export function onPresence(peerId: PeerId, presence: PresenceMessage) {
 export function onPeerGone(peerId: PeerId) {
     forgetPassword(peerId);
     const v = rt.viewing.get(peerId);
-    if (v) end(v, "o amigo saiu da call");
+    if (!v) return;
+    // a placa dele travou ({ op: "stuck" }) e depois a conexao caiu (o lado dele recusa renegociar a conexao travada, e o
+    // Trystero tira a conexao): o motivo certo continua na tela, nao "saiu da call"
+    if (v.streamerStuck && v.status === "error") fail(v, stuckText(peerId));
+    else end(v, "o amigo saiu da call");
 }
 
 const INVALID_IDENTITY_TEXT = "Essa conexão apresentou uma prova de identidade falsa (pode ser alguém se passando pelo seu amigo). A transmissão dela foi bloqueada.";

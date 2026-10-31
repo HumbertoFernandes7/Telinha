@@ -58,7 +58,10 @@ export interface StuckRecord {
     source?: "stream" | "probe";
 }
 
-/** Resultado da sonda WebCodecs salvo neste PC (chave privada hwH264Probe): ela roda uma vez por ambiente. */
+/**
+ * Resultado da sonda WebCodecs salvo neste PC (chave privada hwH264Probe): com "ok" ou "travou" ela nao roda de novo
+ * neste ambiente. "Inconclusiva" nunca e salva (roda de novo a cada abertura).
+ */
 export interface ProbeRecord {
     at: number;
     env: EncoderEnv;
@@ -312,9 +315,11 @@ export function startLocalCaps(report: (line: string) => void): Promise<void> {
         const env = await environment();
         const record = stuckRecord();
         const sameEnv = !!record && !envChanges(record.env, env).length;
-        if (record) setH264HwStuck(true);
+        // "inconclusiva" nunca e salva, entao `done` e ok ou travou
         const saved = probeRecord();
-        const done = saved && !envChanges(saved.env, env).length ? saved : null;
+        const done = saved && saved.verdict !== "unknown" && !envChanges(saved.env, env).length ? saved : null;
+        // a sonda deste ambiente travou mas o registro do travamento sumiu (a gravacao falhou): vale como o registro
+        if (record || done?.verdict === "broken") setH264HwStuck(true);
         const caps = await measuring;
         const line = () => {
             const rec = stuckRecord();
@@ -333,6 +338,17 @@ export function startLocalCaps(report: (line: string) => void): Promise<void> {
                     : "não feita (sem Worker)";
         line();
     })();
+}
+
+/**
+ * A 1a rodada travou e nao deu para confirmar (`why`): VP9 so nesta sessao, nada salvo, e a sonda roda de novo na proxima
+ * abertura do Discord.
+ */
+function sessionOnly(note: string, why: string) {
+    probeNote = `${note}: VP9 nesta sessão`;
+    setH264HwStuck(true);
+    log.warn(`A sonda WebCodecs travou com o H.264 da placa de vídeo, mas ${why}: o automático vai em VP9 nesta sessão, `
+        + "e a sonda roda de novo na próxima vez que o Discord abrir");
 }
 
 /** Uma rodada da sonda, com a linha do log quando o Worker fica preso. */
@@ -372,19 +388,24 @@ export async function runStartupProbe(env: EncoderEnv, profile: string, delayMs 
             probeNote = "travou uma vez; confirmando";
             await sleep(PROBE_START.confirmMs);
             if (streamBusy()) {
-                probeNote = `travou uma vez (${first.detail}), sem confirmar (uma transmissão começou): VP9 nesta sessão`;
-                setH264HwStuck(true);
-                log.warn("A sonda WebCodecs travou com o H.264 da placa de vídeo, mas uma transmissão começou antes da confirmação: o automático vai em VP9 "
-                    + "nesta sessão, e a sonda roda de novo na próxima vez que o Discord abrir");
+                sessionOnly(`travou uma vez (${first.detail}), sem confirmar (uma transmissão começou)`, "uma transmissão começou antes da confirmação");
                 return;
             }
+            // juncao conservadora: so "ok" na 2a desfaz a 1a. O encoder preso da 1a pode travar o caminho do driver, entao
+            // uma 2a presa (inconclusiva e "hung", ex.: sem resposta no isConfigSupported) confirma; inconclusiva sem nada
+            // preso nao confirma nem libera: VP9 nesta sessao, nada salvo
             const second = await probeOnce(profile);
-            result = second.verdict === "broken"
-                ? { verdict: "broken", detail: `${second.detail}; confirmado na 2ª rodada` }
-                : { verdict: second.verdict, detail: `${second.detail} (a 1ª rodada tinha travado: ${first.detail})` };
+            if (second.verdict === "ok") result = { verdict: "ok", detail: `${second.detail} (a 1ª rodada tinha travado: ${first.detail})` };
+            else if (second.verdict === "broken" || second.hung) result = { verdict: "broken", detail: `${second.detail}; confirmado na 2ª rodada` };
+            else {
+                sessionOnly(`travou uma vez (${first.detail}); a 2ª rodada não conseguiu dizer (${second.detail})`, "a 2ª rodada não conseguiu confirmar");
+                return;
+            }
         }
         probeNote = `${PROBE_LABEL[result.verdict]} (${result.detail})`;
-        save("hwH264Probe", { at: Date.now(), env: { ...env }, verdict: result.verdict, detail: result.detail }, "o resultado da sonda do H.264");
+        // "inconclusiva" nunca fica salva: a sonda roda de novo na proxima abertura (um travamento de outro ambiente
+        // continua valendo ate ela dizer "ok")
+        if (result.verdict !== "unknown") save("hwH264Probe", { at: Date.now(), env: { ...env }, verdict: result.verdict, detail: result.detail }, "o resultado da sonda do H.264");
         if (result.verdict === "broken") {
             // antes de soltar a trava (finally): nenhum envio H.264 da placa comeca no meio
             setH264HwStuck(true);
@@ -452,7 +473,7 @@ export function forgetStuckEncoder(): RetryOutcome {
         setH264HwStuck(false);
     }
     log.info("Você pediu para tentar o H.264 da placa de vídeo de novo: " + {
-        testing: "testando a placa agora (sonda WebCodecs); o H.264 só volta se ela responder",
+        testing: "testando a placa agora (sonda WebCodecs); o H.264 só volta se ela não travar no teste",
         restart: "a placa é testada de novo quando o Discord reiniciar",
         now: "vale a partir da próxima pessoa que assistir"
     }[outcome]);

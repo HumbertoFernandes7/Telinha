@@ -21,7 +21,7 @@ import type { FakeRoom } from "@test/fakes/trystero";
 import { videoReceiverStats } from "@test/fakes/webrtc";
 import { addStreamer, closeRoom, incomingStream, logMark, openRoom, receiveOn, viewerOf } from "@test/helpers/wpc-viewing";
 
-import { onPeerStream, onWatchReply, sampleStats, stuckText, watch } from "./viewing";
+import { onPeerGone, onPeerStream, onWatchReply, sampleStats, stuckText, watch } from "./viewing";
 
 const STUCK = "A placa de vídeo de amigo travou; ele precisa reiniciar o Discord.";
 
@@ -108,6 +108,23 @@ test("assistir enquanto a placa dele continua travada: a resposta e o { op: \"st
     assert.equal(v?.status, "error");
     assert.equal(v?.error, STUCK);
     assert.equal(v?.stream, null);
+});
+
+test("a conexao com ele cai depois do aviso (ele recusa renegociar a conexao travada): continua a frase da placa, nao \"saiu da call\"", async () => {
+    addStreamer(room, "peerA");
+    watch("peerA");
+    stuck();
+    onPeerGone("peerA");
+    let v = await viewerOf("peerA");
+    assert.equal(v?.status, "error");
+    assert.equal(v?.error, STUCK);
+
+    // sem o aviso antes: "saiu da call", como sempre
+    addStreamer(room, "peerB");
+    watch("peerB");
+    onPeerGone("peerB");
+    v = await viewerOf("peerB");
+    assert.equal(v?.status, "ended");
 });
 
 test("com a imagem chegando, o aviso e ignorado; sem sessao para esse peer, tambem", async t => {
