@@ -37,11 +37,12 @@ import { isIdentityConfigured } from "./identity/config";
 import { type ApprovalInput, identityRequiresApproval } from "./identity/policy";
 import { errorText, log, logThrottled, notePrivateTitle } from "./log";
 import { getNative } from "./nativeApi";
-import type { SendPlan } from "./peerConnection";
+import { containPeerConnection, isContained, type SendPlan } from "./peerConnection";
 import { me, sendPresence } from "./presence";
 import { CaptureMonitor } from "./quality/captureMonitor";
 import { QualityController } from "./quality/controller";
 import { encodingFor, LEVELS, levelText, scaledSize } from "./quality/levels";
+import { noteStreamStarting, noteStuckEncoder, STUCK_NOTICE, STUCK_NOTICE_PINNED } from "./stuckEncoder";
 
 export interface QualityProfile {
     width: number;
@@ -85,6 +86,11 @@ interface ViewerSend {
     codecRequested?: boolean;
     /** a captura vista nas estatisticas deste envio (tick → noteCapture): o contador e quando ele andou por ultimo */
     capture?: { frames: number; movedAt: number | null; };
+    /**
+     * a placa de video travou neste envio (checkStall: nada do video saiu): contido (containStuck). Nada mais mexe no
+     * sender, no transceiver nem na conexao dele, e `decision` nunca muda
+     */
+    stuck?: boolean;
 }
 
 /** Janela da checagem do H.264 que nao sai (checkStall). Contadores de quadros da captura (capturedFrames). */
@@ -229,6 +235,8 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
     const wantAudio = !!opts.withAudio && kind === "window";
     const wantScreenAudio = !!opts.withAudio && kind === "screen";
     starting = true;
+    // a sonda WebCodecs do H.264 da placa (stuckEncoder.ts) nao comeca no meio de uma partida
+    noteStreamStarting(true);
 
     try {
         const native = getNative();
@@ -331,6 +339,7 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
         throw e instanceof Error ? e : new Error(msg);
     } finally {
         starting = false;
+        noteStreamStarting(false);
     }
 }
 
@@ -408,18 +417,40 @@ export function onAutoQualitySettingChanged() {
     if (rt.local) qualityOf(rt.local)?.settingChanged();
 }
 
-/** Remove o stream de todos os espectadores e para a captura (sem mexer na presenca). */
+/**
+ * Remove o stream de todos os espectadores e para a captura (sem mexer na presenca).
+ *
+ * Envio travado na placa de video (containStuck): fica de fora do removeStream (o removeTrack dele termina numa
+ * renegociacao que destroi o envio e trava o Discord). As faixas da captura param do mesmo jeito (track.stop()), tambem
+ * a de video que alimenta o encoder travado. Por que isso nao chega na desmontagem do encoder:
+ * - no libwebrtc, o VideoRtpSender so reage a faixa quando muda o contentHint (VideoRtpSender::OnChanged); a faixa que
+ *   termina so muda o estado dela para "ended" e para de entregar quadros. Nada chama SetSend, SetCodec nem
+ *   RecreateWebRtcStream, e o encoder so e liberado quando o envio e destruido;
+ * - nos logs de 31/10 (01:43 e 01:55), o removeTrack sincrono ja tinha soltado a faixa do encoder (SetVideoSend com
+ *   fonte nula) e o Discord seguiu vivo: a presenca enviada depois chegou. O que travou veio depois, na renegociacao que
+ *   destroi o envio. Parar a faixa e o mesmo efeito para o encoder (para de chegar quadro), sem renegociar;
+ * - sem quadros, o encoder travado tambem nao recebe mais Encode(), entao o fallback para software do WebRTC (que
+ *   liberaria o encoder da placa) nunca e disparado por um erro de Encode.
+ * track.enabled = false NAO e usado: a faixa desligada manda quadros pretos, que podem vir em outro tamanho e
+ * reconfigurar o encoder (InitEncode → Flush num encoder que nao solta nada). Deixar a captura rodando ate o Discord
+ * reiniciar tambem seria seguro, mas a janela continuaria sendo capturada e alimentando o encoder travado.
+ */
 function stopCapture(local: LocalCapture, reason: string) {
     stopExtras(local);
     const viewers = [...local.viewers];
     local.viewers.clear();
     for (const v of viewers) sends.delete(v);
-    if (rt.room && viewers.length) {
+    const healthy = viewers.filter(v => !contained(v));
+    if (rt.room && healthy.length) {
         try {
-            rt.room.removeStream(local.stream, { target: viewers });
+            rt.room.removeStream(local.stream, { target: healthy });
         } catch (e) {
             log.warn("Falha ao remover o stream dos espectadores: " + errorText(e));
         }
+    }
+    if (healthy.length < viewers.length) {
+        log.warn(`Envio travado pela placa de vídeo deixado como está para ${viewers.filter(v => !healthy.includes(v)).map(peerLabel).join(", ")} `
+            + "(desmontar travaria o Discord): só a captura para");
     }
     local.stream.getTracks().forEach(t => t.stop());
     // a senha vale so para esta captura (trocando de fonte, a nova ja recebeu uma copia)
@@ -829,8 +860,30 @@ export async function connectionInfo(peerId: PeerId): Promise<string | null> {
 
 // #endregion
 
+/**
+ * A conexao com esse peer tem um envio travado na placa de video (containStuck → peerConnection.ts): nada nela pode ser
+ * desmontado (removeStream, setParameters, troca de codec) nem receber faixa nova (addStream renegocia).
+ */
+function contained(peerId: PeerId): boolean {
+    return isContained(getPc(peerId));
+}
+
+/**
+ * Para de mandar o AUDIO de um envio travado sem desmontar nada (o espectador saiu, foi expulso ou recusado): so
+ * replaceTrack(null) nos senders de audio dessa conexao, que e assincrono e so mexe no envio de audio. O de video fica
+ * como esta (ele ja nao manda nada).
+ */
+function silenceStuck(peerId: PeerId, local: LocalCapture) {
+    const audio = local.stream.getAudioTracks();
+    if (!audio.length) return;
+    for (const s of getPc(peerId)?.getSenders() ?? []) {
+        if (s.track && audio.includes(s.track)) s.replaceTrack(null).catch(e => log.warn(`Falha ao cortar o áudio para ${peerLabel(peerId)}: ${errorText(e)}`));
+    }
+}
+
 /** Tira o stream de um peer cujo addStream terminou depois de ele ter deixado de ser espectador. */
 function retract(room: Room, local: LocalCapture, peerId: PeerId) {
+    if (contained(peerId)) return;
     try {
         room.removeStream(local.stream, { target: peerId });
     } catch (e) {
@@ -855,6 +908,13 @@ function sendTo(peerId: PeerId) {
         return;
     }
     if (local.viewers.has(peerId)) return;
+    if (contained(peerId)) {
+        // a faixa nova renegociaria a conexao do envio travado (e com o plano congelado dela, em H.264 de novo)
+        logThrottled(`watch-stuck:${peerId}`, "warn", `${peerLabel(peerId)} pediu para assistir, mas a placa de vídeo travou no envio para ele nesta sessão: `
+            + "nada vai para ele até um de vocês reiniciar o Discord", 60_000);
+        reply(peerId, { op: "stuck" });
+        return;
+    }
 
     const decision = chooseCodec(entry.presence?.caps, settings.store.codec as CodecSetting, getLocalCaps());
     const send: ViewerSend = { decision };
@@ -899,10 +959,15 @@ function removeFrom(peerId: PeerId, reason: string) {
     sends.delete(peerId);
     if (!local?.viewers.delete(peerId)) return;
     qualityOf(local)?.removeViewer(peerId);
-    try {
-        rt.room?.removeStream(local.stream, { target: peerId });
-    } catch (e) {
-        log.warn("Falha ao remover o stream: " + errorText(e));
+    if (contained(peerId)) {
+        // envio travado: o removeStream travaria o Discord; so o audio para
+        silenceStuck(peerId, local);
+    } else {
+        try {
+            rt.room?.removeStream(local.stream, { target: peerId });
+        } catch (e) {
+            log.warn("Falha ao remover o stream: " + errorText(e));
+        }
     }
     log.info(`${peerLabel(peerId)} deixou de receber a transmissão (${reason})`);
     publish();
@@ -920,6 +985,8 @@ function videoSender(peerId: PeerId, local: LocalCapture): RTCRtpSender | null {
  * Devolve false se nao aplicou (a qualidade automatica tenta de novo na proxima avaliacao).
  */
 async function applySenderParams(peerId: PeerId, local: LocalCapture, level: QualityLevel): Promise<boolean> {
+    // envio travado: um setParameters pode reconfigurar o encoder travado (e o getParameters bloqueia se ele ja travou tudo)
+    if (sends.get(peerId)?.stuck || contained(peerId)) return false;
     const sender = videoSender(peerId, local);
     if (!sender) {
         logThrottled(`no-sender:${peerId}`, "warn", `Sem RTCRtpSender de vídeo para ${peerLabel(peerId)}; parâmetros de envio não aplicados`);
@@ -1033,8 +1100,9 @@ function checkEncoder(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc
 }
 
 /**
- * O H.264 deste envio falhou de verdade (checkEncoder: software num tamanho que a placa aceita; checkStall: nada do video
- * sai): conta a queda na sessao do Discord (noteH264Fallback: na 2a, o H.264 automatico desliga para os proximos)
+ * O H.264 deste envio caiu para software de verdade (checkEncoder: OpenH264 num tamanho que a placa aceita; o encoder
+ * que esta no ar e o OpenH264, saudavel, entao trocar o codec e seguro): conta a queda na sessao do Discord
+ * (noteH264Fallback: na 2a, o H.264 automatico desliga para os proximos)
  * e passa so ESTE espectador para `next` (o que chooseCodec escolhe sem a placa: VP9), sem reconectar. Com o codec fixado
  * em H.264 (`next` tambem H.264), so loga. Uma vez por espectador (send.fellBack). `why`: a frase do problema, sem ponto.
  */
@@ -1103,8 +1171,9 @@ function videoLeaving(encoded: number, sent: SentCounters) {
  *
  * Com a conexao no ar ("connected": antes disso o WebRTC segura os quadros antes do encoder, com banda zero) e a captura
  * entregando quadros (capturedFrames subindo; parada por SOURCE_IDLE_MS, a janela recomeca: janela minimizada nao e o
- * encoder), H264_STALL_MS com pelo menos STALL_MIN_SOURCE_FRAMES quadros da captura sem nada do video sair = o H.264 nao
- * sai: fallBack (VP9 so para este espectador, conta como queda; fixado em H.264, so loga). "Nada sair" = framesEncoded
+ * encoder), H264_STALL_MS com pelo menos STALL_MIN_SOURCE_FRAMES quadros da captura sem nada do video sair = a placa de
+ * video travou: containStuck (desde a v0.2.9 NUNCA troca o codec de um encoder da placa, ou nao informado; ver la). Com o
+ * OpenH264 no ar (software), continua a troca so para esse espectador (fallBack), que e segura. "Nada sair" = framesEncoded
  * ainda 0, ou o bytesSent (sem ele, o framesSent) parado a janela toda: qualquer quadro que sai, ate o de uma tela preta
  * parada, faz o bytesSent andar, e cada vez que ele anda a janela recomeca. O framesSent sozinho nao basta porque o
  * libwebrtc o conta na hora de codificar. Um encoder lento que solta o 1o quadro antes de 8 s, ou uma tela parada com
@@ -1114,7 +1183,7 @@ function videoLeaving(encoded: number, sent: SentCounters) {
  * decodifica e o espectador, ele pede VP9 (viewing.ts → askForVp9; aqui, onCodecRequest).
  */
 function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: EncoderReport, frames: number | null, sent: SentCounters) {
-    if (send.fellBack || send.sending || !/^video\/h264$/i.test(enc.mimeType)) return;
+    if (send.stuck || send.fellBack || send.sending || !/^video\/h264$/i.test(enc.mimeType)) return;
     const encoded = enc.framesEncoded ?? 0;
     if (videoLeaving(encoded, sent)) {
         send.sending = true;
@@ -1158,8 +1227,44 @@ function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: 
     if (sent.bytes != null) counts.push(`${(sent.bytes / 1000).toFixed(1).replace(".", ",")} kB enviados`);
     counts.push(enc.implementation ? `encoder ${enc.implementation}` : "encoder não informado pelo Chromium");
     counts.push(enc.width && enc.height ? `${enc.width}x${enc.height}` : "tamanho desconhecido");
-    const next = chooseCodec(rt.peers.get(peerId)?.presence?.caps, settings.store.codec as CodecSetting, { ...getLocalCaps(), h264HwEncode: false });
-    fallBack(peerId, local, send, next, `${what}, com a conexão no ar e a captura entregando quadros (${counts.join(", ")})`);
+    const why = `${what}, com a conexão no ar e a captura entregando quadros (${counts.join(", ")})`;
+    // o encoder no ar e o OpenH264 (software): nao e a placa, e trocar o codec de um encoder de software e seguro (como a
+    // queda do checkEncoder). So o da placa, ou um encoder que o Chromium nao informa, fica contido e marca a placa.
+    if (enc.powerEfficient === false || /openh264/i.test(enc.implementation ?? "")) {
+        fallBack(peerId, local, send, chooseCodec(rt.peers.get(peerId)?.presence?.caps, settings.store.codec as CodecSetting, { ...getLocalCaps(), h264HwEncode: false }), why);
+        return;
+    }
+    containStuck(peerId, local, send, why);
+}
+
+/**
+ * A placa de video travou neste envio (checkStall: o video nunca saiu do PC). Ate a v0.2.8 o envio trocava para VP9 aqui
+ * (setParameters com o codec): o Chromium destroi o envio para trocar o codec e espera o encoder travado para sempre na
+ * thread WebRTC_W_and_N, que todas as conexoes do Discord usam (as conexoes caem ~10 s depois e a proxima chamada
+ * sincrona, como o removeTrack do "Parar transmissão", congela o Discord). Parado, o envio travado nao atrapalha (log das
+ * 02:54: 1,5 min com o audio normal). Por isso, para este envio, ate o Discord reiniciar:
+ * - nada troca o codec (send.decision fica como esta: sendPlanFor e as renegociacoes continuam em H.264), nem
+ *   setParameters/getParameters (a qualidade automatica deixa de cuidar dele), nem removeStream (parar de transmitir,
+ *   parar de assistir, expulsar, recusar, sair do canal, trocar de fonte, a sala fechar, o plugin parar);
+ * - a conexao fica contida (peerConnection.ts → containPeerConnection): close/removeTrack do Trystero viram nada e uma
+ *   renegociacao pedida pelo outro lado usa o plano congelado;
+ * - o H.264 automatico desliga agora para o resto da sessao e o PC lembra (stuckEncoder.ts → noteStuckEncoder);
+ * - quem transmite ve o aviso na barra (STUCK_NOTICE) e quem assiste recebe { op: "stuck" } (protocol.ts, passo 10).
+ * Codec fixado em H.264: tambem (o perigo e o mesmo), so o aviso muda. `why`: a frase do problema, sem ponto.
+ */
+function containStuck(peerId: PeerId, local: LocalCapture, send: ViewerSend, why: string) {
+    const label = peerLabel(peerId);
+    send.stuck = true;
+    send.stall = undefined;
+    const pc = getPc(peerId);
+    if (pc) containPeerConnection(pc, [send, videoSender(peerId, local), local.stream]);
+    qualityOf(local)?.removeViewer(peerId);
+    const pinned = settings.store.codec === "h264";
+    noteStuckEncoder();
+    log.warn(`${why}: a placa de vídeo travou com H.264. O envio para ${label} fica como está até o Discord reiniciar (trocar o codec, `
+        + "parar ou fechar a conexão travaria o Discord inteiro). O H.264 automático fica desligado neste PC até o driver, o Chromium ou a placa mudarem.");
+    setLastError(pinned ? STUCK_NOTICE_PINNED : STUCK_NOTICE);
+    reply(peerId, { op: "stuck" });
 }
 
 /**
@@ -1167,9 +1272,11 @@ function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: 
  * escolhido entre os codecs ja negociados com ele (a negociacao sempre leva todos; so a ordem muda). Conferido num
  * loopback no Chromium 152: H.264 → VP9 na hora, o receiver continua decodificando a mesma faixa e o codec fica nos
  * setParameters seguintes (qualidade automatica). Se o Chromium recusar (ex.: colidiu com um setParameters da
- * qualidade automatica), tenta mais uma vez; falhando de novo, so avisa.
+ * qualidade automatica), tenta mais uma vez; falhando de novo, so avisa. So para um encoder saudavel (o video ja sai, ou
+ * o OpenH264): nunca num envio travado (containStuck).
  */
 async function switchSendCodec(peerId: PeerId, local: LocalCapture, send: ViewerSend, next: CodecDecision) {
+    if (send.stuck || contained(peerId)) return;
     const label = peerLabel(peerId);
     const name = next.codec.toUpperCase();
     // renegociacoes futuras (sendPlanFor) ja vao com o codec novo
@@ -1178,7 +1285,11 @@ async function switchSendCodec(peerId: PeerId, local: LocalCapture, send: Viewer
     for (let attempt = 0; attempt < 2; attempt++) {
         if (attempt) await new Promise(resolve => setTimeout(resolve, 500));
         const sender = videoSender(peerId, local);
-        if (sends.get(peerId) !== send || !sender) return;
+        if (sends.get(peerId) !== send || !sender) {
+            if (sends.get(peerId) === send) log.warn(`Não deu para trocar ${label} para ${name}: o envio de vídeo para ele sumiu`);
+            return;
+        }
+        if (send.stuck) return;
         try {
             const params = sender.getParameters();
             const codec = pickNegotiatedCodec(params.codecs ?? [], next);
@@ -1212,6 +1323,11 @@ async function switchSendCodec(peerId: PeerId, local: LocalCapture, send: Viewer
  * ignorado com uma linha no log (no maximo uma por minuto) e sem marcar, para o proximo pedido dele valer. Codec
  * fixado em H.264: so loga. Um pedido a cada CODEC_REQUEST_MIN_MS por conexao; quem nao esta recebendo a transmissao e
  * ignorado.
+ *
+ * Desde a v0.2.9, so troca um envio cujo video ja sai do PC (send.sending: o encoder e saudavel e quem nao decodifica e
+ * ele; trocar um encoder que funciona nunca travou nada nos logs). Envio travado (containStuck) ou cujo video ainda nao
+ * saiu: ignorado com uma linha no log (no maximo uma por minuto), sem marcar. Um encoder que nao soltou nada pode ser o
+ * da placa travada, e trocar o codec dele trava o Discord; se o video nao sair, o checkStall pega e contem.
  */
 export function onCodecRequest(peerId: PeerId, request: CodecRequestMessage) {
     const now = performance.now();
@@ -1228,6 +1344,17 @@ export function onCodecRequest(peerId: PeerId, request: CodecRequestMessage) {
     }
     // ja atendido, ou o envio ja nao e H.264 (ex.: trocou para VP9 por uma queda do encoder)
     if (send.codecRequested || send.decision.codec !== "h264") return;
+    if (send.stuck) {
+        logThrottled(`codec-request-stuck:${peerId}`, "info", `Pedido de ${wanted} de ${label} ignorado: a placa de vídeo travou no envio para ele `
+            + "e trocar o codec agora travaria o Discord", 60_000);
+        reply(peerId, { op: "stuck" });
+        return;
+    }
+    if (!send.sending) {
+        logThrottled(`codec-request-unsent:${peerId}`, "info", `Pedido de ${wanted} de ${label} ignorado: o vídeo para ele ainda não saiu deste PC, `
+            + "e trocar o codec de um encoder que não soltou nada pode travar o Discord (se o vídeo não sair, o Telinha avisa)", 60_000);
+        return;
+    }
     // captura parada (ex.: janela minimizada desde o comeco) ou sem contador: quem assiste fica sem quadro por causa dela,
     // nao do H.264, e o VP9 so pesaria a CPU. Nao marca codecRequested: quem assiste repete o pedido a cada ~10 s sem
     // quadro (viewing.ts → askForVp9) e o proximo, com a captura no ar, e atendido. Se o H.264 nao sair quando a captura
@@ -1328,7 +1455,8 @@ export function tick() {
         const send = sends.get(peerId);
         // depois de logar o codec real, so o envio que esta de fato em H.264 continua sendo conferido (o Chromium pode
         // trocar o encoder da placa de video pelo OpenH264 no meio, ex.: quando o WebRTC reduz a resolucao; ver checkEncoder)
-        if (!send || (send.reportedCodec && (!/^video\/h264$/i.test(send.reportedCodec) || send.fellBack))) continue;
+        // envio travado (containStuck): nao e mais lido nem conferido
+        if (!send || send.stuck || (send.reportedCodec && (!/^video\/h264$/i.test(send.reportedCodec) || send.fellBack))) continue;
         const sender = videoSender(peerId, local);
         if (!sender) continue;
         sender.getStats().then(report => {

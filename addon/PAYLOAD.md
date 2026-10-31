@@ -246,7 +246,7 @@ installer's Repair/Install replaced our stub with its own (kind `vencord-stub` a
 
 | Situation | Result |
 |---|---|
-| normal | Vencord + Telinha. `main.log`: `boot`, `loaded {"version":…,"commit":…,"rendererHooked":true,"ipcMapHooked":true,"natives":11,…,"errors":0}`, then `CSP: added 8 sources (chained)` and `renderer served {"metaPatched":true,…}` |
+| normal | Vencord + Telinha. `main.log`: `boot`, `loaded {"version":…,"commit":…,"rendererHooked":true,"ipcMapHooked":true,"natives":12,…,"errors":0}`, then `CSP: added 8 sources (chained)` and `renderer served {"metaPatched":true,…}` |
 | `%APPDATA%\Telinha\addon\` missing | stub requires Vencord directly: plain Vencord |
 | `main.js` throws while loading | stub logs `[Telinha] loader failed` to stderr and requires Vencord: plain Vencord |
 | `addon.json` broken / unreadable | logged; no hooks installed; plain Vencord |

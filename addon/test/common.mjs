@@ -25,8 +25,8 @@ export const argValue = name => (process.argv.includes(name) ? resolve(process.a
 
 /** The natives the plugin's native.ts exports (sorted): what the loader registers and VencordNative.pluginHelpers.Telinha shows. */
 export const PLUGIN_NATIVES = [
-    "appendDiagLog", "clearDiagLog", "finishDisplayMedia", "listSources", "prepareDisplayMedia", "readDiagLog", "readScreenAudio", "resetDisplayMedia",
-    "screenAudioStatus", "startScreenAudio", "stopScreenAudio"
+    "appendDiagLog", "clearDiagLog", "finishDisplayMedia", "gpuEnvironment", "listSources", "prepareDisplayMedia", "readDiagLog", "readScreenAudio",
+    "resetDisplayMedia", "screenAudioStatus", "startScreenAudio", "stopScreenAudio"
 ];
 
 export function pickVencordDist() {

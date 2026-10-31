@@ -17,6 +17,23 @@
 //   e corta a rampa inicial de bitrate (~12 s de 320x180 ate 720p no spike).
 //
 // Se o SDP ajustado for recusado, aplica o original (nunca derruba a conexao por causa do ajuste).
+//
+// Conexao contida (containPeerConnection, Telinha 0.2.9): um envio de video dela travou na placa de video
+// (streaming.ts → containStuck; core/stuckEncoder.ts). Desmontar esse envio faz o Chromium destruir o VideoSendStream
+// na thread WebRTC_W_and_N, que todas as conexoes do Discord usam, e esperar o encoder travado para sempre: todas as
+// conexoes caem e a proxima chamada sincrona congela o Discord. Por isso, ate o Discord reiniciar:
+// - close() nao fecha (o Trystero fecha a conexao quando o outro lado sai da sala, quando a nossa sala fecha e quando o
+//   data channel cai; e a unica forma de segurar isso sem mexer no Trystero: ele so ve esta classe). O data channel o
+//   proprio Trystero fecha antes, entao o outro lado ve a saida normal; a conexao fica aberta, sem ninguem, ate o ICE cair
+//   sozinho, e guardada aqui (nao vira lixo coletado);
+// - removeTrack() nao tira nada (o removeStream do Trystero, inclusive o da sala que fecha, terminaria em renegociacao);
+// - nenhuma renegociacao chega ao Chromium: setRemoteDescription e setLocalDescription (fora o "rollback") sao recusados.
+//   Uma oferta do outro lado (ele comeca ou para de transmitir para nos nesta conexao, ou reinicia o ICE) rodaria SRD/SLD,
+//   e o libwebrtc recria o envio de video se as extensoes de cabecalho, o mid ou o extmap-allow-mixed mudarem: e o mesmo
+//   travamento. O signal() do Trystero pega a recusa e a manda para o handler de erro (a conexao sai da sala; uma nova,
+//   em VP9, pode ser criada depois).
+// Limite: o resto do Chromium nao passa por aqui. Recarregar a pagina (Ctrl+R) fecha a conexao por dentro e trava; por
+// isso o aviso pede para fechar o Discord por completo.
 
 import { applyCodecPreferences } from "./codec";
 import { errorText, log, logThrottled } from "./log";
@@ -43,8 +60,38 @@ let PeerConnectionClass: typeof RTCPeerConnection | null = null;
 const appliedPrefs = new WeakMap<RTCRtpTransceiver, string>();
 const loggedMunge = new WeakMap<RTCPeerConnection, string>();
 
+/**
+ * Conexoes contidas (ver o topo) → objetos ligados ao envio travado (sender, stream...), guardados com a conexao.
+ * Referencia forte de proposito: nunca sai daqui.
+ */
+const contained = new Map<RTCPeerConnection, unknown[]>();
+
 export function setPcHooks(next: PcHooks | null) {
     hooks = next;
+}
+
+/**
+ * Contem esta conexao (um envio de video dela travou na placa de video): close/removeTrack viram nada e nenhuma
+ * renegociacao passa. `keep`: objetos a guardar junto. Para sempre (ate o Discord reiniciar).
+ */
+export function containPeerConnection(pc: RTCPeerConnection, keep: unknown[] = []) {
+    contained.set(pc, [...(contained.get(pc) ?? []), ...keep]);
+}
+
+export function isContained(pc: RTCPeerConnection | null | undefined): boolean {
+    return !!pc && contained.has(pc);
+}
+
+/** Quantas conexoes estao contidas nesta sessao do Discord (diagnostico). */
+export function containedCount(): number {
+    return contained.size;
+}
+
+/** Recusa uma negociacao numa conexao contida (ver o topo), com um aviso no log. */
+function refuseNegotiation(what: string): Promise<void> {
+    logThrottled("pc-negotiation-contained", "warn", `${what} recusado na conexão com o envio travado pela placa de vídeo `
+        + "(renegociar recriaria o envio e travaria o Discord): essa conexão sai da sala", 60_000);
+    return Promise.reject(new DOMException(`Telinha: ${what} recusado (envio travado pela placa de vídeo)`, "InvalidStateError"));
 }
 
 function sendingTransceivers(pc: RTCPeerConnection, kind: "audio" | "video") {
@@ -89,6 +136,8 @@ function mungeRemoteDescription(pc: RTCPeerConnection, description: RTCSessionDe
 export function getPeerConnectionClass(): typeof RTCPeerConnection {
     return PeerConnectionClass ??= class TelinhaPeerConnection extends RTCPeerConnection {
         override setLocalDescription(description?: RTCLocalSessionDescriptionInit): Promise<void> {
+            // contida: so o rollback passa (desfaz uma oferta nossa pendente sem tocar no envio)
+            if (contained.has(this) && description?.type !== "rollback") return refuseNegotiation("setLocalDescription");
             if (!description || (description.type !== "rollback" && !description.sdp)) {
                 try {
                     prepareLocalDescription(this);
@@ -100,6 +149,7 @@ export function getPeerConnectionClass(): typeof RTCPeerConnection {
         }
 
         override setRemoteDescription(description: RTCSessionDescriptionInit): Promise<void> {
+            if (contained.has(this)) return refuseNegotiation("setRemoteDescription");
             let munged = description;
             try {
                 munged = mungeRemoteDescription(this, description);
@@ -111,6 +161,26 @@ export function getPeerConnectionClass(): typeof RTCPeerConnection {
                 log.warn("O Chromium recusou o SDP ajustado; aplicando o original: " + errorText(e));
                 return super.setRemoteDescription(description);
             });
+        }
+
+        /** Contida: nao fecha (fechar desmonta o envio travado e trava o Discord). Ver o topo. */
+        override close(): void {
+            if (contained.has(this)) {
+                logThrottled("pc-close-contained", "warn", "Uma conexão com o envio travado pela placa de vídeo não foi fechada (fechar travaria o Discord): "
+                    + "ela fica aberta, sem uso, até o Discord reiniciar", 60_000);
+                return;
+            }
+            super.close();
+        }
+
+        /** Contida: nao tira a faixa (o removeTrack termina numa renegociacao que desmonta o envio travado). */
+        override removeTrack(sender: RTCRtpSender): void {
+            if (contained.has(this)) {
+                logThrottled("pc-remove-contained", "warn", "Uma faixa da conexão com o envio travado pela placa de vídeo não foi removida "
+                    + "(remover travaria o Discord)", 60_000);
+                return;
+            }
+            super.removeTrack(sender);
         }
     };
 }

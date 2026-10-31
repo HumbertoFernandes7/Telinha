@@ -107,6 +107,12 @@
 //    Compatibilidade: versoes sem a acao (a v0.2.8 e anteriores, o amigo virtual) nunca anunciam caps.diag, entao
 //    nenhuma mensagem "diag" vai para elas; o sanitizePresence delas descarta o campo novo. Mensagem, linha ou campo
 //    malformado e ignorado (parseDiagMessage).
+// 10. Placa de video travada (v0.2.9, adicionado sem mudar PROTOCOL_VERSION): na acao "watch", transmissor →
+//    espectador, { op: "stuck" }: a placa de video de quem transmite travou no envio para esse espectador (o encoder
+//    H.264 nao solta nada; core/streaming.ts → containStuck) e nada vai chegar ate o transmissor reiniciar o Discord.
+//    Tambem e a resposta a um "start" ou a um pedido de codec enquanto isso durar. O espectador para de esperar e mostra
+//    "A placa de vídeo de X travou; ele precisa reiniciar o Discord." em vez do aviso generico de 45 s.
+//    Compatibilidade: versoes antigas ignoram o op desconhecido (parseWatchReply devolve null) e caem no aviso de 45 s.
 // ============================================================================
 
 /** Versao do protocolo; vai no handshake (`v`) e na presenca (`v`). */
@@ -227,7 +233,8 @@ export type WatchDeniedReason = "kicked" | "declined" | "timeout" | "duplicate" 
 export type WatchReplyMessage =
     | { op: "pending"; }
     | { op: "denied"; reason: WatchDeniedReason; }
-    | { op: "password"; nonce: string; attemptsLeft?: number; wrong?: boolean; };
+    | { op: "password"; nonce: string; attemptsLeft?: number; wrong?: boolean; }
+    | { op: "stuck"; };
 
 /** Tudo o que trafega na acao "watch". */
 export type WatchActionMessage = WatchMessage | WatchReplyMessage;
@@ -388,6 +395,7 @@ const DENIED_REASONS: readonly WatchDeniedReason[] = ["kicked", "declined", "tim
 export function parseWatchReply(data: unknown): WatchReplyMessage | null {
     if (!isObject(data)) return null;
     if (data.op === "pending") return { op: "pending" };
+    if (data.op === "stuck") return { op: "stuck" };
     if (data.op === "password") {
         if (typeof data.nonce !== "string" || !PASSWORD_NONCE_RE.test(data.nonce)) return null;
         const left = data.attemptsLeft;

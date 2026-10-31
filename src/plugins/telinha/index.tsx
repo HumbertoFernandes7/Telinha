@@ -16,6 +16,7 @@ import { startSession, stopSession } from "./actions";
 import { setDiagnosticsSource } from "./core/diagShare";
 import { localIdentityDiagnostics } from "./core/identity";
 import { peerIdentityDiagnostics } from "./core/session";
+import { stuckEncoderDiagnostics } from "./core/stuckEncoder";
 import { refreshUpdateLog, refreshUpdateStatus, startUpdateChecks, stopUpdateChecks, updateDiagnostics } from "./core/update";
 import { migrateAccessSettings, settings } from "./settings";
 import { formatDiagnostics } from "./store";
@@ -27,6 +28,7 @@ import { panelJsx, voiceUserIconsJsx } from "./ui/jsxShims";
 import { renderToolboxActions, userContextMenuPatch } from "./ui/menus";
 import { startNotices, stopNotices } from "./ui/notices";
 import { startSounds, stopSounds } from "./ui/sounds";
+import { StuckEncoderSection } from "./ui/StuckEncoderSection";
 import { startUpdateNotices, stopUpdateNotices } from "./ui/updateNotice";
 import { UpdateSection } from "./ui/UpdateSection";
 import { closeAllViewers } from "./ui/viewerWindows";
@@ -47,7 +49,7 @@ function identityDiagnostics(): string {
  */
 const diagnostics = {
     refresh: () => Promise.all([refreshUpdateStatus(), refreshUpdateLog()]).catch(() => null),
-    format: () => `${formatDiagnostics()}\n${updateDiagnostics()}\n${identityDiagnostics()}\n\n${formatVoiceTagDiagnostics()}`
+    format: () => `${formatDiagnostics()}\n${updateDiagnostics()}\n${identityDiagnostics()}\n${stuckEncoderDiagnostics()}\n\n${formatVoiceTagDiagnostics()}`
 };
 
 function copyDiagnostics() {
@@ -71,6 +73,7 @@ function SettingsAbout() {
             <Button size="small" variant="secondary" onClick={copyDiagnostics}>
                 Copiar diagnóstico
             </Button>
+            <StuckEncoderSection />
             <DiagShareSection />
             <IdentitySection />
             <UpdateSection />
