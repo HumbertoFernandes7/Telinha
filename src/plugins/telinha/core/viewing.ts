@@ -6,11 +6,14 @@
 
 // Assistir: pede o stream ao transmissor, recebe no onPeerStream, detecta o primeiro quadro
 // decodificado pelas estatisticas do receiver e publica estatisticas basicas a cada 2 s.
+// "Colchão contra engasgos" (settings.jitterCushion → applyCushion): o jitter buffer dos receivers de video e de audio do
+// stream mira um atraso fixo (jitterBufferTarget), para um soluco da internet ser absorvido em vez de virar engasgo.
 // Transmissao com senha (protocol.ts, passo 7): o transmissor responde { op: "password", nonce }; a UI mostra o
 // campo de senha (ViewerSession.passwordPrompt) e submitPassword manda so a prova HMAC. A senha aceita fica
 // lembrada para ESTA transmissao desse peer (assistir de novo nao pergunta outra vez) e e esquecida quando ela acaba.
 
 import { type PresenceMessage, STREAM_KIND_SCREEN, type WatchMessage, type WatchReplyMessage } from "@plugins/telinha/protocol";
+import { settings } from "@plugins/telinha/settings";
 import type { PeerId, ViewDeniedReason } from "@plugins/telinha/types";
 import type { JsonValue } from "trystero";
 
@@ -19,6 +22,7 @@ import { getPc, peerLabel, publish, rt, type ViewerEntry } from "./context";
 import { errorText, log, logThrottled } from "./log";
 import { me } from "./presence";
 import { emptyReceiverCounters, guardStatsLog, readAudioInbound, readVideoInbound, ReceiverLog, type ReceiverSample } from "./statsLog";
+import { pairTeredo, selectedPair } from "./teredo";
 
 const RESPONSE_TIMEOUT_MS = 20_000;
 /** o transmissor pediu para esperar a aprovacao dele (60 s do lado dele + folga de rede) */
@@ -288,6 +292,65 @@ export function clearAll() {
 
 // #region recepcao
 
+// #region colchao contra engasgos
+
+/** Padrao do "Colchão contra engasgos" (ms) e o maior que o Chromium aceita no jitterBufferTarget. */
+export const DEFAULT_CUSHION_MS = 200;
+const MAX_CUSHION_MS = 4000;
+
+/** O colchao escolhido (ms); null = "Desligado" (o Chromium decide o atraso, como antes da 0.2.10). */
+export function cushionMs(): number | null {
+    const v = Number(settings.store.jitterCushion);
+    // nunca salvo ou estragado: o padrao
+    if (!Number.isFinite(v)) return DEFAULT_CUSHION_MS;
+    return v > 0 ? Math.min(v, MAX_CUSHION_MS) : null;
+}
+
+/** Ultimo colchao logado por stream (uma linha quando aplica ou muda). */
+const cushionLogged = new WeakMap<MediaStream, number | null>();
+
+/**
+ * Aplica o colchao nos receivers de video E de audio do stream assistido (jitterBufferTarget em ms; o mesmo nos dois para
+ * a imagem e o som continuarem juntos). Chamado quando o stream chega, a cada leitura de sampleStats (depois de uma
+ * renegociacao o receiver pode ser outro, sem o valor) e quando a opcao muda. Receiver sem jitterBufferTarget (Chromium
+ * antigo) ou que recusa o valor: fica como esta, com uma linha no log.
+ */
+function applyCushion(v: ViewerEntry) {
+    const { stream } = v;
+    const pc = getPc(v.peerId);
+    const tracks = stream?.getTracks() ?? [];
+    if (!stream || !pc || !tracks.length) return;
+    const target = cushionMs();
+    let applied = false;
+    for (const r of pc.getReceivers()) {
+        if (!tracks.includes(r.track)) continue;
+        if (!("jitterBufferTarget" in r)) {
+            logThrottled(`cushion-missing:${v.peerId}`, "info", `Assistir ${peerLabel(v.peerId)}: este Discord não tem o colchão contra engasgos (jitterBufferTarget)`, 10 * 60_000);
+            return;
+        }
+        if ((r.jitterBufferTarget ?? null) === target) {
+            applied = true;
+            continue;
+        }
+        try {
+            r.jitterBufferTarget = target;
+            applied = true;
+        } catch (e) {
+            logThrottled(`cushion-refused:${v.peerId}`, "warn", `Assistir ${peerLabel(v.peerId)}: o colchão contra engasgos não foi aplicado no ${r.track.kind === "audio" ? "áudio" : "vídeo"} (${errorText(e)})`, 10 * 60_000);
+        }
+    }
+    if (!applied || cushionLogged.get(stream) === target) return;
+    cushionLogged.set(stream, target);
+    log.info(`Assistir ${peerLabel(v.peerId)}: colchão contra engasgos ${target ? `de ${(target / 1000).toFixed(1).replace(".", ",")} s no vídeo e no áudio` : "desligado"}`);
+}
+
+/** A opcao "Colchão contra engasgos" mudou (settings.ts): vale ja para o que esta sendo assistido. */
+export function onJitterCushionChanged() {
+    for (const v of rt.viewing.values()) applyCushion(v);
+}
+
+// #endregion
+
 function videoReceiver(v: ViewerEntry) {
     const track = v.stream?.getVideoTracks()[0];
     if (!track) return null;
@@ -308,10 +371,12 @@ async function sample(v: ViewerEntry): Promise<InboundSample | null> {
     if (!video) return null;
 
     const out: InboundSample = {
-        at: 0, framesDecoded: 0, width: 0, height: 0, fps: null, bytes: 0, codec: null, decoder: null, powerEfficient: null, log: emptyReceiverCounters()
+        at: 0, framesDecoded: 0, width: 0, height: 0, fps: null, bytes: 0, codec: null, decoder: null, powerEfficient: null, log: emptyReceiverCounters(),
+        cushionMs: video.jitterBufferTarget ?? null
     };
     for (const r of receivers) {
         const report = await r.getStats();
+        if (r === video) out.teredo = pairTeredo(report, selectedPair(report));
         report.forEach((s: any) => {
             if (s.type !== "inbound-rtp") return;
             out.bytes += s.bytesReceived ?? 0;
@@ -397,6 +462,7 @@ function attachStream(v: ViewerEntry, stream: MediaStream) {
     // pedido de VP9 por stream: um stream novo (ex.: ele trocou de janela) volta a H.264 e pode precisar de outro
     v.codecAskSlot = 0;
     log.info(`Assistir ${peerLabel(v.peerId)}: stream recebido em ${Math.round(performance.now() - v.requestedAt)} ms (${stream.getVideoTracks().length} vídeo, ${stream.getAudioTracks().length} áudio)`);
+    applyCushion(v);
 
     // log de estatisticas deste stream: as linhas saem em sampleStats; o resumo, quando o stream sai (fim, parar, recusa...)
     const statsLog = new ReceiverLog(performance.now());
@@ -500,6 +566,7 @@ export function sampleStats() {
     for (const v of rt.viewing.values()) {
         if (!v.stream || (v.status !== "playing" && v.status !== "waiting-first-frame" && v.status !== "error")) continue;
         const { stream } = v;
+        applyCushion(v);
         sample(v).then(s => {
             if (!s || v.stream !== stream || rt.viewing.get(v.peerId) !== v) return;
             const now = performance.now();

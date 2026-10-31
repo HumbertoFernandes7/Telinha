@@ -22,7 +22,7 @@ const NVENC = "MediaFoundationVideoEncodeAccelerator (NVIDIA H.264 Encoder MFT)"
 const noLog = (patch: Partial<SenderLogCounters> = {}): SenderLogCounters => ({
     mimeType: null, targetKbps: null, packetsSent: null, retransmittedPacketsSent: null, retransmittedBytesSent: null, packetSendDelay: null,
     nackCount: null, pliCount: null, keyFramesEncoded: null, qpSum: null, packetsLost: null, fractionLost: null, rttMs: null, rttTotal: null,
-    rttCount: null, jitterMs: null, route: "host/host", ...patch
+    rttCount: null, jitterMs: null, route: "host/host", teredo: null, resolutionChanges: null, ...patch
 });
 
 function senderWith(stats: StatsEntry[]) {
@@ -74,8 +74,21 @@ describe("readSenderSample", () => {
         assert.deepEqual(s?.log, {
             mimeType: "video/VP9", targetKbps: 1800, packetsSent: 900, retransmittedPacketsSent: 12, retransmittedBytesSent: 14_000, packetSendDelay: 2.7,
             nackCount: 12, pliCount: 1, keyFramesEncoded: 3, qpSum: 10_200, packetsLost: 7, fractionLost: 0.008, rttMs: 31.25, rttTotal: 1.7, rttCount: 50,
-            jitterMs: 7.8125, route: "srflx/relay"
+            jitterMs: 7.8125, route: "srflx/relay", teredo: null, resolutionChanges: null
         });
+    });
+
+    test("so para o log: trocas de resolucao do WebRTC e o par em uso pelo Teredo (so o fato, nunca o endereco)", async () => {
+        const withAddresses = (local: string, remote: string) => videoSenderStats({ extra: { qualityLimitationResolutionChanges: 3 } })
+            .map(e => (e.id === "IL01" ? { ...e, address: local } : e.id === "IR01" ? { ...e, address: remote } : e));
+        const teredo = await readSenderSample(senderWith(withAddresses("2001:0:4136:e378:8000:63bf:3fff:fdd2", "203.0.113.7")));
+        assert.equal(teredo?.log?.teredo, "local");
+        assert.equal(teredo?.log?.resolutionChanges, 3);
+        assert.doesNotMatch(JSON.stringify(teredo), /2001:|203\.0/, "nenhum endereco na leitura");
+        const remote = await readSenderSample(senderWith(withAddresses("abcd1234-5678.local", "2001::5ef5:79fd")));
+        assert.equal(remote?.log?.teredo, "remote", "host mDNS deste lado: desconhecido, nao Teredo");
+        const plain = await readSenderSample(senderWith(withAddresses("192.168.0.10", "2804:14c:5b80::1")));
+        assert.equal(plain?.log?.teredo, null);
     });
 
     test("so para o log: o remote-inbound-rtp e o da outbound-rtp escolhida (localId); sem par de candidatos, sem rota", async () => {
@@ -202,6 +215,28 @@ describe("diffSamples", () => {
         assert.equal(m.hardware, true);
         assert.equal(m.pixelsPerSecond, 1920 * 1080 * 60);
         assert.equal(m.frameHeight, 1080);
+        assert.deepEqual([m.lossPct, m.rttMs, m.pacerMs], [null, null, null], "sem os contadores da rede");
+    });
+
+    test("a rede na janela (para a qualidade automatica): perda sobre os pacotes de midia, RTT medio e espera no pacer", () => {
+        const log = (patch: Partial<SenderLogCounters>) => noLog({ packetsSent: 0, retransmittedPacketsSent: 0, packetsLost: 0, rttTotal: 0, rttCount: 0, packetSendDelay: 0, ...patch });
+        const m = diffSamples(
+            { ...prev, log: log({}) },
+            sample({ at: 12_000, framesEncoded: 220, bytesSent: 2_100_000, log: log({ packetsSent: 1050, retransmittedPacketsSent: 50, packetsLost: 30, rttTotal: 0.24, rttCount: 2, packetSendDelay: 0.105 }) })
+        );
+        assert.ok(m);
+        assert.equal(m.lossPct, 3, "30 de 1000 pacotes de midia");
+        assert.ok(Math.abs(m.rttMs! - 120) < 1e-9);
+        assert.ok(Math.abs(m.rttFreshMs! - 120) < 1e-9, "medidas novas na janela");
+        assert.ok(Math.abs(m.pacerMs! - 0.1) < 1e-9);
+
+        // nenhuma medida de RTT nova (roundTripTimeMeasurements parado): o RTT do ultimo relatorio vale para o log, nao para a base
+        const stale = diffSamples(
+            { ...prev, log: log({ rttTotal: 0.24, rttCount: 2 }) },
+            sample({ at: 12_000, framesEncoded: 220, bytesSent: 2_100_000, log: log({ rttTotal: 0.24, rttCount: 2, rttMs: 140 }) })
+        );
+        assert.equal(stale?.rttMs, 140);
+        assert.equal(stale?.rttFreshMs, null);
     });
 
     test("janela curta demais (< 0,5 s) ou contadores que voltaram (sender trocado): null", () => {

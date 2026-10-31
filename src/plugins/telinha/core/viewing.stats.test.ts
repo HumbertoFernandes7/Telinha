@@ -45,7 +45,7 @@ function playing(clock: FakeClock, pc: FakeRTCPeerConnection) {
     video.stats = () => videoReceiverStats({
         framesDecoded: 30 * s(), framesReceived: 30 * s(), bytesReceived: 125_000 * s(), frameWidth: 1280, frameHeight: 720,
         extra: {
-            framesDropped: 0, freezeCount: 0, totalFreezesDuration: 0, jitterBufferDelay: 30 * s() * 0.05, jitterBufferEmittedCount: 30 * s(),
+            framesDropped: 0, freezeCount: 0, totalFreezesDuration: 0, jitterBufferDelay: 30 * s() * 0.05, jitterBufferEmittedCount: 30 * s(), jitterBufferTargetDelay: 30 * s() * 0.21,
             totalInterFrameDelay: s(), totalSquaredInterFrameDelay: s() / 30, packetsLost: s(), packetsReceived: 99 * s(), nackCount: s(), pliCount: 0
         }
     });
@@ -78,14 +78,14 @@ test("assistindo: uma linha a cada 10 s com a leitura de 2 s e o resumo ao parar
     await every2s(clock, 4);
     assert.deepEqual(lines().filter(l => STATS_LINE_RE.test(l)), [], "8 s: a janela ainda nao fechou");
     await every2s(clock, 1);
-    const line = "Recepção de amigo (peerA): VP9 libvpx 1280x720 · 30,0 fps decodificados de 30,0 recebidos, 0 descartados · congelou 0x · buffer 50 ms · "
-        + "σ entre quadros 0 ms · perda 1,0% · nack 10 pli 0 · 1000 kbps · áudio ocultado 0,1%";
+    const line = "Recepção de amigo (peerA): VP9 libvpx 1280x720 · 30,0 fps decodificados de 30,0 recebidos, 0 descartados · congelou 0x · buffer 50 ms alvo 210 ms "
+        + "colchão 200 ms · σ entre quadros 0 ms · perda 1,0% · nack 10 pli 0 · 1000 kbps · áudio ocultado 0,1%";
     assert.deepEqual(lines().filter(l => STATS_LINE_RE.test(l)), [line]);
 
     unwatch("peerA");
     const all = lines();
     const summary = "Resumo da recepção de amigo (peerA): 10 s · VP9 libvpx 1280x720 · 30,0 fps em média · congelou 0x · 0 descartados · perda média 1,0% · "
-        + "mediana 1000 kbps · buffer médio 50 ms · áudio ocultado 0,1%";
+        + "mediana 1000 kbps · buffer médio 50 ms alvo médio 210 ms colchão 200 ms · áudio ocultado 0,1%";
     assert.deepEqual(all.slice(-2), [summary, "Parou de assistir amigo (peerA)"], "o resumo antes do fim");
 });
 

@@ -216,7 +216,8 @@ describe("envio travado na placa de video: nada desmonta", () => {
         // mesmo depois de ele parar de assistir
         rig.room.receive("watch", { op: "stop" }, v.peerId);
         await turns();
-        assert.equal(sendPlanFor(v.peerId), null, "nao e mais espectador");
+        // desde a 0.2.10 todo peer tem plano (so a banda, START_KBPS); quem nao assiste, sem codec
+        assert.equal(sendPlanFor(v.peerId)?.codec, null, "nao e mais espectador");
         await assert.rejects(pc.setRemoteDescription({ type: "offer", sdp: REMOTE_SDP }));
         assert.equal(v.pc.descriptionCalls.length, negotiations);
         assertUntouched(v, "renegociacao");

@@ -59,6 +59,11 @@ export interface RemotePeer {
     identity?: PeerIdentityStatus;
     /** esta pessoa ligou "Compartilhar diagnóstico" (presenca caps.diag); ausente = desligado ou versao antiga */
     diagShare?: boolean;
+    /**
+     * A conexao com esta pessoa passa pelo Teredo (tunel IPv6 lento do Windows): "local" = o deste PC, "remote" = o do PC
+     * dela, "both" = os dois. Ausente = nao (core/teredoWatch.ts).
+     */
+    teredo?: "local" | "remote" | "both";
 }
 
 /** Diagnostico compartilhado (core/diagShare.ts). Ausente em TelinhaState = nada acontecendo. */

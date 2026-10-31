@@ -57,36 +57,38 @@ test("um espectador: uma linha a cada 10 s com as leituras de 2 s (nenhum getSta
     assert.match(second[0], /^Envio p\/ leo: VP9 libvpx 1280x720 30,0 fps .* · nível 1080p60 fixo$/, "a rota nao repete");
 
     assert.deepEqual(await logsDuring(() => h.controller.removeViewer("leo")), [
-        "Resumo do envio p/ leo: 22 s · 0 trocas de nível · 1080p60 100% · 60 fps 100%, 30 fps 0% · 30,0 fps em média · est mediana 20000 enviado mediana "
-        + "1650 kbps · perda média 0,8% rtt médio 34 ms · kf 0 · rota host/host"
+        "Resumo do envio p/ leo: 22 s · 0 trocas de nível · 1080p60 100% · 60 fps 100%, 30 fps 0% · tamanho 1280x720 100% · fps medido 30 100% · "
+        + "30,0 fps em média · est mediana 20000 enviado mediana 1650 kbps · perda média 0,8% rtt médio 34 ms · kf 0 · rota host/host"
     ]);
     assert.deepEqual(await logsDuring(() => h.runUntil(40_000)), [], "parou: nada mais");
 });
 
 test("troca de degrau: logo depois da linha da decisao, a linha das estatisticas de quem mudou; a proxima periodica conta dali", async t => {
     const clock = useFakeClock(t);
-    // A: o WebRTC reduzindo por banda abaixo do degrau (controller.upload.test.ts); B: tudo bem
-    const a = new EncoderSim({ limitation: "bandwidth", width: 1066, height: 600, link: LINK });
+    // A: caminho estreito (a banda estimada nunca da os 4500 do 1080p60, controller.network.test.ts); B: tudo bem
+    const a = new EncoderSim({ availableKbps: 3000, kbps: 2800, link: LINK });
     const h = qualityHarness(clock, { A: a, B: new EncoderSim({ link: LINK }) });
     await h.join("A");
     await h.join("B");
 
-    const lines = await logsDuring(() => h.runUntil(BW_GRACE_MS + 4000));
-    const decision = "Qualidade automática: 1080p 60 fps → 720p 60 fps para A (banda: o WebRTC reduziu para 600p por banda (degrau 1080p))";
+    const lines = await logsDuring(() => h.runUntil(BW_GRACE_MS + 12_000));
+    const decision = "Qualidade automática: 1080p 60 fps → 720p 60 fps para A (banda: banda estimada 3000 kbps, o degrau pede 4500 há 14 s); nova subida só após 30 s estável";
     assert.deepEqual(qualityLines(lines), [decision]);
     const at = lines.indexOf(decision);
-    assert.match(lines[at + 1], /^Envio p\/ A: VP9 libvpx 1066x600 60,0 fps \(fonte 60\) · .* · lim banda 100% cpu 0% · .* · nível 720p60 \(banda 720p60, geral 1080p60\)$/);
-    assert.equal(statsLines(lines).filter(l => l.startsWith("Envio p/ B:")).length, 2, "B: so as periodicas (12 s e 22 s), sem linha extra");
+    assert.match(lines[at + 1], /^Envio p\/ A: VP9 libvpx 1920x1080 60,0 fps \(fonte 60\) · .* · nível 720p60 \(banda 720p60, geral 1080p60\), antes 1080p60 \(banda: banda estimada\)$/);
+    assert.equal(statsLines(lines).filter(l => l.startsWith("Envio p/ B:")).length, 3, "B: so as periodicas (12, 22 e 32 s), sem linha extra");
 
-    // a linha extra foi aos 24 s: a proxima de A so aos 34 s
-    assert.deepEqual(statsLines(await logsDuring(() => h.runUntil(32_000))).filter(l => l.startsWith("Envio p/ A:")), []);
-    assert.equal(statsLines(await logsDuring(() => h.runUntil(34_000))).filter(l => l.startsWith("Envio p/ A:")).length, 1);
+    // a linha extra foi aos 32 s (no lugar da periodica): a proxima de A so aos 42 s, ja sem o "antes"
+    assert.deepEqual(statsLines(await logsDuring(() => h.runUntil(40_000))).filter(l => l.startsWith("Envio p/ A:")), []);
+    const next = statsLines(await logsDuring(() => h.runUntil(42_000))).filter(l => l.startsWith("Envio p/ A:"));
+    assert.equal(next.length, 1);
+    assert.doesNotMatch(next[0], /antes/);
 
-    // a transmissao acaba: o resumo de cada um, com o tempo em cada degrau
+    // a transmissao acaba: o resumo de cada um, com o tempo em cada degrau e cada troca com o motivo
     const end = await logsDuring(() => h.controller.dispose());
     assert.equal(end.length, 2);
-    assert.match(end[0], /^Resumo do envio p\/ A: 34 s · 1 troca de nível · 1080p60 71%, 720p60 29% · 60 fps 100%, 30 fps 0% · /);
-    assert.match(end[1], /^Resumo do envio p\/ B: 34 s · 0 trocas de nível · 1080p60 100% · /);
+    assert.match(end[0], /^Resumo do envio p\/ A: 42 s · 1 troca de nível: 1080p60→720p60 \(banda: banda estimada\) aos 32 s · 1080p60 76%, 720p60 24% · 60 fps 100%, 30 fps 0% · /);
+    assert.match(end[1], /^Resumo do envio p\/ B: 42 s · 0 trocas de nível · 1080p60 100% · /);
     assert.deepEqual(await logsDuring(() => h.controller.dispose()), [], "uma vez so");
 });
 
@@ -105,15 +107,15 @@ test("o log de estatisticas quebrado (toda chamada do SenderLog lanca): as decis
     };
     for (const m of ["add", "line", "trackLevel", "summary"] as const) t.mock.method(SenderLog.prototype, m, boom);
     const clock = useFakeClock(t);
-    const a = new EncoderSim({ limitation: "bandwidth", width: 1066, height: 600, link: LINK });
+    const a = new EncoderSim({ availableKbps: 3000, kbps: 2800, link: LINK });
     const h = qualityHarness(clock, { A: a, B: new EncoderSim({ link: LINK }) });
 
     const lines = await logsDuring(async () => {
         await h.join("A");
         await h.join("B");
-        await h.runUntil(BW_GRACE_MS + 4000);
+        await h.runUntil(BW_GRACE_MS + 12_000);
     });
-    assert.deepEqual(qualityLines(lines), ["Qualidade automática: 1080p 60 fps → 720p 60 fps para A (banda: o WebRTC reduziu para 600p por banda (degrau 1080p))"]);
+    assert.deepEqual(qualityLines(lines), ["Qualidade automática: 1080p 60 fps → 720p 60 fps para A (banda: banda estimada 3000 kbps, o degrau pede 4500 há 14 s); nova subida só após 30 s estável"]);
     assert.equal(h.lastApplied("A"), "720p60", "o degrau novo chegou no encoder");
     assert.equal(h.lastApplied("B"), "1080p60");
     assert.deepEqual(statsLines(lines), []);

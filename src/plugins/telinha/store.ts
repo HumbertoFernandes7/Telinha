@@ -106,6 +106,13 @@ const IDENTITY_SHORT: Record<NonNullable<RemotePeer["identity"]>, string> = {
     invalid: "identidade falsa"
 };
 
+/** O lado da conexao no Teredo (core/teredo.ts → TEREDO_TEXT), sem endereco. */
+const TEREDO_SHORT: Record<NonNullable<RemotePeer["teredo"]>, string> = {
+    local: "rota via Teredo: este PC",
+    remote: "rota via Teredo: o PC dele",
+    both: "rota via Teredo: os dois PCs"
+};
+
 const BLOCK_SHORT: Record<NonNullable<RemotePeer["blocked"]>, string> = {
     kicked: "expulso",
     declined: "recusado",
@@ -121,7 +128,7 @@ export function formatDiagnostics(): string {
         `gerado: ${new Date().toISOString()}`,
         `agente: ${typeof navigator !== "undefined" ? navigator.userAgent : "?"}`,
         `na sala: ${s.inRoom ? "sim" : "não"}; canal: ${s.channelId ?? "—"}; erro: ${s.lastError ?? "—"}`,
-        `peers: ${s.peers.map(p => `${p.username}${p.admitted ? "" : " (fora do canal)"}${p.duplicateIdentity ? " (identidade duplicada)" : ""}${p.identity ? ` <${IDENTITY_SHORT[p.identity]}>` : ""}${p.blocked ? ` [${BLOCK_SHORT[p.blocked]}]` : ""}${p.streaming ? ` [transmitindo${p.stream?.access ? `, acesso ${p.stream.access}` : ""}]` : ""}`).join(", ") || "nenhum"}`,
+        `peers: ${s.peers.map(p => `${p.username}${p.admitted ? "" : " (fora do canal)"}${p.duplicateIdentity ? " (identidade duplicada)" : ""}${p.identity ? ` <${IDENTITY_SHORT[p.identity]}>` : ""}${p.blocked ? ` [${BLOCK_SHORT[p.blocked]}]` : ""}${p.teredo ? ` [${TEREDO_SHORT[p.teredo]}]` : ""}${p.streaming ? ` [transmitindo${p.stream?.access ? `, acesso ${p.stream.access}` : ""}]` : ""}`).join(", ") || "nenhum"}`,
         `transmitindo: ${s.local ? `${s.local.source.kind} ${s.local.quality}${s.local.hasAudio ? " com áudio" : ""}, quem pode assistir: ${s.local.access}, espectadores: ${s.local.viewers.length}, pedidos pendentes: ${s.local.pendingViewers?.length ?? 0}` : "não"}`,
         `alertas de identidade: ${(s.identityAlerts ?? []).map(a => `${a.self ? "diz ser você" : a.username}${a.kind && a.kind !== "duplicate" ? ` [${a.kind === "fake" ? "prova falsa" : "não verificada x verificada"}]` : ""} (${a.peerIds.length} conexões)`).join(", ") || "nenhum"}`,
         `bloqueados: ${(s.blocked ?? []).map(b => `${b.username} (${BLOCK_SHORT[b.reason]})`).join(", ") || "ninguém"}`,

@@ -15,7 +15,7 @@
 import "@test/fakes/dom";
 
 import assert from "node:assert/strict";
-import { after, afterEach, before, describe, test } from "node:test";
+import { after, afterEach, before, describe, test, type TestContext } from "node:test";
 
 import { getState } from "@plugins/telinha/store";
 import { eventually } from "@test/fakes/clock";
@@ -68,6 +68,25 @@ async function sendProof(v: Viewer, proof: string) {
     const sent = streamsTo(rig.room, v.peerId).length;
     ask(v, proof);
     await eventually(() => repliesTo(rig.room, v.peerId).length > replies || streamsTo(rig.room, v.peerId).length > sent);
+}
+
+/**
+ * Para o teste que mexe no estado ENQUANTO a prova e conferida e depois confere que nada aconteceu (sem resposta para
+ * esperar). A conferencia (core/access.ts → verifyPasswordProof) termina num HMAC de crypto.subtle, que roda na
+ * threadpool do libuv em TEMPO REAL: nenhum numero fixo de turns() garante que ela acabou (no CI com cobertura, sob
+ * carga, 30 nao bastaram e a assercao rodou antes dela). Conta cada HMAC que termina neste teste e devolve
+ * `whileChecking(n, act)`: faz `act` (que manda `n` provas) e espera os `n` HMACs delas terminarem. Depois do HMAC o
+ * transmissor so tem microtasks, entao o que ele faz com a prova ja aconteceu quando a espera acaba.
+ */
+function trackProofChecks(t: TestContext) {
+    let finished = 0;
+    const sign = crypto.subtle.sign.bind(crypto.subtle);
+    t.mock.method(crypto.subtle, "sign", (...args: Parameters<SubtleCrypto["sign"]>) => sign(...args).finally(() => finished++));
+    return async (n: number, act: () => void) => {
+        const before = finished;
+        act();
+        await eventually(() => finished >= before + n);
+    };
 }
 
 before(async () => {
@@ -383,30 +402,34 @@ describe("Com senha", () => {
         assert.equal(getStreamPassword(), null, "sem modo senha, sem senha");
     });
 
-    test("a transmissao acaba, o espectador sai da sala ou da call enquanto a prova e conferida: nada e enviado", async () => {
+    test("a transmissao acaba, o espectador sai da sala ou da call enquanto a prova e conferida: nada e enviado", async t => {
+        const whileChecking = trackProofChecks(t);
         const tito = await viewer("tito");
         const ugo = await viewer("ugo");
         const vivi = await viewer("vivi");
         await startStreaming(screenOptions({ access: "password", password: PASSWORD }));
         ask(tito);
         const titoProof = await proofFor(tito);
+        const titoReplies = repliesTo(rig.room, tito.peerId).length;
         const since = logMark();
 
-        ask(tito, titoProof);
-        stopStreaming();
-        await turns(30);
-        assert.equal(lastReply(tito).op, "password", "nenhuma resposta nova");
+        await whileChecking(1, () => {
+            ask(tito, titoProof);
+            stopStreaming();
+        });
+        assert.equal(repliesTo(rig.room, tito.peerId).length, titoReplies, "nenhuma resposta nova");
         assert.equal(streamsTo(rig.room, tito.peerId).length, 0);
 
         await startStreaming(screenOptions({ access: "password", password: PASSWORD }));
         ask(ugo);
         ask(vivi);
         const [ugoProof, viviProof] = await Promise.all([proofFor(ugo), proofFor(vivi)]);
-        ask(ugo, ugoProof);
-        rig.room.disconnectPeer(ugo.peerId);
-        ask(vivi, viviProof);
-        setMembers(rig, [...rig.members].filter(id => id !== vivi.discordUserId)); // saiu do canal de voz: nao esta mais admitido
-        await turns(30);
+        await whileChecking(2, () => {
+            ask(ugo, ugoProof);
+            rig.room.disconnectPeer(ugo.peerId);
+            ask(vivi, viviProof);
+            setMembers(rig, [...rig.members].filter(id => id !== vivi.discordUserId)); // saiu do canal de voz: nao esta mais admitido
+        });
         assert.equal(streamsTo(rig.room, ugo.peerId).length, 0);
         assert.equal(streamsTo(rig.room, vivi.peerId).length, 0);
         assert.ok(since().includes(`${vivi.label} pediu para assistir, mas não está admitido: ignorado`));
@@ -446,6 +469,7 @@ describe("Com senha", () => {
     });
 
     test("a mesma senha chegando duas vezes (clique duplo): o stream vai uma vez so", async t => {
+        const whileChecking = trackProofChecks(t);
         const zoe = await viewer("zoe");
         await startStreaming(screenOptions({ access: "password", password: PASSWORD }));
         // desafios previsiveis: pedindo de novo antes da resposta, ele recebe o mesmo nonce, e as duas provas
@@ -456,11 +480,12 @@ describe("Com senha", () => {
         });
         ask(zoe);
         const proof = await proofFor(zoe);
-        ask(zoe, proof);
-        ask(zoe);
-        ask(zoe, proof);
-        await eventually(() => streamsTo(rig.room, zoe.peerId).length);
-        await turns(30);
+        // as duas conferencias acabam antes de contar (a segunda nao pode mandar outro stream, nem chegar no teste seguinte)
+        await whileChecking(2, () => {
+            ask(zoe, proof);
+            ask(zoe);
+            ask(zoe, proof);
+        });
         assert.equal(streamsTo(rig.room, zoe.peerId).length, 1);
         assert.ok(watching(zoe));
         assert.equal(repliesTo(rig.room, zoe.peerId).filter(r => r.op !== "password").length, 0, "nenhuma recusa");

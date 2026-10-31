@@ -395,13 +395,18 @@ export class FakeRTCPeerConnection extends BaseEventTarget {
     iceConnectionState: RTCIceConnectionState = "connected";
     iceGatheringState: RTCIceGatheringState = "complete";
     signalingState: RTCSignalingState = "stable";
-    localDescription: DescriptionInit | null = null;
+    /** backing field of localDescription, an accessor as in Chromium (a subclass can wrap it, like core/peerConnection.ts) */
+    private local: DescriptionInit | null = null;
     currentLocalDescription: DescriptionInit | null = null;
     remoteDescription: DescriptionInit | null = null;
     currentRemoteDescription: DescriptionInit | null = null;
     sctp: { transport: FakeDtlsTransport; } | null = { transport: new FakeDtlsTransport() };
     readonly transceivers: FakeRTCRtpTransceiver[] = [];
     stats: StatsSource = [];
+    /** addIceCandidate calls as received (the remote candidates applied), oldest first */
+    readonly remoteCandidates: (RTCIceCandidateInit | null | undefined)[] = [];
+    /** runs before a remote candidate is applied: throw / reject to refuse it */
+    addIceCandidateImpl: ((c: RTCIceCandidateInit | null | undefined) => void | Promise<void>) | null = null;
     /** setLocalDescription/setRemoteDescription calls as received (copies), oldest first */
     readonly descriptionCalls: { method: "setLocalDescription" | "setRemoteDescription"; description: DescriptionInit | undefined; }[] = [];
     /** runs before a description is applied: throw / reject to refuse it */
@@ -415,6 +420,14 @@ export class FakeRTCPeerConnection extends BaseEventTarget {
         super();
         this.config = config;
         FakeRTCPeerConnection.instances.push(this);
+    }
+
+    get localDescription(): DescriptionInit | null {
+        return this.local;
+    }
+
+    set localDescription(d: DescriptionInit | null) {
+        this.local = d;
     }
 
     getConfiguration() {
@@ -468,7 +481,7 @@ export class FakeRTCPeerConnection extends BaseEventTarget {
         this.descriptionCalls.push({ method: "setLocalDescription", description: description && { ...description } });
         if (this.setLocalDescriptionImpl) await this.setLocalDescriptionImpl(description);
         const d = description?.sdp ? description : { type: this.signalingState === "have-remote-offer" ? "answer" as const : "offer" as const, sdp: "v=0\r\n" };
-        this.localDescription = this.currentLocalDescription = d;
+        this.local = this.currentLocalDescription = d;
     }
 
     async setRemoteDescription(description: DescriptionInit): Promise<void> {
@@ -477,7 +490,15 @@ export class FakeRTCPeerConnection extends BaseEventTarget {
         this.remoteDescription = this.currentRemoteDescription = description;
     }
 
-    async addIceCandidate() { }
+    async addIceCandidate(candidate?: RTCIceCandidateInit | null) {
+        if (this.addIceCandidateImpl) await this.addIceCandidateImpl(candidate);
+        this.remoteCandidates.push(candidate);
+    }
+
+    /** Test helper: a local ICE candidate was gathered (null = gathering complete): fires "icecandidate", as Chromium does. */
+    emitIceCandidate(candidate: Partial<RTCIceCandidateInit> | null) {
+        this.dispatchEvent(Object.assign(new BaseEvent("icecandidate"), { candidate }));
+    }
 
     createDataChannel(label: string) {
         return Object.assign(new BaseEventTarget(), { label, readyState: "open", send() { }, close() { } });
@@ -567,6 +588,8 @@ export interface OutboundRtpExtra {
     pliCount?: number;
     keyFramesEncoded?: number;
     qpSum?: number;
+    /** trocas de resolucao do proprio WebRTC */
+    qualityLimitationResolutionChanges?: number;
 }
 
 /** remote-inbound-rtp (times in seconds, as Chromium reports them). */
@@ -639,6 +662,7 @@ export interface InboundRtpExtra {
     totalFreezesDuration?: number;
     jitterBufferDelay?: number;
     jitterBufferEmittedCount?: number;
+    jitterBufferTargetDelay?: number;
     totalInterFrameDelay?: number;
     totalSquaredInterFrameDelay?: number;
     packetsLost?: number;
