@@ -17,14 +17,20 @@
 //   manda os candidatos aos poucos (trickle); um candidato Teredo que chega antes de qualquer outro espera ate
 //   TEREDO_HOLD_MS: se nesse tempo aparece um candidato direto, ele e descartado; senao, passa (sem outro caminho, o
 //   Teredo e melhor que nada). Os SDPs (renegociacoes, reinicio do ICE) levam os candidatos ja coletados: filterSdp.
+// - "outro caminho" e so a EXISTENCIA de um candidato direto, nao a prova de que ele funciona: com os dois PCs atras de
+//   CGNAT (comum na fibra no Brasil) o par srflx x srflx falha e so o Teredo conectaria. Por isso o que ficou de fora e
+//   guardado e o resgate (releaseDropped) devolve tudo se a conexao nao abrir TEREDO_RESCUE_MS depois de a coleta dos
+//   nossos candidatos acabar (peerConnection.ts). Depois do resgate o filtro desliga nessa conexao.
 //
-// Regra a mais, so para o lado remoto: se o IPv6 DESTE PC e so Teredo (visto nos nossos candidatos: algum Teredo e
-// nenhum IPv6 de verdade), um IPv6 normal do outro lado so e alcancado pelo nosso tunel, entao conta como Teredo tambem.
-// Sem ela, o PC com Teredo continuaria formando o par (Teredo deste PC x IPv6 do amigo) e o filtro nao adiantaria.
+// Regra a mais, so para o lado remoto: se o IPv6 DESTE PC nesta conexao e so Teredo (nos nossos candidatos: algum Teredo
+// e nenhum IPv6 global; ULA fc00::/7 e link-local nao contam), um IPv6 global do outro lado so e alcancado pelo nosso
+// tunel, entao conta como Teredo tambem. Sem ela, o PC com Teredo continuaria formando o par (Teredo deste PC x IPv6 do
+// amigo) e o filtro nao adiantaria.
 
 import { logThrottled } from "./log";
 
-export type AddressKind = "teredo" | "ipv4" | "ipv6" | "unknown";
+/** "ipv6": IPv6 global; "ipv6-local": ULA (fc00::/7), link-local, site-local, loopback, IPv4 dentro do IPv6 (nao vai pela internet). */
+export type AddressKind = "teredo" | "ipv4" | "ipv6" | "ipv6-local" | "unknown";
 
 /** Qual lado do par em uso esta no Teredo. */
 export type TeredoSide = "local" | "remote" | "both";
@@ -38,6 +44,11 @@ export const TEREDO_TEXT: Record<TeredoSide, string> = {
 
 /** Candidato Teredo sem outro caminho conhecido espera isto por um candidato direto antes de passar. */
 export const TEREDO_HOLD_MS = 2500;
+/**
+ * A conexao nao abriu ate isto depois de a coleta dos nossos candidatos acabar: os candidatos pelo Teredo que ficaram de
+ * fora entram (o "outro caminho" nao funcionou). Antes dos 15 s em que o Trystero desiste do handshake.
+ */
+export const TEREDO_RESCUE_MS = 8000;
 
 const IPV4_RE = /^(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
 const HEXTET_RE = /^[0-9a-f]{1,4}$/;
@@ -64,7 +75,10 @@ export function addressKind(address: unknown): AddressKind {
     if (halves.length === 1 ? groups !== 8 : groups > 7) return "unknown";
     // 2001:0000::/32: o 1o grupo e 2001 e o 2o e zero (escrito, ou comprimido em "2001::")
     const second = head.length > 1 ? head[1] : "0";
-    return head[0] === "2001" && parseInt(second, 16) === 0 ? "teredo" : "ipv6";
+    if (head[0] === "2001" && parseInt(second, 16) === 0) return "teredo";
+    // so 2000::/3 (unicast global) vai pela internet: ULA fc00::/7, link-local fe80::/10, "::1", "::ffff:..." nao
+    const first = head.length ? parseInt(head[0], 16) : 0;
+    return first >= 0x2000 && first <= 0x3fff ? "ipv6" : "ipv6-local";
 }
 
 /** O lado do par no Teredo; null = nenhum (ou desconhecido). */
@@ -113,32 +127,12 @@ export function parseCandidate(line: unknown): ParsedCandidate | null {
     return { component: parts[1], kind: addressKind(parts[4]) };
 }
 
-/** O IPv6 deste PC visto nos nossos candidatos (todas as conexoes desta sessao do Discord). */
-const machine = { teredo: false, native: false };
-
-/** O IPv6 deste PC e so Teredo (algum candidato nosso no Teredo e nenhum IPv6 de verdade). */
-export function ipv6IsOnlyTeredo(): boolean {
-    return machine.teredo && !machine.native;
-}
-
-/** Esquece o que foi visto do IPv6 deste PC (testes). */
-export function resetTeredoMemory() {
-    machine.teredo = machine.native = false;
-}
-
 type Side = "local" | "remote";
 type Route = "teredo" | "direct" | "unknown";
 
-/** O caminho de um candidato: pelo Teredo, direto (IPv4 ou IPv6 de verdade) ou desconhecido (mDNS). */
-function routeOf(side: Side, kind: AddressKind): Route {
-    if (kind === "teredo") return "teredo";
-    if (kind === "unknown") return "unknown";
-    // regra do lado remoto: com o IPv6 deste PC so no Teredo, o IPv6 do outro lado so e alcancado por ele
-    return side === "remote" && kind === "ipv6" && ipv6IsOnlyTeredo() ? "teredo" : "direct";
-}
-
 interface Held<T> {
-    items: T[];
+    /** os segurados e o texto de cada um (para o resgate) */
+    items: { item: T; candidate: string; }[];
     /** para onde os segurados vao quando passam */
     pass: (item: T) => void;
     timer: ReturnType<typeof setTimeout>;
@@ -152,6 +146,12 @@ class SideState<T> {
 
 const keyOf = (ufrag: string | null | undefined, mid: string | number | null | undefined, component: string) => `${ufrag ?? ""}|${mid ?? ""}|${component}`;
 
+/** Um candidato que ficou de fora, e por onde ele entra se o resgate precisar. */
+interface Dropped {
+    item: unknown;
+    pass: (item: any) => void;
+}
+
 /**
  * Filtro de candidatos de UMA RTCPeerConnection (ver o topo). `label()`: nome do peer para o log (uma linha por conexao
  * e lado, sem enderecos).
@@ -159,9 +159,39 @@ const keyOf = (ufrag: string | null | undefined, mid: string | number | null | u
 export class TeredoFilter {
     private readonly local = new SideState<RTCPeerConnectionIceEvent>();
     private readonly remote = new SideState<RTCIceCandidateInit>();
+    /** o IPv6 deste PC visto nos nossos candidatos desta conexao */
+    private readonly ipv6 = { teredo: false, global: false };
+    /** o que ficou de fora, para o resgate; `seen`: lado|candidato (o mesmo pelo trickle e pelo SDP entra uma vez) */
+    private readonly dropped: Dropped[] = [];
+    private readonly seen = new Set<string>();
+    /** o resgate ja aconteceu: nesta conexao tudo passa */
+    private off = false;
     private readonly id = Math.random().toString(36).slice(2, 10);
 
     constructor(private readonly label: () => string) { }
+
+    /** O IPv6 deste PC nesta conexao e so Teredo (algum candidato nosso no Teredo e nenhum IPv6 global). */
+    ipv6OnlyTeredo(): boolean {
+        return this.ipv6.teredo && !this.ipv6.global;
+    }
+
+    /** Algum candidato ficou de fora (o resgate tem o que devolver). */
+    hasDropped(): boolean {
+        return this.dropped.length > 0;
+    }
+
+    /**
+     * Resgate: a conexao nao abriu sem o Teredo. Devolve tudo o que ficou de fora (e o que ainda espera) por onde cada um
+     * entraria, e desliga o filtro nesta conexao. Quantos candidatos voltaram.
+     */
+    releaseDropped(): number {
+        this.off = true;
+        this.releaseAll(this.local);
+        this.releaseAll(this.remote);
+        const items = this.dropped.splice(0);
+        for (const d of items) d.pass(d.item);
+        return items.length;
+    }
 
     /** Candidato nosso (onicecandidate): `emit` agora, depois (segurado) ou nunca (descartado). null = fim da coleta. */
     localCandidate(event: RTCPeerConnectionIceEvent, emit: (event: RTCPeerConnectionIceEvent) => void) {
@@ -174,74 +204,97 @@ export class TeredoFilter {
         const parsed = parseCandidate(c.candidate);
         if (!parsed) return emit(event);
         this.learn(parsed.kind);
-        this.route("local", this.local, keyOf(c.usernameFragment, c.sdpMid ?? c.sdpMLineIndex, parsed.component), routeOf("local", parsed.kind), event, emit);
+        this.route("local", this.local, keyOf(c.usernameFragment, c.sdpMid ?? c.sdpMLineIndex, parsed.component), this.routeOf("local", parsed.kind), event, emit, c.candidate);
     }
 
     /** Candidato do outro lado (addIceCandidate): `add` agora, depois ou nunca. */
     remoteCandidate(init: RTCIceCandidateInit, add: (init: RTCIceCandidateInit) => void) {
         const parsed = parseCandidate(init.candidate);
         if (!parsed) return add(init);
-        this.route("remote", this.remote, keyOf(init.usernameFragment, init.sdpMid ?? init.sdpMLineIndex, parsed.component), routeOf("remote", parsed.kind), init, add);
+        this.route("remote", this.remote, keyOf(init.usernameFragment, init.sdpMid ?? init.sdpMLineIndex, parsed.component), this.routeOf("remote", parsed.kind), init, add, init.candidate!);
     }
 
     /**
      * Tira do SDP (`side`: o nosso, que vai para o outro lado, ou o recebido) as linhas de candidato pelo Teredo cujo
      * componente tem outro caminho (no proprio SDP ou ja visto por trickle). Os candidatos diretos do SDP passam a contar
-     * para os que chegarem depois. Devolve o mesmo texto quando nada sai.
+     * para os que chegarem depois. `rescue`: por onde uma linha tirada entra se o resgate precisar (o lado remoto; os
+     * nossos ja foram guardados quando sairam pelo trickle). Devolve o mesmo texto quando nada sai.
      */
-    filterSdp(sdp: string, side: Side): string {
+    filterSdp(sdp: string, side: Side, rescue?: (init: RTCIceCandidateInit) => void): string {
+        if (this.off) return sdp;
         const state = side === "local" ? this.local : this.remote;
         const eol = sdp.includes("\r\n") ? "\r\n" : "\n";
         const lines = sdp.split(eol);
         const sessionUfrag = ufragIn(lines.slice(0, Math.max(0, lines.findIndex(l => l.startsWith("m=")))));
         // m-sections: [inicio, fim)
         const starts = lines.map((l, i) => (l.startsWith("m=") ? i : -1)).filter(i => i >= 0);
-        const drop = new Set<number>();
+        const drop = new Map<number, RTCIceCandidateInit>();
         starts.forEach((start, n) => {
             const section = lines.slice(start, starts[n + 1] ?? lines.length);
             const ufrag = ufragIn(section) ?? sessionUfrag;
             const mid = section.find(l => l.startsWith("a=mid:"))?.slice(6).trim();
-            const teredo: { at: number; key: string; }[] = [];
+            const teredo: { at: number; key: string; init: RTCIceCandidateInit; }[] = [];
             section.forEach((line, i) => {
                 const parsed = parseCandidate(line);
                 if (!parsed) return;
                 if (side === "local") this.learn(parsed.kind);
                 const key = keyOf(ufrag, mid, parsed.component);
-                const route = routeOf(side, parsed.kind);
+                const route = this.routeOf(side, parsed.kind);
                 if (route === "direct") state.direct.add(key);
-                else if (route === "teredo") teredo.push({ at: start + i, key });
+                else if (route === "teredo") teredo.push({ at: start + i, key, init: { candidate: line.slice(2), sdpMid: mid, usernameFragment: ufrag } });
             });
-            for (const t of teredo) if (state.direct.has(t.key)) drop.add(t.at);
+            for (const t of teredo) if (state.direct.has(t.key)) drop.set(t.at, t.init);
         });
         if (!drop.size) return sdp;
+        if (rescue) for (const init of drop.values()) this.keep(side, init.candidate!, init, rescue);
         this.noteDropped(side, drop.size);
         return lines.filter((_, i) => !drop.has(i)).join(eol);
     }
 
     private learn(kind: AddressKind) {
-        if (kind === "teredo") machine.teredo = true;
-        else if (kind === "ipv6") machine.native = true;
+        if (kind === "teredo") this.ipv6.teredo = true;
+        else if (kind === "ipv6") this.ipv6.global = true;
     }
 
-    private route<T>(side: Side, state: SideState<T>, key: string, route: Route, item: T, pass: (item: T) => void) {
-        if (route === "unknown") return pass(item);
+    /** O caminho de um candidato: pelo Teredo, direto (IPv4 ou IPv6) ou desconhecido (mDNS). */
+    private routeOf(side: Side, kind: AddressKind): Route {
+        if (kind === "teredo") return "teredo";
+        if (kind === "unknown") return "unknown";
+        // regra do lado remoto: com o IPv6 deste PC so no Teredo, o IPv6 global do outro lado so e alcancado por ele
+        return side === "remote" && kind === "ipv6" && this.ipv6OnlyTeredo() ? "teredo" : "direct";
+    }
+
+    /** Guarda um candidato que ficou de fora para o resgate (uma vez por lado e candidato). */
+    private keep(side: Side, candidate: string, item: unknown, pass: (item: any) => void) {
+        const key = `${side}|${candidate}`;
+        if (this.seen.has(key)) return;
+        this.seen.add(key);
+        this.dropped.push({ item, pass });
+    }
+
+    private route<T>(side: Side, state: SideState<T>, key: string, route: Route, item: T, pass: (item: T) => void, candidate: string) {
+        if (this.off || route === "unknown") return pass(item);
         if (route === "direct") {
             state.direct.add(key);
             const held = state.held.get(key);
             if (held) {
                 clearTimeout(held.timer);
                 state.held.delete(key);
+                for (const h of held.items) this.keep(side, h.candidate, h.item, held.pass);
                 this.noteDropped(side, held.items.length);
             }
             return pass(item);
         }
-        if (state.direct.has(key)) return this.noteDropped(side, 1);
+        if (state.direct.has(key)) {
+            this.keep(side, candidate, item, pass);
+            return this.noteDropped(side, 1);
+        }
         const held = state.held.get(key);
         if (held) {
-            held.items.push(item);
+            held.items.push({ item, candidate });
             return;
         }
-        state.held.set(key, { items: [item], pass, timer: setTimeout(() => this.release(state, key), TEREDO_HOLD_MS) });
+        state.held.set(key, { items: [{ item, candidate }], pass, timer: setTimeout(() => this.release(state, key), TEREDO_HOLD_MS) });
     }
 
     /** Segurado sem candidato direto ate o fim da espera (ou da coleta): passa (o Teredo e o unico caminho conhecido). */
@@ -250,10 +303,10 @@ export class TeredoFilter {
         const held = state.held.get(key)!;
         clearTimeout(held.timer);
         state.held.delete(key);
-        for (const item of held.items) held.pass(item);
+        for (const h of held.items) held.pass(h.item);
     }
 
-    /** Fim da coleta dos nossos candidatos: o que estava segurado passa agora. */
+    /** Fim da coleta dos nossos candidatos (ou o resgate): o que estava segurado passa agora. */
     private releaseAll<T>(state: SideState<T>) {
         for (const key of [...state.held.keys()]) this.release(state, key);
     }

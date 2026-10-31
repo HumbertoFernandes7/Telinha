@@ -11,14 +11,14 @@
 // Rodar:  pnpm test:file src/plugins/telinha/core/teredo.test.ts  (todos: pnpm test:unit)
 
 import assert from "node:assert/strict";
-import { beforeEach, describe, test } from "node:test";
+import { describe, test } from "node:test";
 
 import { useFakeClock } from "@test/fakes/clock";
 import { FakeStatsReport } from "@test/fakes/webrtc";
 import { logged, logMark } from "@test/helpers/wpa-session";
 
 import {
-    addressKind, ipv6IsOnlyTeredo, pairTeredo, parseCandidate, resetTeredoMemory, selectedPair, TEREDO_HOLD_MS, TEREDO_TEXT, TeredoFilter, teredoSide
+    addressKind, pairTeredo, parseCandidate, selectedPair, TEREDO_HOLD_MS, TEREDO_TEXT, TeredoFilter, teredoSide
 } from "./teredo";
 
 /** Enderecos de documentacao (RFC 5737 / 3849) e um Teredo como o Windows atribui (2001:0:servidor:flags:porta:cliente). */
@@ -37,7 +37,9 @@ describe("addressKind", () => {
         assert.equal(addressKind(V6), "ipv6");
         assert.equal(addressKind("2001:db8::"), "ipv6");
         assert.equal(addressKind("2804:14c:5b80:9c00::1"), "ipv6");
-        assert.equal(addressKind("::1"), "ipv6");
+        assert.equal(addressKind("::1"), "ipv6-local", "loopback");
+        assert.equal(addressKind("fd12:3456:789a::1"), "ipv6-local", "ULA (fc00::/7)");
+        assert.equal(addressKind("fe80::1c2b:3a4d:5e6f:7a8b%12"), "ipv6-local", "link-local");
         assert.equal(addressKind(TEREDO), "teredo");
         assert.equal(addressKind("2001:0000:4136:e378:8000:63bf:3fff:fdd2"), "teredo");
         assert.equal(addressKind("2001::5ef5:79fd"), "teredo", "o 2o grupo zero comprimido");
@@ -45,7 +47,7 @@ describe("addressKind", () => {
         assert.equal(addressKind("2001:0:4136:e378:8000:63bf:3fff:fdd2%12"), "teredo", "com zona");
         assert.equal(addressKind("2001:1::1"), "ipv6", "2001:1::/32 nao e Teredo");
         assert.equal(addressKind("2002:cb00:7107::1"), "ipv6", "6to4 nao e Teredo");
-        assert.equal(addressKind("::ffff:203.0.113.7"), "ipv6", "IPv4 dentro do IPv6");
+        assert.equal(addressKind("::ffff:203.0.113.7"), "ipv6-local", "IPv4 dentro do IPv6");
     });
 
     test("mDNS (host oculto pelo Chromium), vazio, invalido ou nao texto: desconhecido, nunca Teredo", () => {
@@ -98,7 +100,6 @@ describe("parseCandidate", () => {
 });
 
 describe("TeredoFilter: candidatos que chegam aos poucos", () => {
-    beforeEach(() => resetTeredoMemory());
 
     /** Um filtro e o que passou de cada lado. */
     function rig() {
@@ -187,9 +188,13 @@ describe("TeredoFilter: candidatos que chegam aos poucos", () => {
     test("IPv6 deste PC so no Teredo: o IPv6 normal do outro lado tambem conta como Teredo (so entra sem outro caminho)", t => {
         const clock = useFakeClock(t);
         const r = rig();
-        assert.equal(ipv6IsOnlyTeredo(), false);
+        assert.equal(r.filter.ipv6OnlyTeredo(), false);
         r.local(TEREDO);
-        assert.equal(ipv6IsOnlyTeredo(), true);
+        // ULA e link-local nao sao um IPv6 que vai pela internet
+        r.local("fd12:3456:789a::1");
+        r.local("fe80::1c2b:3a4d:5e6f:7a8b");
+        assert.equal(r.filter.ipv6OnlyTeredo(), true);
+        assert.equal(rig().filter.ipv6OnlyTeredo(), false, "por conexao: outra comeca sem saber");
         r.remote(V6);
         assert.deepEqual(r.added, [], "o IPv6 dele so seria alcancado pelo nosso tunel");
         r.remote(V4);
@@ -198,14 +203,13 @@ describe("TeredoFilter: candidatos que chegam aos poucos", () => {
 
         // com um IPv6 de verdade aqui, o IPv6 dele e direto de novo
         r.local(V6);
-        assert.equal(ipv6IsOnlyTeredo(), false);
+        assert.equal(r.filter.ipv6OnlyTeredo(), false);
         r.remote(V6, { usernameFragment: "r2" });
         assert.deepEqual(r.added, [cand(V4), cand(V6)]);
     });
 });
 
 describe("TeredoFilter: candidatos no SDP (renegociacao, reinicio do ICE)", () => {
-    beforeEach(() => resetTeredoMemory());
 
     const sdp = (lines: string[], eol = "\r\n") => [
         "v=0", "o=- 1 2 IN IP4 127.0.0.1", "s=-", "t=0 0", "a=ice-ufrag:sess",
@@ -232,8 +236,46 @@ describe("TeredoFilter: candidatos no SDP (renegociacao, reinicio do ICE)", () =
         assert.deepEqual(added, [], "descartado na hora");
 
         f.filterSdp(sdp([`a=${cand(TEREDO)}`]), "local");
-        assert.equal(ipv6IsOnlyTeredo(), true);
+        assert.equal(f.ipv6OnlyTeredo(), true);
         f.filterSdp(sdp([`a=${cand(V6)}`]), "local");
-        assert.equal(ipv6IsOnlyTeredo(), false);
+        assert.equal(f.ipv6OnlyTeredo(), false);
+    });
+});
+
+describe("TeredoFilter: o resgate (o outro caminho nao funcionou)", () => {
+    test("devolve o que ficou de fora (pelo trickle, segurado ou no SDP do outro lado), uma vez cada, e desliga o filtro", t => {
+        const clock = useFakeClock(t);
+        const f = new TeredoFilter(() => "x");
+        const added: string[] = [];
+        const emitted: string[] = [];
+        const add = (c: RTCIceCandidateInit) => added.push(c.candidate!);
+        const emit = (e: RTCPeerConnectionIceEvent) => emitted.push(e.candidate!.candidate);
+        const local = (address: string) => ({ candidate: { candidate: cand(address), sdpMid: "0", usernameFragment: "l1" } }) as unknown as RTCPeerConnectionIceEvent;
+        assert.equal(f.hasDropped(), false);
+        assert.equal(f.releaseDropped(), 0, "nada a devolver");
+
+        const g = new TeredoFilter(() => "x");
+        // o nosso: segurado, e descartado quando o IPv4 chega
+        g.localCandidate(local(TEREDO), emit);
+        g.localCandidate(local(V4), emit);
+        // o do outro lado: descartado na hora (o IPv4 dele ja veio pelo SDP), e o mesmo de novo no SDP seguinte
+        const remoteSdp = ["v=0", "a=ice-ufrag:r1", "m=video 9 UDP/TLS/RTP/SAVPF 96", "a=mid:0", `a=${cand(V4)}`, `a=${cand(TEREDO)}`, ""].join("\r\n");
+        g.filterSdp(remoteSdp, "remote", add);
+        g.filterSdp(remoteSdp, "remote", add);
+        g.remoteCandidate({ candidate: cand(TEREDO), sdpMid: "0", usernameFragment: "r1" }, add);
+        // ainda segurado (outro componente, sem direto): o resgate tambem o solta
+        g.remoteCandidate({ candidate: cand(TEREDO, "host", 2), sdpMid: "0", usernameFragment: "r1" }, add);
+        assert.deepEqual([emitted, added], [[cand(V4)], []]);
+        assert.equal(g.hasDropped(), true);
+
+        assert.equal(g.releaseDropped(), 2, "o nosso e o do outro lado (o mesmo candidato do SDP e do trickle conta uma vez)");
+        assert.deepEqual(emitted, [cand(V4), cand(TEREDO)]);
+        assert.deepEqual(added, [cand(TEREDO, "host", 2), cand(TEREDO)]);
+        // desligado: tudo passa, inclusive no SDP
+        g.remoteCandidate({ candidate: cand("2001::5ef5:79fd"), sdpMid: "0", usernameFragment: "r1" }, add);
+        assert.equal(added.at(-1), cand("2001::5ef5:79fd"));
+        assert.equal(g.filterSdp(remoteSdp, "remote", add), remoteSdp);
+        clock.tick(TEREDO_HOLD_MS);
+        assert.equal(added.length, 3, "nada segurado sobrou");
     });
 });

@@ -227,7 +227,16 @@ describe("diffSamples", () => {
         assert.ok(m);
         assert.equal(m.lossPct, 3, "30 de 1000 pacotes de midia");
         assert.ok(Math.abs(m.rttMs! - 120) < 1e-9);
+        assert.ok(Math.abs(m.rttFreshMs! - 120) < 1e-9, "medidas novas na janela");
         assert.ok(Math.abs(m.pacerMs! - 0.1) < 1e-9);
+
+        // nenhuma medida de RTT nova (roundTripTimeMeasurements parado): o RTT do ultimo relatorio vale para o log, nao para a base
+        const stale = diffSamples(
+            { ...prev, log: log({ rttTotal: 0.24, rttCount: 2 }) },
+            sample({ at: 12_000, framesEncoded: 220, bytesSent: 2_100_000, log: log({ rttTotal: 0.24, rttCount: 2, rttMs: 140 }) })
+        );
+        assert.equal(stale?.rttMs, 140);
+        assert.equal(stale?.rttFreshMs, null);
     });
 
     test("janela curta demais (< 0,5 s) ou contadores que voltaram (sender trocado): null", () => {

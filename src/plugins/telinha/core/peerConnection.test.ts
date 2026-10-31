@@ -18,7 +18,7 @@ import { audioTrack, type FakeRTCPeerConnection, installWebRtc, videoTrack, type
 import { logged, logMark } from "@test/helpers/wpa-session";
 
 import { containPeerConnection, getPeerConnectionClass, isContained, type SendPlan, setPcHooks } from "./peerConnection";
-import { resetTeredoMemory, TEREDO_HOLD_MS, TeredoFilter } from "./teredo";
+import { TEREDO_HOLD_MS, TEREDO_RESCUE_MS, TeredoFilter } from "./teredo";
 
 type TestPc = FakeRTCPeerConnection & RTCPeerConnection;
 
@@ -253,8 +253,6 @@ describe("TelinhaPeerConnection", () => {
         const cand = (address: string, component = 1) => `candidate:1 ${component} udp 1677729535 ${address} 46154 typ srflx generation 0`;
         const remoteInit = (address: string): RTCIceCandidateInit => ({ candidate: cand(address), sdpMid: "0", sdpMLineIndex: 0, usernameFragment: "r1" });
 
-        beforeEach(() => resetTeredoMemory());
-
         test("addIceCandidate: o Teredo do outro lado so entra sem outro caminho; os outros, como vieram (o erro chega no Trystero)", async t => {
             const clock = useFakeClock(t);
             const pc = newPc();
@@ -292,6 +290,74 @@ describe("TelinhaPeerConnection", () => {
             clock.tick(TEREDO_HOLD_MS);
             await new Promise(resolve => setImmediate(resolve));
             assert.equal(closed.remoteCandidates.length, 0);
+        });
+
+        test("o Teredo e o unico caminho que funciona (CGNAT dos dois lados): sem conectar 8 s depois da coleta, o que ficou de fora entra", async t => {
+            const clock = useFakeClock(t);
+            const pc = newPc();
+            pc.connectionState = "connecting";
+            plan = { codec: null, bitrate: null, label: "amigo (abc123)" };
+            const seen: (string | null)[] = [];
+            pc.onicecandidate = ev => seen.push(ev.candidate?.candidate ?? null);
+            pc.emitIceCandidate({ candidate: cand(V4), sdpMid: "0", usernameFragment: "l1" });
+            pc.emitIceCandidate({ candidate: cand(TEREDO), sdpMid: "0", usernameFragment: "l1" });
+            await pc.addIceCandidate(remoteInit(V4));
+            await pc.addIceCandidate(remoteInit(TEREDO));
+            // o outro lado renegocia com mais um Teredo no SDP (o IPv4 dele ja e conhecido)
+            const other = TEREDO.replace("fdd2", "fdd9");
+            await pc.setRemoteDescription({ type: "offer", sdp: REMOTE_SDP.replace("a=mid:1\r\n", `a=mid:1\r\na=ice-ufrag:r1\r\na=${cand(V4)}\r\na=${cand(other)}\r\n`) });
+            const mark = logMark();
+            pc.emitIceCandidate(null);
+            assert.deepEqual(seen, [cand(V4), null]);
+            assert.deepEqual(pc.remoteCandidates.map(c => c?.candidate), [cand(V4)]);
+
+            clock.tick(TEREDO_RESCUE_MS - 1);
+            assert.equal(seen.length, 2, "ainda esperando a conexao");
+            clock.tick(1);
+            await new Promise(resolve => setImmediate(resolve));
+            assert.deepEqual(seen, [cand(V4), null, cand(TEREDO)], "o nosso Teredo vai para o Trystero, que o sinaliza");
+            assert.deepEqual(pc.remoteCandidates.map(c => c?.candidate).sort(), [cand(V4), cand(TEREDO), cand(other)].sort());
+            assert.deepEqual(logged(/Teredo/, mark).map(e => e.msg), [
+                "amigo (abc123): a conexão não abriu em 8 s sem o Teredo; os 3 candidatos pelo Teredo que tinham ficado de fora entraram"
+            ]);
+
+            // depois do resgate o filtro fica desligado nesta conexao; outro fim de coleta nao repete nada
+            await pc.addIceCandidate({ ...remoteInit("2001::5ef5:79fd") });
+            assert.equal(pc.remoteCandidates.at(-1)?.candidate, cand("2001::5ef5:79fd"));
+            pc.emitIceCandidate(null);
+            clock.tick(TEREDO_RESCUE_MS);
+            assert.equal(logged(/não abriu/, mark).length, 1);
+        });
+
+        test("conectada a tempo, fechada ou sem nada de fora: o resgate nao faz nada", t => {
+            const clock = useFakeClock(t);
+            const open = newPc();
+            open.onicecandidate = () => { };
+            open.emitIceCandidate({ candidate: cand(V4), sdpMid: "0", usernameFragment: "l1" });
+            open.emitIceCandidate({ candidate: cand(TEREDO), sdpMid: "0", usernameFragment: "l1" });
+            open.emitIceCandidate(null);
+            open.emitIceCandidate(null);
+            const closed = newPc();
+            closed.connectionState = "closed";
+            closed.emitIceCandidate({ candidate: cand(V4), sdpMid: "0", usernameFragment: "l1" });
+            closed.emitIceCandidate({ candidate: cand(TEREDO), sdpMid: "0", usernameFragment: "l1" });
+            closed.emitIceCandidate(null);
+            const clean = newPc();
+            clean.connectionState = "connecting";
+            clean.emitIceCandidate(null);
+            const mark = logMark();
+            clock.tick(TEREDO_RESCUE_MS);
+            assert.deepEqual(logged(/não abriu/, mark), []);
+
+            // um so de fora: a frase no singular
+            const one = newPc();
+            one.connectionState = "connecting";
+            one.onicecandidate = () => { };
+            one.emitIceCandidate({ candidate: cand(V4), sdpMid: "0", usernameFragment: "l1" });
+            one.emitIceCandidate({ candidate: cand(TEREDO), sdpMid: "0", usernameFragment: "l1" });
+            one.emitIceCandidate(null);
+            clock.tick(TEREDO_RESCUE_MS);
+            assert.match(logged(/não abriu/, mark).map(e => e.msg).join(""), /; o candidato pelo Teredo que tinha ficado de fora entrou$/);
         });
 
         test("onicecandidate: o handler do Trystero so recebe o que o filtro deixa passar; o getter devolve o handler", t => {

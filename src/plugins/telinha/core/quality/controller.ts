@@ -36,7 +36,7 @@ import { log, logThrottled } from "@plugins/telinha/core/log";
 import { guardStatsLog, type SenderLevels, SenderLog } from "@plugins/telinha/core/statsLog";
 import type { AutoQualityState, AutoQualityViewer, PeerId, Quality, QualityLevel, QualityReason } from "@plugins/telinha/types";
 
-import { inBandwidthGrace, LEVELS, levelText, meet, pixelRate, rank, stepDown, stepUp } from "./levels";
+import { inBandwidthGrace, isAtMost, LEVELS, levelText, meet, pixelRate, rank, stepDown, stepUp } from "./levels";
 import { diffSamples, readSenderSample, type SenderSample, type WindowMetrics } from "./stats";
 
 /** Motivos que descem o degrau global (de todos): recursos compartilhados do PC de quem transmite. */
@@ -77,18 +77,23 @@ const FPS_STREAK = 2;
 const CPU_STREAK = 2;
 
 // Rede de UM espectador (o degrau dele) e o upload (o de todos). Uma janela de ~2 s mostra a rede no limite quando ha:
-// - congestionamento: perda >= NET_LOSS_PCT, RTT NET_RTT_RISE_MS acima do menor RTT recente (a fila do caminho
-//   cresceu) ou pacotes esperando mais de NET_PACER_MS no pacer deste PC;
+// - congestionamento: perda >= NET_LOSS_ALONE_PCT; ou perda >= NET_LOSS_PCT com outro sinal (RTT subindo, recuo do
+//   estimador ou banda estimada abaixo do degrau): no Wi-Fi rapido 2-3% de perda cronica e corrigida pelo NACK/RTX e pelo
+//   colchao de quem assiste, sem nada na tela; RTT NET_RTT_RISE_MS acima da base (o P15 dos RTTs medidos nos ultimos
+//   RTT_BASE_MS: uma leitura baixa solta nao vira base) = a fila do caminho cresceu; pacotes esperando mais de
+//   NET_PACER_MS no pacer deste PC;
 // - banda curta: a banda estimada abaixo do que o degrau pede (LEVELS.minKbps), com o envio usando >= NET_FULL_RATIO
 //   dela (o caminho esta cheio; com menos, e o encoder que pede pouco, ex.: tela parada).
 // So desce com o problema seguido por mais que um soluco (log de 31/10: dois soluços de ~10 s, e o WebRTC encolhia a
 // imagem de 1080p a 320x180 e levava ~60 s para voltar):
+const NET_LOSS_ALONE_PCT = 5;
 const NET_LOSS_PCT = 2;
 const NET_RTT_RISE_MS = 60;
 const NET_PACER_MS = 100;
 const NET_FULL_RATIO = 0.85;
-/** o menor RTT das janelas destes ultimos ms e a base sem fila */
+/** a base sem fila: este percentil dos RTTs medidos nestes ultimos ms */
 const RTT_BASE_MS = 120_000;
+const RTT_BASE_PERCENTILE = 0.15;
 /**
  * Congestionamento seguido por isto: desce. Um soluco de 10 s cai em no maximo 6 janelas de 2 s (12 s, contando as das
  * pontas), entao nunca chega aqui.
@@ -103,10 +108,18 @@ const SHORT_MS = 30_000;
 /** recuo do estimador: a banda estimada caiu para isto da janela anterior, ou menos (o GCC recua para 0,85 do entregue) */
 const BACKOFF_RATIO = 0.85;
 /**
- * Subir a banda de um espectador: estavel (sem problema, sem recuo e com a banda estimada >= UP_HEADROOM x o piso do degrau
- * de cima em toda janela) por BW_UP_STABLE_MS. Desceu de novo ate BW_UNDONE_MS depois de subir: a espera dobra, ate
- * BW_MAX_HOLD_MS; volta para BW_UP_STABLE_MS depois de BW_HOLD_RESET_MS sem descer.
+ * Upload (o degrau de todos): algum espectador ja com problema que dura (vai descer) e a maioria com algum problema ha
+ * pelo menos isto. Os periodos de cada um comecam em janelas diferentes, entao exigir que todos completem o deles junto
+ * quase nunca acontecia (e cada um descia sozinho, por "banda").
  */
+const UPLOAD_TROUBLE_MS = 10_000;
+/**
+ * Subir (a banda de um espectador, ou o degrau de todos depois de descer pelo upload): estavel por BW_UP_STABLE_MS, sem
+ * problema, sem recuo e com a banda estimada >= UP_HEADROOM x o piso do degrau de cima em pelo menos CALM_SHARE do tempo
+ * (uma janela ruim solta, como um soluco do Wi-Fi, nao zera a conta), e na ultima janela. Desceu de novo ate BW_UNDONE_MS
+ * depois de subir: a espera dobra, ate BW_MAX_HOLD_MS; volta para BW_UP_STABLE_MS depois de BW_HOLD_RESET_MS sem descer.
+ */
+const CALM_SHARE = 0.9;
 const BW_UP_STABLE_MS = 30_000;
 const BW_UNDONE_MS = 60_000;
 const BW_MAX_HOLD_MS = 600_000;
@@ -199,15 +212,51 @@ interface NetState {
     backoff: boolean;
     /** banda estimada da janela anterior */
     lastEst: number | null;
-    /** RTT das janelas recentes (a base sem fila e o menor) */
+    /** RTTs medidos nas janelas recentes (a base sem fila e o P15 deles) */
     rtts: { at: number; ms: number; }[];
-    /** sem problema nem recuo desde (a subida do degrau global depois de descer por upload) */
-    calmSince: number;
+    /** as janelas recentes, para a subida (calmShare) */
+    windows: NetWindow[];
 }
 
-const newNet = (now: number): NetState => ({
-    level: null, congestedSince: null, troubleSince: null, enoughFor: null, trouble: false, backoff: false, lastEst: null, rtts: [], calmSince: now
+/** Uma janela de ~2 s da rede de um espectador, para a subida. */
+interface NetWindow {
+    /** fim da janela e duracao (ms) */
+    at: number;
+    ms: number;
+    /** sem problema, sem recuo do estimador e sem limitacao do WebRTC */
+    quiet: boolean;
+    est: number | null;
+}
+
+const newNet = (): NetState => ({
+    level: null, congestedSince: null, troubleSince: null, enoughFor: null, trouble: false, backoff: false, lastEst: null, rtts: [], windows: []
 });
+
+/** O valor no percentil `p` (0..1) de `values`; null sem valores. */
+function percentile(values: number[], p: number): number | null {
+    if (!values.length) return null;
+    const sorted = [...values].sort((a, b) => a - b);
+    return sorted[Math.floor(p * (sorted.length - 1))];
+}
+
+/**
+ * Fracao do tempo dos ultimos `ms` em que as janelas de `n` estavam calmas (`calm`); null se elas ainda nao cobrem esse
+ * tempo inteiro depois de `since` (ex.: a ultima troca de degrau) ou se a ultima (a de agora) nao esta calma.
+ */
+function calmShare(n: NetState, now: number, since: number, ms: number, calm: (w: NetWindow) => boolean): number | null {
+    const from = now - ms;
+    const last = n.windows.at(-1);
+    const first = n.windows[0];
+    if (!last || last.at !== now || !calm(last) || since > from || first.at - first.ms > from) return null;
+    let total = 0;
+    let ok = 0;
+    for (const w of n.windows) {
+        if (w.at <= from) continue;
+        total += w.ms;
+        if (calm(w)) ok += w.ms;
+    }
+    return ok / total;
+}
 
 /** Uma casa decimal com virgula. */
 const dec = (v: number) => v.toFixed(1).replace(".", ",");
@@ -229,7 +278,7 @@ interface ViewerState {
     net: NetState;
     applied: QualityLevel | null;
     applying: boolean;
-    /** a captura mudou de tamanho depois do ultimo apply: reaplicar o mesmo degrau (captureResized) */
+    /** reaplicar o mesmo degrau: a captura mudou de tamanho (captureResized) ou o encoder mudou de tipo (reapply) */
     resized: boolean;
     /** antes da primeira medida: o encoder dele deve rodar na placa de video? (addViewer; undefined = como os ja medidos) */
     expectGpu: boolean | undefined;
@@ -265,6 +314,9 @@ function reasonText(level: QualityLevel, reason: QualityReason | null, viewers: 
 }
 
 const REASON_LABEL: Record<QualityReason, string> = { cpu: "CPU", gpu: "placa de vídeo", upload: "upload", bandwidth: "banda" };
+
+/** Janela calma para subir para `next`: sem problema nem recuo e com folga de UP_HEADROOM x o piso dele. */
+const readyFor = (next: QualityLevel) => (w: NetWindow) => w.quiet && (w.est == null || w.est >= LEVELS[next].minKbps * UP_HEADROOM);
 
 /** Tempo por quadro medido agora nos encoders da placa de video. */
 interface GpuSample {
@@ -322,7 +374,7 @@ export class QualityController {
         const now = performance.now();
         this.viewers.set(peerId, {
             peerId, ready: false, readyAt: Infinity, ignoreUntil: now + WARMUP_MS, prev: null, metrics: null, fresh: false,
-            bwLevel: this.deps.ceiling, bwHold: newHold(now, BW_HOLD), net: newNet(now), applied: null, applying: false, resized: false, expectGpu: gpu,
+            bwLevel: this.deps.ceiling, bwHold: newHold(now, BW_HOLD), net: newNet(), applied: null, applying: false, resized: false, expectGpu: gpu,
             log: new SenderLog(now), changeWhy: null
         });
         if (this.deps.enabled()) {
@@ -365,6 +417,14 @@ export class QualityController {
         }
     }
 
+    /** Reaplica o degrau atual deste espectador (ex.: o encoder dele mudou de tipo e a degradationPreference tambem). */
+    reapply(peerId: PeerId) {
+        const v = this.viewers.get(peerId);
+        if (!v || this.disposed) return;
+        v.resized = true;
+        this.applyViewer(v);
+    }
+
     /** A configuracao autoQuality mudou: volta todos para o teto e recomeca. */
     settingChanged() {
         if (this.disposed) return;
@@ -377,7 +437,7 @@ export class QualityController {
         for (const v of this.viewers.values()) {
             v.bwLevel = this.deps.ceiling;
             v.bwHold = newHold(now, BW_HOLD);
-            v.net = newNet(now);
+            v.net = newNet();
             v.ignoreUntil = Math.max(v.ignoreUntil, now + SETTLE_MS);
             this.applyViewer(v);
         }
@@ -633,28 +693,32 @@ export class QualityController {
         }
         const need = LEVELS[level].minKbps;
         const est = m.availableKbps;
-        if (m.rttMs != null) n.rtts.push({ at: now, ms: m.rttMs });
+        if (m.rttFreshMs != null) n.rtts.push({ at: now, ms: m.rttFreshMs });
         while (n.rtts.length && now - n.rtts[0].at > RTT_BASE_MS) n.rtts.shift();
-        const base = n.rtts.length ? Math.min(...n.rtts.map(r => r.ms)) : null;
-
-        const loss = m.lossPct != null && m.lossPct >= NET_LOSS_PCT ? `perda de ${dec(m.lossPct)}%` : null;
-        const rtt = m.rttMs != null && base != null && m.rttMs - base >= NET_RTT_RISE_MS ? `RTT de ${Math.round(m.rttMs)} ms (${Math.round(base)} ms sem fila)` : null;
-        const queue = m.pacerMs != null && m.pacerMs > NET_PACER_MS ? `fila de ${Math.round(m.pacerMs)} ms no envio` : null;
-        const congestion = loss ?? rtt ?? queue;
-        const short = est != null && need > 0 && est < need && m.sentKbps >= est * NET_FULL_RATIO
-            ? `banda estimada ${Math.round(est)} kbps, o degrau pede ${need}` : null;
-        if (est != null && est >= need) n.enoughFor = level;
+        const base = percentile(n.rtts.map(r => r.ms), RTT_BASE_PERCENTILE);
         n.backoff = n.lastEst != null && est != null && est <= n.lastEst * BACKOFF_RATIO;
         n.lastEst = est;
+        const estBelow = est != null && need > 0 && est < need;
+
+        const rtt = m.rttMs != null && base != null && m.rttMs - base >= NET_RTT_RISE_MS ? `RTT de ${Math.round(m.rttMs)} ms (${Math.round(base)} ms sem fila)` : null;
+        // perda: sozinha so a partir de NET_LOSS_ALONE_PCT; de NET_LOSS_PCT para cima, com outro sinal de que o caminho encheu
+        const loss = m.lossPct != null && (m.lossPct >= NET_LOSS_ALONE_PCT || (m.lossPct >= NET_LOSS_PCT && (!!rtt || n.backoff || estBelow)))
+            ? `perda de ${dec(m.lossPct)}%` : null;
+        const queue = m.pacerMs != null && m.pacerMs > NET_PACER_MS ? `fila de ${Math.round(m.pacerMs)} ms no envio` : null;
+        const congestion = loss ?? rtt ?? queue;
+        const short = estBelow && m.sentKbps >= est! * NET_FULL_RATIO ? `banda estimada ${Math.round(est!)} kbps, o degrau pede ${need}` : null;
+        if (est != null && est >= need) n.enoughFor = level;
         n.trouble = !!(congestion || short);
-        if (n.trouble || n.backoff) n.calmSince = now;
+        n.windows.push({ at: now, ms: m.dt * 1000, quiet: !n.trouble && !n.backoff && m.bandwidthFraction < ANY_LIMIT_FRACTION, est });
+        while (now - n.windows[0].at > BW_MAX_HOLD_MS + BW_UP_STABLE_MS) n.windows.shift();
 
         const start = now - m.dt * 1000;
         const counts = !inBandwidthGrace(v.readyAt, now);
         n.congestedSince = counts && congestion ? n.congestedSince ?? start : null;
         n.troubleSince = counts && n.trouble ? n.troubleSince ?? start : null;
-        // so a banda curta: depois de um soluco o estimador demora a voltar (SHORT_MS); se ela nunca deu o que o degrau pede, nao
-        const limit = n.enoughFor === level ? SHORT_MS : CONGESTED_MS;
+        // so a banda curta: depois de um soluco o estimador demora a voltar (SHORT_MS), se ela ja deu o que este degrau pede
+        // (aqui ou num degrau que pede mais); senao e caminho estreito (CONGESTED_MS)
+        const limit = n.enoughFor && LEVELS[n.enoughFor].minKbps >= need ? SHORT_MS : CONGESTED_MS;
         const since = n.congestedSince != null && now - n.congestedSince >= CONGESTED_MS ? n.congestedSince
             : n.troubleSince != null && now - n.troubleSince >= limit ? n.troubleSince : null;
         if (since == null) return null;
@@ -697,14 +761,15 @@ export class QualityController {
                 cpuBinding = `o WebRTC reduziu ${this.deps.label(v.peerId)} para ${m.frameHeight}p por CPU (degrau ${target}p)`;
         }
 
-        // rede: cada espectador com problema que dura (trackNet); a maioria ao mesmo tempo = o upload do streamer
-        // (espectador novo, ainda na carencia de banda, nunca entra em bwBad)
+        // rede: cada espectador com problema que dura (trackNet). Upload do streamer: alguem ja vai descer e a maioria esta
+        // com problema agora ha UPLOAD_TROUBLE_MS (espectador novo, ainda na carencia de banda, nunca conta)
         const bwBad = new Map<Active, { why: string; tag: string; }>();
         for (const v of active) {
             const bad = this.trackNet(v, now);
             if (bad) bwBad.set(v, bad);
         }
-        const uploadWide = this.viewers.size >= 2 && bwBad.size >= Math.max(2, Math.ceil(active.length / 2));
+        const troubled = active.filter(v => v.net.troubleSince != null && now - v.net.troubleSince >= UPLOAD_TROUBLE_MS);
+        const uploadWide = this.viewers.size >= 2 && bwBad.size > 0 && troubled.length >= Math.max(2, Math.ceil(active.length / 2));
 
         this.gpuStreak = gpuOver ? this.gpuStreak + 1 : 0;
         this.fpsStreak = fpsShort ? this.fpsStreak + 1 : 0;
@@ -722,7 +787,7 @@ export class QualityController {
         } else if (uploadWide && sinceDown >= DOWN_COOLDOWN_MS) {
             const total = active.reduce((acc, v) => acc + v.metrics.sentKbps, 0);
             this.uplink = { kbps: total, at: now };
-            globalChanged = this.stepGlobalDown("upload", now, `${bwBad.size} de ${active.length} espectadores com banda limitada, ${Math.round(total)} kbps enviados no total`);
+            globalChanged = this.stepGlobalDown("upload", now, `${troubled.length} de ${active.length} espectadores com banda limitada, ${Math.round(total)} kbps enviados no total`);
         } else if (!gpuOver && !fpsShort && !cpuBinding && !uploadWide && this.global !== this.deps.ceiling) {
             globalChanged = this.tryGlobalUp(active, now);
         }
@@ -738,17 +803,15 @@ export class QualityController {
         for (const v of active) {
             relax(v.bwHold, now);
             const bad = bwBad.get(v);
-            const m = v.metrics;
             const next = v.bwLevel !== this.deps.ceiling ? stepUp(v.bwLevel, this.deps.ceiling, preferMotion) : null;
-            // estavel = sem problema nem recuo do estimador, sem limitacao do WebRTC e com folga para o degrau de cima
-            if (v.net.trouble || v.net.backoff || m.bandwidthFraction >= ANY_LIMIT_FRACTION
-                || (next && m.availableKbps != null && m.availableKbps < LEVELS[next].minKbps * UP_HEADROOM)) v.bwHold.calmSince = now;
             if (bad) {
                 // sem espera entre duas descidas: depois de uma, o problema precisa durar de novo (trackNet recomeca a conta)
                 const down = stepDown(this.levelFor(v.peerId), preferMotion);
                 if (down) this.setViewerBw(v, down, now, bad.why, "down", `banda: ${bad.tag}`);
-            } else if (next && now - v.bwHold.calmSince >= v.bwHold.holdMs) {
-                this.setViewerBw(v, next, now, `estável há ${Math.round((now - v.bwHold.calmSince) / 1000)} s`, "up", "banda: estável");
+            } else if (next) {
+                const share = calmShare(v.net, now, Math.max(v.bwHold.lastDownAt, v.bwHold.lastUpAt), v.bwHold.holdMs, readyFor(next));
+                if (share != null && share >= CALM_SHARE)
+                    this.setViewerBw(v, next, now, `estável em ${Math.round(share * 100)}% dos últimos ${Math.round(v.bwHold.holdMs / 1000)} s`, "up", "banda: estável");
             }
         }
     }
@@ -776,10 +839,14 @@ export class QualityController {
         if (load && (load.perEncoder > UP_MAX_BUSY || load.total > cpuBudget() * 0.8)) return false;
         const up = this.uplinkFresh(now);
         if (up && n * LEVELS[next].minKbps > up.kbps) return false;
-        // desceu pelo upload: so sobe com a rede de todos estavel ha BW_UP_STABLE_MS (como a banda de um espectador)
-        if (this.globalReason === "upload" && active.some(v => now - v.net.calmSince < BW_UP_STABLE_MS
-            || (v.metrics.availableKbps != null && v.metrics.availableKbps < LEVELS[meet(next, v.bwLevel)].minKbps * UP_HEADROOM)))
-            return false;
+        // desceu pelo upload: sobe a menos que a maioria (a mesma conta da descida) ainda nao esteja estavel ha
+        // BW_UP_STABLE_MS com folga para `next`. So conta quem nao esta limitado pela propria rede abaixo de `next`; um Wi-Fi
+        // instavel ou um espectador que acabou de entrar nao segura todos
+        if (this.globalReason === "upload") {
+            const considered = active.filter(v => isAtMost(next, v.bwLevel));
+            const unsettled = considered.filter(v => (calmShare(v.net, now, -Infinity, BW_UP_STABLE_MS, readyFor(next)) ?? 0) < CALM_SHARE);
+            if (unsettled.length >= Math.max(2, Math.ceil(considered.length / 2))) return false;
+        }
         const stable = `estável há ${Math.round((now - this.globalHold.calmSince) / 1000)} s`;
         this.setGlobal(next, this.globalReason ?? "cpu", now, gpu ? `${stable}, previsão de ${gpu.ms.toFixed(1)} ms por quadro na placa` : stable, "up");
         return true;

@@ -20,6 +20,10 @@
 //   addIceCandidate e setRemoteDescription. Os quatro passam por aqui: um candidato pelo Teredo so sai ou entra quando nao
 //   ha outro caminho para o mesmo componente. Os ganchos sao desta classe (o Trystero so ve ela): nada no Trystero e
 //   mudado. Se um dia ele passar a ler os candidatos por outro caminho, o filtro so deixa de agir (a conexao nao quebra).
+//   Resgate (armRescue): "outro caminho" e so um candidato que existe, nao um que funciona. Se a conexao nao abrir
+//   TEREDO_RESCUE_MS depois de a coleta dos nossos candidatos acabar, o que ficou de fora entra: os nossos pelo
+//   onicecandidate do Trystero (ele os sinaliza), os do outro lado pelo addIceCandidate. O Trystero nunca reinicia o ICE
+//   numa conexao que falhou (fecha e a sala reconecta): sem o resgate, dois PCs atras de CGNAT ficariam num ciclo sem fim.
 //
 // Se o SDP ajustado for recusado, aplica o original (nunca derruba a conexao por causa do ajuste).
 //
@@ -43,7 +47,7 @@
 import { applyCodecPreferences } from "./codec";
 import { errorText, log, logThrottled } from "./log";
 import { mungeRemoteSdp, type VideoCodecName } from "./sdp";
-import { TeredoFilter } from "./teredo";
+import { TEREDO_RESCUE_MS, TeredoFilter } from "./teredo";
 
 export interface SendPlan {
     /** codec de video que queremos ENVIAR para o peer desta conexao */
@@ -157,6 +161,24 @@ function teredoOf(pc: RTCPeerConnection): TeredoFilter {
     return filter;
 }
 
+const rescueTimers = new WeakMap<RTCPeerConnection, ReturnType<typeof setTimeout>>();
+
+/**
+ * A coleta dos nossos candidatos acabou: se a conexao nao estiver aberta em TEREDO_RESCUE_MS, o que o filtro do Teredo
+ * deixou de fora entra (core/teredo.ts → releaseDropped) e o filtro desliga nela. Uma linha no log.
+ */
+function armRescue(pc: RTCPeerConnection) {
+    if (rescueTimers.has(pc)) return;
+    rescueTimers.set(pc, setTimeout(() => {
+        rescueTimers.delete(pc);
+        const filter = teredoOf(pc);
+        if (pc.connectionState === "connected" || pc.connectionState === "closed" || !filter.hasDropped()) return;
+        const n = filter.releaseDropped();
+        log.warn(`${labelOf(pc)}: a conexão não abriu em ${TEREDO_RESCUE_MS / 1000} s sem o Teredo; `
+            + (n === 1 ? "o candidato pelo Teredo que tinha ficado de fora entrou" : `os ${n} candidatos pelo Teredo que tinham ficado de fora entraram`));
+    }, TEREDO_RESCUE_MS));
+}
+
 /** O SDP dos nossos candidatos que vai para o outro lado, sem os pelo Teredo que tem outro caminho. */
 function filteredLocal(pc: RTCPeerConnection, d: RTCSessionDescription | null): RTCSessionDescription | null {
     if (!d?.sdp) return d;
@@ -180,6 +202,7 @@ export function getPeerConnectionClass(): typeof RTCPeerConnection {
             // os nossos candidatos: o handler que o Trystero poe em onicecandidate (acessor abaixo) so recebe o que o
             // filtro deixa passar; o evento original nunca chega nele direto
             this.addEventListener("icecandidate", ev => {
+                if (!(ev as RTCPeerConnectionIceEvent).candidate) armRescue(this);
                 const handler = iceHandlers.get(this);
                 if (!handler) return;
                 try {
@@ -237,7 +260,9 @@ export function getPeerConnectionClass(): typeof RTCPeerConnection {
             }
             try {
                 // candidatos do outro lado no SDP (renegociacao, reinicio do ICE): sem os pelo Teredo que tem outro caminho
-                const sdp = munged.sdp && teredoOf(this).filterSdp(munged.sdp, "remote");
+                const sdp = munged.sdp && teredoOf(this).filterSdp(munged.sdp, "remote", c => {
+                    super.addIceCandidate(c).catch(() => { });
+                });
                 if (sdp && sdp !== munged.sdp) munged = { type: munged.type, sdp };
             } catch (e) {
                 logThrottled("pc-teredo-remote-sdp", "warn", "Falha ao filtrar os candidatos do SDP remoto (usando o original): " + errorText(e));

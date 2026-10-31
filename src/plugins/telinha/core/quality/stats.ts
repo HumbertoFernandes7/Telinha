@@ -84,7 +84,7 @@ const HARDWARE_ENCODER_RE = /VideoEncodeAccelerator|ExternalEncoder|MediaFoundat
  * O encoder deste sender roda na placa de video? powerEfficientEncoder decide quando o Chromium o expoe; sem ele, o
  * nome do encoder (HARDWARE_ENCODER_RE).
  */
-export function isHardwareEncoder(powerEfficient: boolean | null, implementation: string | null): boolean {
+export function isHardwareEncoder(powerEfficient: boolean | null | undefined, implementation: string | null | undefined): boolean {
     if (powerEfficient != null) return powerEfficient;
     return HARDWARE_ENCODER_RE.test(implementation ?? "");
 }
@@ -115,6 +115,7 @@ export interface WindowMetrics {
     /** rede na janela (linkWindow); null = o Chromium nao expos */
     lossPct: number | null;
     rttMs: number | null;
+    rttFreshMs: number | null;
     pacerMs: number | null;
 }
 
@@ -226,6 +227,8 @@ export interface LinkWindow {
     lossPct: number | null;
     /** RTT medio na janela; sem os contadores, o do ultimo relatorio */
     rttMs: number | null;
+    /** so o RTT de medidas novas nesta janela (roundTripTimeMeasurements andou); null = nenhuma */
+    rttFreshMs: number | null;
     /** espera media de um pacote no pacer (ΔtotalPacketSendDelay / ΔpacketsSent) */
     pacerMs: number | null;
 }
@@ -244,6 +247,7 @@ export function linkWindow(a: SenderLogCounters, b: SenderLogCounters): LinkWind
         media: loss == null ? null : media,
         lossPct: loss == null ? (b.fractionLost == null ? null : b.fractionLost * 100) : Math.min(100, loss * 100),
         rttMs: rtt == null ? b.rttMs : rtt * 1000,
+        rttFreshMs: rtt == null ? null : rtt * 1000,
         pacerMs: pacer == null ? null : pacer * 1000
     };
 }
@@ -293,6 +297,7 @@ export function diffSamples(prev: SenderSample, cur: SenderSample): WindowMetric
         frameHeight: cur.frameHeight,
         lossPct: link.lossPct,
         rttMs: link.rttMs,
+        rttFreshMs: link.rttFreshMs,
         pacerMs: link.pacerMs
     };
 }
