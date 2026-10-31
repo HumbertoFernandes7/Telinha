@@ -14,7 +14,7 @@
 // trava. Por isso a sonda guarda o primeiro perfil por hardware, a negociacao poe ESSE perfil na frente (sortCodecs
 // aqui, sdp.ts no SDP remoto) e o streaming.ts confere o encoder real no ar (softwareFallback). No ar, o Chromium
 // tambem troca a placa pelo OpenH264 DE PROPOSITO em quadros de tamanho impar ou abaixo de 360p (ver
-// isTransientSoftwareH264): isso e passageiro e nao conta como queda.
+// isTransientSoftwareH264): isso nao e a placa falhando e nunca conta como queda.
 
 import { H264_PROBE } from "@plugins/telinha/protocol";
 import type { CodecSetting } from "@plugins/telinha/settings";
@@ -311,22 +311,25 @@ export function isSoftwareH264(r: EncoderReport): boolean {
 }
 
 /**
- * H.264 em software DE PROPOSITO e de passagem: o proprio WebRTC esta reduzindo a resolucao (qualityLimitationReason
- * diferente de "none", ex.: banda baixa com degradationPreference "maintain-framerate") e chegou num tamanho que a placa
- * de video nao aceita (h264HwAcceptsSize). Medido no Chromium 152 (RTX 3070): o OpenH264 assume nesse quadro e a placa
- * volta sozinha na proxima reconfiguracao com um tamanho valido, sem o espectador travar. Nao e queda.
- * Com o WebRTC sem reduzir nada (ex.: uma reducao nossa com tamanho impar, 1798x1080 ÷1,5 = 1199x720, que
- * quality/levels.ts → evenScale agora evita; a captura em si sempre chega par), o tamanho e o nosso e nao muda sozinho:
- * conta como queda (softwareFallback).
+ * H.264 em software DE PROPOSITO, nao por falha da placa: o quadro esta num tamanho que a placa de video nao aceita
+ * (h264HwAcceptsSize: impar ou abaixo de 360p), seja qual for o qualityLimitationReason. Medido no Chromium 152 (RTX
+ * 3070): com a banda baixa o proprio WebRTC reduz a resolucao (degradationPreference "maintain-framerate"), chega num
+ * tamanho desses, o OpenH264 assume nesse quadro e a placa volta sozinha na proxima reconfiguracao com um tamanho valido,
+ * sem o espectador travar. O qualityLimitationReason nao serve para separar: o WebRTC so sobe a resolucao de novo depois
+ * de varios segundos sem limitacao, entao o motivo volta para "none" com o tamanho reduzido (853x480) ainda no ar. Foi o
+ * que aconteceu no log de 31/10: 20-30 s depois de cada reducao o mesmo 853x480 com "none" contou como queda, a 2a
+ * desligou o H.264 da sessao e o PC passou a codificar VP9 por software. Uma reducao nossa com tamanho impar (1798x1080
+ * ÷1,5 = 1199x720, que quality/levels.ts → evenScale evita) tambem nao e a placa falhando. Sem tamanho: nao da para
+ * saber (false, como antes). Nunca conta como queda (softwareFallback).
  */
 export function isTransientSoftwareH264(r: EncoderReport): boolean {
-    if (!isSoftwareH264(r) || !r.limitation || r.limitation === "none" || !r.width || !r.height) return false;
+    if (!isSoftwareH264(r) || !r.width || !r.height) return false;
     return !h264HwAcceptsSize(r.width, r.height);
 }
 
 /**
  * Checagem no ar de UM envio (streaming.ts → tick), no maximo uma vez por espectador (`alreadyChecked`): se o H.264
- * caiu para software de verdade (nao de passagem, ver isTransientSoftwareH264), o codec para ESTE espectador, o que
+ * caiu para software de verdade (num tamanho que a placa aceita, ver isTransientSoftwareH264), o codec para ESTE espectador, o que
  * chooseCodec escolhe com este PC sem H.264 por hardware (VP9; continua H.264 so se estiver fixado nas configuracoes).
  * Nao mexe na sessao: quem chama registra a queda (noteH264Fallback). null = nada a fazer (sem evidencia, de passagem,
  * outro codec ou ja tratado).

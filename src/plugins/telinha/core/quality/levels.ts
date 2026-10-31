@@ -123,8 +123,8 @@ function shortestIn(lo: number, hi: number): number {
 /**
  * scaleResolutionDownBy que leva a captura `width`x`height` para a altura `targetHeight` (ou ate 16 px abaixo) com
  * largura E altura PARES. O RTCVideoEncoder do Chromium so codifica H.264 na placa de video em tamanho par
- * (codec.ts → h264HwAcceptsSize); fora disso o WebRTC usa o OpenH264 e, como a reducao e nossa (o WebRTC nao esta
- * limitando nada), o streaming.ts → checkEncoder conta como queda de verdade e passa o espectador para VP9. A escala
+ * (codec.ts → h264HwAcceptsSize); fora disso o WebRTC usa o OpenH264 (por software) e, como a reducao e nossa, o
+ * tamanho nao muda sozinho: o espectador ficaria no OpenH264 ate o degrau mudar (nao conta como queda). A escala
  * simples (altura / alvo, 3 casas) da tamanho impar em metade das capturas de janela entre 736 e 1080 de altura, ex.:
  * 1798x1080 ÷1,5 = 1199x720 (OpenH264, medido); aqui sai ÷1,501 = 1198x720 (placa de video, medido).
  * Mantem a escala simples quando ela ja da par (ex.: 1920x1080 ÷1,5 = 1280x720) ou quando nao precisa reduzir (<= 1).
