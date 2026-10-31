@@ -8,9 +8,11 @@
 // core/session.ts → core/streaming.ts → onCodecRequest): quem assiste recebeu o H.264 e nao decodificou nenhum quadro, e
 // pede VP9. Com o codec no automatico, so o envio para ele vira VP9 (sem reconectar) e isso NAO conta como queda do
 // H.264 deste PC (pode ser o decodificador dele); fixado em H.264, so loga; quem nao esta assistindo e ignorado; com a
-// captura parada (janela minimizada) ou sem contador de quadros, ignorado (o VP9 so pesaria a CPU). O contador da
-// captura vem do media-source das estatisticas do envio, lidas pelo tick a cada segundo: os pedidos esperam 2 leituras.
-// Do lado de quem assiste (quando pedir), ver viewing.codecRequest.test.ts.
+// captura sem quadro novo em CODEC_REQUEST_CAPTURE_MS (janela minimizada) ou sem contador de quadros, ignorado sem marcar
+// (o VP9 so pesaria a CPU; o proximo pedido do espectador vale). O contador da captura vem do media-source das
+// estatisticas do envio, lidas pelo tick a cada segundo: os pedidos esperam 2 leituras. O espectador pede aos
+// NO_FRAME_HINT_MS e repete a cada NO_FRAME_HINT_MS sem quadro: os pedidos daqui seguem esse ritmo (o lado de quem
+// assiste, que manda os pedidos sozinho, fica em viewing.codecRequest.test.ts; os dois nao rodam juntos num processo).
 // Rodar:  pnpm test:file src/plugins/telinha/core/streaming.codecRequest.test.ts  (todos: pnpm test:unit)
 
 import "@test/fakes/dom";
@@ -25,14 +27,18 @@ import { connectViewer, createRig, destroyRig, enterCall, logMark, screenOptions
 
 import { getLocalCaps } from "./codec";
 import { STATS_LINE_RE } from "./statsLog";
-import { sendPlanFor, startStreaming, stopStreaming } from "./streaming";
+import { CODEC_REQUEST_CAPTURE_MS, sendPlanFor, startStreaming, stopStreaming } from "./streaming";
+import { NO_FRAME_HINT_MS } from "./viewing";
 
 const NVENC = "MediaFoundationVideoEncodeAccelerator (NVIDIA H.264 Encoder MFT)";
 
 let rig: StreamingRig;
 let seq = 0;
 
-/** A captura vista no media-source do envio: quadros por segundo (0 = parada, janela minimizada; null = sem contador). */
+/**
+ * A captura vista no media-source do envio: quadros por segundo (0 = parada, janela minimizada; 0.25 = um quadro a cada
+ * 4 s, desktop parado; null = sem contador).
+ */
 interface Capture {
     fps: number | null;
 }
@@ -53,11 +59,11 @@ function senderStats(hw: boolean, capture: Capture) {
     let at = rig.clock.now();
     return () => {
         const now = rig.clock.now();
-        frames += Math.round((now - at) / 1000 * (capture.fps ?? 0));
+        frames += (now - at) / 1000 * (capture.fps ?? 0);
         at = now;
         return videoSenderStats({
             mimeType: hw ? "video/H264" : "video/VP9", encoderImplementation: hw ? NVENC : "libvpx", powerEfficientEncoder: hw, framesEncoded: 600,
-            bytesSent: 5_000_000, sourceFrames: capture.fps == null ? null : frames, sourceFps: capture.fps
+            bytesSent: 5_000_000, sourceFrames: capture.fps == null ? null : Math.floor(frames + 1e-9), sourceFps: capture.fps
         });
     };
 }
@@ -144,25 +150,40 @@ describe("pedido de VP9 de quem assiste (acao \"codec\")", () => {
         assert.deepEqual(about(again(), a), []);
     });
 
-    test("captura parada (janela minimizada) ou sem contador de quadros: ignorado com uma linha, continua em H.264; com a captura de volta, troca", async () => {
+    test("captura parada (janela minimizada) ou sem contador: o 1o pedido e ignorado com uma linha; o 2o, com a captura de volta, troca", async () => {
         const idle = await watcher("parada", true, { fps: 0 });
         const blind = await watcher("semcontador", true, { fps: null });
-        await seconds(rig, 3);
+        const ignored = (v: TestViewer) => `Pedido de VP9 de ${v.label} ignorado: a captura não está entregando quadros (janela minimizada?)`;
+        // 1o pedido do espectador, aos 10 s sem quadro
+        await seconds(rig, NO_FRAME_HINT_MS / 1000);
         const since = logMark();
         await asks(idle);
         await asks(blind);
         for (const v of [idle, blind]) {
             assert.equal(v.sender.encoding.codec, undefined, v.label);
             assert.equal(sendPlanFor(v.peerId)?.codec, "h264", v.label);
-            assert.deepEqual(about(since(), v), [`Pedido de VP9 de ${v.label} ignorado: a captura não está entregando quadros (janela minimizada?)`], v.label);
+            assert.deepEqual(about(since(), v), [ignored(v)], v.label);
         }
 
-        // o pedido ignorado nao fica marcado: com a captura de volta, um pedido novo (passado o intervalo minimo) troca como hoje
+        // a janela e restaurada logo depois; o 2o pedido do espectador (10 s depois) e atendido: o ignorado nao ficou marcado
         idle.capture.fps = 60;
-        await seconds(rig, 5);
+        await seconds(rig, NO_FRAME_HINT_MS / 1000);
         await asks(idle);
+        await asks(blind);
         assert.equal(sentCodec(idle.sender), "video/VP9");
         assert.equal(getLocalCaps().h264HwEncode, true, "nenhuma queda contada");
+        // sem contador continua ignorado, sem outra linha (no maximo uma por minuto)
+        assert.equal(blind.sender.encoding.codec, undefined);
+        assert.deepEqual(about(since(), blind), [ignored(blind)]);
+    });
+
+    test("desktop parado que entrega um quadro a cada 4 s: a captura conta como viva e o pedido troca", async () => {
+        const slow = await watcher("lenta", true, { fps: 0.25 });
+        // quadros novos aos 4 e 8 s; o pedido aos 11 s vem 3 s depois do ultimo (mais que os 2,5 s do checkStall)
+        await seconds(rig, 11);
+        assert.ok(CODEC_REQUEST_CAPTURE_MS > 3000);
+        await asks(slow);
+        assert.equal(sentCodec(slow.sender), "video/VP9");
     });
 
     test("quem nao esta assistindo, ou ja recebe VP9: ignorado (um aviso no maximo por minuto)", async () => {

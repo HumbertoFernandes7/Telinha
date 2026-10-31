@@ -73,9 +73,11 @@
 // 8. Pedido de codec (depois da v0.2.6, adicionado sem mudar PROTOCOL_VERSION): acao ACTION_CODEC ("codec"),
 //    espectador → transmissor, { codec: "vp9" } (CodecRequestMessage): o stream chegou, o video vem em H.264 (ou
 //    nenhum pacote de video chegou, codec desconhecido; desde a v0.2.8) e nenhum quadro foi decodificado em ~10 s
-//    (core/viewing.ts → NO_FRAME_HINT_MS). No maximo um por "assistir".
+//    (core/viewing.ts → NO_FRAME_HINT_MS). Na v0.2.7, um por "assistir"; desde a v0.2.8, repetido a cada ~10 s
+//    enquanto nenhum quadro chega (no maximo 4 por stream, ate o aviso de 45 s).
 //    O transmissor atende so se o codec dele estiver no automatico e o peer estiver recebendo a transmissao em
-//    H.264: troca so o envio para ele (sem renegociar, como a queda do H.264 por software; core/streaming.ts →
+//    H.264 (desde a v0.2.8, tambem so com a captura dele entregando quadros nos ultimos ~10 s), uma vez por envio:
+//    troca so o envio para ele (sem renegociar, como a queda do H.264 por software; core/streaming.ts →
 //    onCodecRequest), sem contar como falha do encoder deste PC (pode ser o decodificador de quem pediu).
 //    Compatibilidade: versoes sem o pedido (a v0.2.6 e anteriores, o amigo virtual) nao registram a acao e a
 //    mensagem expira sozinha no Trystero; codec diferente de "vp9" e ignorado.

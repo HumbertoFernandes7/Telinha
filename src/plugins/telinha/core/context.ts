@@ -109,8 +109,11 @@ export interface ViewerEntry {
     meter: { bytes: number; frames: number; at: number; } | null;
     /** log de estatisticas do stream atual (core/statsLog.ts): linhas a cada STATS_LOG_MS e o resumo quando ele acaba */
     statsLog?: ReceiverLog;
-    /** ja pediu VP9 ao transmissor nesta visualizacao (nenhum quadro em H.264; viewing.ts → askForVp9): uma vez so */
-    codecRequested?: boolean;
+    /**
+     * ultimo pedido de VP9 ao transmissor neste stream (viewing.ts → askForVp9), em multiplos de NO_FRAME_HINT_MS desde que
+     * o stream chegou (1 = o de 10 s, 2 = o de 20 s...); 0 ou ausente = nenhum. Zerado a cada stream novo (attachStream).
+     */
+    codecAskSlot?: number;
     /** limpeza dos timers do pedido (timeout de resposta) */
     requestCleanup: (() => void)[];
     /** limpeza dos listeners/timers do stream atual */

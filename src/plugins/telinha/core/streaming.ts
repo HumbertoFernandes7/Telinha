@@ -135,6 +135,12 @@ const SOURCE_IDLE_MS = 2500;
 const STALL_MIN_SOURCE_FRAMES = 8;
 /** Pedidos de codec (onCodecRequest) de uma mesma conexao: no maximo um a cada este tempo; o resto e ignorado. */
 const CODEC_REQUEST_MIN_MS = 5000;
+/**
+ * Pedido de VP9 (onCodecRequest) so e atendido se a captura entregou algum quadro neste tempo (captureLive). Mais largo
+ * que o SOURCE_IDLE_MS do checkStall: uma janela minimizada nao entrega nada o tempo todo, mas um desktop parado entrega
+ * so quando muda (ja vimos fonte a 4-6 fps, e menos numa tela de carregamento).
+ */
+export const CODEC_REQUEST_CAPTURE_MS = 10_000;
 
 const sends = new Map<PeerId, ViewerSend>();
 /** performance.now() do ultimo pedido de codec de cada conexao (onCodecRequest) */
@@ -1066,10 +1072,10 @@ function noteCapture(send: ViewerSend, frames: number | null) {
     send.capture = frames == null ? undefined : { frames, movedAt: prev && frames > prev.frames ? performance.now() : prev?.movedAt ?? null };
 }
 
-/** A captura entregou quadros novos nos ultimos SOURCE_IDLE_MS (o criterio do checkStall). Sem contador, nao. */
+/** A captura entregou algum quadro novo nos ultimos CODEC_REQUEST_CAPTURE_MS (onCodecRequest). Sem contador, nao. */
 function captureLive(send: ViewerSend) {
     const movedAt = send.capture?.movedAt;
-    return movedAt != null && performance.now() - movedAt < SOURCE_IDLE_MS;
+    return movedAt != null && performance.now() - movedAt < CODEC_REQUEST_CAPTURE_MS;
 }
 
 /** Um contador das estatisticas, ou null se nao veio (ou nao e numero). */
@@ -1199,7 +1205,8 @@ async function switchSendCodec(peerId: PeerId, local: LocalCapture, send: Viewer
  * ou sem nenhum pacote de video (viewing.ts → askForVp9). Atendido so com o codec no automatico, para quem esta recebendo
  * a transmissao em H.264, com a captura entregando quadros (captureLive), uma vez por envio: troca so o envio para ele
  * (switchSendCodec, como uma queda), mas NAO conta como queda do H.264 deste PC (noteH264Fallback): os quadros podem estar
- * saindo e o problema ser o decodificador dele. Captura parada ou sem contador: ignorado com uma linha no log. Codec
+ * saindo e o problema ser o decodificador dele. Captura sem quadro novo em CODEC_REQUEST_CAPTURE_MS, ou sem contador:
+ * ignorado com uma linha no log (no maximo uma por minuto) e sem marcar, para o proximo pedido dele valer. Codec
  * fixado em H.264: so loga. Um pedido a cada CODEC_REQUEST_MIN_MS por conexao; quem nao esta recebendo a transmissao e
  * ignorado.
  */
@@ -1219,10 +1226,11 @@ export function onCodecRequest(peerId: PeerId, request: CodecRequestMessage) {
     // ja atendido, ou o envio ja nao e H.264 (ex.: trocou para VP9 por uma queda do encoder)
     if (send.codecRequested || send.decision.codec !== "h264") return;
     // captura parada (ex.: janela minimizada desde o comeco) ou sem contador: quem assiste fica sem quadro por causa dela,
-    // nao do H.264, e o VP9 so pesaria a CPU. Nao marca codecRequested (quem assiste so pede uma vez por "assistir"; um
-    // pedido novo com a captura no ar e atendido); se o H.264 nao sair quando a captura voltar, o checkStall pega.
+    // nao do H.264, e o VP9 so pesaria a CPU. Nao marca codecRequested: quem assiste repete o pedido a cada ~10 s sem
+    // quadro (viewing.ts → askForVp9) e o proximo, com a captura no ar, e atendido. Se o H.264 nao sair quando a captura
+    // voltar, o checkStall tambem pega.
     if (!captureLive(send)) {
-        log.info(`Pedido de ${wanted} de ${label} ignorado: a captura não está entregando quadros (janela minimizada?)`);
+        logThrottled(`codec-request-capture:${peerId}`, "info", `Pedido de ${wanted} de ${label} ignorado: a captura não está entregando quadros (janela minimizada?)`, 60_000);
         return;
     }
     send.codecRequested = true;
