@@ -14,7 +14,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } fr
 import { createRequire } from "module";
 import { dirname, join } from "path";
 
-import { ADDON, argValue, HERE, makeChecker, pickPayload, pickVencordDist, SCRATCH } from "./common.mjs";
+import { ADDON, argValue, HERE, makeChecker, pickPayload, pickVencordDist, PLUGIN_NATIVES, SCRATCH } from "./common.mjs";
 
 const require = createRequire(import.meta.url);
 const { buildStubAsar, readAsarFile } = require("../installer/asar.js");
@@ -24,7 +24,7 @@ const { check, finish } = makeChecker();
 const vencordSrc = pickVencordDist();
 const payload = pickPayload();
 const stubTemplate = readFileSync(join(payload.dir, payload.version.stubTemplate), "utf8");
-const NATIVES = ["appendDiagLog", "finishDisplayMedia", "listSources", "prepareDisplayMedia", "readDiagLog", "readScreenAudio", "resetDisplayMedia", "screenAudioStatus", "startScreenAudio", "stopScreenAudio"];
+const NATIVES = PLUGIN_NATIVES;
 
 function copyVencord(src, name) {
     const dir = join(SCRATCH, name);
@@ -149,7 +149,7 @@ let relays = [];
     check("CSP: Vencord stylesheet content-type fix intact", r.csp.stylesheetContentType === "text/css");
     check("Discord update: Vencord copied OUR stub into app-1.0.9003", r.persist?.newAppAsarIsOurStub && r.persist.newIndexIsTelinhaStub && r.persist.newOriginalMovedTo_app, r.persist);
     check("no add-on errors", (a.errors ?? []).length === 0, a.errors);
-    check("main.log: boot + loaded with 8 natives + CSP chained", /\] boot /.test(r.mainLog) && /loaded .*"natives":8/.test(r.mainLog) && /CSP: added 8 sources \(chained\)/.test(r.mainLog), r.mainLog.slice(-600));
+    check(`main.log: boot + loaded with ${NATIVES.length} natives + CSP chained`, /\] boot /.test(r.mainLog) && new RegExp(`loaded .*"natives":${NATIVES.length}\\b`).test(r.mainLog) && /CSP: added 8 sources \(chained\)/.test(r.mainLog), r.mainLog.slice(-600));
 }
 
 // ---------------------------------------------------------------------------------------------- S2
