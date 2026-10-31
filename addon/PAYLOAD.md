@@ -110,6 +110,9 @@ must not rename files: `main.js` resolves its siblings by these names.
     install.json    <- what the installer did (section 4.7); kept in step by automatic updates (section 8.5)
     update\         <- automatic-update state (section 8): state.json, run\<pid>, swap.lock, staging-* (transient)
     logs\main.log   <- loader log (main-process stdout is invisible on Windows); rotates to main.log.1 at 256 KiB
+    logs\renderer.log <- the plugin's own log lines, written only while "Compartilhar diagnóstico" is on (native.ts
+                       appendDiagLog, core/diagLogMain.ts): the previous session's tail for a friend who asks for the
+                       diagnostics; rotates to renderer.log.1 at 100 KiB
 ```
 
 `<FlavorDir>` is the folder name under `%LOCALAPPDATA%` (`Discord`, `DiscordPTB`, `DiscordCanary`,
@@ -242,7 +245,7 @@ installer's Repair/Install replaced our stub with its own (kind `vencord-stub` a
 
 | Situation | Result |
 |---|---|
-| normal | Vencord + Telinha. `main.log`: `boot`, `loaded {"version":…,"commit":…,"rendererHooked":true,"ipcMapHooked":true,"natives":8,…,"errors":0}`, then `CSP: added 8 sources (chained)` and `renderer served {"metaPatched":true,…}` |
+| normal | Vencord + Telinha. `main.log`: `boot`, `loaded {"version":…,"commit":…,"rendererHooked":true,"ipcMapHooked":true,"natives":10,…,"errors":0}`, then `CSP: added 8 sources (chained)` and `renderer served {"metaPatched":true,…}` |
 | `%APPDATA%\Telinha\addon\` missing | stub requires Vencord directly: plain Vencord |
 | `main.js` throws while loading | stub logs `[Telinha] loader failed` to stderr and requires Vencord: plain Vencord |
 | `addon.json` broken / unreadable | logged; no hooks installed; plain Vencord |

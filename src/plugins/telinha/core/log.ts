@@ -17,6 +17,28 @@ export function stripIps(text: string): string {
     return text.replace(IPV4_RE, "[ip]").replace(IPV6_RE, "[ip]");
 }
 
+// O que sai do PC no diagnostico compartilhado (core/diagShare.ts) passa tambem por estes: a pasta do usuario
+// (C:\Users\<nome>\..., inclusive com a barra dobrada do JSON, /home/<nome>, /Users/<nome>) e qualquer coisa com cara de
+// token (JWT como o id_token, token de conta do Discord, "Bearer x", "access_token=x"...). O nucleo nunca loga tokens:
+// isto e so a segunda barreira.
+const WIN_USER_DIR_RE = /\b([a-z]:(?:\\{1,2}|\/)(?:users|documents and settings)(?:\\{1,2}|\/))[^\\/:*?"<>|\r\n]+/gi;
+const UNIX_USER_DIR_RE = /(\/(?:home|Users)\/)[^/\s"'<>]+/g;
+const JWT_RE = /\beyJ[\w-]{4,}\.[\w-]{4,}\.[\w-]*/g;
+const DISCORD_TOKEN_RE = /\b[\w-]{23,28}\.[\w-]{6}\.[\w-]{27,40}\b/g;
+const NAMED_SECRET_RE = /\b(access_token|refresh_token|id_token|client_secret|code_verifier)(["']?\s*[=:]\s*["']?)[^\s"'&,;]+/gi;
+const BEARER_RE = /\b(bearer\s+)[\w.~+/-]+=*/gi;
+
+/** Sem IPs, sem a pasta do usuario e sem nada com cara de token: o texto que pode sair deste PC. */
+export function maskPrivate(text: string): string {
+    return stripIps(text)
+        .replace(WIN_USER_DIR_RE, "$1[usuário]")
+        .replace(UNIX_USER_DIR_RE, "$1[usuário]")
+        .replace(JWT_RE, "[token]")
+        .replace(DISCORD_TOKEN_RE, "[token]")
+        .replace(NAMED_SECRET_RE, "$1$2[token]")
+        .replace(BEARER_RE, "$1[token]");
+}
+
 export function errorText(e: unknown): string {
     if (e instanceof Error || (e && typeof e === "object" && "message" in e)) {
         const err = e as Error;

@@ -13,6 +13,7 @@ import { desktopCapturer, type IpcMainInvokeEvent } from "electron";
 
 import { readScreenAudioMain, screenAudioStatusMain, startScreenAudioMain, stopScreenAudioMain } from "./core/audio/screenAudioMain";
 import type { ScreenAudioRead, ScreenAudioStart, ScreenAudioStatus } from "./core/audio/types";
+import { appendDiagLogMain, readDiagLogMain } from "./core/diagLogMain";
 import { getWindowProcessInfo } from "./nativeWindowPid";
 import { RELAY_URLS } from "./protocol";
 
@@ -244,6 +245,20 @@ export function readScreenAudio(_: IpcMainInvokeEvent, id: number, maxWaitMs: nu
 
 export function stopScreenAudio(_: IpcMainInvokeEvent, id?: number): void {
     stopScreenAudioMain(typeof id === "number" ? id : undefined);
+}
+
+// #endregion
+
+// #region registro do Telinha em arquivo (core/diagLog.ts → core/diagLogMain.ts; so com "Compartilhar diagnóstico")
+
+/** Acrescenta um lote de linhas ao %APPDATA%\Telinha\logs\renderer.log (roda para .1 ao passar de 100 KiB). false = nao gravou. */
+export function appendDiagLog(_: IpcMainInvokeEvent, text: string): Promise<boolean> {
+    return appendDiagLogMain(text);
+}
+
+/** As ultimas linhas do registro (renderer.log.1 + renderer.log), mais antiga primeiro. */
+export function readDiagLog(_: IpcMainInvokeEvent): Promise<string[]> {
+    return readDiagLogMain();
 }
 
 // #endregion

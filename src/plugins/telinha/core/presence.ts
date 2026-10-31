@@ -41,7 +41,8 @@ export function selfPresence(): PresenceMessage {
         streaming: !!local,
         // stream.access: quem pode assistir (a v0.1.0 ignora); nunca a senha
         ...(local ? { stream: { ...local.info, access: local.access } } : {}),
-        caps: { h264HwDecode: getLocalCaps().h264HwDecode }
+        // caps.diag: "Compartilhar diagnóstico" ligado (protocol.ts, passo 9); desligado = a presenca de antes
+        caps: { h264HwDecode: getLocalCaps().h264HwDecode, ...(settings.store.shareDiagnostics === true ? { diag: true } : {}) }
     };
 }
 
