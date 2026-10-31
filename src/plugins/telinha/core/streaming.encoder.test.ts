@@ -28,6 +28,7 @@ import { connectViewer, createRig, destroyRig, enterCall, logMark, screenOptions
 import { getLocalCaps } from "./codec";
 import { rt } from "./context";
 import { scaledSize } from "./quality/levels";
+import { STATS_LINE_RE } from "./statsLog";
 import { connectionInfo, sendPlanFor, startStreaming, stopStreaming } from "./streaming";
 
 const NVENC = "MediaFoundationVideoEncodeAccelerator (NVIDIA H.264 Encoder MFT)";
@@ -64,8 +65,8 @@ async function watcher(name: string, opts: { hw?: boolean; stats?: StatsEntry[];
 /** O codec fixado no encodings[0] do envio (undefined = o negociado). */
 const codecOf = (v: TestViewer) => v.sender.encoding.codec;
 
-/** Linhas do log sobre este espectador. */
-const about = (lines: string[], v: TestViewer) => lines.filter(l => l.includes(v.label));
+/** Linhas do log sobre este espectador, sem as de estatisticas a cada 10 s (statsLog.ts, testadas a parte). */
+const about = (lines: string[], v: TestViewer) => lines.filter(l => l.includes(v.label) && !STATS_LINE_RE.test(l));
 
 before(async () => {
     rig = createRig({

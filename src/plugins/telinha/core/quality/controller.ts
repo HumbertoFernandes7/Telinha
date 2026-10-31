@@ -30,6 +30,7 @@
 // de CPU (o tempo deles nao e processador); encoders por software seguem so a logica de CPU, como antes.
 
 import { log, logThrottled } from "@plugins/telinha/core/log";
+import { type SenderLevels, SenderLog } from "@plugins/telinha/core/statsLog";
 import type { AutoQualityState, AutoQualityViewer, PeerId, Quality, QualityLevel, QualityReason } from "@plugins/telinha/types";
 
 import { inBandwidthGrace, LEVELS, levelText, meet, pixelRate, rank, stepDown, stepUp } from "./levels";
@@ -150,6 +151,8 @@ interface ViewerState {
     resized: boolean;
     /** antes da primeira medida: o encoder dele deve rodar na placa de video? (addViewer; undefined = como os ja medidos) */
     expectGpu: boolean | undefined;
+    /** log de estatisticas deste envio (core/statsLog.ts): linhas a cada STATS_LOG_MS e o resumo quando ele para */
+    log: SenderLog;
 }
 
 type Active = ViewerState & { metrics: WindowMetrics; };
@@ -236,7 +239,8 @@ export class QualityController {
         const now = performance.now();
         this.viewers.set(peerId, {
             peerId, ready: false, readyAt: Infinity, ignoreUntil: now + WARMUP_MS, prev: null, metrics: null, fresh: false,
-            bwLevel: this.deps.ceiling, bwHold: newHold(now), bwStreak: 0, applied: null, applying: false, resized: false, expectGpu: gpu
+            bwLevel: this.deps.ceiling, bwHold: newHold(now), bwStreak: 0, applied: null, applying: false, resized: false, expectGpu: gpu,
+            log: new SenderLog(now)
         });
         if (this.deps.enabled()) {
             const before = this.global;
@@ -259,7 +263,11 @@ export class QualityController {
     }
 
     removeViewer(peerId: PeerId) {
-        if (this.viewers.delete(peerId)) this.emit();
+        const v = this.viewers.get(peerId);
+        if (!v) return;
+        this.viewers.delete(peerId);
+        this.logSummary(v);
+        this.emit();
     }
 
     /**
@@ -296,8 +304,11 @@ export class QualityController {
         this.emit();
     }
 
+    /** A transmissao acabou (ou trocou de fonte): o resumo de cada envio vai para o log. */
     dispose() {
+        if (this.disposed) return;
         this.disposed = true;
+        for (const v of this.viewers.values()) this.logSummary(v);
         this.viewers.clear();
     }
 
@@ -309,6 +320,7 @@ export class QualityController {
             await this.sample();
             if (this.disposed) return;
             if (this.deps.enabled()) this.decide(performance.now());
+            this.logStats();
             for (const v of this.viewers.values()) this.applyViewer(v);
         } finally {
             this.evaluating = false;
@@ -336,6 +348,7 @@ export class QualityController {
             v.fresh = false;
             if (!s) return;
             const m = v.prev ? diffSamples(v.prev, s) : null;
+            v.log.add(v.prev, s);
             v.prev = s;
             if (m) {
                 v.metrics = m;
@@ -349,6 +362,39 @@ export class QualityController {
         });
         if (maxSourceFps != null)
             this.sourceFpsEma = this.sourceFpsEma == null ? maxSourceFps : this.sourceFpsEma * 0.7 + maxSourceFps * 0.3;
+    }
+
+    // #endregion
+
+    // #region log de estatisticas (so diagnostico: nada aqui entra nas decisoes)
+
+    private levelsOf(v: ViewerState): SenderLevels {
+        return { level: this.levelFor(v.peerId), bw: v.bwLevel, global: this.global, auto: this.deps.enabled() };
+    }
+
+    /** Depois de cada avaliacao: a linha periodica de quem completou a janela do log (core/statsLog.ts → STATS_LOG_MS). */
+    private logStats() {
+        for (const v of this.viewers.values()) {
+            const line = v.fresh && v.prev && v.log.line(v.prev, this.deps.label(v.peerId), this.levelsOf(v));
+            if (line) log.info(line);
+        }
+    }
+
+    /**
+     * Degrau de cada espectador para o log (tempo em cada um, no resumo) e, se mudou, mais uma linha de estatisticas
+     * dele: a janela desde a ultima linha, logo depois da linha da decisao. Chamado em toda mudanca de estado (emit).
+     */
+    private noteLevels() {
+        const now = performance.now();
+        for (const v of this.viewers.values()) {
+            const line = v.log.trackLevel(this.levelFor(v.peerId), now) && v.prev && v.log.line(v.prev, this.deps.label(v.peerId), this.levelsOf(v), true);
+            if (line) log.info(line);
+        }
+    }
+
+    private logSummary(v: ViewerState) {
+        const line = v.log.summary(this.deps.label(v.peerId), performance.now());
+        if (line) log.info(line);
     }
 
     // #endregion
@@ -688,6 +734,7 @@ export class QualityController {
     }
 
     private emit() {
+        this.noteLevels();
         const next = this.buildState();
         const key = JSON.stringify(next);
         if (key === this.publishedKey) return;

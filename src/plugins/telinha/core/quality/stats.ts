@@ -7,6 +7,40 @@
 // Leitura das estatisticas de UM RTCRtpSender de video (outbound-rtp + media-source + par de
 // candidatos) e o resumo de uma janela entre duas leituras.
 
+/**
+ * O que a mesma leitura traz so para o log de estatisticas (core/statsLog.ts); a qualidade automatica nao usa nada
+ * daqui. Contadores acumulados (diferenca entre duas leituras) e valores do momento; null = o Chromium nao expos.
+ * Sem enderecos, portas nem SSRC: do par de candidatos, so o tipo.
+ */
+export interface SenderLogCounters {
+    /** mimeType do codec em uso (outbound-rtp → codec), ex.: "video/VP9" */
+    mimeType: string | null;
+    /** targetBitrate do encoder agora (kbps) */
+    targetKbps: number | null;
+    packetsSent: number | null;
+    retransmittedPacketsSent: number | null;
+    retransmittedBytesSent: number | null;
+    /** totalPacketSendDelay (segundos): espera dos pacotes no pacer */
+    packetSendDelay: number | null;
+    nackCount: number | null;
+    pliCount: number | null;
+    keyFramesEncoded: number | null;
+    qpSum: number | null;
+    /** remote-inbound-rtp (o que o espectador relata por RTCP): pacotes perdidos */
+    packetsLost: number | null;
+    /** remote-inbound-rtp: fractionLost do ultimo relatorio (0..1) */
+    fractionLost: number | null;
+    /** remote-inbound-rtp: roundTripTime do ultimo relatorio (ms) */
+    rttMs: number | null;
+    /** remote-inbound-rtp: totalRoundTripTime (segundos) e roundTripTimeMeasurements */
+    rttTotal: number | null;
+    rttCount: number | null;
+    /** remote-inbound-rtp: jitter que o espectador mede (ms) */
+    jitterMs: number | null;
+    /** tipos dos candidatos do par em uso, local/remoto, ex.: "host/srflx" */
+    route: string | null;
+}
+
 /** Contadores acumulados de uma leitura. */
 export interface SenderSample {
     /** performance.now() */
@@ -28,6 +62,8 @@ export interface SenderSample {
     powerEfficient: boolean | null;
     /** encoderImplementation, ex.: "MediaFoundationVideoEncodeAccelerator (NVIDIA H.264 Encoder MFT)", "libvpx" */
     implementation: string | null;
+    /** so para o log (ausente = leitura sem eles) */
+    log?: SenderLogCounters;
 }
 
 /**
@@ -72,6 +108,35 @@ export interface WindowMetrics {
 }
 
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+const str = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
+
+/** Os contadores so do log (SenderLogCounters) da outbound-rtp `out` e do remote-inbound-rtp dela. */
+function logCounters(report: RTCStatsReport, out: any, remote: any, pair: any): SenderLogCounters {
+    const target = num(out.targetBitrate);
+    const rtt = num(remote?.roundTripTime);
+    const jitter = num(remote?.jitter);
+    const local = str(report.get(pair?.localCandidateId)?.candidateType);
+    const peer = str(report.get(pair?.remoteCandidateId)?.candidateType);
+    return {
+        mimeType: str(out.codecId ? report.get(out.codecId)?.mimeType : null),
+        targetKbps: target != null ? target / 1000 : null,
+        packetsSent: num(out.packetsSent),
+        retransmittedPacketsSent: num(out.retransmittedPacketsSent),
+        retransmittedBytesSent: num(out.retransmittedBytesSent),
+        packetSendDelay: num(out.totalPacketSendDelay),
+        nackCount: num(out.nackCount),
+        pliCount: num(out.pliCount),
+        keyFramesEncoded: num(out.keyFramesEncoded),
+        qpSum: num(out.qpSum),
+        packetsLost: num(remote?.packetsLost),
+        fractionLost: num(remote?.fractionLost),
+        rttMs: rtt != null ? rtt * 1000 : null,
+        rttTotal: num(remote?.totalRoundTripTime),
+        rttCount: num(remote?.roundTripTimeMeasurements),
+        jitterMs: jitter != null ? jitter * 1000 : null,
+        route: local || peer ? `${local ?? "?"}/${peer ?? "?"}` : null
+    };
+}
 
 export async function readSenderSample(sender: RTCRtpSender): Promise<SenderSample | null> {
     const report = await sender.getStats();
@@ -79,12 +144,14 @@ export async function readSenderSample(sender: RTCRtpSender): Promise<SenderSamp
     let source: any = null;
     let transport: any = null;
     const pairs: any[] = [];
+    const remotes: any[] = [];
     report.forEach((s: any) => {
         if (s.type === "outbound-rtp" && s.kind === "video") {
             if (!out || (s.bytesSent ?? 0) > (out.bytesSent ?? 0)) out = s;
         } else if (s.type === "media-source" && s.kind === "video") source = s;
         else if (s.type === "transport") transport = s;
         else if (s.type === "candidate-pair") pairs.push(s);
+        else if (s.type === "remote-inbound-rtp" && s.kind === "video") remotes.push(s);
     });
     if (!out) return null;
 
@@ -92,6 +159,7 @@ export async function readSenderSample(sender: RTCRtpSender): Promise<SenderSamp
         || pairs.find(p => p.nominated && p.state === "succeeded" && num(p.availableOutgoingBitrate) != null);
     const available = num(pair?.availableOutgoingBitrate);
     const durations = out.qualityLimitationDurations;
+    const remote = remotes.find(r => r.localId === out.id) ?? (remotes.length === 1 ? remotes[0] : null);
 
     return {
         at: performance.now(),
@@ -108,7 +176,8 @@ export async function readSenderSample(sender: RTCRtpSender): Promise<SenderSamp
         sourceFps: num(source?.framesPerSecond),
         availableKbps: available != null ? available / 1000 : null,
         powerEfficient: typeof out.powerEfficientEncoder === "boolean" ? out.powerEfficientEncoder : null,
-        implementation: typeof out.encoderImplementation === "string" ? out.encoderImplementation : null
+        implementation: typeof out.encoderImplementation === "string" ? out.encoderImplementation : null,
+        log: logCounters(report, out, remote, pair)
     };
 }
 

@@ -16,6 +16,7 @@ import { isIdentityConfigured } from "./identity/config";
 import type { PeerIdentity } from "./identity/policy";
 import type { IdentityFailure } from "./identity/verify";
 import { shortId } from "./log";
+import type { ReceiverLog } from "./statsLog";
 
 // Estado mutavel do nucleo. A UI nunca ve isto: publish() monta um snapshot imutavel para o store.
 
@@ -106,6 +107,8 @@ export interface ViewerEntry {
     firstFrameAt: number | null;
     /** ultima leitura para calcular kbps/fps */
     meter: { bytes: number; frames: number; at: number; } | null;
+    /** log de estatisticas do stream atual (core/statsLog.ts): linhas a cada STATS_LOG_MS e o resumo quando ele acaba */
+    statsLog?: ReceiverLog;
     /** limpeza dos timers do pedido (timeout de resposta) */
     requestCleanup: (() => void)[];
     /** limpeza dos listeners/timers do stream atual */

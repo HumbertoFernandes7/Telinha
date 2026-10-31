@@ -14,9 +14,16 @@ import { describe, test } from "node:test";
 
 import { FakeRTCRtpSender, type StatsEntry, videoSenderStats, videoTrack } from "@test/fakes/webrtc";
 
-import { diffSamples, isHardwareEncoder, readSenderSample, type SenderSample } from "./stats";
+import { diffSamples, isHardwareEncoder, readSenderSample, type SenderLogCounters, type SenderSample } from "./stats";
 
 const NVENC = "MediaFoundationVideoEncodeAccelerator (NVIDIA H.264 Encoder MFT)";
+
+/** Os contadores do log de um envio sem nenhum deles exposto (so o tipo dos candidatos, `route`). */
+const noLog = (patch: Partial<SenderLogCounters> = {}): SenderLogCounters => ({
+    mimeType: null, targetKbps: null, packetsSent: null, retransmittedPacketsSent: null, retransmittedBytesSent: null, packetSendDelay: null,
+    nackCount: null, pliCount: null, keyFramesEncoded: null, qpSum: null, packetsLost: null, fractionLost: null, rttMs: null, rttTotal: null,
+    rttCount: null, jitterMs: null, route: "host/host", ...patch
+});
 
 function senderWith(stats: StatsEntry[]) {
     const sender = new FakeRTCRtpSender(videoTrack());
@@ -50,8 +57,42 @@ describe("readSenderSample", () => {
         assert.deepEqual({ ...s, at: 0 }, {
             at: 0, framesEncoded: 600, totalEncodeTime: 2.5, bytesSent: 1_000_000, limitation: { cpu: 1.5, bandwidth: 3 },
             reason: "bandwidth", frameWidth: 1280, frameHeight: 720, sourceFrames: 610, sourceFps: 59, availableKbps: 4500,
-            powerEfficient: true, implementation: NVENC
+            powerEfficient: true, implementation: NVENC, log: noLog({ mimeType: "video/VP9" })
         });
+    });
+
+    test("so para o log: contadores da outbound-rtp, o remote-inbound-rtp dela e o tipo dos candidatos (sem enderecos)", async () => {
+        const s = await readSenderSample(senderWith(videoSenderStats({
+            localCandidateType: "srflx", remoteCandidateType: "relay",
+            extra: {
+                targetBitrate: 1_800_000, packetsSent: 900, retransmittedPacketsSent: 12, retransmittedBytesSent: 14_000, totalPacketSendDelay: 2.7,
+                nackCount: 12, pliCount: 1, keyFramesEncoded: 3, qpSum: 10_200
+            },
+            // tempos em segundos, como o Chromium relata (valores exatos em binario: 1/32 e 1/128 s)
+            remoteInbound: { packetsLost: 7, fractionLost: 0.008, jitter: 0.0078125, roundTripTime: 0.03125, totalRoundTripTime: 1.7, roundTripTimeMeasurements: 50 }
+        })));
+        assert.deepEqual(s?.log, {
+            mimeType: "video/VP9", targetKbps: 1800, packetsSent: 900, retransmittedPacketsSent: 12, retransmittedBytesSent: 14_000, packetSendDelay: 2.7,
+            nackCount: 12, pliCount: 1, keyFramesEncoded: 3, qpSum: 10_200, packetsLost: 7, fractionLost: 0.008, rttMs: 31.25, rttTotal: 1.7, rttCount: 50,
+            jitterMs: 7.8125, route: "srflx/relay"
+        });
+    });
+
+    test("so para o log: o remote-inbound-rtp e o da outbound-rtp escolhida (localId); sem par de candidatos, sem rota", async () => {
+        const remote = (id: string, localId: string | undefined, packetsLost: number) => ({ id, type: "remote-inbound-rtp", kind: "video", localId, packetsLost });
+        const base = videoSenderStats().filter(e => e.type !== "transport" && e.type !== "candidate-pair");
+        const two = await readSenderSample(senderWith([...base, remote("RA", "OUTRA", 1), remote("RB", "OT01V", 2)]));
+        assert.equal(two?.log?.packetsLost, 2);
+        assert.equal(two?.log?.route, null);
+        const one = await readSenderSample(senderWith([...base, remote("RA", undefined, 5)]));
+        assert.equal(one?.log?.packetsLost, 5, "um so, sem localId (Chromium antigo): e ele");
+        const none = await readSenderSample(senderWith([...base, remote("RA", "OUTRA", 1), remote("RB", "OUTRA2", 2)]));
+        assert.equal(none?.log?.packetsLost, null, "varios e nenhum desta outbound-rtp: nenhum");
+        // so um dos candidatos com tipo
+        const half = await readSenderSample(senderWith(videoSenderStats().filter(e => e.type !== "remote-candidate")));
+        assert.equal(half?.log?.route, "host/?");
+        const other = await readSenderSample(senderWith(videoSenderStats({ remoteCandidateType: "relay" }).filter(e => e.type !== "local-candidate")));
+        assert.equal(other?.log?.route, "?/relay");
     });
 
     test("sem outbound-rtp de video (ainda negociando, ou so audio): null", async () => {
@@ -98,7 +139,7 @@ describe("readSenderSample", () => {
         assert.deepEqual({ ...s, at: 0 }, {
             at: 0, framesEncoded: 0, totalEncodeTime: 0, bytesSent: 0, limitation: { cpu: 0, bandwidth: 0 }, reason: null,
             frameWidth: 0, frameHeight: 0, sourceFrames: null, sourceFps: null, availableKbps: null,
-            powerEfficient: null, implementation: null
+            powerEfficient: null, implementation: null, log: noLog()
         });
     });
 
