@@ -72,7 +72,7 @@ describe("prepare(): what the loader reads from its folder", () => {
         assert.deepEqual([state.version, state.commit], ["0.1.0", "base0100"]);
         assert.equal(state.nativesLoaded, true);
         assert.deepEqual(state.nativeChannels, ["TelinhaAddon_Telinha_listSources", "TelinhaAddon_Telinha_stopScreenAudio"], "only the functions the natives module exports");
-        assert.deepEqual(state.addonChannels.sort(), ["bootOk", "updateCheck", "updateDownload", "updateStatus"].map(m => `TelinhaAddon_TelinhaAddon_${m}`));
+        assert.deepEqual(state.addonChannels.sort(), ["bootOk", "updateCheck", "updateDownload", "updateLog", "updateStatus"].map(m => `TelinhaAddon_TelinhaAddon_${m}`));
         assert.equal(process.env.TELINHA_TEST_HELPER_DIR, tree.addonDir, "the plugin's helper executables are looked up in the add-on folder");
         assert.equal(state.helperDir, tree.addonDir);
         assert.deepEqual(state.errors, []);
@@ -310,7 +310,7 @@ describe("the fallback preload's info channel (TelinhaAddonPreloadInfo)", () => 
         assert.equal(info.ipcMapHooked, false);
         assert.deepEqual(Object.keys(info.methods), ["listSources", "stopScreenAudio"]);
         assert.equal(info.addonHelpers, "TelinhaAddon");
-        assert.deepEqual(Object.keys(info.addonMethods).sort(), ["bootOk", "updateCheck", "updateDownload", "updateStatus"]);
+        assert.deepEqual(Object.keys(info.addonMethods).sort(), ["bootOk", "updateCheck", "updateDownload", "updateLog", "updateStatus"]);
         assert.match(info.rendererJs, /"via":"preload-fallback"/);
         assert.match(info.rendererJs, /"metaReason":"renderer hook not active"/);
         assert.equal(globalThis.__updStub.calls.filter(c => c[0] === "markServed").length, 1);
@@ -357,10 +357,11 @@ describe("IPC handlers for the natives", () => {
         assert.deepEqual(globalThis.__telinhaNativeCalls, [], "the native was never reached");
     });
 
-    test("the loader's own natives: status, check (options sanitised), download", async t => {
+    test("the loader's own natives: status, log, check (options sanitised), download", async t => {
         const { electron } = boot(t);
         const call = (m, ...args) => electron.ipcMain.invoke(`TelinhaAddon_TelinhaAddon_${m}`, DISCORD, ...args);
         assert.deepEqual(await call("updateStatus"), { phase: "idle" });
+        assert.deepEqual(await call("updateLog"), ["a [1] update: line"], "the updater's last update lines of main.log");
         assert.deepEqual(await call("updateCheck", { autoDownload: true, manual: true, extra: "ignored" }), { phase: "checked" });
         await call("updateCheck", { autoDownload: "yes", manual: 1 });
         await call("updateCheck");

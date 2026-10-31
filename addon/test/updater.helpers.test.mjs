@@ -502,3 +502,57 @@ describe("a payload is accepted by createUpdater only when it verifies (home san
         assert.deepEqual([u.installed.version, u.installed.commit], ["0.4.2", "deadbeef"]);
     });
 });
+
+describe("which programs are running (run markers of other Discords)", () => {
+    test("isDiscordExe: the main executable of every Discord flavor, any letter case; nothing else", () => {
+        for (const n of ["Discord.exe", "DiscordPTB.exe", "DiscordCanary.exe", "DiscordDevelopment.exe", "DISCORD.EXE", "discordptb.exe"])
+            assert.equal(upd.isDiscordExe(n), true, n);
+        for (const n of ["Update.exe", "svchost.exe", "node.exe", "DiscordSystemHelper.exe", "telinha-audio.exe", "Discord", "", null, undefined, 5])
+            assert.equal(upd.isDiscordExe(n), false, String(n));
+    });
+
+    test("parseTasklist: tasklist /FO CSV /NH rows -> pid -> image name (CRLF, the localised memory column, odd lines skipped)", () => {
+        const text = '\r\n"System Idle Process","0","Services","0","8 K"\r\n"Discord.exe","4242","Console","1","123.456 K"\r\n' +
+            '"svchost.exe","1000","Services","0","1.234 K"\r\nnot a row\r\n"Nome da imagem","PID","Nome da sessão"\r\n';
+        assert.deepEqual([...upd.parseTasklist(text)], [[0, "System Idle Process"], [4242, "Discord.exe"], [1000, "svchost.exe"]]);
+    });
+
+    test("parseTasklist: no process row at all (an INFO line in any language, nothing, not text) throws: the list is unreadable", () => {
+        for (const text of ["INFO: No tasks are running which match the specified criteria.\r\n", "INFORMAÇÕES: Não há tarefas em execução.", "", null, undefined])
+            assert.throws(() => upd.parseTasklist(text), /tasklist listed no process/, String(text));
+    });
+
+    test("listProcessNames: Windows' own tasklist.exe (System32), CSV without header, hidden window, 3 s at most", () => {
+        const calls = [];
+        const spawnSync = (file, args, opts) => {
+            calls.push({ file, args, opts });
+            return { status: 0, stdout: '"DiscordPTB.exe","77","Console","1","1 K"\r\n' };
+        };
+        const names = upd.listProcessNames({ platform: "win32", spawnSync, env: { SystemRoot: "D:\\Win" } });
+        assert.deepEqual([...names], [[77, "DiscordPTB.exe"]]);
+        assert.equal(calls[0].file, "D:\\Win\\System32\\tasklist.exe");
+        assert.deepEqual(calls[0].args, ["/FO", "CSV", "/NH"]);
+        assert.equal(calls[0].opts.windowsHide, true);
+        assert.equal(calls[0].opts.timeout, 3000);
+        assert.equal(calls[0].opts.encoding, "utf8");
+        upd.listProcessNames({ platform: "win32", spawnSync, env: { windir: "E:\\W" } });
+        upd.listProcessNames({ platform: "win32", spawnSync, env: {} });
+        assert.deepEqual(calls.slice(1).map(c => c.file), ["E:\\W\\System32\\tasklist.exe", "C:\\Windows\\System32\\tasklist.exe"]);
+    });
+
+    test("listProcessNames throws when the list cannot be read: not Windows, tasklist missing or too slow, a failed exit", () => {
+        assert.throws(() => upd.listProcessNames({ platform: "linux", spawnSync: () => assert.fail("not spawned") }), /no process list on linux/);
+        const timedOut = Object.assign(new Error("spawnSync tasklist.exe ETIMEDOUT"), { code: "ETIMEDOUT" });
+        assert.throws(() => upd.listProcessNames({ platform: "win32", spawnSync: () => ({ error: timedOut, status: null }), env: {} }), /ETIMEDOUT/);
+        assert.throws(() => upd.listProcessNames({ platform: "win32", spawnSync: () => ({ status: 1, stdout: "" }), env: {} }), /tasklist exited with 1/);
+        assert.throws(() => upd.listProcessNames({ platform: "win32", spawnSync: () => ({ status: null, signal: "SIGTERM", stdout: "" }), env: {} }), /tasklist exited with SIGTERM/);
+        assert.throws(() => upd.listProcessNames({ platform: "win32", spawnSync: () => ({ status: 0, stdout: "INFO: nothing" }), env: {} }), /listed no process/);
+    });
+
+    test("listProcessNames for real (Windows only): this very test process is in the list, as node.exe", t => {
+        if (process.platform !== "win32") return t.skip("tasklist is Windows only");
+        const names = upd.listProcessNames();
+        assert.match(names.get(process.pid) ?? "", /^node(?:\.exe)?$/i);
+        assert.equal(upd.isDiscordExe(names.get(process.pid)), false);
+    });
+});

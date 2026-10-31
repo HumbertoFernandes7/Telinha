@@ -284,7 +284,9 @@ payload's own `version.json`. Discord and Vencord must always start, whatever an
 
 - The plugin asks for a check ~15 s after it starts and every 6 h, through the loader's own IPC natives
   `VencordNative.pluginHelpers.TelinhaAddon.{updateStatus, updateCheck({ autoDownload, manual }), updateDownload,
-  bootOk}` (next to the plugin's natives, so they work even when `telinha.main.js` failed to load). The requests run
+  updateLog, bootOk}` (next to the plugin's natives, so they work even when `telinha.main.js` failed to load;
+  `updateLog` = the last 10 `update` lines of `main.log` for "Copiar diagnóstico", with the user's folder as `~` and
+  IPv4 addresses masked). The requests run
   in the main process with Electron `net.fetch` (Chromium's network stack: system proxy, redirects to GitHub's asset
   CDN; the renderer's CSP is not involved).
 - `GET https://api.github.com/repos/HumbertoFernandes7/Telinha/releases/latest` (normal releases only, never drafts or
@@ -312,7 +314,9 @@ payload's own `version.json`. Discord and Vencord must always start, whatever an
 `Telinha X.Y.Z pronto` (Reiniciar agora / Depois) once a version is staged; `Telinha X.Y.Z disponível` (Atualizar /
 Depois) when automatic updates are off. Never while the user is streaming or watching a stream (shown after it ends),
 only while Discord has focus, once per version per session. "Reiniciar agora" is Vencord's own relaunch
-(`DiscordNative.app.relaunch()`, as in Vencord's `src/utils/native.ts`).
+(`DiscordNative.app.relaunch()`, as in Vencord's `src/utils/native.ts`). When the staged version already failed to go
+in at a start (`status().waiting`, 8.5), the notice and the settings line say why and what to do instead (another
+Discord open, a file in use, the swap lock, the trial not confirmed yet).
 
 ### 8.3 Swap at the next Discord start
 
@@ -321,7 +325,11 @@ is running, first thing in `boot()`, before any hook, native or plugin code of t
 
 1. Not with `--vanilla`, not while another live process uses the add-on (`update\run\<pid>` markers, refreshed every
    5 min, removed at exit: a second `Discord.exe` boots our stub before Discord's single-instance check makes it quit,
-   and other flavors share `addon\`), not while the running version's own trial is unconfirmed (8.4).
+   and other flavors share `addon\`), not while the running version's own trial is unconfirmed (8.4). A marker
+   survives a Discord that ends without `exit` (crash, End task, Windows shutting down) and Windows soon reuses its pid,
+   so a marker whose pid answers only counts when `tasklist` says that pid is a Discord program (`Discord.exe`,
+   `DiscordPTB.exe`, `DiscordCanary.exe`, `DiscordDevelopment.exe`, the installer's list); any other program means a
+   stale marker, which is deleted. If the program list cannot be read, the marker counts (the old rule).
 2. `addon.new` fully verified again (every file), newer, not bad; otherwise it is deleted.
 3. Under `update\swap.lock`: `addon` → `addon.old`, `addon.new` → `addon` (if this fails, `addon.old` goes back), then
    `addon.old` → `addon.prev`. Each rename retries briefly (antivirus, a process that just exited); a locked folder
@@ -352,7 +360,10 @@ is running, first thing in `boot()`, before any hook, native or plugin code of t
 
 `state.json` (owned by `updater.js`; installers only delete it on uninstall): `format`, `bad`
 (`{ "<version>": { commit, at, reason } }`), `trial`, `staged` (`{ version, commit, tag, asset, sha256, at }` for
-`addon.new`), `lastCheck` (`{ at, etag, release }`), `lastRollback`.
+`addon.new`), `lastCheck` (`{ at, etag, release }`), `lastRollback`, `waiting` (`{ version, reason, detail, at, starts }`:
+why the staged version did not go in at the last start; `reason` is `others` (detail: `pids`, `exes`), `in-use` /
+`activate-failed` (detail: the error `code`), `locked` or `trial`; `starts` counts the starts in a row; cleared by a
+swap, a rollback or `addon.new` going away).
 
 `install.json` is only updated when it exists (never created): on a swap `version`, `commit`, `installedAt` (RFC 3339,
 seconds) and `source` = `{ "kind": "github", "release": "<tag>", "asset": "<zip>", "sha256": "<hex>" }`, plus

@@ -17,7 +17,7 @@
  */
 import { spawn, spawnSync } from "child_process";
 import { createHash } from "crypto";
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import http from "http";
 import { createRequire } from "module";
 import { join } from "path";
@@ -82,6 +82,19 @@ const verifies = dir => {
         return null;
     }
 };
+
+/**
+ * A live process named like a Discord flavor (a copy of node.exe that only waits), for the run-marker checks: the updater
+ * asks Windows' tasklist which program owns a marker's pid. kill() ends it.
+ */
+function discordLookalike(exeName) {
+    const dir = join(ROOT, "procs");
+    mkdirSync(dir, { recursive: true });
+    const exe = join(dir, exeName);
+    if (!existsSync(exe)) copyFileSync(process.execPath, exe);
+    const child = spawn(exe, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", windowsHide: true });
+    return { pid: child.pid, kill: () => child.kill() };
+}
 
 // ------------------------------------------------------------------------------------------- fake GitHub
 
@@ -400,16 +413,33 @@ console.log("\nU9 boot marker left set at the next start: automatic rollback, ve
     check("same release again: skipped (no download loop)", again.phase === "up-to-date" && again.skipped === "0.1.1" && zipDownloads() === 1 && !existsSync(t.staged), again);
 }
 
-console.log("\nU10 swap waits while another Discord runs from this add-on (second Discord.exe, other flavor)");
+console.log("\nU10 swap waits while another Discord runs from this add-on (second Discord.exe, other flavor); a stale marker does not block");
 {
     const t = makeHome("u10", { staged: NEW });
-    mkdirSync(join(t.home, "update", "run"), { recursive: true });
-    writeFileSync(join(t.home, "update", "run", String(process.ppid)), "{}"); // a live process that is not us
-    const u = updaterFor(t, null);
-    check("no swap while it runs", u.startup() === null && verifies(t.addonDir) === "0.1.0" && verifies(t.staged) === "0.1.1" && u.lines.some(l => /another Discord is running/.test(l)), u.lines);
-    writeFileSync(join(t.home, "update", "run", "999999"), "{}"); // dead pid: ignored and cleaned
-    rmSync(join(t.home, "update", "run", String(process.ppid)));
-    check("once it is gone, the next start swaps (dead markers ignored)", updaterFor(t, null).startup()?.kind === "swapped" && verifies(t.addonDir) === "0.1.1" && !existsSync(join(t.home, "update", "run", "999999")));
+    const run = join(t.home, "update", "run");
+    mkdirSync(run, { recursive: true });
+    // Windows: a real process named DiscordPTB.exe, named by the updater's own tasklist call; elsewhere a fake list
+    const other = process.platform === "win32" ? discordLookalike("DiscordPTB.exe") : null;
+    try {
+        const pid = other?.pid ?? process.ppid;
+        const u = updaterFor(t, null, other ? {} : { processNames: () => new Map([[pid, "DiscordPTB.exe"]]) });
+        writeFileSync(join(run, String(pid)), "{}");
+        check("no swap while a Discord PTB runs (tasklist names it)", u.startup() === null && verifies(t.addonDir) === "0.1.0" && verifies(t.staged) === "0.1.1" &&
+            u.lines.some(l => /another Discord is running/.test(l) && /DiscordPTB\.exe/.test(l)), u.lines);
+        const st = u.status();
+        check("status(): ready, and why it waits (another Discord, with its pid and program)", st.phase === "ready" && st.waiting?.reason === "others" &&
+            st.waiting.detail?.pids?.[0] === pid && st.waiting.detail?.exes?.[0] === "DiscordPTB.exe", st);
+        rmSync(join(run, String(pid)));
+    } finally {
+        other?.kill();
+    }
+    // a marker left by a Discord that crashed, its pid now another live program's (this test's parent), and a dead one
+    writeFileSync(join(run, String(process.ppid)), "{}");
+    writeFileSync(join(run, "999999"), "{}");
+    const u2 = updaterFor(t, null, process.platform === "win32" ? {} : { processNames: () => new Map([[process.ppid, "node"]]) });
+    check("a stale marker (live pid, not a Discord) and a dead one: both dropped, the next start swaps, the reason is cleared",
+        u2.startup()?.kind === "swapped" && verifies(t.addonDir) === "0.1.1" && !existsSync(join(run, "999999")) && !existsSync(join(run, String(process.ppid))) &&
+        u2.readState().waiting === undefined, u2.lines);
 }
 
 console.log("\nU11 never downgrade, never a tampered stage");
@@ -449,7 +479,7 @@ let cycleTree;
     const r1 = await boot("i1-a", t, { TELINHA_UPDATE_API: gh.base, FAKE_ADDON_CALLS: "bootOk,check" });
     const a1 = r1.addon ?? {};
     check("start 1: Discord + Vencord + Telinha 0.1.0 loaded", r1.afterLoad?.discordLoaded && a1.vencordLoaded && a1.rendererHooked && a1.version === "0.1.0" && r1.loaderMarker === "0.1.0", { a1, marker: r1.loaderMarker });
-    check("pluginHelpers.TelinhaAddon = the loader's natives (next to the 8 plugin natives)", JSON.stringify([...(r1.preload?.addonHelpers ?? [])].sort()) === '["bootOk","updateCheck","updateDownload","updateStatus"]' && r1.preload?.telinhaHelpers?.length === 8, r1.preload);
+    check("pluginHelpers.TelinhaAddon = the loader's natives (next to the 8 plugin natives)", JSON.stringify([...(r1.preload?.addonHelpers ?? [])].sort()) === '["bootOk","updateCheck","updateDownload","updateLog","updateStatus"]' && r1.preload?.telinhaHelpers?.length === 8, r1.preload);
     check("update check over IPC: 0.1.1 downloaded, verified, staged", r1.addonCalls?.check?.phase === "ready" && verifies(t.staged) === "0.1.1" && verifies(t.addonDir) === "0.1.0", r1.addonCalls);
     const r2 = await boot("i1-b", t, { FAKE_ADDON_CALLS: "bootOk,status" });
     const a2 = r2.addon ?? {};
@@ -497,14 +527,34 @@ console.log("\nI4 the new version's natives throw: its start is not confirmed, r
     check("start 2: back on 0.1.0 with working natives, 0.1.1 marked bad", r2.loaderMarker === "0.1.0" && r2.addon?.nativeChannels?.length === 8 && r2.addonCalls?.bootOk?.confirmed === true && !!t.state().bad?.["0.1.1"], r2.addon?.update);
 }
 
-console.log("\nI5 another Discord is running from the add-on: the swap waits");
+console.log("\nI5 another Discord is running from the add-on: the swap waits and says why; a stale marker does not block");
 {
     const t = makeTree("i5", { staged: NEW });
-    mkdirSync(join(t.home, "update", "run"), { recursive: true });
-    writeFileSync(join(t.home, "update", "run", String(process.pid)), "{}"); // this test process: alive, not the booting one
-    const r = await boot("i5", t);
-    check("0.1.0 started normally, addon.new kept for later", r.loaderMarker === "0.1.0" && r.afterLoad?.discordLoaded && verifies(t.addonDir) === "0.1.0" && verifies(t.staged) === "0.1.1");
-    check("the status reports it ready (restart pending)", /another Discord is running/.test(t.mainLog()));
+    const run = join(t.home, "update", "run");
+    mkdirSync(run, { recursive: true });
+    if (process.platform === "win32") {
+        const other = discordLookalike("DiscordCanary.exe");
+        try {
+            writeFileSync(join(run, String(other.pid)), "{}");
+            const r = await boot("i5", t);
+            check("0.1.0 started normally, addon.new kept for later", r.loaderMarker === "0.1.0" && r.afterLoad?.discordLoaded && verifies(t.addonDir) === "0.1.0" && verifies(t.staged) === "0.1.1");
+            check("main.log: another Discord (DiscordCanary.exe) is running", /another Discord is running from this add-on .*DiscordCanary\.exe/.test(t.mainLog()));
+            check("state.json says why it waits (others, with the pid)", t.state().waiting?.reason === "others" && t.state().waiting.detail?.pids?.[0] === other.pid, t.state().waiting);
+        } finally {
+            other.kill();
+        }
+        rmSync(join(run, String(other.pid)), { force: true });
+    }
+    // this test process: alive, but node.exe, i.e. a crashed Discord's pid that Windows gave to another program
+    writeFileSync(join(run, String(process.pid)), "{}");
+    const r2 = await boot("i5-b", t);
+    if (process.platform === "win32") {
+        check("a marker whose pid is now another program: dropped, the swap goes ahead", r2.loaderMarker === "0.1.1" && verifies(t.addonDir) === "0.1.1" &&
+            /run marker of a Discord that is gone, dropped/.test(t.mainLog()) && !existsSync(join(run, String(process.pid))), { marker: r2.loaderMarker });
+    } else {
+        check("no list of programs here (tasklist is Windows only): the live marker still counts", r2.loaderMarker === "0.1.0" && verifies(t.staged) === "0.1.1" &&
+            /could not list the running programs/.test(t.mainLog()));
+    }
 }
 
 console.log("\nI6 --vanilla: no swap, no hooks");
