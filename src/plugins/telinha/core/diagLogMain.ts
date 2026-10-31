@@ -38,10 +38,10 @@ function logFile(): string {
 
 let queue: Promise<unknown> = Promise.resolve();
 
-/** Uma operacao por vez, na ordem: a leitura nunca pega uma rotacao pela metade. */
+/** Uma operacao por vez, na ordem: a leitura nunca pega uma rotacao pela metade. `fn` nunca rejeita (trata os proprios erros). */
 function serial<T>(fn: () => Promise<T>): Promise<T> {
     const run = queue.then(fn);
-    queue = run.catch(() => { });
+    queue = run;
     return run;
 }
 

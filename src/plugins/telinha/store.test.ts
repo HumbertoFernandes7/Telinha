@@ -13,7 +13,7 @@ import { afterEach, describe, test } from "node:test";
 
 import { act, renderHook } from "@test/fakes/render";
 
-import { formatDiagnostics, getEventLog, getState, pushEvent, resetState, setState, subscribe, useTelinhaState } from "./store";
+import { formatDiagnostics, getEventLog, getState, pushEvent, resetState, setState, subscribe, subscribeEvents, useTelinhaState } from "./store";
 import type { TelinhaState } from "./types";
 
 const BASE: TelinhaState = { inRoom: false, channelId: null, peers: [], local: null, viewing: {}, lastError: null, blocked: [], identityAlerts: [] };
@@ -79,6 +79,22 @@ describe("eventos", () => {
         assert.equal(events.at(-1)?.msg, "e409");
         events.length = 0;
         assert.equal(getEventLog().length, 400);
+    });
+
+    test("subscribeEvents: cada evento novo, depois de entrar no buffer; um listener que lanca nao derruba os outros", t => {
+        const error = t.mock.method(console, "error", () => { });
+        const seen: string[] = [];
+        const offBroken = subscribeEvents(() => {
+            throw new Error("listener quebrado");
+        });
+        const off = subscribeEvents(e => seen.push(`${e.msg}:${getEventLog().at(-1)?.msg}`));
+        pushEvent({ at: 1, level: "warn", msg: "um" });
+        off();
+        offBroken();
+        pushEvent({ at: 2, level: "info", msg: "dois" });
+        assert.deepEqual(seen, ["um:um"]);
+        assert.equal(error.mock.callCount(), 1);
+        assert.equal(error.mock.calls[0].arguments[0], "[Telinha] listener do log falhou");
     });
 });
 
