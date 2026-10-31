@@ -71,8 +71,9 @@
 //    pending/denied): como espectadora de uma transmissao com senha, o pedido dela expira sem resposta; os
 //    motivos novos viram "declined" nela.
 // 8. Pedido de codec (depois da v0.2.6, adicionado sem mudar PROTOCOL_VERSION): acao ACTION_CODEC ("codec"),
-//    espectador → transmissor, { codec: "vp9" } (CodecRequestMessage): o stream chegou, o video vem em H.264 e
-//    nenhum quadro foi decodificado em ~10 s (core/viewing.ts → NO_FRAME_HINT_MS). No maximo um por "assistir".
+//    espectador → transmissor, { codec: "vp9" } (CodecRequestMessage): o stream chegou, o video vem em H.264 (ou
+//    nenhum pacote de video chegou, codec desconhecido; desde a v0.2.8) e nenhum quadro foi decodificado em ~10 s
+//    (core/viewing.ts → NO_FRAME_HINT_MS). No maximo um por "assistir".
 //    O transmissor atende so se o codec dele estiver no automatico e o peer estiver recebendo a transmissao em
 //    H.264: troca so o envio para ele (sem renegociar, como a queda do H.264 por software; core/streaming.ts →
 //    onCodecRequest), sem contar como falha do encoder deste PC (pode ser o decodificador de quem pediu).
@@ -201,7 +202,7 @@ export type WatchReplyMessage =
 /** Tudo o que trafega na acao "watch". */
 export type WatchActionMessage = WatchMessage | WatchReplyMessage;
 
-/** Acao "codec" (passo 8): o espectador nao decodificou nenhum quadro em H.264 e pede para receber em `codec`. */
+/** Acao "codec" (passo 8): o espectador nao decodificou nenhum quadro (video em H.264, ou nenhum pacote) e pede para receber em `codec`. */
 export type CodecRequestMessage = {
     codec: "vp9";
 };

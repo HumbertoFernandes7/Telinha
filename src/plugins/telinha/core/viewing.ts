@@ -319,21 +319,26 @@ function onFirstFrame(v: ViewerEntry, s: InboundSample) {
 }
 
 /**
- * O stream chegou ha NO_FRAME_HINT_MS, o video vem em H.264 (codec do inbound-rtp) e nenhum quadro foi decodificado:
- * pede ao transmissor para mandar VP9 so para nos (acao "codec", protocol.ts passo 8). Visto em 31/10: o H.264 de um PC
- * com placa AMD nunca virou imagem do outro lado, e em VP9 o 1o quadro chegou em menos de 1 s. Um pedido por
- * "assistir" (v.codecRequested). Quem decide e o transmissor (so com o codec dele no automatico); versoes sem a acao a
- * ignoram. O aviso de 45 s e a espera continuam como estao. Sem codec nas estatisticas (nenhum pacote chegou), nao pede:
- * o transmissor confere o proprio encoder (streaming.ts → checkStall).
+ * O stream chegou ha NO_FRAME_HINT_MS e nenhum quadro foi decodificado, com o video em H.264 (codec do inbound-rtp) ou
+ * sem codec conhecido (nenhum pacote de video chegou): pede ao transmissor para mandar VP9 so para nos (acao "codec",
+ * protocol.ts passo 8). Visto em 31/10, nos dois casos com o H.264 de um PC com placa AMD: o video chegava e nunca virou
+ * imagem; e, as 02:54, nenhum pacote de video chegou (so o audio), com o encoder dele no ar. Em VP9 o 1o quadro chegou
+ * em menos de 1 s. Video em outro codec (ex.: VP9), nao pede. Um pedido por "assistir" (v.codecRequested). Quem decide e
+ * o transmissor (so troca um envio em H.264, com o codec dele no automatico); versoes sem a acao a ignoram. O aviso de
+ * 45 s e a espera continuam como estao. O transmissor tambem confere sozinho se o H.264 sai (streaming.ts → checkStall).
  */
 function askForVp9(v: ViewerEntry, s: InboundSample, streamAt: number) {
-    if (v.codecRequested || performance.now() - streamAt < NO_FRAME_HINT_MS || !s.codec || !/^video\/h264$/i.test(s.codec)) return;
+    if (v.codecRequested || performance.now() - streamAt < NO_FRAME_HINT_MS || (s.codec && !/^video\/h264$/i.test(s.codec))) return;
     const action = rt.codecAction;
     if (!action) return;
     v.codecRequested = true;
     const received = s.log.framesReceived != null ? `${s.log.framesReceived} quadros recebidos` : `${Math.round(s.bytes / 1000)} kB recebidos`;
-    log.warn(`Assistir ${peerLabel(v.peerId)}: nenhum quadro do vídeo em H.264 decodificado em ${Math.round((performance.now() - streamAt) / 1000)} s `
-        + `(${received}${s.decoder ? `, decodificador ${s.decoder}` : ""}); pedindo ao transmissor para mandar VP9`);
+    const secs = Math.round((performance.now() - streamAt) / 1000);
+    const detail = `${received}${s.decoder ? `, decodificador ${s.decoder}` : ""}`;
+    const what = s.codec
+        ? `nenhum quadro do vídeo em H.264 decodificado em ${secs} s (${detail})`
+        : `nenhum quadro de vídeo decodificado em ${secs} s e nenhum pacote de vídeo identificado (codec desconhecido, ${detail})`;
+    log.warn(`Assistir ${peerLabel(v.peerId)}: ${what}; pedindo ao transmissor para mandar VP9`);
     action.send({ codec: "vp9" }, { target: v.peerId })
         .catch(e => logThrottled(`codec-send:${v.peerId}`, "warn", `Falha ao pedir VP9 a ${peerLabel(v.peerId)}: ${errorText(e)}`));
 }

@@ -5,9 +5,10 @@
  */
 
 // Testes do pedido de VP9 de quem assiste (core/viewing.ts → askForVp9, acao "codec", protocol.ts passo 8): o stream
-// chegou, o video vem em H.264 e nenhum quadro foi decodificado em NO_FRAME_HINT_MS: pede ao transmissor (uma vez por
-// "assistir") para mandar VP9. O aviso de 45 s continua igual. O lado de quem transmite fica em
-// streaming.codecRequest.test.ts.
+// chegou, o video vem em H.264 (ou nenhum pacote de video chegou: codec desconhecido, o log das 02:54 de 31/10) e nenhum
+// quadro foi decodificado em NO_FRAME_HINT_MS: pede ao transmissor (uma vez por "assistir") para mandar VP9. Video em
+// outro codec, nao pede. O aviso de 45 s continua igual. O lado de quem transmite (so troca um envio em H.264, com o
+// codec no automatico) fica em streaming.codecRequest.test.ts.
 // Rodar:  pnpm test:file src/plugins/telinha/core/viewing.codecRequest.test.ts  (todos: pnpm test:unit)
 
 import assert from "node:assert/strict";
@@ -17,7 +18,7 @@ import { rt } from "@plugins/telinha/core/context";
 import { STREAM_KIND_SCREEN } from "@plugins/telinha/protocol";
 import { useFakeClock } from "@test/fakes/clock";
 import type { FakeRoom } from "@test/fakes/trystero";
-import { videoReceiverStats } from "@test/fakes/webrtc";
+import { audioReceiverStats, videoReceiverStats } from "@test/fakes/webrtc";
 import { addStreamer, closeRoom, incomingStream, logMark, openRoom, receiveOn, viewerOf } from "@test/helpers/wpc-viewing";
 
 import { NO_FRAME_HINT_MS, onPeerStream, unwatch, watch } from "./viewing";
@@ -84,17 +85,43 @@ test("sem contador de quadros recebidos (Chromium antigo): o pedido diz os kB; a
     assert.deepEqual(requests(), []);
 });
 
-test("sem pedido: o video em VP9, sem codec nas estatisticas (nenhum pacote) ou o 1o quadro antes de 10 s", async t => {
+test("log das 02:54: nenhum pacote de video (sem codec, so o audio chega) e nenhum quadro em 10 s: pede VP9, uma vez", async t => {
+    const clock = useFakeClock(t);
+    const lines = logMark();
+    const pc = addStreamer(room, "peerA");
+    watch("peerA");
+    const { stream, fake, audio } = incomingStream({ audio: true });
+    const rx = receiveOn(pc, fake);
+    rx.stats = []; // o Chromium so cria o inbound-rtp do video com o 1o pacote
+    pc.getReceivers().find(r => r.track === audio)!.stats = audioReceiverStats({ bytesReceived: 1250 });
+    onPeerStream("peerA", stream, { kind: STREAM_KIND_SCREEN });
+    await clock.tickAsync(NO_FRAME_HINT_MS - 300, 150);
+    assert.deepEqual(requests(), [], "antes de 10 s: espera");
+    await clock.tickAsync(450, 150);
+    assert.deepEqual(requests(), [[{ codec: "vp9" }, "peerA"]]);
+    assert.ok(lines().includes("Assistir amigo (peerA): nenhum quadro de vídeo decodificado em 10 s e nenhum pacote de vídeo identificado "
+        + "(codec desconhecido, 1 kB recebidos); pedindo ao transmissor para mandar VP9"), lines().join("\n"));
+
+    await clock.tickAsync(36_000, 150);
+    assert.equal(requests().length, 1, "um pedido por assistir");
+    assert.equal((await viewerOf("peerA"))?.status, "error", "o aviso de 45 s continua");
+    unwatch("peerA");
+
+    // o inbound-rtp do video sem codecId (sem o codec nas estatisticas): o mesmo pedido, com o que chegou
+    room.sent.length = 0;
+    const bare = streamArrives({ framesDecoded: 0, framesReceived: 3 });
+    bare.stats = () => videoReceiverStats({ framesDecoded: 0, framesReceived: 3 }).filter(e => e.type !== "codec").map(e => ({ ...e, codecId: undefined }));
+    await clock.tickAsync(NO_FRAME_HINT_MS + 300, 150);
+    assert.deepEqual(requests(), [[{ codec: "vp9" }, "peerA"]]);
+    assert.ok(lines().some(l => l.endsWith("nenhum pacote de vídeo identificado (codec desconhecido, 3 quadros recebidos, decodificador libvpx); "
+        + "pedindo ao transmissor para mandar VP9")), lines().join("\n"));
+});
+
+test("sem pedido: o video em VP9 ou o 1o quadro antes de 10 s", async t => {
     const clock = useFakeClock(t);
     streamArrives({ mimeType: "video/VP9", framesDecoded: 0 });
     await clock.tickAsync(NO_FRAME_HINT_MS + 1000, 150);
     assert.deepEqual(requests(), [], "VP9");
-    unwatch("peerA");
-
-    const rx = streamArrives({ framesDecoded: 0 });
-    rx.stats = () => videoReceiverStats({ framesDecoded: 0 }).filter(e => e.type !== "codec").map(e => ({ ...e, codecId: undefined }));
-    await clock.tickAsync(NO_FRAME_HINT_MS + 1000, 150);
-    assert.deepEqual(requests(), [], "sem codec");
     unwatch("peerA");
 
     const late = streamArrives({ mimeType: "video/H264", framesDecoded: 0 });
