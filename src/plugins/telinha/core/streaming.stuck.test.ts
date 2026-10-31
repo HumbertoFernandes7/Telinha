@@ -202,18 +202,23 @@ describe("envio travado na placa de video: nada desmonta", () => {
         assert.ok(since().some(l => l.startsWith("Uma faixa da conexão com o envio travado pela placa de vídeo não foi removida")));
     });
 
-    test("renegociacao pedida pelo outro lado, mesmo depois de ele parar de assistir: o SDP continua com o H.264 na frente", async () => {
+    test("renegociacao pedida pelo outro lado (ele passa a transmitir para nos, ou reinicia o ICE): recusada, nada chega ao envio travado", async () => {
         const v = await stuckWatcher("renegocia");
+        const negotiations = v.pc.descriptionCalls.length;
+        const prefs = v.pc.getTransceivers().map(t => t.codecPreferences);
+        const pc = v.pc as unknown as RTCPeerConnection;
+        // o que o signal() do Trystero faz com uma oferta: SRD e SLD; a recusa vai para o handler de erro dele
+        await assert.rejects(pc.setRemoteDescription({ type: "offer", sdp: REMOTE_SDP }), (e: DOMException) => e.name === "InvalidStateError");
+        await assert.rejects(pc.setLocalDescription(), /recusado/);
+        assert.equal(v.pc.descriptionCalls.length, negotiations, "o Chromium nao viu nenhuma");
+        assert.deepEqual(v.pc.getTransceivers().map(t => t.codecPreferences), prefs, "nenhum setCodecPreferences novo");
+
+        // mesmo depois de ele parar de assistir
         rig.room.receive("watch", { op: "stop" }, v.peerId);
         await turns();
         assert.equal(sendPlanFor(v.peerId), null, "nao e mais espectador");
-        const prefs = v.pc.getTransceivers().map(t => t.codecPreferences);
-        await (v.pc as unknown as RTCPeerConnection).setRemoteDescription({ type: "offer", sdp: REMOTE_SDP });
-        await (v.pc as unknown as RTCPeerConnection).setLocalDescription();
-        const applied = v.pc.descriptionCalls.filter(c => c.method === "setRemoteDescription").at(-1)!.description!.sdp!;
-        assert.match(applied, /^m=video 9 UDP\/TLS\/RTP\/SAVPF 102 /m, "o plano congelado: H.264 primeiro, como na 1a negociacao");
-        assert.match(applied, /x-google-max-bitrate=20000/);
-        assert.deepEqual(v.pc.getTransceivers().map(t => t.codecPreferences), prefs, "nenhum setCodecPreferences novo");
+        await assert.rejects(pc.setRemoteDescription({ type: "offer", sdp: REMOTE_SDP }));
+        assert.equal(v.pc.descriptionCalls.length, negotiations);
         assertUntouched(v, "renegociacao");
     });
 

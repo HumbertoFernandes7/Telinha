@@ -1171,7 +1171,8 @@ function videoLeaving(encoded: number, sent: SentCounters) {
  * Com a conexao no ar ("connected": antes disso o WebRTC segura os quadros antes do encoder, com banda zero) e a captura
  * entregando quadros (capturedFrames subindo; parada por SOURCE_IDLE_MS, a janela recomeca: janela minimizada nao e o
  * encoder), H264_STALL_MS com pelo menos STALL_MIN_SOURCE_FRAMES quadros da captura sem nada do video sair = a placa de
- * video travou: containStuck (desde a v0.2.9 NUNCA troca o codec aqui; ver la). "Nada sair" = framesEncoded
+ * video travou: containStuck (desde a v0.2.9 NUNCA troca o codec de um encoder da placa, ou nao informado; ver la). Com o
+ * OpenH264 no ar (software), continua a troca so para esse espectador (fallBack), que e segura. "Nada sair" = framesEncoded
  * ainda 0, ou o bytesSent (sem ele, o framesSent) parado a janela toda: qualquer quadro que sai, ate o de uma tela preta
  * parada, faz o bytesSent andar, e cada vez que ele anda a janela recomeca. O framesSent sozinho nao basta porque o
  * libwebrtc o conta na hora de codificar. Um encoder lento que solta o 1o quadro antes de 8 s, ou uma tela parada com
@@ -1225,7 +1226,14 @@ function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: 
     if (sent.bytes != null) counts.push(`${(sent.bytes / 1000).toFixed(1).replace(".", ",")} kB enviados`);
     counts.push(enc.implementation ? `encoder ${enc.implementation}` : "encoder não informado pelo Chromium");
     counts.push(enc.width && enc.height ? `${enc.width}x${enc.height}` : "tamanho desconhecido");
-    containStuck(peerId, local, send, `${what}, com a conexão no ar e a captura entregando quadros (${counts.join(", ")})`);
+    const why = `${what}, com a conexão no ar e a captura entregando quadros (${counts.join(", ")})`;
+    // o encoder no ar e o OpenH264 (software): nao e a placa, e trocar o codec de um encoder de software e seguro (como a
+    // queda do checkEncoder). So o da placa, ou um encoder que o Chromium nao informa, fica contido e marca a placa.
+    if (enc.powerEfficient === false || /openh264/i.test(enc.implementation ?? "")) {
+        fallBack(peerId, local, send, chooseCodec(rt.peers.get(peerId)?.presence?.caps, settings.store.codec as CodecSetting, { ...getLocalCaps(), h264HwEncode: false }), why);
+        return;
+    }
+    containStuck(peerId, local, send, why);
 }
 
 /**
@@ -1253,7 +1261,7 @@ function containStuck(peerId: PeerId, local: LocalCapture, send: ViewerSend, why
     const pinned = settings.store.codec === "h264";
     noteStuckEncoder();
     log.warn(`${why}: a placa de vídeo travou com H.264. O envio para ${label} fica como está até o Discord reiniciar (trocar o codec, `
-        + "parar ou fechar a conexão travaria o Discord inteiro). O H.264 automático fica desligado neste PC até o driver, o Discord ou a placa mudarem.");
+        + "parar ou fechar a conexão travaria o Discord inteiro). O H.264 automático fica desligado neste PC até o driver, o Chromium ou a placa mudarem.");
     setLastError(pinned ? STUCK_NOTICE_PINNED : STUCK_NOTICE);
     reply(peerId, { op: "stuck" });
 }

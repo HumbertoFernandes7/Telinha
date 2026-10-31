@@ -12,11 +12,12 @@
 // 5 s, com a pagina respondendo; o VP9 no mesmo teste saiu em 41 ms.
 //
 // Resultado:
-// - "broken": a placa aceitou a configuracao (isConfigSupported + configure) e, no prazo, nenhum pacote saiu ou o flush()
-//   nao terminou. Quem chama marca o PC como "o H.264 da placa trava" (core/stuckEncoder.ts) antes da 1a transmissao;
+// - "broken": a placa aceitou a configuracao (isConfigSupported + configure) e nenhum pacote saiu em
+//   ENCODER_PROBE_TIMING.noChunkMs desde o 1o encode() (ou o flush terminou sem nenhum). Quem chama confirma com uma 2a
+//   rodada antes de marcar o PC como "o H.264 da placa trava" (core/stuckEncoder.ts → runStartupProbe);
 // - "unknown": sem Worker/WebCodecs, configuracao recusada (sem H.264 na placa nesse perfil), configure lancou, erro do
-//   encoder ou a propria consulta sem resposta: nada muda;
-// - "ok": pacotes sairam e o flush terminou.
+//   encoder, um passo ate o 1o quadro sem resposta, ou pacotes saindo com o flush() sem fim: nada muda;
+// - "ok": pacotes sairam e o flush terminou, mesmo devagar.
 // Encoder ou Worker presos NUNCA sao fechados nem terminados (o close/terminate desmontaria o encoder preso, o mesmo
 // risco do WebRTC): ficam guardados em `leftAlone` ate o Discord fechar. So um que terminou normalmente e terminado.
 
@@ -32,12 +33,19 @@ export interface ProbeResult {
     hung?: boolean;
 }
 
-/** Limites da sonda (ms). Mutaveis pelos testes. */
+/**
+ * Limites da sonda (ms). Mutaveis pelos testes. Uma placa saudavel mas lenta (a 1a sessao do NVENC depois de ligar o PC,
+ * a placa ocupada com um jogo, o processo da GPU reiniciando) pode soltar o 1o pacote em ~3 s e terminar o flush em ~4,5 s:
+ * por isso o prazo do "nenhum pacote" conta do 1o encode() (nao do configure, quando o encoder ainda nem existe) e e
+ * largo, e um flush lento depois de algum pacote nunca e "travou".
+ */
 export const ENCODER_PROBE_TIMING = {
-    /** isConfigSupported + configure sem resposta: inconclusiva */
+    /** cada passo ate o 1o quadro chegar ao encoder (isConfigSupported, configure, o 1o encode()): sem resposta, inconclusiva */
     configureMs: 3000,
-    /** do configure ao fim do flush(): passou disto, a placa travou */
-    encodeMs: 4000
+    /** do 1o encode() ao 1o pacote: passou disto sem nenhum pacote, a placa travou */
+    noChunkMs: 10_000,
+    /** do 1o pacote ao fim do flush(): passou disto, inconclusiva (a placa codifica; so o flush demora) */
+    flushMs: 10_000
 };
 
 const PROBE_SIZE = { width: 1280, height: 720, framerate: 30 };
@@ -51,8 +59,8 @@ export function stuckProbeWorkers(): number {
 }
 
 /**
- * Codigo do Worker (vai como texto por blob:/data: URL: JS puro, so ASCII). Fases: "phase" isConfigSupported/encode/
- * flush, "chunk" no 1o pacote, "done" com o veredito do lado do Worker.
+ * Codigo do Worker (vai como texto por blob:/data: URL: JS puro, so ASCII). Fases: "phase" isConfigSupported/encode
+ * (configure chamado)/encoding (o 1o encode() chamado)/flush, "chunk" no 1o pacote, "done" com o veredito do lado do Worker.
  */
 export const PROBE_WORKER_SOURCE = `"use strict";
 self.onmessage = async function (msg) {
@@ -78,20 +86,23 @@ self.onmessage = async function (msg) {
         enc.configure(config);
     } catch (e) { post("done", { verdict: "configure", error: describe(e) }); return; }
     post("phase", { phase: "encode" });
-    var canvas = new OffscreenCanvas(config.width, config.height);
-    var ctx = canvas.getContext("2d");
-    var t0 = performance.now();
-    for (var i = 0; i < frames && enc.state === "configured"; i++) {
-        var wait = t0 + i * 1000 / config.framerate - performance.now();
-        if (wait > 1) await new Promise(function (r) { setTimeout(r, wait); });
-        if (enc.state !== "configured") break;
-        ctx.fillStyle = "hsl(" + ((i * 12) % 360) + " 60% 35%)";
-        ctx.fillRect(0, 0, config.width, config.height);
-        ctx.fillStyle = "#fff";
-        ctx.fillRect((i * 37) % config.width, (i * 23) % config.height, 160, 90);
-        var frame = new VideoFrame(canvas, { timestamp: Math.round(i * 1e6 / config.framerate), duration: Math.round(1e6 / config.framerate) });
-        try { enc.encode(frame, { keyFrame: i === 0 }); } finally { frame.close(); }
-    }
+    try {
+        var canvas = new OffscreenCanvas(config.width, config.height);
+        var ctx = canvas.getContext("2d");
+        var t0 = performance.now();
+        for (var i = 0; i < frames && enc.state === "configured"; i++) {
+            var wait = t0 + i * 1000 / config.framerate - performance.now();
+            if (wait > 1) await new Promise(function (r) { setTimeout(r, wait); });
+            if (enc.state !== "configured") break;
+            ctx.fillStyle = "hsl(" + ((i * 12) % 360) + " 60% 35%)";
+            ctx.fillRect(0, 0, config.width, config.height);
+            ctx.fillStyle = "#fff";
+            ctx.fillRect((i * 37) % config.width, (i * 23) % config.height, 160, 90);
+            var frame = new VideoFrame(canvas, { timestamp: Math.round(i * 1e6 / config.framerate), duration: Math.round(1e6 / config.framerate) });
+            try { enc.encode(frame, { keyFrame: i === 0 }); } finally { frame.close(); }
+            if (i === 0) post("phase", { phase: "encoding" });
+        }
+    } catch (e) { if (!error) error = describe(e); }
     post("phase", { phase: "flush" });
     try { if (enc.state === "configured") await enc.flush(); } catch (e) { if (!error) error = describe(e); }
     post("done", { verdict: "finished", chunks: chunks, error: error });
@@ -150,23 +161,26 @@ export function runEncoderProbe(profile: string): Promise<ProbeResult> {
             clearTimeout(timer);
             timer = setTimeout(onTimeout, ms);
         };
-        // ate o configure: sem resposta e inconclusiva (nao deu para saber se a placa aceita), mas o Worker fica
-        arm(ENCODER_PROBE_TIMING.configureMs, () => finish({ verdict: "unknown", detail: `${phase} sem resposta em ${ENCODER_PROBE_TIMING.configureMs / 1000} s` }, true));
+        const secs = (ms: number) => `${ms / 1000} s`;
+        // ate o 1o quadro chegar ao encoder, cada passo: sem resposta e inconclusiva (nao deu para saber), mas o Worker fica
+        const armStep = () => arm(ENCODER_PROBE_TIMING.configureMs, () => finish({ verdict: "unknown", detail: `${phase} sem resposta em ${secs(ENCODER_PROBE_TIMING.configureMs)}` }, true));
+        armStep();
         worker.onmessage = ({ data }: MessageEvent) => {
             if (!data || typeof data !== "object") return;
             if (data.ev === "phase") {
                 phase = String(data.phase);
-                if (data.phase === "encode") {
-                    // a placa aceitou: daqui ate o fim do flush, prazo duro
-                    arm(ENCODER_PROBE_TIMING.encodeMs, () => finish({
+                if (data.phase === "encode") armStep();
+                // o 1o quadro chegou ao encoder: sem nenhum pacote no prazo, a placa travou (o sinal do 31/10)
+                else if (data.phase === "encoding" && !chunks) {
+                    arm(ENCODER_PROBE_TIMING.noChunkMs, () => finish({
                         verdict: "broken",
-                        detail: chunks
-                            ? `o flush() não terminou em ${ENCODER_PROBE_TIMING.encodeMs / 1000} s`
-                            : `nenhum pacote em ${ENCODER_PROBE_TIMING.encodeMs / 1000} s (${phase === "flush" ? "o flush() não terminou" : "ainda codificando"})`
+                        detail: `nenhum pacote em ${secs(ENCODER_PROBE_TIMING.noChunkMs)} desde o 1º quadro (${phase === "flush" ? "o flush() não terminou" : "ainda codificando"})`
                     }, true));
                 }
             } else if (data.ev === "chunk") {
                 chunks = true;
+                // a placa codifica: um flush lento nao e "travou"; sem fim no prazo, inconclusiva (e o Worker fica)
+                arm(ENCODER_PROBE_TIMING.flushMs, () => finish({ verdict: "unknown", detail: `os pacotes saíram, mas o flush() não terminou em ${secs(ENCODER_PROBE_TIMING.flushMs)}` }, true));
             } else if (data.ev === "error") {
                 encoderError ??= String(data.error ?? "erro").slice(0, 200);
             } else if (data.ev === "done") {

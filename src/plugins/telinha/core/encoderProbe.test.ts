@@ -5,13 +5,15 @@
  */
 
 // Testes da sonda WebCodecs do H.264 da placa (core/encoderProbe.ts) sobre um Worker falso (@test/fakes/worker): o lado
-// do Worker e o roteiro do teste. Travou (config aceita, nenhum pacote ou flush sem fim no prazo) = "broken", e o Worker
-// preso NUNCA e terminado; sem suporte/erro = "unknown"; pacotes saindo = "ok". Prazos curtos com timers reais.
+// do Worker e o roteiro do teste. Travou (config aceita, nenhum pacote no prazo desde o 1o encode()) = "broken", e o Worker
+// preso NUNCA e terminado; sem suporte/erro, ou pacotes saindo com o flush sem fim = "unknown"; pacotes saindo = "ok",
+// mesmo devagar. Prazos curtos com timers reais; o caso da placa lenta usa os prazos de verdade no relogio falso.
 // Rodar:  pnpm test:file src/plugins/telinha/core/encoderProbe.test.ts  (todos: pnpm test:unit)
 
 import assert from "node:assert/strict";
 import { after, afterEach, before, describe, test } from "node:test";
 
+import { useFakeClock } from "@test/fakes/clock";
 import { healthyProbe, installWorker, stuckProbe, type WorkerEnv } from "@test/fakes/worker";
 
 import { ENCODER_PROBE_TIMING, PROBE_WORKER_SOURCE, runEncoderProbe, stuckProbeWorkers } from "./encoderProbe";
@@ -19,10 +21,9 @@ import { ENCODER_PROBE_TIMING, PROBE_WORKER_SOURCE, runEncoderProbe, stuckProbeW
 let workers: WorkerEnv;
 const saved = { ...ENCODER_PROBE_TIMING };
 
-before(() => {
-    ENCODER_PROBE_TIMING.configureMs = 40;
-    ENCODER_PROBE_TIMING.encodeMs = 60;
-});
+const shortTimings = () => Object.assign(ENCODER_PROBE_TIMING, { configureMs: 40, noChunkMs: 60, flushMs: 60 });
+
+before(shortTimings);
 
 after(() => Object.assign(ENCODER_PROBE_TIMING, saved));
 
@@ -46,35 +47,67 @@ describe("sonda WebCodecs do H.264 da placa", () => {
         workers = installWorker(stuckProbe());
         const before = stuckProbeWorkers();
         const result = await runEncoderProbe("42001f");
-        assert.deepEqual(result, { verdict: "broken", detail: "nenhum pacote em 0.06 s (o flush() não terminou)", hung: true });
+        assert.deepEqual(result, { verdict: "broken", detail: "nenhum pacote em 0.06 s desde o 1º quadro (o flush() não terminou)", hung: true });
         assert.equal(workers.instances[0].terminated, false, "terminate() desmontaria o encoder preso");
         assert.equal(stuckProbeWorkers(), before + 1, "guardado para sempre");
         // o Worker solta algo depois do prazo: ignorado
         workers.instances[0].emit({ ev: "done", verdict: "finished", chunks: 5 });
     });
 
-    test("alguns pacotes saem, mas o flush nunca termina: broken (o flush preso e o que trava a desmontagem)", async () => {
+    test("placa lenta mas saudavel (1o pacote aos 3 s, flush aos 5 s, prazos de verdade): ok", async t => {
+        Object.assign(ENCODER_PROBE_TIMING, saved);
+        const clock = useFakeClock(t);
+        try {
+            workers = installWorker(w => {
+                w.emit({ ev: "phase", phase: "isConfigSupported" });
+                setTimeout(() => {
+                    w.emit({ ev: "phase", phase: "encode" });
+                    w.emit({ ev: "phase", phase: "encoding" });
+                }, 2000);
+                setTimeout(() => w.emit({ ev: "chunk" }), 2000 + 3000);
+                setTimeout(() => w.emit({ ev: "done", verdict: "finished", chunks: 30, error: null }), 2000 + 5000);
+            });
+            const run = runEncoderProbe("42001f");
+            await clock.tickAsync(8000, 500);
+            assert.deepEqual(await run, { verdict: "ok", detail: "30 pacotes de 30 quadros" });
+            assert.equal(workers.instances[0].terminated, true);
+        } finally {
+            shortTimings();
+        }
+    });
+
+    test("alguns pacotes saem, mas o flush nunca termina: inconclusiva (a placa codifica), e o Worker fica", async () => {
         workers = installWorker(w => {
             w.emit({ ev: "phase", phase: "encode" });
+            w.emit({ ev: "phase", phase: "encoding" });
             w.emit({ ev: "chunk" });
             w.emit({ ev: "phase", phase: "flush" });
         });
         const result = await runEncoderProbe("4d001f");
-        assert.equal(result.verdict, "broken");
-        assert.equal(result.detail, "o flush() não terminou em 0.06 s");
+        assert.deepEqual(result, { verdict: "unknown", detail: "os pacotes saíram, mas o flush() não terminou em 0.06 s", hung: true });
         assert.equal(workers.instances[0].terminated, false);
     });
 
-    test("ainda codificando no prazo, sem nenhum pacote: broken", async () => {
-        workers = installWorker(w => w.emit({ ev: "phase", phase: "encode" }));
+    test("ainda codificando no prazo desde o 1o quadro, sem nenhum pacote: broken", async () => {
+        workers = installWorker(w => {
+            w.emit({ ev: "phase", phase: "encode" });
+            w.emit({ ev: "phase", phase: "encoding" });
+        });
         const result = await runEncoderProbe("42001f");
-        assert.equal(result.detail, "nenhum pacote em 0.06 s (ainda codificando)");
+        assert.equal(result.detail, "nenhum pacote em 0.06 s desde o 1º quadro (ainda codificando)");
         assert.equal(result.hung, true);
+    });
+
+    test("o 1o quadro nao chega ao encoder no prazo: inconclusiva (o encoder ainda nem recebeu nada), e o Worker fica", async () => {
+        workers = installWorker(w => w.emit({ ev: "phase", phase: "encode" }));
+        assert.deepEqual(await runEncoderProbe("42001f"), { verdict: "unknown", detail: "encode sem resposta em 0.04 s", hung: true });
+        assert.equal(workers.instances[0].terminated, false);
     });
 
     test("o flush termina sem nenhum pacote e sem erro: broken (sem esperar o prazo)", async () => {
         workers = installWorker(w => {
             w.emit({ ev: "phase", phase: "encode" });
+            w.emit({ ev: "phase", phase: "encoding" });
             w.emit({ ev: "done", verdict: "finished", chunks: 0, error: null });
         });
         assert.deepEqual(await runEncoderProbe("42001f"), { verdict: "broken", detail: "nenhum pacote de 30 quadros (o flush terminou vazio)" });

@@ -123,7 +123,7 @@ const stalled = (v: TestViewer, seconds: number, source: number) =>
 
 /** O fim da linha de log de um envio contido (containStuck). */
 const contained = (v: TestViewer) => `: a placa de vídeo travou com H.264. O envio para ${v.label} fica como está até o Discord reiniciar `
-    + "(trocar o codec, parar ou fechar a conexão travaria o Discord inteiro). O H.264 automático fica desligado neste PC até o driver, o Discord ou a placa mudarem.";
+    + "(trocar o codec, parar ou fechar a conexão travaria o Discord inteiro). O H.264 automático fica desligado neste PC até o driver, o Chromium ou a placa mudarem.";
 
 /** O envio ficou contido: nenhum codec trocado, o plano continua H.264, a conexao contida e o espectador avisado. */
 function assertContained(v: TestViewer) {
@@ -212,6 +212,31 @@ describe("H.264 que nao sai do PC (checkStall)", () => {
         stopWatching(idle);
         await turns();
         assert.equal(rt.lastError, null, "nenhum aviso de placa travada");
+    });
+
+    test("OpenH264 (software, num tamanho que a placa nao aceita) que codifica e nada sai: so esse espectador vai para VP9, sem conter nem marcar a placa", async () => {
+        const v = await watcher("software");
+        let n = 0;
+        v.sender.stats = () => {
+            n++;
+            const entries = videoSenderStats({
+                mimeType: "video/H264", encoderImplementation: "OpenH264", powerEfficientEncoder: false, framesEncoded: 60 * n, bytesSent: 0,
+                frameWidth: 480, frameHeight: 270, sourceFrames: 60 * n, sourceFps: 60
+            });
+            entries[0].framesSent = 0;
+            return entries;
+        };
+        const since = logMark();
+        await seconds(rig, H264_STALL_MS / 1000 + 1);
+        assert.equal(sentCodec(v.sender), "video/VP9", "trocado sem reconectar (o encoder no ar e de software: seguro)");
+        assert.equal(isContained(v.pc as unknown as RTCPeerConnection), false);
+        assert.equal(rt.lastError, null, "nenhum aviso de placa travada");
+        assert.equal(stuckRecord(), null, "a placa nao fica marcada");
+        assert.equal(getLocalCaps().h264HwEncode, true, "uma queda so nao desliga o H.264 automatico");
+        const lines = stalls(since(), v);
+        assert.equal(lines.length, 1);
+        assert.ok(lines[0].endsWith(`encoder OpenH264, 480x270): trocando para VP9 só para ${v.label}. Os próximos espectadores ainda tentam a placa de vídeo.`), lines[0]);
+        assert.deepEqual(repliesTo(rig.room, v.peerId).filter(m => m.op === "stuck"), []);
     });
 
     test("log de 31/10 (0.2.6): nenhum quadro em 8 s com a captura no ar → travou, contido (sem trocar o codec); o H.264 automatico desliga ja na 1a", async () => {

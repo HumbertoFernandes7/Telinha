@@ -50,5 +50,5 @@ test("travou nesta sessao (ha um envio contido): o botao vale so depois de reini
         fireEvent.click(screen.getByRole("button", { name: "Tentar a placa de vídeo de novo" }));
     });
     await settle();
-    assert.deepEqual(toasts.map(t => t.text), ["Pronto: a placa de vídeo volta a ser usada depois que você reiniciar o Discord."]);
+    assert.deepEqual(toasts.map(t => t.text), ["Pronto: a placa de vídeo é testada de novo quando você reiniciar o Discord."]);
 });

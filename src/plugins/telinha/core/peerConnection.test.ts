@@ -283,19 +283,23 @@ describe("conexao contida", () => {
         assert.equal(stuck.pc.connectionState, "connected");
     });
 
-    test("sem negociacao registrada: congela o plano de agora (o de depois nao vale); sem ganchos, nada e reordenado", async () => {
-        let plan: SendPlan = { codec: "vp9", bitrate: { startKbps: 5000, maxKbps: 20000 }, label: "amigo" };
-        setPcHooks({ planFor: () => plan });
-        const frozen = sendingPc();
-        containPeerConnection(frozen.pc as unknown as RTCPeerConnection);
-        plan = { codec: "vp8", bitrate: null, label: "amigo" };
-        await frozen.pc.setRemoteDescription({ type: "offer", sdp: REMOTE_SDP });
-        assert.equal(videoLine(frozen.pc), "m=video 9 UDP/TLS/RTP/SAVPF 98 96", "o VP9 congelado na frente");
+    test("renegociar na contida: setRemoteDescription e setLocalDescription recusados (nada chega ao Chromium), so o rollback passa", async () => {
+        setPcHooks({ planFor: () => ({ codec: "vp9", bitrate: { startKbps: 5000, maxKbps: 20000 }, label: "amigo" }) });
+        const free = sendingPc();
+        const stuck = sendingPc();
+        containPeerConnection(stuck.pc as unknown as RTCPeerConnection);
+        const mark = logMark();
+        await assert.rejects(stuck.pc.setRemoteDescription({ type: "offer", sdp: REMOTE_SDP }), (e: DOMException) => e.name === "InvalidStateError");
+        await assert.rejects(stuck.pc.setLocalDescription(), /setLocalDescription recusado/);
+        await assert.rejects(stuck.pc.setLocalDescription({ type: "answer", sdp: REMOTE_SDP }), /setLocalDescription recusado/);
+        assert.equal(stuck.pc.descriptionCalls.length, 0, "o Chromium nao viu nenhuma");
+        assert.equal(stuck.video.codecPreferences, null, "nem preferencia de codec");
+        await stuck.pc.setLocalDescription({ type: "rollback" });
+        assert.deepEqual(stuck.pc.descriptionCalls.map(c => c.description?.type), ["rollback"]);
+        assert.equal(logged(/^setRemoteDescription recusado na conexão com o envio travado pela placa de vídeo/, mark).length, 1, "um aviso por minuto");
 
-        setPcHooks(null);
-        const none = sendingPc();
-        containPeerConnection(none.pc as unknown as RTCPeerConnection);
-        await none.pc.setRemoteDescription({ type: "offer", sdp: REMOTE_SDP });
-        assert.equal(none.pc.descriptionCalls.at(-1)!.description!.sdp, REMOTE_SDP);
+        // a saudavel negocia como sempre
+        await free.pc.setRemoteDescription({ type: "offer", sdp: REMOTE_SDP });
+        assert.equal(videoLine(free.pc), "m=video 9 UDP/TLS/RTP/SAVPF 98 96");
     });
 });

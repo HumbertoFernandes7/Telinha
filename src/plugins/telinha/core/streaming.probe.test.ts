@@ -64,18 +64,26 @@ test("a sonda trava antes da 1a transmissao: o PC fica marcado e o 1o espectador
     assert.equal(workers.instances.length, 1);
     assert.deepEqual((workers.instances[0].posted[0] as { config: { codec: string; }; }).config.codec, "avc1.42001f");
 
-    // configure ok, nenhum pacote, o flush sem fim: no prazo, travou
-    rig.clock.tick(ENCODER_PROBE_TIMING.encodeMs + 1);
+    // configure ok, o 1o quadro entrou, nenhum pacote e o flush sem fim: no prazo, travou; nada salvo ainda
+    rig.clock.tick(ENCODER_PROBE_TIMING.noChunkMs + 1);
+    await turns();
+    assert.equal(probeRecord(), null, "a 1a rodada so nao basta");
+    assert.equal(getLocalCaps().h264HwEncode, false, "esperando a confirmacao: VP9");
+    // a 2a rodada, PROBE_START.confirmMs depois, trava de novo: confirmado
+    rig.clock.tick(PROBE_START.confirmMs);
+    await turns();
+    assert.equal(workers.instances.length, 2);
+    rig.clock.tick(ENCODER_PROBE_TIMING.noChunkMs + 1);
     await turns();
     assert.equal(probeRecord()?.verdict, "broken");
     assert.equal(stuckRecord()?.source, "probe");
     assert.deepEqual(stuckRecord()?.env, { vendorId: "1002", deviceId: "7550", driver: null, chrome: null, discord: null }, "placa pelo WebGPU");
-    assert.equal(workers.instances[0].terminated, false);
+    assert.deepEqual(workers.instances.map(w => w.terminated), [false, false]);
     assert.equal(getLocalCaps().h264HwEncode, false);
     const caps = getEventLog().filter(e => e.msg.startsWith("Capacidades locais:")).map(e => e.msg);
     assert.equal(caps.length, 1);
     assert.ok(caps[0].includes("; placa de vídeo 1002:7550, driver ?;"), caps[0]);
-    assert.ok(caps[0].includes("; sonda WebCodecs H.264 placa: travou (nenhum pacote em 4 s (o flush() não terminou))"), caps[0]);
+    assert.ok(caps[0].includes("; sonda WebCodecs H.264 placa: travou (nenhum pacote em 10 s desde o 1º quadro (o flush() não terminou); confirmado na 2ª rodada)"), caps[0]);
     assert.ok(stuckEncoderDiagnostics().includes("(placa via webgpu)"));
 
     // a 1a transmissao: o espectador decodifica H.264 na placa, mas recebe VP9

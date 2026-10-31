@@ -15,18 +15,20 @@
 //   Chromium, Discord);
 // - nas proximas sessoes com o mesmo ambiente, o automatico comeca em VP9 e nenhum encoder H.264 da placa e criado
 //   (codec fixado em H.264 continua H.264);
-// - o H.264 da placa volta a ser tentado sozinho quando o ambiente muda (driver, Discord/Chromium, outra placa), com uma
-//   linha no log, ou pelo botao "Tentar a placa de vídeo de novo" (ui/StuckEncoderSection.tsx);
+// - o H.264 da placa volta a ser tentado quando o ambiente muda (driver, versao principal do Chromium, outra placa; a
+//   versao do Discord nao conta) E a sonda deste ambiente diz "ok", ou pelo botao "Tentar a placa de vídeo de novo"
+//   (ui/StuckEncoderSection.tsx), que tambem roda a sonda de novo;
 // - antes da 1a transmissao, uma vez por ambiente: a sonda WebCodecs (core/encoderProbe.ts) codifica uns quadros com o
-//   H.264 da placa num Worker. Travou = o mesmo registro de "travou", entao a 1a transmissao ja vai em VP9 e nenhum
-//   encoder H.264 do WebRTC e criado. O resultado fica salvo (chave privada hwH264Probe) e ela so roda de novo quando o
-//   ambiente muda. O checkStall + containStuck do streaming.ts continuam como rede de seguranca.
+//   H.264 da placa num Worker. Travou duas vezes (a 2a rodada confirma) = o mesmo registro de "travou", entao a 1a
+//   transmissao ja vai em VP9 e nenhum encoder H.264 do WebRTC e criado. O resultado fica salvo (chave privada
+//   hwH264Probe) e ela so roda de novo quando o ambiente muda. O checkStall + containStuck do streaming.ts continuam como
+//   rede de seguranca.
 // Parte do ambiente desconhecida (o native.ts antigo, getGPUInfo falhou) vale como curinga: o PC continua lembrando, e so
 // uma parte conhecida dos dois lados e diferente conta como mudanca (um retry por engano custaria outro travamento).
 
 import { settings } from "@plugins/telinha/settings";
 
-import { describeLocalCaps, isH264HwStuck, probeLocalCaps, setH264HwProbing, setH264HwStuck } from "./codec";
+import { describeLocalCaps, getLocalCaps, isH264HwStuck, probeLocalCaps, setH264HwProbing, setH264HwStuck } from "./codec";
 import { rt } from "./context";
 import { type ProbeResult, type ProbeVerdict, runEncoderProbe } from "./encoderProbe";
 import { errorText, log } from "./log";
@@ -64,8 +66,11 @@ export interface ProbeRecord {
     detail: string;
 }
 
-/** Espera antes da sonda WebCodecs, depois da sonda de codecs: fora da partida do Discord. Mutavel pelos testes. */
-export const PROBE_START = { delayMs: 3000 };
+/**
+ * Quando a sonda WebCodecs roda: `delayMs` depois da sonda de codecs (fora da partida do Discord) e, se travar, a 2a
+ * rodada de confirmacao `confirmMs` depois. Mutavel pelos testes.
+ */
+export const PROBE_START = { delayMs: 3000, confirmMs: 30_000 };
 
 /** Aviso para quem transmite (barra do Telinha), com o codec no automatico. */
 export const STUCK_NOTICE = "A placa de vídeo travou com H.264. Para não travar o Discord, o Telinha não mexe mais nesta transmissão. "
@@ -184,10 +189,23 @@ const ENV_PARTS: readonly [keyof EncoderEnv, string][] = [
     ["discord", "Discord"]
 ];
 
+/**
+ * As partes que, mudando, fazem a placa ser testada de novo. A versao do Discord fica de fora (muda toda semana sem mexer
+ * no encoder; so aparece na descricao), e o Chromium conta so pela versao principal (152.0.x → 152.0.y nao muda nada).
+ */
+const CHANGE_PARTS = ENV_PARTS.filter(([key]) => key !== "discord");
+
+const major = (version: string) => version.split(".")[0];
+
 /** O que mudou entre o ambiente salvo e o atual: so partes conhecidas dos dois lados e diferentes. Vazio = o mesmo. */
 export function envChanges(saved: EncoderEnv, now: EncoderEnv): string[] {
-    return ENV_PARTS
-        .filter(([key]) => saved[key] != null && now[key] != null && saved[key] !== now[key])
+    return CHANGE_PARTS
+        .filter(([key]) => {
+            const a = saved[key];
+            const b = now[key];
+            if (a == null || b == null) return false;
+            return key === "chrome" ? major(a) !== major(b) : a !== b;
+        })
         .map(([key, name]) => `${name} ${saved[key]} → ${now[key]}`);
 }
 
@@ -256,48 +274,60 @@ export function stuckLine(record: StuckRecord): string {
     return `A placa de vídeo travou com H.264 neste PC em ${shortDate(record.at)}; usando VP9.`;
 }
 
-/** O travamento lembrado vale neste ambiente? Mudou: esquece, com uma linha no log. */
-function applyRemembered(env: EncoderEnv): StuckRecord | null {
-    const record = stuckRecord();
-    if (!record) return null;
-    const changes = envChanges(record.env, env);
-    if (!changes.length) {
-        setH264HwStuck(true);
-        return record;
+/**
+ * O travamento salvo e de outro ambiente (driver, Chromium ou placa mudou): so a sonda DESTE ambiente dizendo "ok" o
+ * esquece. Inconclusiva (ou sem sonda) mantem o VP9: um retry as cegas custaria outro travamento.
+ */
+function settleChangedEnv(record: StuckRecord, env: EncoderEnv, verdict: ProbeVerdict) {
+    const changes = envChanges(record.env, env).join("; ");
+    if (verdict === "ok") {
+        writeRecord(null);
+        setH264HwStuck(stuckThisSession);
+        log.info(`A placa de vídeo tinha travado com H.264 neste PC em ${shortDate(record.at)}, mas o ambiente mudou (${changes}) e a sonda deste `
+            + "ambiente passou: o automático volta a tentar o H.264 da placa de vídeo");
+        return;
     }
-    writeRecord(null);
-    log.info(`A placa de vídeo tinha travado com H.264 neste PC em ${shortDate(record.at)}, mas o ambiente mudou (${changes.join("; ")}): `
-        + "o automático volta a tentar o H.264 da placa de vídeo");
-    return null;
+    setH264HwStuck(true);
+    log.info(`A placa de vídeo tinha travado com H.264 neste PC em ${shortDate(record.at)}; o ambiente mudou (${changes}), mas a sonda deste `
+        + `ambiente não confirmou que ela funciona (${PROBE_LABEL[verdict]}): continua em VP9`);
 }
 
+const canProbe = () => typeof (globalThis as { Worker?: unknown; }).Worker === "function";
+const streamBusy = () => streamStarting || !!rt.local;
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 /**
- * Inicio da sessao (session.ts): le o ambiente, aplica o travamento lembrado (mesmo ambiente: H.264 automatico desligado;
- * ambiente mudou: esquece, com uma linha no log) e so entao mede as capacidades (codec.ts → probeLocalCaps), para nenhum
- * envio H.264 da placa comecar antes. Resolve ai (a presenca sai). Se a sonda WebCodecs ainda nao rodou neste ambiente
- * (e a placa codifica H.264, e o PC nao tem travamento lembrado), ela roda em segundo plano depois de PROBE_START.delayMs
+ * Inicio da sessao (session.ts). A sonda de codecs (codec.ts → probeLocalCaps) e a leitura do ambiente correm juntas;
+ * so o H.264 automatico espera (setH264HwProbing) ate o travamento lembrado ser aplicado, para nenhum envio H.264 da placa
+ * comecar antes. Travamento lembrado no mesmo ambiente: H.264 automatico desligado. Ambiente mudou: continua desligado ate
+ * a sonda deste ambiente dizer "ok" (settleChangedEnv). Resolve depois das duas (a presenca sai). Se a sonda WebCodecs
+ * ainda nao rodou neste ambiente (e a placa codifica H.264), ela roda em segundo plano depois de PROBE_START.delayMs
  * (runStartupProbe). `report` recebe UMA linha das capacidades, com a placa de video, o travamento e a sonda (quando a
  * sonda roda, so no fim dela). Uma vez por sessao do Discord. Nunca rejeita.
  */
 export function startLocalCaps(report: (line: string) => void): Promise<void> {
     return started ??= (async () => {
+        setH264HwProbing(true);
+        const measuring = probeLocalCaps();
         const env = await environment();
-        const remembered = applyRemembered(env);
+        const record = stuckRecord();
+        const sameEnv = !!record && !envChanges(record.env, env).length;
+        if (record) setH264HwStuck(true);
         const saved = probeRecord();
         const done = saved && !envChanges(saved.env, env).length ? saved : null;
-        const canProbe = typeof (globalThis as { Worker?: unknown; }).Worker === "function";
-        const wantProbe = !remembered && !done && canProbe;
-        // a sonda vai rodar: ate ela acabar, o automatico vai de VP9 (ligado antes da sonda de codecs, sem brecha)
-        if (wantProbe) setH264HwProbing(true);
-        const caps = await probeLocalCaps();
-        const line = () => report(`${describeLocalCaps(caps)}; ${describeEnv(env)}; sonda WebCodecs H.264 placa: ${probeNote}`
-            + (remembered ? `; H.264 automático desligado: a placa de vídeo travou com H.264 neste PC em ${shortDate(remembered.at)} (usando VP9)` : ""));
-        if (wantProbe && caps.h264HwEncode && caps.h264HwProfile) {
+        const caps = await measuring;
+        const line = () => {
+            const rec = stuckRecord();
+            report(`${describeLocalCaps(caps)}; ${describeEnv(env)}; sonda WebCodecs H.264 placa: ${probeNote}`
+                + (rec && isH264HwStuck() ? `; H.264 automático desligado: a placa de vídeo travou com H.264 neste PC em ${shortDate(rec.at)} (usando VP9)` : ""));
+        };
+        if (!sameEnv && !done && canProbe() && caps.h264HwEncode && caps.h264HwProfile) {
             void runStartupProbe(env, caps.h264HwProfile).then(line);
             return;
         }
+        if (record && !sameEnv) settleChangedEnv(record, env, done?.verdict ?? "unknown");
         setH264HwProbing(false);
-        probeNote = remembered ? "não feita (a placa já travou neste PC)"
+        probeNote = sameEnv ? "não feita (a placa já travou neste PC)"
             : done ? `${PROBE_LABEL[done.verdict]} (feita em ${shortDate(done.at)} neste ambiente: ${done.detail})`
                 : !caps.h264HwEncode ? "não feita (este PC não codifica H.264 na placa)"
                     : "não feita (sem Worker)";
@@ -305,25 +335,54 @@ export function startLocalCaps(report: (line: string) => void): Promise<void> {
     })();
 }
 
+/** Uma rodada da sonda, com a linha do log quando o Worker fica preso. */
+async function probeOnce(profile: string): Promise<ProbeResult> {
+    const result = await runEncoderProbe(profile);
+    if (result.hung) log.warn(`Sonda WebCodecs do H.264 da placa de vídeo: o encoder ficou preso (${result.detail}); o Worker dela fica como está até o Discord fechar`);
+    return result;
+}
+
+/** a sonda WebCodecs esta rodando (inicio da sessao ou o botao): nao comeca outra */
+let probeRunning = false;
+
 /**
- * A sonda WebCodecs (core/encoderProbe.ts), uma vez por ambiente, fora da partida do Discord (espera PROBE_START.delayMs).
- * Uma transmissao comecando ou no ar nessa hora: nao roda (fica para a proxima vez que o Discord abrir). Enquanto roda,
- * o H.264 automatico fica desligado (setH264HwProbing): uma transmissao que comeca no meio manda VP9 para quem pedir
- * nesses segundos (no maximo ~7 s). Travou = o mesmo registro de um travamento numa transmissao (source "probe"), antes
- * de desligar a trava, entao nenhum encoder H.264 do WebRTC e criado. Ok ou inconclusiva: como antes.
+ * A sonda WebCodecs (core/encoderProbe.ts), uma vez por ambiente, fora da partida do Discord (espera `delayMs`). Uma
+ * transmissao comecando ou no ar nessa hora: nao roda (fica para a proxima vez que o Discord abrir). Enquanto roda, o
+ * H.264 automatico fica desligado (setH264HwProbing): uma transmissao que comeca no meio manda VP9 para quem pedir.
+ * - Travou: confirma com uma 2a rodada PROBE_START.confirmMs depois (um encoder preso continua preso; uma placa so
+ *   ocupada naquela hora nao). Travou de novo = o mesmo registro de um travamento numa transmissao (source "probe"),
+ *   antes de soltar a trava, entao nenhum encoder H.264 do WebRTC e criado. Uma transmissao comecou no meio: VP9 so nesta
+ *   sessao, nada salvo (a sonda roda de novo na proxima abertura).
+ * - Ok ou inconclusiva: como antes; um travamento salvo de outro ambiente so e esquecido com "ok" (settleChangedEnv).
  */
-export async function runStartupProbe(env: EncoderEnv, profile: string) {
+export async function runStartupProbe(env: EncoderEnv, profile: string, delayMs = PROBE_START.delayMs) {
+    probeRunning = true;
     setH264HwProbing(true);
     try {
-        await new Promise(resolve => setTimeout(resolve, PROBE_START.delayMs));
-        if (streamStarting || rt.local) {
+        await sleep(delayMs);
+        if (streamBusy()) {
             probeNote = "não feita (uma transmissão estava começando ou no ar; tenta de novo na próxima vez que o Discord abrir)";
             return;
         }
         probeNote = "rodando";
-        // nunca rejeita: travou, inconclusiva ou ok
-        const result: ProbeResult = await runEncoderProbe(profile);
-        if (result.hung) log.warn(`Sonda WebCodecs do H.264 da placa de vídeo: o encoder ficou preso (${result.detail}); o Worker dela fica como está até o Discord fechar`);
+        const first = await probeOnce(profile);
+        let result = first;
+        if (first.verdict === "broken") {
+            log.info(`Sonda WebCodecs do H.264 da placa de vídeo: travou (${first.detail}); confirmando em ${PROBE_START.confirmMs / 1000} s`);
+            probeNote = "travou uma vez; confirmando";
+            await sleep(PROBE_START.confirmMs);
+            if (streamBusy()) {
+                probeNote = `travou uma vez (${first.detail}), sem confirmar (uma transmissão começou): VP9 nesta sessão`;
+                setH264HwStuck(true);
+                log.warn("A sonda WebCodecs travou com o H.264 da placa de vídeo, mas uma transmissão começou antes da confirmação: o automático vai em VP9 "
+                    + "nesta sessão, e a sonda roda de novo na próxima vez que o Discord abrir");
+                return;
+            }
+            const second = await probeOnce(profile);
+            result = second.verdict === "broken"
+                ? { verdict: "broken", detail: `${second.detail}; confirmado na 2ª rodada` }
+                : { verdict: second.verdict, detail: `${second.detail} (a 1ª rodada tinha travado: ${first.detail})` };
+        }
         probeNote = `${PROBE_LABEL[result.verdict]} (${result.detail})`;
         save("hwH264Probe", { at: Date.now(), env: { ...env }, verdict: result.verdict, detail: result.detail }, "o resultado da sonda do H.264");
         if (result.verdict === "broken") {
@@ -331,9 +390,13 @@ export async function runStartupProbe(env: EncoderEnv, profile: string) {
             setH264HwStuck(true);
             writeRecord({ at: Date.now(), env, source: "probe" });
             log.warn(`A sonda WebCodecs mostrou que o H.264 da placa de vídeo trava neste PC (${result.detail}): `
-                + "o automático vai em VP9, sem criar o encoder H.264 da placa, até o driver, o Discord ou a placa mudarem");
+                + "o automático vai em VP9, sem criar o encoder H.264 da placa, até o driver, o Chromium ou a placa mudarem");
+            return;
         }
+        const record = stuckRecord();
+        if (record && envChanges(record.env, env).length) settleChangedEnv(record, env, result.verdict);
     } finally {
+        probeRunning = false;
         setH264HwProbing(false);
     }
 }
@@ -360,15 +423,40 @@ export function stuckInThisSession() {
 }
 
 /**
- * Botao "Tentar a placa de vídeo de novo": esquece o travamento lembrado. Sem nada travado nesta sessao, o H.264
- * automatico volta agora (devolve true); com um envio travado nesta sessao, so depois de reiniciar o Discord (false).
+ * O que o botao fez: "testing" = a sonda roda agora e o H.264 so volta se ela disser ok/inconclusiva; "restart" = um
+ * envio travou nesta sessao, ou ha uma transmissao no ar: a sonda roda na proxima abertura do Discord; "now" = nao ha
+ * sonda possivel (sem Worker, ou a placa nem codifica H.264): o H.264 automatico volta ja, como antes.
  */
-export function forgetStuckEncoder(): boolean {
+export type RetryOutcome = "testing" | "restart" | "now";
+
+/**
+ * Botao "Tentar a placa de vídeo de novo": esquece o travamento E o resultado da sonda, para o H.264 da placa so voltar
+ * depois de a sonda deste ambiente dizer ok/inconclusiva (nunca as cegas).
+ */
+export function forgetStuckEncoder(): RetryOutcome {
     writeRecord(null);
-    const now = !stuckThisSession;
-    if (now) setH264HwStuck(false);
-    log.info(`Você pediu para tentar o H.264 da placa de vídeo de novo: ${now ? "vale a partir da próxima pessoa que assistir" : "vale depois que você reiniciar o Discord"}`);
-    return now;
+    save("hwH264Probe", null, "o resultado da sonda do H.264");
+    const profile = getLocalCaps().h264HwProfile;
+    const probeable = canProbe() && !!profile;
+    let outcome: RetryOutcome;
+    if (stuckThisSession || (probeable && streamBusy())) {
+        outcome = "restart";
+    } else if (probeable) {
+        outcome = "testing";
+        // a trava da sonda antes de soltar a do travamento: nenhum envio H.264 da placa comeca no meio
+        setH264HwProbing(true);
+        setH264HwStuck(false);
+        if (!probeRunning) void environment().then(env => runStartupProbe(env, profile, 0));
+    } else {
+        outcome = "now";
+        setH264HwStuck(false);
+    }
+    log.info("Você pediu para tentar o H.264 da placa de vídeo de novo: " + {
+        testing: "testando a placa agora (sonda WebCodecs); o H.264 só volta se ela responder",
+        restart: "a placa é testada de novo quando o Discord reiniciar",
+        now: "vale a partir da próxima pessoa que assistir"
+    }[outcome]);
+    return outcome;
 }
 
 /** Linhas do "Copiar diagnóstico": a placa de video, o travamento lembrado e o desta sessao. */

@@ -17,6 +17,7 @@ import { after, before, describe, test } from "node:test";
 
 import { settings } from "@plugins/telinha/settings";
 import { getEventLog, type TelinhaEvent } from "@plugins/telinha/store";
+import { eventually } from "@test/fakes/clock";
 import { installNative, type NativeEnv } from "@test/fakes/native";
 import { pluginSettings } from "@test/fakes/vencord";
 import { installWebRtc, type WebRtcEnv } from "@test/fakes/webrtc";
@@ -55,9 +56,8 @@ before(() => {
         gpuEnvironment: async () => ({ vendorId: 0x1002, deviceId: 0x7550, driverVersion: "32.0.21001.9024", chrome: "152.0.7444.59", discord: "1.0.9266", error: null })
     });
     pluginSettings.load({ stuckHwH264: { at: STUCK_AT, env: { ...AMD_ENV }, source: "stream" } });
-    PROBE_START.delayMs = 0;
-    ENCODER_PROBE_TIMING.configureMs = 40;
-    ENCODER_PROBE_TIMING.encodeMs = 60;
+    Object.assign(PROBE_START, { delayMs: 0, confirmMs: 0 });
+    Object.assign(ENCODER_PROBE_TIMING, { configureMs: 40, noChunkMs: 60, flushMs: 60 });
 });
 
 after(() => {
@@ -66,6 +66,15 @@ after(() => {
     native.restore();
     rtc.restore();
 });
+
+/** O detalhe do 31/10 nos prazos curtos deste arquivo. */
+const STUCK_DETAIL = "nenhum pacote em 0.06 s desde o 1º quadro (o flush() não terminou)";
+
+/** Um Worker por rodada: o roteiro `scripts[n]` na n-esima (o ultimo vale para as seguintes). */
+function workersFor(...scripts: NonNullable<WorkerEnv["script"]>[]) {
+    let n = 0;
+    return installWorker((w, data) => scripts[Math.min(n++, scripts.length - 1)](w, data));
+}
 
 describe("placa de video que trava com H.264: lembrada neste PC", () => {
     test("o mesmo ambiente: o automatico ja comeca em VP9 (o fixado continua H.264), sem rodar a sonda; a linha das capacidades diz tudo", async () => {
@@ -102,14 +111,27 @@ describe("placa de video que trava com H.264: lembrada neste PC", () => {
         assert.equal(diag[3], "sonda WebCodecs H.264 placa: não feita (a placa já travou neste PC)");
     });
 
-    test("\"Tentar a placa de vídeo de novo\" sem nada travado nesta sessao: esquece e o H.264 automatico volta ja", () => {
+    test("\"Tentar a placa de vídeo de novo\": esquece o travamento E a sonda, e o H.264 so volta depois de a sonda responder", async () => {
+        pluginSettings.set("hwH264Probe", { at: STUCK_AT, env: AMD_ENV, verdict: "broken", detail: "x" });
+        workers = installWorker(healthyProbe(30));
         const since = logMark();
-        assert.equal(forgetStuckEncoder(), true);
+        assert.equal(forgetStuckEncoder(), "testing");
         assert.equal(stuckRecord(), null);
         assert.equal(pluginSettings.get("stuckHwH264"), null);
-        assert.equal(getLocalCaps().h264HwEncode, true);
+        assert.equal(getLocalCaps().h264HwEncode, false, "testando: ainda VP9");
+        await eventually(() => probeRecord()?.verdict === "ok");
+        await flush();
+        assert.equal(getLocalCaps().h264HwEncode, true, "a sonda respondeu: o H.264 volta");
         assert.equal(chooseCodec({ h264HwDecode: true }, "auto").codec, "h264");
-        assert.deepEqual(since(), ["info: Você pediu para tentar o H.264 da placa de vídeo de novo: vale a partir da próxima pessoa que assistir"]);
+        assert.equal(workers.instances.length, 1);
+        assert.deepEqual(since(), ["info: Você pediu para tentar o H.264 da placa de vídeo de novo: testando a placa agora (sonda WebCodecs); o H.264 só volta se ela responder"]);
+        workers.restore();
+
+        // sem Worker (nenhuma sonda possivel): volta ja, como antes
+        pluginSettings.set("stuckHwH264", { at: STUCK_AT, env: AMD_ENV });
+        assert.equal(forgetStuckEncoder(), "now");
+        assert.equal(probeRecord(), null, "o resultado da sonda tambem foi esquecido");
+        assert.equal(getLocalCaps().h264HwEncode, true);
     });
 });
 
@@ -151,7 +173,38 @@ describe("sonda WebCodecs (runStartupProbe)", () => {
         workers.restore();
     });
 
-    test("travou (o 31/10 no navegador): marca o PC antes de qualquer transmissao, e o Worker preso fica (nunca terminado)", async () => {
+    test("travou na 1a rodada e passou na 2a (a placa so estava ocupada): nada marcado, o H.264 continua", async () => {
+        workers = workersFor(stuckProbe(), healthyProbe(30));
+        await runStartupProbe(AMD_ENV, "42001f");
+        assert.equal(workers.instances.length, 2, "a 2a rodada confirma");
+        assert.equal(workers.instances[0].terminated, false, "o preso da 1a fica");
+        assert.equal(stuckRecord(), null);
+        assert.equal(getLocalCaps().h264HwEncode, true);
+        assert.deepEqual({ ...probeRecord()!, at: 0 }, { at: 0, env: AMD_ENV, verdict: "ok", detail: `30 pacotes de 30 quadros (a 1ª rodada tinha travado: ${STUCK_DETAIL})` });
+        workers.restore();
+    });
+
+    test("travou e uma transmissao comecou antes da confirmacao: VP9 so nesta sessao, nada salvo", async () => {
+        pluginSettings.set("hwH264Probe", null);
+        workers = installWorker((w, data) => {
+            stuckProbe()(w, data);
+            noteStreamStarting(true);
+        });
+        try {
+            await runStartupProbe(AMD_ENV, "42001f");
+        } finally {
+            noteStreamStarting(false);
+        }
+        assert.equal(workers.instances.length, 1);
+        assert.equal(getLocalCaps().h264HwEncode, false, "VP9 nesta sessao");
+        assert.equal(stuckRecord(), null, "nada salvo");
+        assert.equal(probeRecord(), null);
+        assert.ok(stuckEncoderDiagnostics().includes(`sonda WebCodecs H.264 placa: travou uma vez (${STUCK_DETAIL}), sem confirmar (uma transmissão começou): VP9 nesta sessão`));
+        workers.restore();
+        assert.equal(forgetStuckEncoder(), "now", "sem Worker agora: volta ja");
+    });
+
+    test("travou duas vezes (o 31/10 no navegador): marca o PC antes de qualquer transmissao, e os Workers presos ficam (nunca terminados)", async () => {
         workers = installWorker(stuckProbe());
         const since = logMark();
         await runStartupProbe(AMD_ENV, "42001f");
@@ -161,17 +214,38 @@ describe("sonda WebCodecs (runStartupProbe)", () => {
         assert.equal(record.source, "probe");
         assert.deepEqual(record.env, AMD_ENV);
         assert.equal(probeRecord()?.verdict, "broken");
-        assert.equal(workers.instances[0].terminated, false);
+        assert.equal(probeRecord()?.detail, `${STUCK_DETAIL}; confirmado na 2ª rodada`);
+        assert.deepEqual(workers.instances.map(w => w.terminated), [false, false]);
+        const hung = `warn: Sonda WebCodecs do H.264 da placa de vídeo: o encoder ficou preso (${STUCK_DETAIL}); o Worker dela fica como está até o Discord fechar`;
         assert.deepEqual(since(), [
-            "warn: Sonda WebCodecs do H.264 da placa de vídeo: o encoder ficou preso (nenhum pacote em 0.06 s (o flush() não terminou)); o Worker dela fica como está até o Discord fechar",
-            "warn: A sonda WebCodecs mostrou que o H.264 da placa de vídeo trava neste PC (nenhum pacote em 0.06 s (o flush() não terminou)): "
-            + "o automático vai em VP9, sem criar o encoder H.264 da placa, até o driver, o Discord ou a placa mudarem"
+            hung,
+            `info: Sonda WebCodecs do H.264 da placa de vídeo: travou (${STUCK_DETAIL}); confirmando em 0 s`,
+            hung,
+            `warn: A sonda WebCodecs mostrou que o H.264 da placa de vídeo trava neste PC (${STUCK_DETAIL}; confirmado na 2ª rodada): `
+            + "o automático vai em VP9, sem criar o encoder H.264 da placa, até o driver, o Chromium ou a placa mudarem"
         ]);
         assert.ok(stuckEncoderDiagnostics().includes("[visto pela sonda]"));
-        assert.equal(stuckInThisSession(), false, "nenhum envio travou: o botao vale ja");
-        assert.equal(forgetStuckEncoder(), true);
+        assert.equal(stuckInThisSession(), false);
+        workers.restore();
+    });
+
+    test("travamento salvo de outro driver: a sonda deste ambiente dizendo ok esquece; inconclusiva mantem o VP9", async () => {
+        const newDriver = { ...AMD_ENV, driver: "32.0.21013.1000" };
+        pluginSettings.set("stuckHwH264", { at: STUCK_AT, env: AMD_ENV });
+        workers = installWorker(w => w.emit({ ev: "done", verdict: "unsupported" }));
+        const since = logMark();
+        await runStartupProbe(newDriver, "42001f");
+        assert.ok(stuckRecord(), "inconclusiva: continua lembrado");
+        assert.equal(getLocalCaps().h264HwEncode, false);
+        assert.ok(since().some(l => l.endsWith("mas a sonda deste ambiente não confirmou que ela funciona (inconclusiva): continua em VP9")));
+        workers.restore();
+
+        workers = installWorker(healthyProbe(30));
+        await runStartupProbe(newDriver, "42001f");
+        assert.equal(stuckRecord(), null, "ok: esquecido");
         assert.equal(getLocalCaps().h264HwEncode, true);
-        assert.equal(probeRecord()?.verdict, "broken", "o botao nao apaga a sonda: ela nao roda de novo neste ambiente");
+        assert.ok(since().some(l => l.endsWith("e a sonda deste ambiente passou: o automático volta a tentar o H.264 da placa de vídeo")));
+        workers.restore();
     });
 });
 
@@ -188,22 +262,23 @@ describe("travou numa transmissao nesta sessao", () => {
         assert.ok(stuckEncoderDiagnostics().includes("travou nesta sessão: sim (0 conexões contidas)"));
 
         const since = logMark();
-        assert.equal(forgetStuckEncoder(), false);
-        assert.equal(stuckRecord(), null, "esquecido para a proxima sessao");
+        assert.equal(forgetStuckEncoder(), "restart");
+        assert.equal(stuckRecord(), null, "esquecido para a proxima sessao (a sonda roda ao abrir)");
         assert.equal(getLocalCaps().h264HwEncode, false, "nesta sessao continua VP9 (ha um envio travado)");
-        assert.deepEqual(since(), ["info: Você pediu para tentar o H.264 da placa de vídeo de novo: vale depois que você reiniciar o Discord"]);
+        assert.deepEqual(since(), ["info: Você pediu para tentar o H.264 da placa de vídeo de novo: a placa é testada de novo quando o Discord reiniciar"]);
     });
 });
 
 describe("ambiente e registros salvos", () => {
-    test("envChanges: so o que e conhecido dos dois lados e diferente; describeEnv com o desconhecido em \"?\"", () => {
+    test("envChanges: so o que e conhecido dos dois lados e diferente (o Discord nao conta; o Chromium so pela versao principal)", () => {
         const unknown: EncoderEnv = { vendorId: null, deviceId: null, driver: null, chrome: null, discord: null };
         assert.deepEqual(envChanges(AMD_ENV, AMD_ENV), []);
         assert.deepEqual(envChanges(AMD_ENV, unknown), [], "desconhecido e curinga: continua lembrando");
         assert.deepEqual(envChanges(unknown, AMD_ENV), []);
-        assert.deepEqual(envChanges(AMD_ENV, { ...AMD_ENV, driver: "32.0.21013.1000", discord: "1.0.9300" }), [
+        assert.deepEqual(envChanges(AMD_ENV, { ...AMD_ENV, discord: "1.0.9300", chrome: "152.0.7500.10" }), [], "Discord novo e o mesmo Chromium 152");
+        assert.deepEqual(envChanges(AMD_ENV, { ...AMD_ENV, driver: "32.0.21013.1000", chrome: "153.0.7600.1" }), [
             "driver da placa de vídeo 32.0.21001.9024 → 32.0.21013.1000",
-            "Discord 1.0.9266 → 1.0.9300"
+            "Chromium 152.0.7444.59 → 153.0.7600.1"
         ]);
         assert.deepEqual(envChanges(AMD_ENV, { ...AMD_ENV, vendorId: "10de", deviceId: "2484" }), ["fabricante da placa de vídeo 1002 → 10de", "placa de vídeo 7550 → 2484"]);
         assert.equal(describeEnv(unknown), "placa de vídeo ?:?, driver ?; Chromium ?; Discord ?");

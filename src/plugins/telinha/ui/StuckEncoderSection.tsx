@@ -10,9 +10,16 @@
 
 import { Button } from "@components/Button";
 import { Paragraph } from "@components/Paragraph";
-import { forgetStuckEncoder, stuckLine, stuckRecord } from "@plugins/telinha/core/stuckEncoder";
+import { forgetStuckEncoder, type RetryOutcome, stuckLine, stuckRecord } from "@plugins/telinha/core/stuckEncoder";
 import { settings } from "@plugins/telinha/settings";
 import { showToast } from "@webpack/common";
+
+/** O aviso depois do botao, conforme o que ele fez (core/stuckEncoder.ts → forgetStuckEncoder). */
+const RETRY_TOAST: Record<RetryOutcome, string> = {
+    testing: "Pronto: testando a placa de vídeo agora. Se ela responder, a próxima pessoa que assistir recebe o H.264 dela.",
+    restart: "Pronto: a placa de vídeo é testada de novo quando você reiniciar o Discord.",
+    now: "Pronto: a próxima pessoa que assistir recebe o H.264 da placa de vídeo de novo."
+};
 
 export function StuckEncoderSection() {
     // re-renderiza quando o registro muda (o botao, ou um travamento novo com a pagina aberta)
@@ -21,11 +28,7 @@ export function StuckEncoderSection() {
     if (!record) return null;
 
     const retry = () => {
-        const now = forgetStuckEncoder();
-        showToast({
-            text: now ? "Pronto: a próxima pessoa que assistir recebe o H.264 da placa de vídeo de novo." : "Pronto: a placa de vídeo volta a ser usada depois que você reiniciar o Discord.",
-            variant: "success"
-        });
+        showToast({ text: RETRY_TOAST[forgetStuckEncoder()], variant: "success" });
     };
 
     return (

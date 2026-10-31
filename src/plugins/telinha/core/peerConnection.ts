@@ -27,8 +27,11 @@
 //   proprio Trystero fecha antes, entao o outro lado ve a saida normal; a conexao fica aberta, sem ninguem, ate o ICE cair
 //   sozinho, e guardada aqui (nao vira lixo coletado);
 // - removeTrack() nao tira nada (o removeStream do Trystero, inclusive o da sala que fecha, terminaria em renegociacao);
-// - renegociacoes que o outro lado pedir usam o plano congelado no ultimo SDP aplicado (mesmo codec, mesma ordem, mesmos
-//   x-google-*): a negociacao nao troca o codec nem os parametros do envio travado.
+// - nenhuma renegociacao chega ao Chromium: setRemoteDescription e setLocalDescription (fora o "rollback") sao recusados.
+//   Uma oferta do outro lado (ele comeca ou para de transmitir para nos nesta conexao, ou reinicia o ICE) rodaria SRD/SLD,
+//   e o libwebrtc recria o envio de video se as extensoes de cabecalho, o mid ou o extmap-allow-mixed mudarem: e o mesmo
+//   travamento. O signal() do Trystero pega a recusa e a manda para o handler de erro (a conexao sai da sala; uma nova,
+//   em VP9, pode ser criada depois).
 // Limite: o resto do Chromium nao passa por aqui. Recarregar a pagina (Ctrl+R) fecha a conexao por dentro e trava; por
 // isso o aviso pede para fechar o Discord por completo.
 
@@ -56,35 +59,23 @@ let PeerConnectionClass: typeof RTCPeerConnection | null = null;
 /** transceiver → "codec:perfil" ja aplicado com setCodecPreferences */
 const appliedPrefs = new WeakMap<RTCRtpTransceiver, string>();
 const loggedMunge = new WeakMap<RTCPeerConnection, string>();
-/** o ultimo plano usado numa negociacao desta conexao (vira o plano congelado se ela for contida) */
-const lastPlans = new WeakMap<RTCPeerConnection, SendPlan>();
 
-interface Contained {
-    /** plano das negociacoes daqui em diante: o da ultima negociacao (null = nenhuma, nada e reordenado) */
-    plan: SendPlan | null;
-    /** objetos ligados ao envio travado (sender, stream...): guardados com a conexao ate o Discord reiniciar */
-    keep: unknown[];
-}
-
-/** Conexoes contidas (ver o topo). Referencia forte de proposito: nunca sai daqui. */
-const contained = new Map<RTCPeerConnection, Contained>();
+/**
+ * Conexoes contidas (ver o topo) → objetos ligados ao envio travado (sender, stream...), guardados com a conexao.
+ * Referencia forte de proposito: nunca sai daqui.
+ */
+const contained = new Map<RTCPeerConnection, unknown[]>();
 
 export function setPcHooks(next: PcHooks | null) {
     hooks = next;
 }
 
 /**
- * Contem esta conexao (um envio de video dela travou na placa de video): close/removeTrack viram nada e as
- * renegociacoes usam o plano da ultima negociacao. `keep`: objetos a guardar junto. Para sempre (ate o Discord reiniciar).
+ * Contem esta conexao (um envio de video dela travou na placa de video): close/removeTrack viram nada e nenhuma
+ * renegociacao passa. `keep`: objetos a guardar junto. Para sempre (ate o Discord reiniciar).
  */
 export function containPeerConnection(pc: RTCPeerConnection, keep: unknown[] = []) {
-    const entry = contained.get(pc);
-    if (entry) {
-        entry.keep.push(...keep);
-        return;
-    }
-    // sem negociacao registrada (nao acontece: o envio passou por uma), o plano de agora
-    contained.set(pc, { plan: lastPlans.get(pc) ?? hooks?.planFor(pc) ?? null, keep: [...keep] });
+    contained.set(pc, [...(contained.get(pc) ?? []), ...keep]);
 }
 
 export function isContained(pc: RTCPeerConnection | null | undefined): boolean {
@@ -96,13 +87,11 @@ export function containedCount(): number {
     return contained.size;
 }
 
-/** Plano de envio desta conexao: o congelado, se ela estiver contida; senao, o do streaming.ts. */
-function planOf(pc: RTCPeerConnection): SendPlan | null {
-    const c = contained.get(pc);
-    if (c) return c.plan;
-    const plan = hooks?.planFor(pc) ?? null;
-    if (plan) lastPlans.set(pc, plan);
-    return plan;
+/** Recusa uma negociacao numa conexao contida (ver o topo), com um aviso no log. */
+function refuseNegotiation(what: string): Promise<void> {
+    logThrottled("pc-negotiation-contained", "warn", `${what} recusado na conexão com o envio travado pela placa de vídeo `
+        + "(renegociar recriaria o envio e travaria o Discord): essa conexão sai da sala", 60_000);
+    return Promise.reject(new DOMException(`Telinha: ${what} recusado (envio travado pela placa de vídeo)`, "InvalidStateError"));
 }
 
 function sendingTransceivers(pc: RTCPeerConnection, kind: "audio" | "video") {
@@ -114,7 +103,7 @@ function sendingTransceivers(pc: RTCPeerConnection, kind: "audio" | "video") {
 }
 
 function prepareLocalDescription(pc: RTCPeerConnection) {
-    const plan = planOf(pc);
+    const plan = hooks?.planFor(pc);
     if (!plan?.codec) return;
     const key = `${plan.codec}:${plan.h264Profile ?? ""}`;
     for (const t of sendingTransceivers(pc, "video")) {
@@ -126,7 +115,7 @@ function prepareLocalDescription(pc: RTCPeerConnection) {
 
 function mungeRemoteDescription(pc: RTCPeerConnection, description: RTCSessionDescriptionInit): RTCSessionDescriptionInit {
     if (!description?.sdp || (description.type !== "offer" && description.type !== "answer" && description.type !== "pranswer")) return description;
-    const plan = planOf(pc);
+    const plan = hooks?.planFor(pc);
     if (!plan) return description;
 
     const mids = (kind: "audio" | "video") => new Set(sendingTransceivers(pc, kind).map(t => t.mid).filter((m): m is string => !!m));
@@ -147,6 +136,8 @@ function mungeRemoteDescription(pc: RTCPeerConnection, description: RTCSessionDe
 export function getPeerConnectionClass(): typeof RTCPeerConnection {
     return PeerConnectionClass ??= class TelinhaPeerConnection extends RTCPeerConnection {
         override setLocalDescription(description?: RTCLocalSessionDescriptionInit): Promise<void> {
+            // contida: so o rollback passa (desfaz uma oferta nossa pendente sem tocar no envio)
+            if (contained.has(this) && description?.type !== "rollback") return refuseNegotiation("setLocalDescription");
             if (!description || (description.type !== "rollback" && !description.sdp)) {
                 try {
                     prepareLocalDescription(this);
@@ -158,6 +149,7 @@ export function getPeerConnectionClass(): typeof RTCPeerConnection {
         }
 
         override setRemoteDescription(description: RTCSessionDescriptionInit): Promise<void> {
+            if (contained.has(this)) return refuseNegotiation("setRemoteDescription");
             let munged = description;
             try {
                 munged = mungeRemoteDescription(this, description);

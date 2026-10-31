@@ -86,6 +86,7 @@ export function healthyProbe(chunks = 30): NonNullable<WorkerEnv["script"]> {
     return w => {
         w.emit({ ev: "phase", phase: "isConfigSupported" });
         w.emit({ ev: "phase", phase: "encode" });
+        w.emit({ ev: "phase", phase: "encoding" });
         w.emit({ ev: "chunk" });
         w.emit({ ev: "phase", phase: "flush" });
         w.emit({ ev: "done", verdict: "finished", chunks, error: null });
@@ -97,6 +98,7 @@ export function stuckProbe(): NonNullable<WorkerEnv["script"]> {
     return w => {
         w.emit({ ev: "phase", phase: "isConfigSupported" });
         w.emit({ ev: "phase", phase: "encode" });
+        w.emit({ ev: "phase", phase: "encoding" });
         w.emit({ ev: "phase", phase: "flush" });
     };
 }

@@ -49,7 +49,7 @@ test("driver novo: o travamento salvo e esquecido sozinho; a sonda deste ambient
 
     assert.equal(stuckRecord(), null);
     assert.ok(getEventLog().some(e => e.level === "info" && e.msg === "A placa de vídeo tinha travado com H.264 neste PC em 31/10, mas o ambiente mudou "
-        + "(driver da placa de vídeo 32.0.21001.9024 → 32.0.21013.1000): o automático volta a tentar o H.264 da placa de vídeo"));
+        + "(driver da placa de vídeo 32.0.21001.9024 → 32.0.21013.1000) e a sonda deste ambiente passou: o automático volta a tentar o H.264 da placa de vídeo"));
     assert.equal(getLocalCaps().h264HwEncode, true);
     assert.equal(chooseCodec({ h264HwDecode: true }, "auto").codec, "h264");
     assert.equal(workers.instances.length, 0, "a sonda ja tinha rodado neste ambiente");
