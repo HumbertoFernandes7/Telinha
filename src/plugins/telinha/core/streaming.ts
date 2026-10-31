@@ -921,7 +921,10 @@ async function applySenderParams(peerId: PeerId, local: LocalCapture, level: Qua
  *   e 480x270 (OpenH264). Em cima do nosso degrau 720p (scaleResolutionDownBy 1,5 = 1280x720) vai a 853x480 (largura
  *   impar: OpenH264), 640x360 (placa de novo), 427x240 e 320x180 (OpenH264). Foi o que aconteceu no log de 29/10
  *   (banda ~0,5 Mbps + degrau 720p, OpenH264 18 s depois). Isso e de passagem e o espectador nao trava (no loopback:
- *   decodifica a 55+ fps, sem congelar nem pedir PLI). Por isso nao conta como queda (isTransientSoftwareH264): so loga;
+ *   decodifica a 55+ fps, sem congelar nem pedir PLI). Por isso nao conta como queda (isTransientSoftwareH264): so loga.
+ *   Vale tambem depois que o qualityLimitationReason volta para "none": o WebRTC so sobe a resolucao de novo depois de
+ *   varios segundos sem limitacao, e nesse meio tempo o 853x480 continua no ar (log de 31/10: contava como queda 20-30 s
+ *   depois, e a 2a desligava o H.264 da sessao inteira);
  * - nao tiram da placa: o nosso scaleResolutionDownBy 1,5 sozinho (1080p→720p, com ou sem 12 Mbps), reconectar 3 vezes
  *   com 1,5 s de intervalo, 3 envios H.264 ao mesmo tempo;
  * - a captura nunca chega com tamanho impar (medido no mesmo dia com uma janela nossa capturada como o Telinha captura,
@@ -931,15 +934,16 @@ async function applySenderParams(peerId: PeerId, local: LocalCapture, level: Qua
  *   com visibleRect (num worker, +0,1 ms) passou 993 quadros sem recortar nenhum, e applyConstraints com um tamanho par
  *   fixo reescala e nao acompanha a janela (1200x800 virou 952x634);
  * - o tamanho impar vinha da NOSSA reducao: o degrau 720p com a escala altura/720 dava largura impar em metade das janelas,
- *   ex.: 1798x1080 ÷1,5 = 1199x720 no OpenH264, com qualityLimitationReason "none" (contava como queda). Agora
- *   levels.evenScale escolhe uma escala que da largura e altura pares (÷1,501 = 1198x720, na placa) e checkCaptureSize
- *   reaplica quando a janela muda de tamanho (a escala antiga no tamanho novo: 1904x1040 → 1268x693, OpenH264; a
- *   reaplicada, 1318x720, volta para a placa). Ate RESIZE_GRACE_MS depois da mudanca, OpenH264 e esse meio tempo: so loga.
+ *   ex.: 1798x1080 ÷1,5 = 1199x720 no OpenH264, com qualityLimitationReason "none". Agora levels.evenScale escolhe uma
+ *   escala que da largura e altura pares (÷1,501 = 1198x720, na placa) e checkCaptureSize reaplica quando a janela muda de
+ *   tamanho (a escala antiga no tamanho novo: 1904x1040 → 1268x693, OpenH264; a reaplicada, 1318x720, volta para a
+ *   placa). Um tamanho impar tambem nao e a placa falhando: so loga. Ate RESIZE_GRACE_MS depois da mudanca, OpenH264
+ *   num tamanho que a placa aceita e a reducao antiga sendo reaplicada: so loga.
  *
- * Queda de verdade (OpenH264 num tamanho que a placa aceita, ou com o WebRTC sem reduzir nada, ex.: uma reducao nossa com
- * tamanho impar, que evenScale evita): so ESTE espectador passa para o codec que chooseCodec escolher sem a placa (VP9); os proximos
- * ainda tentam a placa. Na 2a queda da sessao do Discord (noteH264Fallback), o H.264 automatico desliga para os
- * proximos. Uma vez por espectador (send.fellBack): nunca volta e repete. Codec fixado em H.264: continua H.264.
+ * Queda de verdade (OpenH264 num tamanho que a placa aceita, fora do tempo de reaplicar): so ESTE espectador passa para o
+ * codec que chooseCodec escolher sem a placa (VP9); os proximos ainda tentam a placa. Na 2a queda da sessao do Discord
+ * (noteH264Fallback), o H.264 automatico desliga para os proximos. Uma vez por espectador (send.fellBack): nunca volta e
+ * repete. Codec fixado em H.264: continua H.264.
  */
 function checkEncoder(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: EncoderReport) {
     if (send.fellBack) return;
@@ -947,9 +951,14 @@ function checkEncoder(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc
     const size = enc.width && enc.height ? `${enc.width}x${enc.height}` : "tamanho desconhecido";
     if (isTransientSoftwareH264(enc)) {
         send.transientSoftware = true;
-        logThrottled(`h264-transient:${peerId}`, "info", `O H.264 para ${label} passou para o OpenH264 (software) em ${size}: o WebRTC reduziu a resolução `
-            + `por conta própria (${enc.limitation === "cpu" ? "CPU" : enc.limitation === "bandwidth" ? "banda" : enc.limitation}) e a placa de vídeo só codifica H.264 `
-            + "em tamanho par a partir de 360p. Volta para a placa sozinho quando a resolução subir; não é queda.", 60_000);
+        // o WebRTC ainda limitando: diz o motivo; ja sem limitacao ("none"), o tamanho reduzido continua no ar ate ele subir
+        const limiting = enc.limitation && enc.limitation !== "none";
+        const why = limiting
+            ? `o WebRTC reduziu a resolução por conta própria (${enc.limitation === "cpu" ? "CPU" : enc.limitation === "bandwidth" ? "banda" : enc.limitation}) `
+            + "e a placa de vídeo só codifica H.264 em tamanho par a partir de 360p"
+            : "um tamanho que a placa de vídeo não codifica (só H.264 em tamanho par a partir de 360p), em geral uma redução do WebRTC que ainda não voltou a subir";
+        logThrottled(`h264-transient:${peerId}`, "info", `O H.264 para ${label} passou para o OpenH264 (software) em ${size}: ${why}. `
+            + "Volta para a placa sozinho quando a resolução subir; não é queda.", 60_000);
         return;
     }
     if (isSoftwareH264(enc) && resizing(local)) {
