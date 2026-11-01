@@ -17,7 +17,7 @@ import { after, before, describe, test } from "node:test";
 
 import { useFakeClock } from "@test/fakes/clock";
 import { EncoderSim, installWebRtc, type LinkRates, type WebRtcEnv } from "@test/fakes/webrtc";
-import { EVAL_MS, logsDuring, type QualityHarness, qualityHarness, qualityLines } from "@test/helpers/wpb-quality";
+import { EVAL_MS, logsDuring, probeSawtooth, type QualityHarness, qualityHarness, qualityLines } from "@test/helpers/wpb-quality";
 
 import { BW_GRACE_MS } from "./levels";
 
@@ -206,6 +206,16 @@ describe("upload: subir de volta sem um espectador segurar todos", () => {
         await flaky(h, sims.B, 104_000, 132_000, 10_000);
         assert.equal(h.controller.levelFor("A"), "1080p60");
         assert.equal(h.controller.levelFor("C"), "720p30");
+    });
+
+    test("o estimador de todos sondando um caminho de 10 Mbps (o envio segue a estimativa): os recuos nao seguram a subida, e no 1080p60 fica", async t => {
+        const { h, sims } = await downByUpload(t);
+        // 3 recuos em cada 15 janelas (test/helpers/wpb-quality.ts → probeSawtooth): sem contar como problema, 30 s com folga
+        const up = await logsDuring(() => probeSawtooth(h, sims, 10_000, 132_000));
+        assert.match(qualityLines(up).join("|"), /^Qualidade automática: 720p 60 fps → 1080p 60 fps para os 3 espectadores \(upload: estável há \d+ s\)$/);
+        assert.equal(h.controller.state?.reason, null);
+        assert.deepEqual(qualityLines(await logsDuring(() => probeSawtooth(h, sims, 10_000, 300_000))), []);
+        assert.equal(h.controller.levelFor("A"), "1080p60");
     });
 });
 

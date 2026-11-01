@@ -7,7 +7,8 @@
 // Testes da qualidade automatica (core/quality/controller.ts → trackNet) limitada pela REDE de um espectador, desde a
 // 0.2.10: um soluco da internet nao muda o degrau; so problema que dura (perda >= 5%, ou >= 2% com outro sinal; RTT 60 ms
 // acima da base (P15 dos ultimos 2 min); fila do pacer > 100 ms; por 14 s. So a banda estimada curta: 30 s, ou 14 s se
-// ela nunca deu o que o degrau pede). Subir: 30 s com 90% das janelas calmas e folga de 1,5x o piso do degrau de cima;
+// ela nunca deu o que o degrau pede). Subir: 30 s com 90% das janelas calmas e folga de 1,5x o piso do degrau de cima
+// (um recuo do estimador para >= 0,8x do que se enviava, sem outro sinal, e ele sondando o caminho: nao tira a calma);
 // subida desfeita dobra a espera (ate 10 min). A rede vem do EncoderSim com `link` (perda, RTT, fila:
 // test/fakes/webrtc.ts), num relogio falso.
 // Rodar:  pnpm test:file src/plugins/telinha/core/quality/controller.network.test.ts  (todos: pnpm test:unit)
@@ -17,7 +18,7 @@ import { after, before, describe, test } from "node:test";
 
 import { useFakeClock } from "@test/fakes/clock";
 import { EncoderSim, installWebRtc, type LinkRates, type WebRtcEnv } from "@test/fakes/webrtc";
-import { EVAL_MS, logsDuring, type QualityHarness, qualityHarness, qualityLines } from "@test/helpers/wpb-quality";
+import { EVAL_MS, logsDuring, probeSawtooth, type QualityHarness, qualityHarness, qualityLines } from "@test/helpers/wpb-quality";
 
 import { BW_GRACE_MS } from "./levels";
 
@@ -249,10 +250,13 @@ describe("rede de um espectador: subir de volta", () => {
         assert.equal(h.controller.levelFor("A"), "1080p60");
     });
 
+    // recuos de congestionamento: a estimativa cai bem abaixo do que se enviava (< 0,75x os ~11,4 Mbps do teto do 720p60),
+    // ainda acima dos 6750 kbps de folga do 1080p60 (so o recuo conta)
     test("um recuo solto do estimador nao zera a conta (1 janela ruim em 15)", async t => {
         const once = await downByLoss(t);
+        once.sim.set({ kbps: 11_400 });
         await once.h.runUntil(80_000);
-        once.sim.set({ availableKbps: 15_000 });
+        once.sim.set({ availableKbps: 8000 });
         await once.h.runUntil(82_000);
         once.sim.set({ availableKbps: 20_000 });
         await once.h.runUntil(90_000);
@@ -261,12 +265,14 @@ describe("rede de um espectador: subir de volta", () => {
 
     test("dois recuos seguidos do estimador seguram a subida ate sairem dos 30 s", async t => {
         const { h, sim } = await downByLoss(t);
+        sim.set({ kbps: 11_400 });
         await h.runUntil(80_000);
-        sim.set({ availableKbps: 15_000 });
+        sim.set({ availableKbps: 8400 });
         await h.runUntil(82_000);
-        sim.set({ availableKbps: 12_000 });
+        // o envio segue a estimativa; o 2o recuo vem logo depois do 1o: conta mesmo perto do que se enviava
+        sim.set({ availableKbps: 7000, kbps: 7300 });
         await h.runUntil(84_000);
-        sim.set({ availableKbps: 20_000 });
+        sim.set({ availableKbps: 20_000, kbps: 11_400 });
         await h.runUntil(110_000);
         assert.equal(h.controller.levelFor("A"), "720p60", "2 janelas ruins em 15");
         await h.runUntil(112_000);
@@ -312,6 +318,60 @@ describe("rede de um espectador: subir de volta", () => {
         await h.runUntil(90_000);
         assert.equal(h.controller.levelFor("A"), "1080p60");
     });
+
+    // o estimador sondando o caminho (test/helpers/wpb-quality.ts → probeSawtooth): sobe ate 1,05x o caminho, passa e recua
+    // para 0,85x a cada 6-14 s (3 janelas em 15), e o envio segue a estimativa (no maximo o teto do degrau). 7,5 Mbps e a
+    // fronteira: no recuo a estimativa (6375 kbps) fica abaixo da folga de 1,5x o piso do 1080p60 (6750), e fica em 720p60
+    for (const [path, up] of [[7500, false], [9000, true], [10_000, true], [11_000, true]] as const) {
+        test(`caminho de ${path / 1000} Mbps com o estimador sondando: ${up ? "os recuos nao seguram a subida para o 1080p60, e la fica" : "sem a folga do 1080p60 no recuo, fica em 720p60"}`, async t => {
+            const { h, sim } = await downByLoss(t);
+            // a 1a janela (20 Mbps estimados → 0,85x o caminho, < 0,75x o que se enviava) conta; com a de 60 s (perda), aos 88 s
+            // sao 2 de 15; aos 90 s, 1 de 15 (93%)
+            await probeSawtooth(h, { A: sim }, path, 88_000);
+            assert.equal(h.controller.levelFor("A"), "720p60");
+            const lines = await logsDuring(() => probeSawtooth(h, { A: sim }, path, 90_000));
+            assert.deepEqual(qualityLines(lines), up ? ["Qualidade automática: 720p 60 fps → 1080p 60 fps para A (banda: estável em 93% dos últimos 30 s)"] : []);
+            // no 1080p60 (pede 4,5 Mbps) o mesmo caminho e o mesmo serrote: nao volta a descer
+            assert.deepEqual(qualityLines(await logsDuring(() => probeSawtooth(h, { A: sim }, path, 300_000))), []);
+            assert.deepEqual(h.applied.map(a => a.level), up ? ["1080p60", "720p60", "1080p60"] : ["1080p60", "720p60"]);
+        });
+    }
+
+    test("caminho encolhendo (-17,5% por janela, sem perda nem RTT): recuos seguidos contam, nao sobe no meio da queda", async t => {
+        const { h, sim } = await downByLoss(t);
+        // o envio segue a estimativa (no maximo os 12 Mbps do 720p60): cada recuo fica em ~0,79x do que se enviava, perto o
+        // bastante para parecer sondagem, mas vem logo depois de outro
+        let est = 20_000;
+        const lines = await logsDuring(async () => {
+            for (let at = 60_000; at < 200_000; at += EVAL_MS) {
+                const next = at < 80_000 ? est : Math.max(4000, Math.round(est * 0.825));
+                sim.set({ availableKbps: next, kbps: Math.round(Math.min(12_000, (est + next) / 2) * 0.95) });
+                est = next;
+                await h.runUntil(at + EVAL_MS);
+            }
+        });
+        // aos 88 s so a 1a janela da queda (82 s) ficou calma: 3 ruins em 15. Depois a estimativa fica sem a folga do 1080p60
+        assert.deepEqual(qualityLines(lines), []);
+        assert.deepEqual(h.applied.map(a => a.level), ["1080p60", "720p60"]);
+    });
+
+    test("recuos que caem bem abaixo do que se enviava (0,7x): congestionamento, seguram a subida", async t => {
+        const { h, sim } = await downByLoss(t);
+        // caminho de 11 Mbps: mesmo no recuo a estimativa fica acima dos 6750 kbps de folga do 1080p60; so o recuo segura
+        const lines = await logsDuring(() => probeSawtooth(h, { A: sim }, 11_000, 300_000, { dropToSent: 0.7 }));
+        assert.deepEqual(qualityLines(lines), [], "12 de 15 janelas calmas (80%)");
+        assert.equal(h.controller.levelFor("A"), "720p60");
+    });
+
+    for (const [what, trouble] of [["perda de 6%", { lossPct: 6 }], ["perda de 3%, que com o recuo conta", { lossPct: 3 }], ["RTT 80 ms acima da base", { rttMs: 110 }]] as const) {
+        test(`recuos sondando o caminho com problema de verdade nas mesmas janelas (${what}): seguram a subida`, async t => {
+            const { h, sim } = await downByLoss(t);
+            const each = (s: EncoderSim, backoff: boolean) => s.set({ link: backoff ? { ...LINK, ...trouble } : LINK });
+            const lines = await logsDuring(() => probeSawtooth(h, { A: sim }, 10_000, 300_000, { each }));
+            assert.deepEqual(qualityLines(lines), [], "nem sobe nem desce: o problema de cada vez e um soluco");
+            assert.equal(h.controller.levelFor("A"), "720p60");
+        });
+    }
 });
 
 describe("rede de um espectador: a qualidade automatica desligada ou o espectador saindo", () => {

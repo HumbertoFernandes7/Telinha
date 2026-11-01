@@ -108,6 +108,12 @@ const SHORT_MS = 30_000;
 /** recuo do estimador: a banda estimada caiu para isto da janela anterior, ou menos (o GCC recua para 0,85 do entregue) */
 const BACKOFF_RATIO = 0.85;
 /**
+ * Recuo de quem sondou o caminho (trackNet): a banda estimada nova ficou em pelo menos isto do que enviamos na janela
+ * anterior. Ao passar do que o caminho leva, o GCC recua para ~0,85 do que foi entregue (~ o que enviamos; ~0,8 quando a
+ * janela anterior passou do caminho); cair bem abaixo disso e congestionamento.
+ */
+const PROBE_LANDING = 0.75;
+/**
  * Upload (o degrau de todos): algum espectador ja com problema que dura (vai descer) e a maioria com algum problema ha
  * pelo menos isto. Os periodos de cada um comecam em janelas diferentes, entao exigir que todos completem o deles junto
  * quase nunca acontecia (e cada um descia sozinho, por "banda").
@@ -115,9 +121,10 @@ const BACKOFF_RATIO = 0.85;
 const UPLOAD_TROUBLE_MS = 10_000;
 /**
  * Subir (a banda de um espectador, ou o degrau de todos depois de descer pelo upload): estavel por BW_UP_STABLE_MS, sem
- * problema, sem recuo e com a banda estimada >= UP_HEADROOM x o piso do degrau de cima em pelo menos CALM_SHARE do tempo
- * (uma janela ruim solta, como um soluco do Wi-Fi, nao zera a conta), e na ultima janela. Desceu de novo ate BW_UNDONE_MS
- * depois de subir: a espera dobra, ate BW_MAX_HOLD_MS; volta para BW_UP_STABLE_MS depois de BW_HOLD_RESET_MS sem descer.
+ * problema, sem recuo (fora o de sondar o caminho: PROBE_LANDING) e com a banda estimada >= UP_HEADROOM x o piso
+ * do degrau de cima em pelo menos CALM_SHARE do tempo (uma janela ruim solta, como um soluco do Wi-Fi, nao zera a conta),
+ * e na ultima janela. Desceu de novo ate BW_UNDONE_MS depois de subir: a espera dobra, ate BW_MAX_HOLD_MS; volta para
+ * BW_UP_STABLE_MS depois de BW_HOLD_RESET_MS sem descer.
  */
 const CALM_SHARE = 0.9;
 const BW_UP_STABLE_MS = 30_000;
@@ -210,8 +217,10 @@ interface NetState {
     /** a ultima janela: algum problema / o estimador recuou */
     trouble: boolean;
     backoff: boolean;
-    /** banda estimada da janela anterior */
+    /** banda estimada, envio (kbps) e se o estimador recuou, da janela anterior (envio e recuo: so no degrau atual) */
     lastEst: number | null;
+    lastSent: number | null;
+    lastBackoff: boolean;
     /** RTTs medidos nas janelas recentes (a base sem fila e o P15 deles) */
     rtts: { at: number; ms: number; }[];
     /** as janelas recentes, para a subida (calmShare) */
@@ -223,13 +232,14 @@ interface NetWindow {
     /** fim da janela e duracao (ms) */
     at: number;
     ms: number;
-    /** sem problema, sem recuo do estimador e sem limitacao do WebRTC */
+    /** sem problema, sem recuo do estimador (a nao ser sondando o caminho: PROBE_LANDING) e sem limitacao do WebRTC */
     quiet: boolean;
     est: number | null;
 }
 
 const newNet = (): NetState => ({
-    level: null, congestedSince: null, troubleSince: null, enoughFor: null, trouble: false, backoff: false, lastEst: null, rtts: [], windows: []
+    level: null, congestedSince: null, troubleSince: null, enoughFor: null, trouble: false, backoff: false, lastEst: null, lastSent: null,
+    lastBackoff: false, rtts: [], windows: []
 });
 
 /** O valor no percentil `p` (0..1) de `values`; null sem valores. */
@@ -690,6 +700,9 @@ export class QualityController {
         if (n.level !== level) {
             n.level = level;
             n.congestedSince = n.troubleSince = null;
+            // o envio do degrau de antes nao diz nada deste: a 1a janela nao compara com ele
+            n.lastSent = null;
+            n.lastBackoff = false;
         }
         const need = LEVELS[level].minKbps;
         const est = m.availableKbps;
@@ -709,7 +722,18 @@ export class QualityController {
         const short = estBelow && m.sentKbps >= est! * NET_FULL_RATIO ? `banda estimada ${Math.round(est!)} kbps, o degrau pede ${need}` : null;
         if (est != null && est >= need) n.enoughFor = level;
         n.trouble = !!(congestion || short);
-        n.windows.push({ at: now, ms: m.dt * 1000, quiet: !n.trouble && !n.backoff && m.bandwidthFraction < ANY_LIMIT_FRACTION, est });
+        // recuo de quem sondou o caminho: o estimador (GCC) sobe ate passar do que o caminho leva e recua um pouco, de novo a
+        // cada 5-15 s (ex.: 720p60 num caminho de ~10 Mbps, que leva o 1080p60 com folga). Um recuo solto (a janela anterior
+        // nao recuou), sem outro sinal (problema ou banda estimada abaixo do degrau) e caindo para perto do que enviavamos
+        // (PROBE_LANDING) nao tira a calma da janela, senao a subida nunca completa. Queda maior, ou recuos seguidos (um
+        // caminho encolhendo, ex.: um download de quem assiste ganhando banda), contam como antes. Corrida aceita: o 1o recuo
+        // de um caminho que comeca a encolher, ou de um congestionamento que so aparece na perda ou no RTT na janela
+        // seguinte, deixa essa janela calma; os seguintes contam, e uma subida que dai da errado e desfeita e a espera dobra
+        // (BW_UNDONE_MS)
+        const probed = n.lastSent != null && !n.lastBackoff && est != null && !estBelow && est >= n.lastSent * PROBE_LANDING;
+        n.lastSent = m.sentKbps;
+        n.lastBackoff = n.backoff;
+        n.windows.push({ at: now, ms: m.dt * 1000, quiet: !n.trouble && (!n.backoff || probed) && m.bandwidthFraction < ANY_LIMIT_FRACTION, est });
         while (now - n.windows[0].at > BW_MAX_HOLD_MS + BW_UP_STABLE_MS) n.windows.shift();
 
         const start = now - m.dt * 1000;
