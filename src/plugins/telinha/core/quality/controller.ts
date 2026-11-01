@@ -108,6 +108,11 @@ const SHORT_MS = 30_000;
 /** recuo do estimador: a banda estimada caiu para isto da janela anterior, ou menos (o GCC recua para 0,85 do entregue) */
 const BACKOFF_RATIO = 0.85;
 /**
+ * Envio a ate esta fracao do teto do degrau (LEVELS.maxKbps), para menos ou para mais: um recuo do estimador nesta janela e
+ * ele sondando o nosso teto (trackNet). Bem acima do teto, nao e o teto que segura o envio.
+ */
+const NEAR_CEILING = 0.15;
+/**
  * Upload (o degrau de todos): algum espectador ja com problema que dura (vai descer) e a maioria com algum problema ha
  * pelo menos isto. Os periodos de cada um comecam em janelas diferentes, entao exigir que todos completem o deles junto
  * quase nunca acontecia (e cada um descia sozinho, por "banda").
@@ -115,9 +120,10 @@ const BACKOFF_RATIO = 0.85;
 const UPLOAD_TROUBLE_MS = 10_000;
 /**
  * Subir (a banda de um espectador, ou o degrau de todos depois de descer pelo upload): estavel por BW_UP_STABLE_MS, sem
- * problema, sem recuo e com a banda estimada >= UP_HEADROOM x o piso do degrau de cima em pelo menos CALM_SHARE do tempo
- * (uma janela ruim solta, como um soluco do Wi-Fi, nao zera a conta), e na ultima janela. Desceu de novo ate BW_UNDONE_MS
- * depois de subir: a espera dobra, ate BW_MAX_HOLD_MS; volta para BW_UP_STABLE_MS depois de BW_HOLD_RESET_MS sem descer.
+ * problema, sem recuo (fora o de sondar o teto do degrau: NEAR_CEILING) e com a banda estimada >= UP_HEADROOM x o piso
+ * do degrau de cima em pelo menos CALM_SHARE do tempo (uma janela ruim solta, como um soluco do Wi-Fi, nao zera a conta),
+ * e na ultima janela. Desceu de novo ate BW_UNDONE_MS depois de subir: a espera dobra, ate BW_MAX_HOLD_MS; volta para
+ * BW_UP_STABLE_MS depois de BW_HOLD_RESET_MS sem descer.
  */
 const CALM_SHARE = 0.9;
 const BW_UP_STABLE_MS = 30_000;
@@ -223,7 +229,7 @@ interface NetWindow {
     /** fim da janela e duracao (ms) */
     at: number;
     ms: number;
-    /** sem problema, sem recuo do estimador e sem limitacao do WebRTC */
+    /** sem problema, sem recuo do estimador (a nao ser sondando o teto do degrau: NEAR_CEILING) e sem limitacao do WebRTC */
     quiet: boolean;
     est: number | null;
 }
@@ -709,7 +715,13 @@ export class QualityController {
         const short = estBelow && m.sentKbps >= est! * NET_FULL_RATIO ? `banda estimada ${Math.round(est!)} kbps, o degrau pede ${need}` : null;
         if (est != null && est >= need) n.enoughFor = level;
         n.trouble = !!(congestion || short);
-        n.windows.push({ at: now, ms: m.dt * 1000, quiet: !n.trouble && !n.backoff && m.bandwidthFraction < ANY_LIMIT_FRACTION, est });
+        // recuo provocado por nos: enviando perto do teto do degrau, o estimador (GCC) sonda ate ele, passa do que o caminho
+        // leva e recua, de novo a cada 5-15 s (ex.: 720p60, teto 12 Mbps, num caminho de ~10 Mbps, que leva o 1080p60 com
+        // folga). Esse recuo sozinho nao tira a calma da janela, senao a subida nunca completa; problema de verdade (perda,
+        // RTT, fila, banda curta) continua contando, e o recuo enviando bem abaixo do teto tambem
+        const cap = LEVELS[level].maxKbps;
+        const probing = Math.abs(m.sentKbps - cap) <= cap * NEAR_CEILING;
+        n.windows.push({ at: now, ms: m.dt * 1000, quiet: !n.trouble && (!n.backoff || probing) && m.bandwidthFraction < ANY_LIMIT_FRACTION, est });
         while (now - n.windows[0].at > BW_MAX_HOLD_MS + BW_UP_STABLE_MS) n.windows.shift();
 
         const start = now - m.dt * 1000;

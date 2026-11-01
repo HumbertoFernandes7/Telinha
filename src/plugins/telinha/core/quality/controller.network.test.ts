@@ -7,7 +7,8 @@
 // Testes da qualidade automatica (core/quality/controller.ts → trackNet) limitada pela REDE de um espectador, desde a
 // 0.2.10: um soluco da internet nao muda o degrau; so problema que dura (perda >= 5%, ou >= 2% com outro sinal; RTT 60 ms
 // acima da base (P15 dos ultimos 2 min); fila do pacer > 100 ms; por 14 s. So a banda estimada curta: 30 s, ou 14 s se
-// ela nunca deu o que o degrau pede). Subir: 30 s com 90% das janelas calmas e folga de 1,5x o piso do degrau de cima;
+// ela nunca deu o que o degrau pede). Subir: 30 s com 90% das janelas calmas e folga de 1,5x o piso do degrau de cima
+// (um recuo do estimador enviando perto do teto do degrau, a ate 15% dele, e ele sondando o teto: nao tira a calma);
 // subida desfeita dobra a espera (ate 10 min). A rede vem do EncoderSim com `link` (perda, RTT, fila:
 // test/fakes/webrtc.ts), num relogio falso.
 // Rodar:  pnpm test:file src/plugins/telinha/core/quality/controller.network.test.ts  (todos: pnpm test:unit)
@@ -17,7 +18,7 @@ import { after, before, describe, test } from "node:test";
 
 import { useFakeClock } from "@test/fakes/clock";
 import { EncoderSim, installWebRtc, type LinkRates, type WebRtcEnv } from "@test/fakes/webrtc";
-import { EVAL_MS, logsDuring, type QualityHarness, qualityHarness, qualityLines } from "@test/helpers/wpb-quality";
+import { EVAL_MS, logsDuring, probeSawtooth, type QualityHarness, qualityHarness, qualityLines } from "@test/helpers/wpb-quality";
 
 import { BW_GRACE_MS } from "./levels";
 
@@ -312,6 +313,37 @@ describe("rede de um espectador: subir de volta", () => {
         await h.runUntil(90_000);
         assert.equal(h.controller.levelFor("A"), "1080p60");
     });
+
+    // o estimador sondando o teto do 720p60 (12 Mbps) num caminho de ~10 Mbps, que leva o 1080p60 (pede 4,5) com folga:
+    // recua a cada 6-14 s (test/helpers/wpb-quality.ts → PROBE_SAWTOOTH), 3 janelas em 15
+    test("recuos do estimador sondando o teto, enviando perto dele (90%): nao seguram a subida, e no 1080p60 fica", async t => {
+        const { h, sim } = await downByLoss(t);
+        const atCeiling = (est: number) => sim.set({ availableKbps: est, kbps: 10_800 });
+        // as janelas de 58 e 60 s ainda tinham perda: aos 86 s sao 2 de 15; aos 88 s, 1 de 15 (93%), como sem recuo nenhum
+        await probeSawtooth(h, 86_000, atCeiling);
+        assert.equal(h.controller.levelFor("A"), "720p60");
+        const up = await logsDuring(() => probeSawtooth(h, 88_000, atCeiling));
+        assert.deepEqual(qualityLines(up), ["Qualidade automática: 720p 60 fps → 1080p 60 fps para A (banda: estável em 93% dos últimos 30 s)"]);
+        // no 1080p60 o mesmo caminho e o mesmo serrote: nao volta a descer
+        assert.deepEqual(qualityLines(await logsDuring(() => probeSawtooth(h, 300_000, atCeiling))), []);
+        assert.deepEqual(h.applied.map(a => a.level), ["1080p60", "720p60", "1080p60"]);
+    });
+
+    test("os mesmos recuos enviando bem abaixo do teto (6 de 12 Mbps): seguram a subida, como antes", async t => {
+        const { h, sim } = await downByLoss(t);
+        const below = (est: number) => sim.set({ availableKbps: est, kbps: 6000 });
+        assert.deepEqual(qualityLines(await logsDuring(() => probeSawtooth(h, 300_000, below))), [], "12 de 15 janelas calmas (80%)");
+        assert.equal(h.controller.levelFor("A"), "720p60");
+    });
+
+    for (const [what, trouble] of [["perda de 6%", { lossPct: 6 }], ["perda de 3%, que com o recuo conta", { lossPct: 3 }], ["RTT 80 ms acima da base", { rttMs: 110 }]] as const) {
+        test(`recuos no teto com problema de verdade nas mesmas janelas (${what}): seguram a subida`, async t => {
+            const { h, sim } = await downByLoss(t);
+            const lines = await logsDuring(() => probeSawtooth(h, 300_000, (est, backoff) => sim.set({ availableKbps: est, kbps: 10_800, link: backoff ? { ...LINK, ...trouble } : LINK })));
+            assert.deepEqual(qualityLines(lines), [], "nem sobe nem desce: o problema de cada vez e um soluco");
+            assert.equal(h.controller.levelFor("A"), "720p60");
+        });
+    }
 });
 
 describe("rede de um espectador: a qualidade automatica desligada ou o espectador saindo", () => {

@@ -113,6 +113,32 @@ export function qualityHarness(clock: FakeClock, sims: Record<string, EncoderSim
     return h;
 }
 
+// #region the bandwidth estimator probing a level's ceiling
+
+/** Where PROBE_SAWTOOTH lands after each backoff. */
+export const PROBE_LOW_KBPS = 9600;
+
+/**
+ * The bandwidth estimator (GCC) probing the 12 Mbps ceiling of 720p60 on a ~10 Mbps path: it climbs to 12 Mbps,
+ * overshoots the path and backs off to 9.6 Mbps (0.8x: a backoff for the controller) after 6, 10 and 14 s, over and
+ * over. One estimate per 2 s window, indexed by the window's start / EVAL_MS.
+ */
+export const PROBE_SAWTOOTH: readonly number[] = [3, 5, 7].flatMap(n => Array.from({ length: n }, (_, k) => PROBE_LOW_KBPS + 2400 * k / (n - 1)));
+
+/**
+ * Window by window from now up to `to`: `each` sets the sims for the window that ends EVAL_MS later, with its estimate
+ * from PROBE_SAWTOOTH and whether that estimate is one of the backoffs.
+ */
+export async function probeSawtooth(h: QualityHarness, to: number, each: (estKbps: number, backoff: boolean) => void) {
+    for (let at = h.elapsed(); at < to; at += EVAL_MS) {
+        const est = PROBE_SAWTOOTH[Math.floor(at / EVAL_MS) % PROBE_SAWTOOTH.length];
+        each(est, est === PROBE_LOW_KBPS);
+        await h.runUntil(at + EVAL_MS);
+    }
+}
+
+// #endregion
+
 // #region one shared hardware encoder
 
 /** encoderImplementation of Chromium's hardware H.264 encoder on Windows with an NVIDIA card */
