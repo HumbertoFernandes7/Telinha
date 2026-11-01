@@ -109,10 +109,10 @@ const SHORT_MS = 30_000;
 const BACKOFF_RATIO = 0.85;
 /**
  * Recuo de quem sondou o caminho (trackNet): a banda estimada nova ficou em pelo menos isto do que enviamos na janela
- * anterior. Ao passar do que o caminho leva, o GCC recua para ~0,85 do que foi entregue (~ o que enviamos); cair bem
- * abaixo disso e congestionamento.
+ * anterior. Ao passar do que o caminho leva, o GCC recua para ~0,85 do que foi entregue (~ o que enviamos; ~0,8 quando a
+ * janela anterior passou do caminho); cair bem abaixo disso e congestionamento.
  */
-const PROBE_LANDING = 0.8;
+const PROBE_LANDING = 0.75;
 /**
  * Upload (o degrau de todos): algum espectador ja com problema que dura (vai descer) e a maioria com algum problema ha
  * pelo menos isto. Os periodos de cada um comecam em janelas diferentes, entao exigir que todos completem o deles junto
@@ -217,9 +217,10 @@ interface NetState {
     /** a ultima janela: algum problema / o estimador recuou */
     trouble: boolean;
     backoff: boolean;
-    /** banda estimada e envio (kbps) da janela anterior */
+    /** banda estimada, envio (kbps) e se o estimador recuou, da janela anterior (envio e recuo: so no degrau atual) */
     lastEst: number | null;
     lastSent: number | null;
+    lastBackoff: boolean;
     /** RTTs medidos nas janelas recentes (a base sem fila e o P15 deles) */
     rtts: { at: number; ms: number; }[];
     /** as janelas recentes, para a subida (calmShare) */
@@ -237,8 +238,8 @@ interface NetWindow {
 }
 
 const newNet = (): NetState => ({
-    level: null, congestedSince: null, troubleSince: null, enoughFor: null, trouble: false, backoff: false, lastEst: null, lastSent: null, rtts: [],
-    windows: []
+    level: null, congestedSince: null, troubleSince: null, enoughFor: null, trouble: false, backoff: false, lastEst: null, lastSent: null,
+    lastBackoff: false, rtts: [], windows: []
 });
 
 /** O valor no percentil `p` (0..1) de `values`; null sem valores. */
@@ -699,6 +700,9 @@ export class QualityController {
         if (n.level !== level) {
             n.level = level;
             n.congestedSince = n.troubleSince = null;
+            // o envio do degrau de antes nao diz nada deste: a 1a janela nao compara com ele
+            n.lastSent = null;
+            n.lastBackoff = false;
         }
         const need = LEVELS[level].minKbps;
         const est = m.availableKbps;
@@ -719,13 +723,16 @@ export class QualityController {
         if (est != null && est >= need) n.enoughFor = level;
         n.trouble = !!(congestion || short);
         // recuo de quem sondou o caminho: o estimador (GCC) sobe ate passar do que o caminho leva e recua um pouco, de novo a
-        // cada 5-15 s (ex.: 720p60 num caminho de ~10 Mbps, que leva o 1080p60 com folga). Sem outro sinal (problema ou banda
-        // estimada abaixo do degrau) e caindo para perto do que enviavamos (PROBE_LANDING), esse recuo nao tira a calma da
-        // janela, senao a subida nunca completa; queda maior conta, como antes. Corrida aceita: um congestionamento que
-        // comeca com o recuo uma janela antes da perda ou do RTT aparecerem deixa essa janela calma; uma subida que dai da
-        // errado e desfeita e a espera dobra (BW_UNDONE_MS)
-        const probed = n.lastSent != null && est != null && !estBelow && est >= n.lastSent * PROBE_LANDING;
+        // cada 5-15 s (ex.: 720p60 num caminho de ~10 Mbps, que leva o 1080p60 com folga). Um recuo solto (a janela anterior
+        // nao recuou), sem outro sinal (problema ou banda estimada abaixo do degrau) e caindo para perto do que enviavamos
+        // (PROBE_LANDING) nao tira a calma da janela, senao a subida nunca completa. Queda maior, ou recuos seguidos (um
+        // caminho encolhendo, ex.: um download de quem assiste ganhando banda), contam como antes. Corrida aceita: o 1o recuo
+        // de um caminho que comeca a encolher, ou de um congestionamento que so aparece na perda ou no RTT na janela
+        // seguinte, deixa essa janela calma; os seguintes contam, e uma subida que dai da errado e desfeita e a espera dobra
+        // (BW_UNDONE_MS)
+        const probed = n.lastSent != null && !n.lastBackoff && est != null && !estBelow && est >= n.lastSent * PROBE_LANDING;
         n.lastSent = m.sentKbps;
+        n.lastBackoff = n.backoff;
         n.windows.push({ at: now, ms: m.dt * 1000, quiet: !n.trouble && (!n.backoff || probed) && m.bandwidthFraction < ANY_LIMIT_FRACTION, est });
         while (now - n.windows[0].at > BW_MAX_HOLD_MS + BW_UP_STABLE_MS) n.windows.shift();
 
