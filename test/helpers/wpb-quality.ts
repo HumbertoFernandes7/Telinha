@@ -10,7 +10,7 @@
 // time, as streaming.ts → tick does.
 
 import { QualityController, type QualityDeps } from "@plugins/telinha/core/quality/controller";
-import { encodingFor, scaledSize } from "@plugins/telinha/core/quality/levels";
+import { encodingFor, LEVELS, scaledSize } from "@plugins/telinha/core/quality/levels";
 import { getEventLog, type TelinhaEvent } from "@plugins/telinha/store";
 import type { QualityLevel } from "@plugins/telinha/types";
 import type { FakeClock } from "@test/fakes/clock";
@@ -113,26 +113,40 @@ export function qualityHarness(clock: FakeClock, sims: Record<string, EncoderSim
     return h;
 }
 
-// #region the bandwidth estimator probing a level's ceiling
-
-/** Where PROBE_SAWTOOTH lands after each backoff. */
-export const PROBE_LOW_KBPS = 9600;
+// #region the bandwidth estimator probing the path
 
 /**
- * The bandwidth estimator (GCC) probing the 12 Mbps ceiling of 720p60 on a ~10 Mbps path: it climbs to 12 Mbps,
- * overshoots the path and backs off to 9.6 Mbps (0.8x: a backoff for the controller) after 6, 10 and 14 s, over and
- * over. One estimate per 2 s window, indexed by the window's start / EVAL_MS.
+ * The bandwidth estimator (GCC) probing the path, as a fraction of the path per 2 s window: it climbs to 1.05x the path,
+ * overshoots it and backs off to 0.85x (GCC lands at ~0.85x of what got through) after 6, 10 and 14 s, over and over.
+ * Indexed by the window's start / EVAL_MS; the backoffs are the windows at PROBE_SAWTOOTH[0].
  */
-export const PROBE_SAWTOOTH: readonly number[] = [3, 5, 7].flatMap(n => Array.from({ length: n }, (_, k) => PROBE_LOW_KBPS + 2400 * k / (n - 1)));
+export const PROBE_SAWTOOTH: readonly number[] = [3, 5, 7].flatMap(n => Array.from({ length: n }, (_, k) => 0.85 + 0.2 * k / (n - 1)));
+
+/** The send in a window: the encoder's target (the estimate, at most the level's ceiling) over the window, x0.95. */
+const SEND_OF_TARGET = 0.95;
+
+export interface ProbeOptions {
+    /** the backoffs land at this fraction of what was sent the window before, instead of 0.85x the path (a congestion drop) */
+    dropToSent?: number;
+    /** after each window's estimate and send are set, e.g. a link with trouble in the backoffs */
+    each?: (sim: EncoderSim, backoff: boolean) => void;
+}
 
 /**
- * Window by window from now up to `to`: `each` sets the sims for the window that ends EVAL_MS later, with its estimate
- * from PROBE_SAWTOOTH and whether that estimate is one of the backoffs.
+ * Window by window from now up to `to`, for every sim: the estimate follows PROBE_SAWTOOTH on a `pathKbps` path, and the
+ * send follows the estimate as the encoder does: the mean of the estimates at the window's start and end, at most the
+ * ceiling of the viewer's level, x SEND_OF_TARGET.
  */
-export async function probeSawtooth(h: QualityHarness, to: number, each: (estKbps: number, backoff: boolean) => void) {
+export async function probeSawtooth(h: QualityHarness, sims: Record<string, EncoderSim>, pathKbps: number, to: number, opts: ProbeOptions = {}) {
     for (let at = h.elapsed(); at < to; at += EVAL_MS) {
-        const est = PROBE_SAWTOOTH[Math.floor(at / EVAL_MS) % PROBE_SAWTOOTH.length];
-        each(est, est === PROBE_LOW_KBPS);
+        const step = PROBE_SAWTOOTH[Math.floor(at / EVAL_MS) % PROBE_SAWTOOTH.length];
+        const backoff = step === PROBE_SAWTOOTH[0];
+        for (const [peerId, sim] of Object.entries(sims)) {
+            const est = Math.round(backoff && opts.dropToSent ? sim.rates.kbps * opts.dropToSent : pathKbps * step);
+            const target = Math.min(LEVELS[h.controller.levelFor(peerId)].maxKbps, ((sim.rates.availableKbps ?? est) + est) / 2);
+            sim.set({ availableKbps: est, kbps: Math.round(target * SEND_OF_TARGET) });
+            opts.each?.(sim, backoff);
+        }
         await h.runUntil(at + EVAL_MS);
     }
 }
