@@ -18,7 +18,7 @@ import { after, before, describe, test } from "node:test";
 
 import { useFakeClock } from "@test/fakes/clock";
 import { EncoderSim, installWebRtc, type LinkRates, type WebRtcEnv } from "@test/fakes/webrtc";
-import { EVAL_MS, logsDuring, probeSawtooth, type QualityHarness, qualityHarness, qualityLines } from "@test/helpers/wpb-quality";
+import { EVAL_MS, logsDuring, NVENC_IMPLEMENTATION, probeSawtooth, type QualityHarness, qualityHarness, qualityLines } from "@test/helpers/wpb-quality";
 
 import { BW_GRACE_MS } from "./levels";
 
@@ -85,10 +85,12 @@ describe("rede de um espectador: soluco nao muda nada", () => {
         assert.equal(h.controller.levelFor("A"), "1080p60");
     });
 
-    test("tela parada (o encoder pede pouco): banda estimada abaixo do degrau sem o caminho cheio nao e problema", async t => {
+    test("tela parada (o encoder pede pouco): banda estimada perto do degrau (4000 de 4500) sem o caminho cheio nao e problema", async t => {
         const { h, sim } = await viewer(t);
-        sim.set({ availableKbps: 2000, kbps: 500 });
-        assert.deepEqual(qualityLines(await logsDuring(() => h.runUntil(120_000))), []);
+        // os 4000 kbps iniciais do estimador (x-google-start-bitrate), que uma tela parada nunca empurra para cima
+        sim.set({ availableKbps: 4000, kbps: 500 });
+        assert.deepEqual(qualityLines(await logsDuring(() => h.runUntil(300_000))), []);
+        assert.equal(h.controller.levelFor("A"), "1080p60");
     });
 
     test("Wi-Fi rapido com 3% de perda cronica (o NACK e o colchao escondem): sem outro sinal, nunca desce", async t => {
@@ -224,6 +226,99 @@ describe("rede de um espectador: problema que dura desce um degrau", () => {
         assert.equal(h.controller.levelFor("A"), "1080p60");
         await h.runUntil(32_000);
         assert.equal(h.controller.levelFor("A"), "720p60", "a carencia contou desde a 1a vez");
+    });
+});
+
+// Log de 02/11: um espectador ficou 1 min em 1080p60 (pede 4500) com 1,6-3,2 Mbps estimados; o alvo do encoder ficava
+// em ~70-80% da estimativa e o envio em 58-94% dela (qp 38-47, imagem borrada no movimento). A banda curta pedia o envio
+// em >= 85% da estimativa, e cada janela abaixo disso recomecava a conta. Agora a estimativa abaixo de 0,7x o que o
+// degrau pede conta com qualquer envio; perto do que ele pede, o envio em 85% continua exigido.
+describe("rede de um espectador: banda estimada bem abaixo do degrau", () => {
+    /** As linhas de 10 s do envio para leozzyy (02/11, 01:35:42-01:36:52, 1080p60 em H.264 na placa): [estimada, enviada]. */
+    const LEOZZYY: readonly (readonly [est: number, sent: number])[] = [
+        [2489, 1676], [2875, 2014], [3223, 2431], [2490, 2331], [2186, 1888], [1670, 1426], [2056, 1289], [2857, 1647]
+    ];
+
+    /** O encoder dele: NVENC, 47 de 51 fps da fonte, ~10 ms por quadro (bem abaixo do limite da placa). */
+    const leoSim = () => new EncoderSim({
+        mimeType: "video/H264", implementation: NVENC_IMPLEMENTATION, powerEfficient: true, fps: 47, sourceFps: 51, encodeBusy: 10 * 47 / 1000,
+        availableKbps: LEOZZYY[0][0], kbps: LEOZZYY[0][1], link: { ...LINK, rttMs: 20, pacerMs: 10 }
+    });
+
+    /** Janela a janela de agora ate `to`: a estimativa e o envio de `rates(at)`, onde `at` e o inicio da janela. */
+    async function replay(h: QualityHarness, sim: EncoderSim, to: number, rates: (at: number) => readonly [number, number]) {
+        for (let at = h.elapsed(); at < to; at += EVAL_MS) {
+            const [est, sent] = rates(at);
+            sim.set({ availableKbps: est, kbps: sent });
+            await h.runUntil(at + EVAL_MS);
+        }
+    }
+
+    /**
+     * O envio de cada janela de 2 s em torno da media da linha de 10 s (a media de WOBBLE e 1): o encoder segue a cena. Com
+     * a media em 85-94% da estimativa, algumas janelas ficam abaixo dos 85% e quebravam a sequencia da banda curta.
+     */
+    const WOBBLE = [1.12, 0.88, 1.06, 0.84, 1.10];
+    const leozzyy = (at: number): readonly [number, number] => {
+        const [est, sent] = LEOZZYY[Math.floor(at / 10_000) % LEOZZYY.length];
+        return [est, Math.round(sent * WOBBLE[Math.floor(at / EVAL_MS) % WOBBLE.length])];
+    };
+
+    test("leozzyy (02/11): desce de 1080p60 para 720p60 (pede 2500; a mediana estimada dele e 2490) e la fica por 10 min; com a internet boa, sobe", async t => {
+        const clock = useFakeClock(t);
+        const sim = leoSim();
+        const h = qualityHarness(clock, { A: sim });
+        await h.join("A");
+        const lines = await logsDuring(() => replay(h, sim, 600_000, leozzyy));
+        // 1080p60: as janelas de 20-30 s (3223 kbps, acima de 0,7 x 4500 = 3150, enviando 63-84%) nao contam; de 30 s em
+        // diante todas ficam abaixo de 3150, e a estimativa nunca deu os 4500 (caminho estreito): 14 s. Antes (so com o
+        // envio em >= 85%) a sequencia mais longa era de 2 janelas, e ele ficava em 1080p60
+        assert.deepEqual(qualityLines(lines), [
+            "Qualidade automática: 1080p 60 fps → 720p 60 fps para A (banda: banda estimada 2186 kbps, o degrau pede 4500 há 14 s); nova subida só após 30 s estável"
+        ]);
+        // 720p60 pede 2500: so os 1670 (< 0,7 x 2500 = 1750) contam com qualquer envio, por 10-12 s seguidos; o resto, so
+        // com o caminho cheio. Sem voltar: o 1080p60 pede 6750 de folga, e a estimativa nunca passa de 3223
+        assert.deepEqual(h.applied.map(a => [a.level, a.atMs]), [["1080p60", 0], ["720p60", 44_000]]);
+        assert.deepEqual(h.controller.state?.viewers.A, { level: "720p60", reason: "bandwidth" });
+
+        // a internet dele melhora: com folga para o 1080p60 em 14 das 15 janelas dos ultimos 30 s (a 1a ainda e a de antes)
+        const up = await logsDuring(() => replay(h, sim, 700_000, () => [20_000, 16_000]));
+        assert.deepEqual(qualityLines(up), ["Qualidade automática: 720p 60 fps → 1080p 60 fps para A (banda: estável em 93% dos últimos 30 s)"]);
+    });
+
+    // caminhos estaveis com o encoder enviando 75% da estimativa (o alvo dele fica em ~70-80% dela): desce ate um degrau
+    // que cabe e fica, sem voltar (subir pede 1,5x o piso do degrau de cima)
+    for (const [mbps, path, levels] of [
+        ["2-3", [2000, 2250, 2500, 2750, 3000, 2750, 2500, 2250], ["1080p60", "720p60"]],
+        ["1,2-1,7", [1200, 1350, 1500, 1650, 1700, 1600, 1450, 1300], ["1080p60", "720p60", "720p30"]]
+    ] as const) {
+        test(`caminho estavel de ${mbps} Mbps, enviando 75% da estimativa: ${levels.join(" → ")}, e la fica por 10 min`, async t => {
+            const clock = useFakeClock(t);
+            const sim = leoSim();
+            const h = qualityHarness(clock, { A: sim });
+            await h.join("A");
+            const lines = await logsDuring(() => replay(h, sim, 600_000, at => {
+                const est = path[(at / EVAL_MS) % path.length];
+                return [est, Math.round(est * 0.75)];
+            }));
+            // 1080p60: tudo abaixo de 3150, 14 s depois da carencia. 720p60 (pede 2500): no de 2-3 Mbps as janelas abaixo de
+            // 2500 ficam acima de 1750 sem o caminho cheio, e fica; no de 1,2-1,7, tudo abaixo de 1750: mais 14 s
+            assert.deepEqual(h.applied.map(a => a.level), levels);
+            assert.deepEqual(qualityLines(lines).length, levels.length - 1);
+            assert.deepEqual(h.applied.slice(1).map(a => a.atMs), [32_000, 48_000].slice(0, levels.length - 1));
+        });
+    }
+
+    test("a fronteira e 0,7x o que o degrau pede: o encoder pedindo pouco com 3200 de 4500 (0,71x) nao conta; com 3100 (0,69x), conta", async t => {
+        const { h, sim } = await viewer(t);
+        sim.set({ availableKbps: 3200, kbps: 500 });
+        assert.deepEqual(qualityLines(await logsDuring(() => h.runUntil(160_000))), []);
+        // a estimativa ja deu os 4500 do 1080p60: so a banda curta espera 30 s
+        sim.set({ availableKbps: 3100 });
+        await h.runUntil(188_000);
+        assert.equal(h.controller.levelFor("A"), "1080p60");
+        const lines = await logsDuring(() => h.runUntil(190_000));
+        assert.deepEqual(qualityLines(lines), ["Qualidade automática: 1080p 60 fps → 720p 60 fps para A (banda: banda estimada 3100 kbps, o degrau pede 4500 há 30 s); nova subida só após 30 s estável"]);
     });
 });
 

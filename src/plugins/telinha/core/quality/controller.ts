@@ -30,7 +30,9 @@
 //   ate 9 era "none") e os espectadores congelam.
 // 720p60 custa ~4,9% do encoder por espectador (10 x 720p60 = 49%, tranquilo). Ate 8 o tempo e quase linear:
 // ~3,1 ms fixos + ~1,16 ms por espectador 1080p60 (GPU_FIXED_RATE). Para encoders por hardware este sinal substitui os
-// de CPU (o tempo deles nao e processador); encoders por software seguem so a logica de CPU, como antes.
+// de CPU (o tempo deles nao e processador); encoders por software seguem so a logica de CPU, como antes. Com a captura
+// pela placa de video (deps.gpuCapture), o tempo inclui esperar o quadro atras do jogo: o limite medido so desce o degrau
+// com os encoders ficando para tras (GPU_KEEP_UP).
 
 import { log, logThrottled } from "@plugins/telinha/core/log";
 import { guardStatsLog, type SenderLevels, SenderLog } from "@plugins/telinha/core/statsLog";
@@ -57,6 +59,11 @@ export interface QualityDeps {
     motion(): number | null;
     /** contador de quadros da fonte visto por um sender (alimenta o detector de imagem congelada) */
     sourceFrames(key: string, frames: number): void;
+    /**
+     * A "Captura pela placa de vídeo" (WebRtcAllowWgcUsingTexture, core/captureBoost.ts) vale nesta partida do Discord:
+     * o tempo por quadro dos encoders da placa inclui a espera pelo quadro capturado (GPU_KEEP_UP). Ausente = nao vale.
+     */
+    gpuCapture?(): boolean;
     /** o snapshot publicado (state) mudou */
     changed(): void;
 }
@@ -83,7 +90,8 @@ const CPU_STREAK = 2;
 //   RTT_BASE_MS: uma leitura baixa solta nao vira base) = a fila do caminho cresceu; pacotes esperando mais de
 //   NET_PACER_MS no pacer deste PC;
 // - banda curta: a banda estimada abaixo do que o degrau pede (LEVELS.minKbps), com o envio usando >= NET_FULL_RATIO
-//   dela (o caminho esta cheio; com menos, e o encoder que pede pouco, ex.: tela parada).
+//   dela (o caminho esta cheio; com menos, e o encoder que pede pouco, ex.: tela parada); ou a banda estimada bem
+//   abaixo do que o degrau pede (< NET_FAR_BELOW_RATIO dele), com qualquer envio.
 // So desce com o problema seguido por mais que um soluco (log de 31/10: dois soluços de ~10 s, e o WebRTC encolhia a
 // imagem de 1080p a 320x180 e levava ~60 s para voltar):
 const NET_LOSS_ALONE_PCT = 5;
@@ -91,6 +99,14 @@ const NET_LOSS_PCT = 2;
 const NET_RTT_RISE_MS = 60;
 const NET_PACER_MS = 100;
 const NET_FULL_RATIO = 0.85;
+/**
+ * Banda estimada abaixo disto x o que o degrau pede: banda curta mesmo sem o caminho cheio. Num caminho estreito o alvo
+ * do encoder fica em ~70-80% da banda estimada e o envio com ele: no log de 02/11 um espectador ficou 1 min em 1080p60
+ * (4500 pedidos) com 1,6-3,2 Mbps estimados, enviando 58-94% deles (qp 38-47, imagem borrada), e o NET_FULL_RATIO
+ * quebrava a sequencia a cada janela abaixo dos 85%. Perto do que o degrau pede, o NET_FULL_RATIO continua valendo
+ * (ex.: tela parada com os 4000 kbps iniciais do estimador em 1080p60, que pede 4500).
+ */
+const NET_FAR_BELOW_RATIO = 0.7;
 /** a base sem fila: este percentil dos RTTs medidos nestes ultimos ms */
 const RTT_BASE_MS = 120_000;
 const RTT_BASE_PERCENTILE = 0.15;
@@ -164,6 +180,17 @@ const GPU_STREAK = 2;
  * 1 espectador → 2 dobraria os 4,3 ms, e a placa x2 desceria ja no 2o espectador).
  */
 const GPU_FIXED_RATE = 2.7 * 1920 * 1080 * 60;
+/**
+ * Com a captura pela placa de video (deps.gpuCapture) o quadro capturado e uma textura na placa, e o tempo por quadro do
+ * encoder inclui esperar a placa terminar o quadro atras do jogo: e atraso, nao o encoder no limite, e descer o degrau
+ * nem diminui o custo da captura. No log de 02/11 (God of War, 2 espectadores em 1080p30) a mediana chegou a 29,8 ms
+ * (limite 27,4 ms) com os dois encoders codificando os ~29 fps da fonte inteiros, e os dois desceram para 720p30 a toa.
+ * Entao, com ela, o limite da placa so desce o degrau com os encoders ficando para tras na mesma janela: a mediana de
+ * quadros codificados / esperados (o fps da fonte, ou o do degrau se a fonte entrega mais) abaixo disto.
+ */
+const GPU_KEEP_UP = 0.9;
+/** com a captura pela placa de video, o tempo acima do limite sem os encoders ficarem para tras: uma linha no log a cada */
+const GPU_LATENCY_LOG_MS = 300_000;
 
 /** Quanto esperar estavel antes de subir e como a espera cresce quando a subida e desfeita. */
 interface HoldRules {
@@ -346,6 +373,8 @@ export class QualityController {
     private fpsStreak = 0;
     private cpuStreak = 0;
     private gpuStreak = 0;
+    /** a ultima linha "Placa de vídeo: ... a qualidade fica" (GPU_LATENCY_LOG_MS) */
+    private gpuLatencyLoggedAt = -Infinity;
     /** upload total medido quando a maioria dos espectadores estava limitada por banda */
     private uplink: { kbps: number; at: number; } | null = null;
     private sourceFpsEma: number | null = null;
@@ -641,6 +670,24 @@ export class QualityController {
     }
 
     /**
+     * Com a captura pela placa de video (GPU_KEEP_UP): a mediana de quadros codificados / esperados dos mesmos encoders do
+     * gpuNow nesta janela. Fora quem a propria rede limita: com problema agora (trackNet → trouble) ou ja abaixo do degrau
+     * de todos pela banda dele (no piso, 720p30, a banda curta nao e mais problema). O WebRTC descarta quadros dele para
+     * caber na banda (log de 02/11: 4 de 29 fps com 735 kbps estimados), e isso nao e a placa. null = nenhum para medir.
+     */
+    private gpuKeepUp(list: Active[]): number | null {
+        const ratios: number[] = [];
+        for (const v of list) {
+            const m = v.metrics;
+            if (!m.hardware || m.encodeMsPerFrame == null || m.encodedFps < MIN_ENCODED_FPS) continue;
+            if (v.net.trouble || meet(this.global, v.bwLevel) !== this.global) continue;
+            const { fps } = LEVELS[this.levelFor(v.peerId)];
+            ratios.push(m.encodedFps / Math.min(fps, m.sourceFps ?? fps));
+        }
+        return ratios.length ? median(ratios) : null;
+    }
+
+    /**
      * Tempo por quadro previsto na placa de video com os encoders dela no degrau `level` (cada um limitado pela banda
      * dele), contando os espectadores ainda sem medida que vao codificar nela (o novo, no addViewer): o tempo medido
      * escalado pela taxa de pixels depois/antes, com a parte fixa (GPU_FIXED_RATE) dos dois lados. null = nada medido.
@@ -719,7 +766,8 @@ export class QualityController {
             ? `perda de ${dec(m.lossPct)}%` : null;
         const queue = m.pacerMs != null && m.pacerMs > NET_PACER_MS ? `fila de ${Math.round(m.pacerMs)} ms no envio` : null;
         const congestion = loss ?? rtt ?? queue;
-        const short = estBelow && m.sentKbps >= est! * NET_FULL_RATIO ? `banda estimada ${Math.round(est!)} kbps, o degrau pede ${need}` : null;
+        const short = estBelow && (est! < need * NET_FAR_BELOW_RATIO || m.sentKbps >= est! * NET_FULL_RATIO)
+            ? `banda estimada ${Math.round(est!)} kbps, o degrau pede ${need}` : null;
         if (est != null && est >= need) n.enoughFor = level;
         n.trouble = !!(congestion || short);
         // recuo de quem sondou o caminho: o estimador (GCC) sobe ate passar do que o caminho leva e recua um pouco, de novo a
@@ -754,13 +802,6 @@ export class QualityController {
         const active = [...this.viewers.values()].filter((v): v is Active => v.fresh && !!v.metrics && now >= v.ignoreUntil);
         if (!active.length) return;
 
-        // placa de video (compartilhada): a mediana do tempo por quadro dos encoders por hardware passa do limite
-        const gpu = this.gpuNow(active);
-        const gpuLimit = GPU_LIMIT * this.frameMs(this.global);
-        const gpuOver = gpu && gpu.ms > gpuLimit
-            ? `mediana de ${gpu.ms.toFixed(1)} ms por quadro em ${gpu.count} ${gpu.count === 1 ? "encoder" : "encoders"} da placa, o limite é ${gpuLimit.toFixed(1)} ms`
-            : null;
-
         // CPU (compartilhada): o encoder nao mantem o fps da fonte, ou o WebRTC corta resolucao por CPU. So encoders por
         // software: num por hardware, quadros atrasados e o "cpu" do WebRTC sao a placa de video (gpuOver)
         let fpsShort: string | null = null;
@@ -794,6 +835,29 @@ export class QualityController {
         }
         const troubled = active.filter(v => v.net.troubleSince != null && now - v.net.troubleSince >= UPLOAD_TROUBLE_MS);
         const uploadWide = this.viewers.size >= 2 && bwBad.size > 0 && troubled.length >= Math.max(2, Math.ceil(active.length / 2));
+
+        // placa de video (compartilhada): a mediana do tempo por quadro dos encoders por hardware passa do limite; com a
+        // captura pela placa de video, e os encoders ficam para tras na mesma janela (GPU_KEEP_UP; depois do trackNet, que
+        // diz quem a propria rede limita)
+        const gpuCapture = this.deps.gpuCapture?.() === true;
+        const gpu = this.gpuNow(active);
+        const gpuLimit = GPU_LIMIT * this.frameMs(this.global);
+        let gpuOver = gpu && gpu.ms > gpuLimit
+            ? `mediana de ${gpu.ms.toFixed(1)} ms por quadro em ${gpu.count} ${gpu.count === 1 ? "encoder" : "encoders"} da placa, o limite é ${gpuLimit.toFixed(1)} ms`
+            : null;
+        if (gpuOver && gpuCapture) {
+            const keepUp = this.gpuKeepUp(active);
+            const share = keepUp == null ? "sem encoder para medir fora os limitados pela rede" : `codificando ${Math.round(keepUp * 100)}% dos quadros esperados`;
+            if (keepUp != null && keepUp < GPU_KEEP_UP) {
+                gpuOver = `${gpuOver}; ${share}`;
+            } else {
+                if (now - this.gpuLatencyLoggedAt >= GPU_LATENCY_LOG_MS) {
+                    this.gpuLatencyLoggedAt = now;
+                    log.info(`Placa de vídeo: ${gpuOver}, mas os encoders acompanham a fonte (${share}): com a captura pela placa de vídeo é espera atrás do jogo, a qualidade fica`);
+                }
+                gpuOver = null;
+            }
+        }
 
         this.gpuStreak = gpuOver ? this.gpuStreak + 1 : 0;
         this.fpsStreak = fpsShort ? this.fpsStreak + 1 : 0;
