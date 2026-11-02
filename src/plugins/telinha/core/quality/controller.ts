@@ -30,7 +30,9 @@
 //   ate 9 era "none") e os espectadores congelam.
 // 720p60 custa ~4,9% do encoder por espectador (10 x 720p60 = 49%, tranquilo). Ate 8 o tempo e quase linear:
 // ~3,1 ms fixos + ~1,16 ms por espectador 1080p60 (GPU_FIXED_RATE). Para encoders por hardware este sinal substitui os
-// de CPU (o tempo deles nao e processador); encoders por software seguem so a logica de CPU, como antes.
+// de CPU (o tempo deles nao e processador); encoders por software seguem so a logica de CPU, como antes. Com a captura
+// pela placa de video (deps.gpuCapture), o tempo inclui esperar o quadro atras do jogo: o limite medido so desce o degrau
+// com os encoders ficando para tras (GPU_KEEP_UP).
 
 import { log, logThrottled } from "@plugins/telinha/core/log";
 import { guardStatsLog, type SenderLevels, SenderLog } from "@plugins/telinha/core/statsLog";
@@ -57,6 +59,11 @@ export interface QualityDeps {
     motion(): number | null;
     /** contador de quadros da fonte visto por um sender (alimenta o detector de imagem congelada) */
     sourceFrames(key: string, frames: number): void;
+    /**
+     * A "Captura pela placa de vídeo" (WebRtcAllowWgcUsingTexture, core/captureBoost.ts) vale nesta partida do Discord:
+     * o tempo por quadro dos encoders da placa inclui a espera pelo quadro capturado (GPU_KEEP_UP). Ausente = nao vale.
+     */
+    gpuCapture?(): boolean;
     /** o snapshot publicado (state) mudou */
     changed(): void;
 }
@@ -83,7 +90,8 @@ const CPU_STREAK = 2;
 //   RTT_BASE_MS: uma leitura baixa solta nao vira base) = a fila do caminho cresceu; pacotes esperando mais de
 //   NET_PACER_MS no pacer deste PC;
 // - banda curta: a banda estimada abaixo do que o degrau pede (LEVELS.minKbps), com o envio usando >= NET_FULL_RATIO
-//   dela (o caminho esta cheio; com menos, e o encoder que pede pouco, ex.: tela parada).
+//   dela (o caminho esta cheio; com menos, e o encoder que pede pouco, ex.: tela parada); ou a banda estimada bem
+//   abaixo do que o degrau pede (< NET_FAR_BELOW_RATIO dele) com o encoder de fato sem banda (encoderStarved).
 // So desce com o problema seguido por mais que um soluco (log de 31/10: dois soluços de ~10 s, e o WebRTC encolhia a
 // imagem de 1080p a 320x180 e levava ~60 s para voltar):
 const NET_LOSS_ALONE_PCT = 5;
@@ -91,6 +99,28 @@ const NET_LOSS_PCT = 2;
 const NET_RTT_RISE_MS = 60;
 const NET_PACER_MS = 100;
 const NET_FULL_RATIO = 0.85;
+/**
+ * Banda estimada abaixo disto x o que o degrau pede: banda curta mesmo sem o caminho cheio. Num caminho estreito o alvo
+ * do encoder fica em ~70-80% da banda estimada e o envio com ele: no log de 02/11 um espectador ficou 1 min em 1080p60
+ * (4500 pedidos) com 1,6-3,2 Mbps estimados, enviando 58-94% deles (qp 38-47, imagem borrada), e o NET_FULL_RATIO
+ * quebrava a sequencia a cada janela abaixo dos 85%. So com o encoder de fato sem banda (encoderStarved): numa tela
+ * parada a estimativa fica baixa porque o encoder nao pede nada (log de 02/11: fonte 1 fps, alvo 30, enviado 0, 169 kbps
+ * estimados), e a imagem nao sofre. Perto do que o degrau pede, o NET_FULL_RATIO continua valendo.
+ */
+const NET_FAR_BELOW_RATIO = 0.7;
+/** encoderStarved: o envio em pelo menos isto do alvo do encoder (targetBitrate) = ele usa toda a banda que tem */
+const TARGET_FULL_RATIO = 0.85;
+/**
+ * encoderStarved: o alvo em pelo menos isto da banda estimada, para o envio contra ele valer. Sem banda de verdade, o alvo
+ * fica em 0,65-0,77 da estimativa (log de 02/11); muito abaixo disso o encoder pede pouco (tela parada: 30 de 169, 0,18),
+ * e ate um jogo pausado mandando quadros repetidos enche um alvo minusculo sem a imagem sofrer.
+ */
+const TARGET_OF_EST_RATIO = 0.5;
+/**
+ * encoderStarved, so no H.264 (a escala do qp muda com o codec; VP9 e AV1 vao so pelo alvo): qp medio a partir disto =
+ * imagem ja borrada. No log de 02/11, 38-48 no espectador preso em 1080p60 com ~2 Mbps; ~23-30 no de 20 Mbps.
+ */
+const STARVED_QP_H264 = 35;
 /** a base sem fila: este percentil dos RTTs medidos nestes ultimos ms */
 const RTT_BASE_MS = 120_000;
 const RTT_BASE_PERCENTILE = 0.15;
@@ -164,6 +194,17 @@ const GPU_STREAK = 2;
  * 1 espectador → 2 dobraria os 4,3 ms, e a placa x2 desceria ja no 2o espectador).
  */
 const GPU_FIXED_RATE = 2.7 * 1920 * 1080 * 60;
+/**
+ * Com a captura pela placa de video (deps.gpuCapture) o quadro capturado e uma textura na placa, e o tempo por quadro do
+ * encoder inclui esperar a placa terminar o quadro atras do jogo: e atraso, nao o encoder no limite, e descer o degrau
+ * nem diminui o custo da captura. No log de 02/11 (God of War, 2 espectadores em 1080p30) a mediana chegou a 29,8 ms
+ * (limite 27,4 ms) com os dois encoders codificando os ~29 fps da fonte inteiros, e os dois desceram para 720p30 a toa.
+ * Entao, com ela, o limite da placa so desce o degrau com os encoders ficando para tras na mesma janela: a mediana de
+ * quadros codificados / esperados (o fps da fonte, ou o do degrau se a fonte entrega mais) abaixo disto.
+ */
+const GPU_KEEP_UP = 0.9;
+/** com a captura pela placa de video, o tempo acima do limite sem os encoders ficarem para tras: uma linha no log a cada */
+const GPU_LATENCY_LOG_MS = 300_000;
 
 /** Quanto esperar estavel antes de subir e como a espera cresce quando a subida e desfeita. */
 interface HoldRules {
@@ -177,6 +218,16 @@ interface HoldRules {
 
 /** O degrau global (CPU, placa de video, upload): como sempre foi. */
 const GLOBAL_HOLD: HoldRules = { baseMs: BASE_HOLD_MS, maxMs: MAX_HOLD_MS, undoneMs: FAILED_UP_MS, resetMs: HOLD_RESET_MS };
+/**
+ * O degrau global depois de descer pela placa de video com a captura pela placa de video (os encoders ficaram para tras de
+ * verdade, GPU_KEEP_UP). Com ela, o tempo por quadro nao preve se o degrau de cima cabe (tryGlobalUp → gpuLatency): so
+ * tentando se sabe, e cada tentativa que nao cabe deixa os espectadores travando por ~8 s (acomodacao + 2 janelas) ate
+ * descer de novo. Com a espera de sempre (10 s, dobrando ate 2 min e voltando a 10 s depois de 2 min sem descer) foram
+ * 15 tentativas em 16 min na simulacao (controller.test.ts); aqui a 1a espera e de 1 min e dobra ate 10 min a cada subida
+ * desfeita (descer de novo ate 1 min depois de subir), e volta a 1 min depois de 15 min sem descer: 4 tentativas. Fora
+ * isso (CPU, upload, a placa sem a captura pela placa), GLOBAL_HOLD como sempre.
+ */
+const GPU_TEXTURE_HOLD: HoldRules = { baseMs: 60_000, maxMs: 600_000, undoneMs: 60_000, resetMs: 900_000 };
 /** A banda de um espectador. */
 const BW_HOLD: HoldRules = { baseMs: BW_UP_STABLE_MS, maxMs: BW_MAX_HOLD_MS, undoneMs: BW_UNDONE_MS, resetMs: BW_HOLD_RESET_MS };
 
@@ -190,6 +241,13 @@ interface Hold {
 }
 
 const newHold = (now: number, rules: HoldRules): Hold => ({ rules, holdMs: rules.baseMs, lastDownAt: -Infinity, lastUpAt: -Infinity, calmSince: now });
+
+/** Troca as regras de espera de `h`: a espera atual fica entre a base e o maximo das novas. */
+function useRules(h: Hold, rules: HoldRules) {
+    if (h.rules === rules) return;
+    h.rules = rules;
+    h.holdMs = Math.min(Math.max(h.holdMs, rules.baseMs), rules.maxMs);
+}
 
 function noteDown(h: Hold, now: number) {
     if (now - h.lastUpAt < h.rules.undoneMs) h.holdMs = Math.min(h.holdMs * 2, h.rules.maxMs);
@@ -271,6 +329,27 @@ function calmShare(n: NetState, now: number, since: number, ms: number, calm: (w
 /** Uma casa decimal com virgula. */
 const dec = (v: number) => v.toFixed(1).replace(".", ",");
 
+/**
+ * O encoder esta de fato sem banda (NET_FAR_BELOW_RATIO): a fonte em movimento (>= STATIC_SOURCE_FPS) e ele usando o alvo
+ * inteiro (TARGET_FULL_RATIO), com o alvo perto da banda estimada (TARGET_OF_EST_RATIO), ou, no H.264, com o qp alto
+ * (STARVED_QP_H264). Sem as medidas, nao: so desce com a imagem sofrendo de verdade.
+ */
+function encoderStarved(m: WindowMetrics): boolean {
+    if ((m.sourceFps ?? 0) < STATIC_SOURCE_FPS) return false;
+    const target = m.targetKbps;
+    if (target != null && target > 0 && m.availableKbps != null && target >= m.availableKbps * TARGET_OF_EST_RATIO
+        && m.sentKbps >= target * TARGET_FULL_RATIO) return true;
+    return m.mimeType?.toLowerCase() === "video/h264" && m.qp != null && m.qp >= STARVED_QP_H264;
+}
+
+/**
+ * A rede e o gargalo do envio (estimativa abaixo do teto do degrau e enviando quase tudo): o controle de taxa do WebRTC
+ * descarta quadros para caber na banda, e quadros a menos nao sao a CPU nem a placa de video.
+ */
+function netSaturated(m: WindowMetrics, level: QualityLevel): boolean {
+    return m.availableKbps != null && m.availableKbps < LEVELS[level].maxKbps * UP_AVAILABLE_RATIO && m.sentKbps >= m.availableKbps * NET_SATURATED;
+}
+
 interface ViewerState {
     peerId: PeerId;
     /** o sender ja existe (addStream resolveu) */
@@ -346,6 +425,8 @@ export class QualityController {
     private fpsStreak = 0;
     private cpuStreak = 0;
     private gpuStreak = 0;
+    /** a ultima linha "Placa de vídeo: ... a qualidade fica" (GPU_LATENCY_LOG_MS) */
+    private gpuLatencyLoggedAt = -Infinity;
     /** upload total medido quando a maioria dos espectadores estava limitada por banda */
     private uplink: { kbps: number; at: number; } | null = null;
     private sourceFpsEma: number | null = null;
@@ -443,6 +524,7 @@ export class QualityController {
         this.globalReason = null;
         this.globalHold = newHold(now, GLOBAL_HOLD);
         this.fpsStreak = this.cpuStreak = this.gpuStreak = 0;
+        this.gpuLatencyLoggedAt = -Infinity;
         this.uplink = null;
         for (const v of this.viewers.values()) {
             v.bwLevel = this.deps.ceiling;
@@ -641,6 +723,27 @@ export class QualityController {
     }
 
     /**
+     * Com a captura pela placa de video (GPU_KEEP_UP): a mediana de quadros codificados / esperados dos mesmos encoders do
+     * gpuNow nesta janela. Fora quem a propria rede limita: com problema agora (trackNet → trouble), ja abaixo do degrau
+     * de todos pela banda dele (no piso, 720p30, a banda curta nao e mais problema), limitado por banda pelo WebRTC ou com a
+     * rede cheia (netSaturated, como na regra de CPU; ex.: um pico de movimento com a estimativa pouco acima do que o
+     * degrau pede). O WebRTC descarta quadros dele para caber na banda (log de 02/11: 4 de 29 fps com 735 kbps estimados),
+     * e isso nao e a placa. null = nenhum para medir.
+     */
+    private gpuKeepUp(list: Active[]): number | null {
+        const ratios: number[] = [];
+        for (const v of list) {
+            const m = v.metrics;
+            if (!m.hardware || m.encodeMsPerFrame == null || m.encodedFps < MIN_ENCODED_FPS) continue;
+            const level = this.levelFor(v.peerId);
+            if (v.net.trouble || meet(this.global, v.bwLevel) !== this.global || m.bandwidthFraction >= ANY_LIMIT_FRACTION || netSaturated(m, level)) continue;
+            const { fps } = LEVELS[level];
+            ratios.push(m.encodedFps / Math.min(fps, m.sourceFps != null && m.sourceFps > 0 ? m.sourceFps : fps));
+        }
+        return ratios.length ? median(ratios) : null;
+    }
+
+    /**
      * Tempo por quadro previsto na placa de video com os encoders dela no degrau `level` (cada um limitado pela banda
      * dele), contando os espectadores ainda sem medida que vao codificar nela (o novo, no addViewer): o tempo medido
      * escalado pela taxa de pixels depois/antes, com a parte fixa (GPU_FIXED_RATE) dos dois lados. null = nada medido.
@@ -664,8 +767,13 @@ export class QualityController {
         let level = this.global;
         let reason: GlobalReason | null = null;
         let why = "";
+        // com a captura pela placa de video o tempo medido e quase todo espera pelo quadro atras do jogo (GPU_KEEP_UP):
+        // escalar pela taxa de pixels nao preve nada, e um encoder que ainda nao comecou nao tem como ficar para tras. Sem
+        // previsao da placa aqui; se o novo encoder lotar a placa de verdade, os encoders ficam para tras e a regra
+        // periodica (decide) desce em 2 janelas. CPU e upload como sempre
+        const gpuCapture = this.deps.gpuCapture?.() === true;
         for (let i = 0; i < 2; i++) {
-            const gpu = this.predictGpu(level);
+            const gpu = gpuCapture ? null : this.predictGpu(level);
             const gpuLimit = GPU_LIMIT * this.frameMs(level);
             const load = this.predictLoad(level);
             const up = this.uplinkFresh(now);
@@ -719,7 +827,8 @@ export class QualityController {
             ? `perda de ${dec(m.lossPct)}%` : null;
         const queue = m.pacerMs != null && m.pacerMs > NET_PACER_MS ? `fila de ${Math.round(m.pacerMs)} ms no envio` : null;
         const congestion = loss ?? rtt ?? queue;
-        const short = estBelow && m.sentKbps >= est! * NET_FULL_RATIO ? `banda estimada ${Math.round(est!)} kbps, o degrau pede ${need}` : null;
+        const short = estBelow && ((est! < need * NET_FAR_BELOW_RATIO && encoderStarved(m)) || m.sentKbps >= est! * NET_FULL_RATIO)
+            ? `banda estimada ${Math.round(est!)} kbps, o degrau pede ${need}` : null;
         if (est != null && est >= need) n.enoughFor = level;
         n.trouble = !!(congestion || short);
         // recuo de quem sondou o caminho: o estimador (GCC) sobe ate passar do que o caminho leva e recua um pouco, de novo a
@@ -754,13 +863,6 @@ export class QualityController {
         const active = [...this.viewers.values()].filter((v): v is Active => v.fresh && !!v.metrics && now >= v.ignoreUntil);
         if (!active.length) return;
 
-        // placa de video (compartilhada): a mediana do tempo por quadro dos encoders por hardware passa do limite
-        const gpu = this.gpuNow(active);
-        const gpuLimit = GPU_LIMIT * this.frameMs(this.global);
-        const gpuOver = gpu && gpu.ms > gpuLimit
-            ? `mediana de ${gpu.ms.toFixed(1)} ms por quadro em ${gpu.count} ${gpu.count === 1 ? "encoder" : "encoders"} da placa, o limite é ${gpuLimit.toFixed(1)} ms`
-            : null;
-
         // CPU (compartilhada): o encoder nao mantem o fps da fonte, ou o WebRTC corta resolucao por CPU. So encoders por
         // software: num por hardware, quadros atrasados e o "cpu" do WebRTC sao a placa de video (gpuOver)
         let fpsShort: string | null = null;
@@ -772,13 +874,9 @@ export class QualityController {
             const level = this.levelFor(v.peerId);
             const spec = LEVELS[level];
             const expected = Math.min(spec.fps, m.sourceFps ?? spec.fps);
-            // a rede e o gargalo (estimativa abaixo do teto do degrau e enviando quase tudo): quadros
-            // descartados pelo controle de taxa nao sao CPU
-            const netSaturated = m.availableKbps != null && m.availableKbps < spec.maxKbps * UP_AVAILABLE_RATIO
-                && m.sentKbps >= m.availableKbps * NET_SATURATED;
             if (m.cpuFraction >= ANY_LIMIT_FRACTION) anyCpu = true;
             if (!fpsShort && m.sourceFps != null && m.sourceFps >= MIN_SOURCE_FPS && m.encodedFps < expected * FPS_SHORT_RATIO
-                && m.bandwidthFraction < LIMITED_FRACTION && !netSaturated && (m.encodeBusy == null || m.encodeBusy >= BUSY_FOR_CPU))
+                && m.bandwidthFraction < LIMITED_FRACTION && !netSaturated(m, level) && (m.encodeBusy == null || m.encodeBusy >= BUSY_FOR_CPU))
                 fpsShort = `${this.deps.label(v.peerId)} codificado a ${Math.round(m.encodedFps)} de ${Math.round(expected)} fps`;
             const target = this.targetHeight(level);
             if (!cpuBinding && m.cpuFraction >= LIMITED_FRACTION && m.frameHeight > 0 && m.frameHeight < target * BINDING_RATIO)
@@ -795,6 +893,29 @@ export class QualityController {
         const troubled = active.filter(v => v.net.troubleSince != null && now - v.net.troubleSince >= UPLOAD_TROUBLE_MS);
         const uploadWide = this.viewers.size >= 2 && bwBad.size > 0 && troubled.length >= Math.max(2, Math.ceil(active.length / 2));
 
+        // placa de video (compartilhada): a mediana do tempo por quadro dos encoders por hardware passa do limite; com a
+        // captura pela placa de video, e os encoders ficam para tras na mesma janela (GPU_KEEP_UP; depois do trackNet, que
+        // diz quem a propria rede limita)
+        const gpuCapture = this.deps.gpuCapture?.() === true;
+        const gpu = this.gpuNow(active);
+        const gpuLimit = GPU_LIMIT * this.frameMs(this.global);
+        let gpuOver = gpu && gpu.ms > gpuLimit
+            ? `mediana de ${gpu.ms.toFixed(1)} ms por quadro em ${gpu.count} ${gpu.count === 1 ? "encoder" : "encoders"} da placa, o limite é ${gpuLimit.toFixed(1)} ms`
+            : null;
+        if (gpuOver && gpuCapture) {
+            const keepUp = this.gpuKeepUp(active);
+            const share = keepUp == null ? "sem encoder para medir fora os limitados pela rede" : `codificando ${Math.min(100, Math.round(keepUp * 100))}% dos quadros esperados`;
+            if (keepUp != null && keepUp < GPU_KEEP_UP) {
+                gpuOver = `${gpuOver}; ${share}`;
+            } else {
+                if (now - this.gpuLatencyLoggedAt >= GPU_LATENCY_LOG_MS) {
+                    this.gpuLatencyLoggedAt = now;
+                    log.info(`Placa de vídeo: ${gpuOver}, mas os encoders acompanham a fonte (${share}): com a captura pela placa de vídeo é espera atrás do jogo, a qualidade fica`);
+                }
+                gpuOver = null;
+            }
+        }
+
         this.gpuStreak = gpuOver ? this.gpuStreak + 1 : 0;
         this.fpsStreak = fpsShort ? this.fpsStreak + 1 : 0;
         this.cpuStreak = cpuBinding ? this.cpuStreak + 1 : 0;
@@ -803,7 +924,7 @@ export class QualityController {
         const sinceDown = now - this.globalHold.lastDownAt;
         let globalChanged = false;
         if (gpuOver && this.gpuStreak >= GPU_STREAK && sinceDown >= DOWN_COOLDOWN_MS) {
-            globalChanged = this.stepGlobalDown("gpu", now, gpuOver);
+            globalChanged = this.stepGlobalDown("gpu", now, gpuOver, gpuCapture ? GPU_TEXTURE_HOLD : GLOBAL_HOLD);
         } else if (fpsShort && this.fpsStreak >= FPS_STREAK && sinceDown >= DOWN_COOLDOWN_MS) {
             globalChanged = this.stepGlobalDown("cpu", now, fpsShort);
         } else if (cpuBinding && this.cpuStreak >= CPU_STREAK && sinceDown >= ADAPTATION_MEMORY_MS) {
@@ -813,7 +934,7 @@ export class QualityController {
             this.uplink = { kbps: total, at: now };
             globalChanged = this.stepGlobalDown("upload", now, `${troubled.length} de ${active.length} espectadores com banda limitada, ${Math.round(total)} kbps enviados no total`);
         } else if (!gpuOver && !fpsShort && !cpuBinding && !uploadWide && this.global !== this.deps.ceiling) {
-            globalChanged = this.tryGlobalUp(active, now);
+            globalChanged = this.tryGlobalUp(active, now, gpuCapture);
         }
 
         if (uploadWide || globalChanged) {
@@ -840,7 +961,7 @@ export class QualityController {
         }
     }
 
-    private stepGlobalDown(reason: GlobalReason, now: number, why: string): boolean {
+    private stepGlobalDown(reason: GlobalReason, now: number, why: string, hold = GLOBAL_HOLD): boolean {
         const next = stepDown(this.global, this.preferMotion());
         if (!next) {
             this.fpsStreak = this.cpuStreak = this.gpuStreak = 0;
@@ -848,17 +969,21 @@ export class QualityController {
             logThrottled("auto-quality-floor", "warn", `Qualidade automática: já no mínimo (${levelText(this.global)}) e ainda limitado por ${REASON_LABEL[reason]} — ${why}`, 60_000);
             return false;
         }
-        this.setGlobal(next, reason, now, why, "down");
+        this.setGlobal(next, reason, now, why, "down", hold);
         return true;
     }
 
-    private tryGlobalUp(active: Active[], now: number): boolean {
+    private tryGlobalUp(active: Active[], now: number, gpuCapture: boolean): boolean {
         if (now - this.globalHold.calmSince < this.globalHold.holdMs) return false;
         const next = stepUp(this.global, this.deps.ceiling, this.preferMotion());
         if (!next) return false;
         const n = this.viewers.size;
         const gpu = this.predictGpu(next);
-        if (gpu && gpu.ms > GPU_UP_LIMIT * this.frameMs(next)) return false;
+        // com a captura pela placa de video e os encoders acompanhando a fonte (ou nenhum para medir), a previsao vem do
+        // tempo de espera pelo quadro (GPU_KEEP_UP) e nao segura a subida; se o degrau de cima nao couber, os encoders ficam
+        // para tras, a regra periodica desce e a espera dobra
+        const gpuLatency = gpuCapture && (this.gpuKeepUp(active) ?? 1) >= GPU_KEEP_UP;
+        if (gpu && gpu.ms > GPU_UP_LIMIT * this.frameMs(next) && !gpuLatency) return false;
         const load = this.predictLoad(next);
         if (load && (load.perEncoder > UP_MAX_BUSY || load.total > cpuBudget() * 0.8)) return false;
         const up = this.uplinkFresh(now);
@@ -872,14 +997,18 @@ export class QualityController {
             if (unsettled.length >= Math.max(2, Math.ceil(considered.length / 2))) return false;
         }
         const stable = `estável há ${Math.round((now - this.globalHold.calmSince) / 1000)} s`;
-        this.setGlobal(next, this.globalReason ?? "cpu", now, gpu ? `${stable}, previsão de ${gpu.ms.toFixed(1)} ms por quadro na placa` : stable, "up");
+        const gpuText = !gpu ? "" : gpuLatency ? ", os encoders da placa acompanham a fonte" : `, previsão de ${gpu.ms.toFixed(1)} ms por quadro na placa`;
+        this.setGlobal(next, this.globalReason ?? "cpu", now, stable + gpuText, "up");
         return true;
     }
 
-    private setGlobal(level: QualityLevel, reason: GlobalReason, now: number, why: string, dir: "down" | "up") {
+    /** `hold`: as regras da espera para subir depois desta descida (GPU_TEXTURE_HOLD; senao GLOBAL_HOLD). */
+    private setGlobal(level: QualityLevel, reason: GlobalReason, now: number, why: string, dir: "down" | "up", hold = GLOBAL_HOLD) {
         const from = this.global;
-        if (dir === "down") noteDown(this.globalHold, now);
-        else noteUp(this.globalHold, now);
+        if (dir === "down") {
+            useRules(this.globalHold, hold);
+            noteDown(this.globalHold, now);
+        } else noteUp(this.globalHold, now);
         this.global = level;
         this.globalReason = level === this.deps.ceiling ? null : reason;
         this.fpsStreak = this.cpuStreak = this.gpuStreak = 0;

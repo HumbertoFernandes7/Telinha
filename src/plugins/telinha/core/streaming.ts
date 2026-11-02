@@ -401,6 +401,9 @@ function startExtras(local: LocalCapture, video: MediaStreamTrack) {
         sourceFrames: (key, frames) => {
             if (extras?.local === local) extras.monitor?.noteSourceFrames(key, frames);
         },
+        // a "Captura pela placa de vídeo" vale nesta partida do Discord: o captureEndedText so tem texto nesse caso
+        // (core/captureBoost.ts, a mesma condicao do "Modo da captura: pela placa de vídeo")
+        gpuCapture: () => captureEndedText(local.info.kind) != null,
         changed: () => {
             if (rt.local !== local) return;
             local.autoQuality = quality.state;

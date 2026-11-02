@@ -112,6 +112,12 @@ export interface WindowMetrics {
     /** pixels codificados por segundo na janela */
     pixelsPerSecond: number;
     frameHeight: number;
+    /** codec em uso (outbound-rtp → codec), ex.: "video/H264"; null = o Chromium nao expos */
+    mimeType: string | null;
+    /** targetBitrate do encoder na leitura mais recente (kbps); null = o Chromium nao expos */
+    targetKbps: number | null;
+    /** qp medio dos quadros da janela (ΔqpSum / ΔframesEncoded, como no log); a escala depende do codec: null se ele mudou */
+    qp: number | null;
     /** rede na janela (linkWindow); null = o Chromium nao expos */
     lossPct: number | null;
     rttMs: number | null;
@@ -280,7 +286,9 @@ export function diffSamples(prev: SenderSample, cur: SenderSample): WindowMetric
         : cur.sourceFps;
     const encodedFps = frames / dt;
     const encodeTime = cur.totalEncodeTime - prev.totalEncodeTime;
-    const link = linkWindow(prev.log ?? NO_LINK_COUNTERS, cur.log ?? NO_LINK_COUNTERS);
+    const a = prev.log ?? NO_LINK_COUNTERS;
+    const b = cur.log ?? NO_LINK_COUNTERS;
+    const link = linkWindow(a, b);
 
     return {
         dt,
@@ -295,6 +303,10 @@ export function diffSamples(prev: SenderSample, cur: SenderSample): WindowMetric
         hardware: isHardwareEncoder(cur.powerEfficient, cur.implementation),
         pixelsPerSecond: cur.frameWidth * cur.frameHeight * encodedFps,
         frameHeight: cur.frameHeight,
+        mimeType: b.mimeType,
+        targetKbps: b.targetKbps,
+        // codec trocado no meio da janela: o qpSum soma escalas diferentes
+        qp: a.mimeType === b.mimeType ? ratio(delta(a.qpSum, b.qpSum), frames) : null,
         lossPct: link.lossPct,
         rttMs: link.rttMs,
         rttFreshMs: link.rttFreshMs,
