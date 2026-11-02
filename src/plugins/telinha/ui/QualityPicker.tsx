@@ -14,7 +14,7 @@ import { HINT_2K, qualityOf, splitQuality } from "@plugins/telinha/core/quality/
 import { useTelinhaState } from "@plugins/telinha/store";
 import type { Quality } from "@plugins/telinha/types";
 import { RenderModalProps } from "@vencord/discord-types";
-import { Modal, openModal } from "@webpack/common";
+import { Modal, openModal, useEffect, useRef } from "@webpack/common";
 
 import { cl, FPS_OPTIONS, RESOLUTION_OPTIONS } from "./common";
 
@@ -50,14 +50,25 @@ export function Segmented<T extends number>({ label, options, value, disabled, t
 
 function QualityModal({ modalProps, onPick }: { modalProps: RenderModalProps; onPick(quality: Quality): void; }) {
     const { local } = useTelinhaState();
-    const quality = local?.quality ?? "1080p60";
+    const picked = useRef(false);
+
+    // the stream ended with the modal open: nothing left to change (no made-up "current" quality)
+    useEffect(() => {
+        if (!local) modalProps.onClose();
+    }, [local]);
+
+    if (!local) return null;
+
+    const { quality } = local;
     const { resolution, fps } = splitQuality(quality);
-    const lock = local?.qualityLock ?? null;
-    const sizeNote = local?.sizeNote ?? null;
-    const off = !local || !!lock;
+    const lock = local.qualityLock ?? null;
+    const sizeNote = local.sizeNote ?? null;
+    const off = !!lock;
 
     const pick = (next: Quality) => {
-        if (off || next === quality) return;
+        // one pick per modal: a fast second click on the closing modal must not apply a second change
+        if (picked.current || off || next === quality) return;
+        picked.current = true;
         modalProps.onClose();
         onPick(next);
     };
@@ -68,7 +79,6 @@ function QualityModal({ modalProps, onPick }: { modalProps: RenderModalProps; on
             size="md"
             title="Qualidade da transmissão"
             subtitle="Ao trocar, o Telinha captura a mesma tela de novo: quem assiste continua assistindo."
-            notice={!local ? { message: "Você não está mais transmitindo.", type: "critical" } : undefined}
             actions={[{ text: "Fechar", variant: "secondary", onClick: modalProps.onClose }]}
         >
             <div className={cl("picker")}>

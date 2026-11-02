@@ -432,20 +432,43 @@ describe("VoiceBar (so com o estado do Telinha)", () => {
                 assert.equal(b.title, LOCK, "a dica do 2K da lugar ao motivo");
             }
             assert.ok(screen.getByText(LOCK));
-            fireEvent.click(seg("FPS", "30"));
+            // o React nao entrega clique a botao desligado: chama o onClick do botao direto (como um clique que chegou antes de o
+            // bloqueio desligar a tela) para provar que a propria troca e recusada
+            const fps30 = seg("FPS", "30");
+            const propsKey = Object.keys(fps30).find(k => k.startsWith("__reactProps$"))!;
+            act(() => (fps30 as unknown as Record<string, { onClick(): void; }>)[propsKey].onClick());
             await settle();
-            assert.equal(modals.list().length, 1);
-            assert.deepEqual(loggerLines.filter(l => l.level === "error"), [], "nem tentou trocar");
+            assert.equal(modals.list().length, 1, "o modal segue aberto: nada foi escolhido");
+            assert.deepEqual(loggerLines.filter(l => l.level === "error"), [], "changeStreamQuality nem foi chamada");
+            assert.deepEqual(toasts, []);
+            assert.equal(qualityRow().disabled, true);
         });
 
-        test("a transmissao acabou com o modal aberto: aviso no modal e os botoes desligados", async () => {
+        test("duplo clique rapido no modal: aplica uma vez so (o segundo clique e ignorado)", async () => {
+            show({ local: mine({ quality: "1080p60" }) });
+            renderBar();
+            await openQuality();
+            const b720 = seg("Resolução", "720p");
+            const b30 = seg("FPS", "30");
+            act(() => {
+                b720.click();
+                b30.click(); // ainda no mesmo instante: o modal nao saiu da tela
+            });
+            await settle();
+            assert.equal(modals.list().length, 0);
+            assert.deepEqual(loggerLines.filter(l => l.level === "error").map(l => l.args[0]), ["changeStreamQuality falhou"], "uma chamada so");
+            assert.equal(qualityRow().disabled, false, "terminou: o Mudar volta");
+        });
+
+        test("a transmissao acabou com o modal aberto: o modal fecha, sem mostrar uma qualidade inventada", async () => {
             show({ local: mine() });
             renderBar();
             await openQuality();
             show({ local: null });
             await settle();
-            assert.ok(screen.getByText("Você não está mais transmitindo."));
-            assert.equal(seg("FPS", "30").disabled, true);
+            assert.equal(modals.list().length, 0);
+            assert.equal(screen.queryByRole("group"), null);
+            assert.equal(screen.queryByText("Qualidade da transmissão"), null);
         });
     });
 

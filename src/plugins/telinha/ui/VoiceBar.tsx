@@ -27,7 +27,7 @@ import { ACCESS_LABEL } from "@plugins/telinha/core/access";
 import { qualityLabel } from "@plugins/telinha/core/quality/choice";
 import { useTelinhaState } from "@plugins/telinha/store";
 import type { AccessMode, Quality, QualityReason } from "@plugins/telinha/types";
-import { SelectedChannelStore, showToast, Tooltip, useState, useStateFromStores } from "@webpack/common";
+import { SelectedChannelStore, showToast, Tooltip, useRef, useState, useStateFromStores } from "@webpack/common";
 import type { ReactNode } from "react";
 
 import { copyStreamPassword, openAccessModal } from "./AccessPicker";
@@ -65,16 +65,22 @@ const REASON_SHORT: Record<QualityReason, string> = {
  */
 function LiveQuality({ quality, sizeNote, lock }: { quality: Quality; sizeNote?: string | null; lock?: string | null; }) {
     const [busy, setBusy] = useState(false);
+    // live value: the modal calls the `change` captured when Mudar was clicked, whose `busy` state is already stale
+    const running = useRef(false);
 
     const change = (next: Quality) => {
-        if (busy || lock || next === quality) return;
+        if (running.current || lock || next === quality) return;
+        running.current = true;
         setBusy(true);
         changeStreamQuality(next)
             .then(
                 () => showToast({ text: `Telinha: transmitindo em ${qualityLabel(next)}`, variant: "success" }),
                 e => logger.error("changeStreamQuality falhou", e)
             )
-            .finally(() => setBusy(false));
+            .finally(() => {
+                running.current = false;
+                setBusy(false);
+            });
     };
 
     return (
