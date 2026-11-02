@@ -47,15 +47,30 @@
 // o H.265 fica desligado neste ambiente e, com um encoder preso na placa, VP9 nesta sessao. Um envio em H.265 que trava ou
 // sai da placa no ar marca o H.265 (nunca o H.264) como travado neste ambiente, sem o registro permanente "H.264 da placa
 // travado"; o botao "Tentar a placa de vídeo de novo" nao esquece esse "travou" (o mesmo laco do High).
+//
+// AV1 (depois da v0.3.3): o mesmo desenho do H.265, com a SUA sonda (um VideoEncoder WebCodecs "av01.0.<nivel>M.08" Main
+// 8 bits em "prefer-hardware", av1ProbeCodec; o libaom por software nao passa nela) e o seu resultado salvo (chave privada
+// hwAv1Probe), SO com o AV1 fixado, depois da do H.265 (settleUpgrades), e so com o WebRtcAV1HWEncode ligado nesta partida
+// do Discord (sem ele o encodingInfo ja diz que nao ha AV1 na placa). As mesmas travas: nunca com o H.264 da placa
+// travado ou desligado (a placa que trava nunca cria um encoder AV1), nunca com uma transmissao comecando ou no ar, e
+// segura o H.264 da placa enquanto roda (hold "av1"). Um envio em AV1 que trava, ou que sai da placa (o libaom assumiu),
+// marca so o AV1 como travado neste ambiente.
+//
+// O H.265 e o AV1 compartilham o codigo (HW_ONLY, settleHwOnly, runHwOnlyProbe, noteHwOnlyFailed); as funcoes com o nome
+// de cada um (settleH265, runAv1Probe...) sao so atalhos.
 
-import { settings } from "@plugins/telinha/settings";
+import { type CodecSetting, settings } from "@plugins/telinha/settings";
 
-import { describeLocalCaps, getLocalCaps, isH264HwStuck, probeLocalCaps, setH264HighProbeOk, setH264HwProbing, setH264HwStuck, setH265ProbeOk } from "./codec";
+import {
+    describeLocalCaps, getLocalCaps, hwOnlyWanted, isH264HwStuck, type LocalCodecCaps, probeLocalCaps, setAv1ProbeOk, setH264HighProbeOk, setH264HwProbing, setH264HwStuck,
+    setH265ProbeOk
+} from "./codec";
 import { rt } from "./context";
 import { type ProbeResult, type ProbeVerdict, runEncoderProbe } from "./encoderProbe";
 import { errorText, log } from "./log";
 import { getNativeOrNull } from "./nativeApi";
 import { containedCount } from "./peerConnection";
+import type { HwOnlyCodec } from "./sdp";
 
 /** O ambiente do encoder. Cada parte null = desconhecida (curinga na comparacao). */
 export interface EncoderEnv {
@@ -99,13 +114,15 @@ export interface HighProbeRecord extends ProbeRecord {
     source?: "probe" | "stream";
 }
 
-/** O resultado da sonda WebCodecs do H.265 (chave privada hwH265Probe): o mesmo, com o codec WebCodecs testado. */
-export interface H265ProbeRecord extends ProbeRecord {
-    /** codec testado (ex.: "hvc1.1.6.L123.B0"); null = desconhecido */
+/** O resultado da sonda WebCodecs do H.265 ou do AV1 (chaves privadas hwH265Probe, hwAv1Probe): o mesmo, com o codec WebCodecs testado. */
+export interface HwOnlyProbeRecord extends ProbeRecord {
+    /** codec testado (ex.: "hvc1.1.6.L123.B0", "av01.0.05M.08"); null = desconhecido */
     codec: string | null;
-    /** quem viu: a sonda, ou um envio em H.265 no ar ("stream": travou ou saiu da placa); ausente = a sonda */
+    /** quem viu: a sonda, ou um envio no ar ("stream": travou ou saiu da placa); ausente = a sonda */
     source?: "probe" | "stream";
 }
+
+export type H265ProbeRecord = HwOnlyProbeRecord;
 
 /**
  * Quando a sonda WebCodecs roda: `delayMs` depois da sonda de codecs (fora da partida do Discord) e, se travar, a 2a
@@ -122,6 +139,9 @@ export const STUCK_NOTICE_HIGH = "A placa de vídeo travou com H.264 High. Para 
 /** O aviso quando o envio que travou era em H.265: na proxima vez vai o H.264 de sempre, sem o H.265. */
 export const STUCK_NOTICE_H265 = "A placa de vídeo travou com H.265. Para não travar o Discord, o Telinha não mexe mais nesta transmissão. "
     + "Reinicie o Discord (feche por completo e abra de novo) para transmitir de novo: da próxima vez vai sem o H.265.";
+/** O aviso quando o envio que travou era em AV1: na proxima vez vai o H.264 de sempre, sem o AV1. */
+export const STUCK_NOTICE_AV1 = "A placa de vídeo travou com AV1. Para não travar o Discord, o Telinha não mexe mais nesta transmissão. "
+    + "Reinicie o Discord (feche por completo e abra de novo) para transmitir de novo: da próxima vez vai sem o AV1.";
 /** O mesmo aviso com o codec fixado em H.264 nas configuracoes (ai o automatico nao vale). */
 export const STUCK_NOTICE_PINNED = "A placa de vídeo travou com H.264. Para não travar o Discord, o Telinha não mexe mais nesta transmissão. "
     + "Reinicie o Discord (feche por completo e abra de novo) para transmitir de novo. O formato de vídeo está fixado em H.264 nas configurações: escolha Automático para ir em VP9.";
@@ -132,7 +152,7 @@ const ENV_TIMEOUT_MS = 4000;
 /** Fabricantes que o WebGPU (GPUAdapterInfo.vendor) da pelo nome. */
 const VENDOR_IDS: Record<string, string> = { amd: "1002", nvidia: "10de", intel: "8086", qualcomm: "5143", apple: "106b", microsoft: "1414" };
 
-type PrivateStore = { stuckHwH264?: unknown; hwH264Probe?: unknown; hwH264HighProbe?: unknown; hwH265Probe?: unknown; };
+type PrivateStore = { stuckHwH264?: unknown; hwH264Probe?: unknown; hwH264HighProbe?: unknown; hwH265Probe?: unknown; hwAv1Probe?: unknown; };
 
 /** As configuracoes do plugin com a chave privada (lido so na hora: settings.ts importa o nucleo). */
 function privateSettings() {
@@ -153,16 +173,31 @@ let streamStarting = false;
 let probeNote = "ainda não";
 /** a sonda WebCodecs do High nesta sessao: o que ela disse, ou por que nao rodou (log e diagnostico) */
 let highNote = "ainda não";
-/** a sonda WebCodecs do H.265 nesta sessao: o que ela disse, ou por que nao rodou (log e diagnostico) */
-let h265Note = "ainda não";
-/** quem segura o H.264 da placa agora (setH264HwProbing): a sonda do Baseline (e o inicio), a do High e a do H.265 */
-const holds = { baseline: false, high: false, h265: false };
+/** as sondas WebCodecs do H.265 e do AV1 nesta sessao: o que disseram, ou por que nao rodaram (log e diagnostico) */
+const hwOnlyNotes: Record<HwOnlyCodec, string> = { h265: "ainda não", av1: "ainda não" };
+/** quem segura o H.264 da placa agora (setH264HwProbing): a sonda do Baseline (e o inicio), a do High, a do H.265 e a do AV1 */
+const holds = { baseline: false, high: false, h265: false, av1: false };
 
 /** Segura (ou solta) o H.264 da placa para `who`; ele so volta quando ninguem mais segura. */
 function hold(who: keyof typeof holds, on: boolean) {
     holds[who] = on;
-    setH264HwProbing(holds.baseline || holds.high || holds.h265);
+    setH264HwProbing(holds.baseline || holds.high || holds.h265 || holds.av1);
 }
+
+/** O que muda entre o H.265 e o AV1 nas sondas deles (o resto e o mesmo codigo). */
+interface HwOnlySpec {
+    label: string;
+    key: "hwH265Probe" | "hwAv1Probe";
+    /** um codec WebCodecs valido deste (o salvo pode ter sido editado a mao) */
+    codecRe: RegExp;
+    /** o fmtp do sender que este PC codifica na placa (encodingInfo); null = nenhum */
+    fmtp(caps: LocalCodecCaps): string | null | undefined;
+    probeCodec(fmtp: string | null | undefined): string;
+    setOk(ok: boolean): void;
+}
+
+/** A ordem das sondas depois da do High: o H.265 e depois o AV1, uma de cada vez. */
+const HW_ONLY_CODECS: readonly HwOnlyCodec[] = ["h265", "av1"];
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -310,7 +345,7 @@ function writeRecord(record: StuckRecord | null) {
 
 const VERDICTS: readonly ProbeVerdict[] = ["ok", "broken", "unknown"];
 
-function readProbe(key: "hwH264Probe" | "hwH264HighProbe" | "hwH265Probe") {
+function readProbe(key: "hwH264Probe" | "hwH264HighProbe" | "hwH265Probe" | "hwAv1Probe") {
     const saved = readSaved(key);
     const verdict = VERDICTS.find(v => v === saved?.raw.verdict);
     if (!saved || !verdict) return null;
@@ -338,20 +373,32 @@ function saveHigh(record: HighProbeRecord) {
         "o resultado da sonda do H.264 High");
 }
 
-/** O resultado da sonda WebCodecs do H.265 salvo neste PC (de qualquer ambiente). null = nenhum. */
-export function h265ProbeRecord(): H265ProbeRecord | null {
-    const read = readProbe("hwH265Probe");
+/** O resultado da sonda WebCodecs do H.265 ou do AV1 salvo neste PC (de qualquer ambiente). null = nenhum. */
+export function hwOnlyProbeRecord(codec: HwOnlyCodec): HwOnlyProbeRecord | null {
+    const spec = HW_ONLY[codec];
+    const read = readProbe(spec.key);
     if (!read) return null;
-    const codec = text(read.saved.raw.codec, 32);
+    const tested = text(read.saved.raw.codec, 32);
     return {
-        ...read.record, codec: codec && /^(hvc1|hev1)\.[0-9a-z.]+$/i.test(codec) ? codec : null,
+        ...read.record, codec: tested && spec.codecRe.test(tested) ? tested : null,
         ...(read.saved.raw.source === "stream" ? { source: "stream" as const } : {})
     };
 }
 
-function saveH265(record: H265ProbeRecord) {
-    save("hwH265Probe", { at: record.at, env: { ...record.env }, verdict: record.verdict, detail: record.detail, codec: record.codec, source: record.source ?? "probe" },
-        "o resultado da sonda do H.265");
+/** O resultado da sonda WebCodecs do H.265 salvo neste PC (de qualquer ambiente). null = nenhum. */
+export function h265ProbeRecord(): HwOnlyProbeRecord | null {
+    return hwOnlyProbeRecord("h265");
+}
+
+/** O resultado da sonda WebCodecs do AV1 salvo neste PC (de qualquer ambiente). null = nenhum. */
+export function av1ProbeRecord(): HwOnlyProbeRecord | null {
+    return hwOnlyProbeRecord("av1");
+}
+
+function saveHwOnly(codec: HwOnlyCodec, record: HwOnlyProbeRecord) {
+    const spec = HW_ONLY[codec];
+    save(spec.key, { at: record.at, env: { ...record.env }, verdict: record.verdict, detail: record.detail, codec: record.codec, source: record.source ?? "probe" },
+        `o resultado da sonda do ${spec.label}`);
 }
 
 /**
@@ -363,6 +410,22 @@ export function h265ProbeCodec(fmtp: string | null | undefined): string {
     const level = /level-id=(\d{1,3})/.exec(fmtp ?? "")?.[1];
     return `hvc1.1.6.L${level ?? "120"}.B0`;
 }
+
+/**
+ * O codec WebCodecs da sonda do AV1 para o fmtp que o Chromium oferece (Main 8 bits, tier Main, nivel do level-idx; ex.:
+ * "level-idx=5;profile=0;tier=0" → "av01.0.05M.08", o nivel 3.1, que cobre os 1280x720@30 da sonda). Sem level-idx, o
+ * nivel 4.0 (08). Medido no Edge 156 (RTX 3070, sem AV1 na placa): isConfigSupported diz false para av01.0.05M.08 e
+ * av01.0.08M.08 em prefer-hardware (true em no-preference, o libaom), entao a sonda so passa com o encoder da placa.
+ */
+export function av1ProbeCodec(fmtp: string | null | undefined): string {
+    const level = Number(/level-idx=(\d{1,2})/.exec(fmtp ?? "")?.[1] ?? 8);
+    return `av01.0.${pad2(level)}M.08`;
+}
+
+const HW_ONLY: Record<HwOnlyCodec, HwOnlySpec> = {
+    h265: { label: "H.265", key: "hwH265Probe", codecRe: /^(hvc1|hev1)\.[0-9a-z.]+$/i, fmtp: caps => caps.h265HwFmtp, probeCodec: h265ProbeCodec, setOk: setH265ProbeOk },
+    av1: { label: "AV1", key: "hwAv1Probe", codecRe: /^av01\.[0-9a-z.]+$/i, fmtp: caps => caps.av1HwFmtp, probeCodec: av1ProbeCodec, setOk: setAv1ProbeOk }
+};
 
 /** Um resultado salvo que vale neste ambiente (ok ou travou; "inconclusiva" nunca e salva, mas pode ter sido editada a mao). */
 function doneIn<R extends ProbeRecord>(saved: R | null, env: EncoderEnv): R | null {
@@ -402,10 +465,13 @@ function settleChangedEnv(record: StuckRecord, env: EncoderEnv, verdict: ProbeVe
         + `ambiente não confirmou que ela funciona (${PROBE_LABEL[verdict]}): continua em VP9`);
 }
 
-/** O formato de video fixado em H.265 (o H.265 e so manual). Configuracoes indisponiveis = nao (o diagnostico continua). */
-function h265Forced(): boolean {
+/**
+ * A sonda do H.265/AV1 vale agora: o formato de video fixado nele, ou ele no automatico (codec.ts → hwOnlyWanted; hoje
+ * os dois sao so manuais). Configuracoes indisponiveis = nao (o diagnostico continua).
+ */
+function wanted(codec: HwOnlyCodec): boolean {
     try {
-        return settings.store.codec === "h265";
+        return hwOnlyWanted(codec, settings.store.codec as CodecSetting);
     } catch {
         return false;
     }
@@ -441,7 +507,8 @@ export function startLocalCaps(report: (line: string) => void): Promise<void> {
             const rec = stuckRecord();
             report(`${describeLocalCaps(caps)}; ${describeEnv(env)}; sonda WebCodecs H.264 placa: ${probeNote}`
                 + (caps.h264HighHwProfile ? `; sonda WebCodecs H.264 High: ${highNote}` : "")
-                + (caps.h265HwFmtp ? `; sonda WebCodecs H.265: ${h265Note}` : "")
+                + (caps.h265HwFmtp ? `; sonda WebCodecs H.265: ${hwOnlyNotes.h265}` : "")
+                + (caps.av1HwFmtp || wanted("av1") ? `; sonda WebCodecs AV1: ${hwOnlyNotes.av1}` : "")
                 + (rec && isH264HwStuck() ? `; H.264 automático desligado: a placa de vídeo travou com H.264 neste PC em ${shortDate(rec.at)} (usando VP9)` : ""));
         };
         if (!sameEnv && !done && canProbe() && caps.h264HwEncode && caps.h264HwProfile) {
@@ -495,66 +562,86 @@ export function settleHigh(env: EncoderEnv, delayMs: number): Promise<void> | nu
 }
 
 /**
- * O High e depois o H.265 (settleHigh, settleH265), um depois do outro: o H.265 nunca roda ao lado da sonda do High, e
- * espera `delayMs` so se a do High nao rodou. Devolve a promessa quando alguma sonda roda (null = nenhuma).
+ * O High, depois o H.265 e depois o AV1 (settleHigh, settleHwOnly), um depois do outro: nenhuma sonda roda ao lado de
+ * outra, e so a primeira que roda espera `delayMs`. Devolve a promessa quando alguma sonda roda (null = nenhuma).
  */
 export function settleUpgrades(env: EncoderEnv, delayMs: number): Promise<void> | null {
-    const high = settleHigh(env, delayMs);
-    if (high) return high.then(() => settleH265(env, 0) ?? undefined);
-    return settleH265(env, delayMs);
+    let chain = settleHigh(env, delayMs);
+    for (const codec of HW_ONLY_CODECS) chain = chain ? chain.then(() => settleHwOnly(codec, env, 0) ?? undefined) : settleHwOnly(codec, env, delayMs);
+    return chain;
 }
 
 /**
- * O H.265 depois que o Baseline e o High se resolveram: o resultado salvo deste ambiente E deste codec vale; sem ele, a
- * sonda do H.265 roda (runH265Probe, depois de `delayMs`) se este PC codifica H.265 por hardware (encodingInfo), o H.264
- * da placa nao esta desligado e a sonda do Baseline deu "ok" neste ambiente. Senao, sem H.265 nesta sessao.
+ * O H.265 (ou o AV1) depois que o Baseline e o High se resolveram: o resultado salvo deste ambiente E deste codec vale;
+ * sem ele, a sonda roda (runHwOnlyProbe, depois de `delayMs`) se ele esta fixado, este PC o codifica por hardware
+ * (encodingInfo), o H.264 da placa nao esta desligado e a sonda do Baseline deu "ok" neste ambiente. AV1: tambem so com
+ * o WebRtcAV1HWEncode ligado nesta partida do Discord. Senao, sem ele nesta sessao.
  */
-export function settleH265(env: EncoderEnv, delayMs: number): Promise<void> | null {
-    const fmtp = getLocalCaps().h265HwFmtp;
-    const codec = fmtp ? h265ProbeCodec(fmtp) : null;
-    const saved = doneIn(h265ProbeRecord(), env);
-    const done = saved && saved.codec === codec ? saved : null;
+export function settleHwOnly(codec: HwOnlyCodec, env: EncoderEnv, delayMs: number): Promise<void> | null {
+    const spec = HW_ONLY[codec];
+    const caps = getLocalCaps();
+    const fmtp = spec.fmtp(caps);
+    const tested = fmtp ? spec.probeCodec(fmtp) : null;
+    const saved = doneIn(hwOnlyProbeRecord(codec), env);
+    const done = saved && saved.codec === tested ? saved : null;
     const skip = (why: string) => {
-        setH265ProbeOk(false);
-        h265Note = `não feita (${why})`;
+        spec.setOk(false);
+        hwOnlyNotes[codec] = `não feita (${why})`;
         return null;
     };
-    if (!codec) return skip("este PC não codifica H.265 na placa");
+    // sem o recurso, o WebRTC so teria o AV1 por software (e o encodingInfo ja diz que nao ha AV1 na placa)
+    if (codec === "av1" && caps.av1HwFeature === false) return skip("o WebRtcAV1HWEncode não está ligado nesta partida do Discord; liga quando o Discord abrir com o AV1 fixado");
+    if (!tested) return skip(`este PC não codifica ${spec.label} na placa`);
     if (done) {
-        setH265ProbeOk(done.verdict === "ok");
-        h265Note = `${PROBE_LABEL[done.verdict]} (feita em ${shortDate(done.at)} neste ambiente: ${done.detail})${done.source === "stream" ? " [visto numa transmissão]" : ""}`;
+        spec.setOk(done.verdict === "ok");
+        hwOnlyNotes[codec] = `${PROBE_LABEL[done.verdict]} (feita em ${shortDate(done.at)} neste ambiente: ${done.detail})${done.source === "stream" ? " [visto numa transmissão]" : ""}`;
         return null;
     }
-    // o H.265 e so manual: sem ele fixado, a sonda nunca roda (a abertura do Discord custa o mesmo de antes)
-    if (!h265Forced()) return skip("só roda com o H.265 fixado no formato de vídeo");
-    if (isH264HwStuck()) return skip("o H.264 da placa está desligado neste PC, e o H.265 vai junto");
-    if (!baselineOkIn(env)) return skip("a sonda do H.264 Baseline não deu ok neste ambiente; sem H.265 nesta sessão");
+    // so manual: sem ele fixado, a sonda nunca roda (a abertura do Discord custa o mesmo de antes)
+    if (!wanted(codec)) return skip(`só roda com o ${spec.label} fixado no formato de vídeo`);
+    if (isH264HwStuck()) return skip(`o H.264 da placa está desligado neste PC, e o ${spec.label} vai junto`);
+    if (!baselineOkIn(env)) return skip(`a sonda do H.264 Baseline não deu ok neste ambiente; sem ${spec.label} nesta sessão`);
     if (!canProbe()) return skip("sem Worker");
-    return runH265Probe(env, codec, delayMs);
+    return runHwOnlyProbe(codec, env, tested, delayMs);
+}
+
+/** settleHwOnly do H.265. */
+export function settleH265(env: EncoderEnv, delayMs: number): Promise<void> | null {
+    return settleHwOnly("h265", env, delayMs);
+}
+
+/** settleHwOnly do AV1. */
+export function settleAv1(env: EncoderEnv, delayMs: number): Promise<void> | null {
+    return settleHwOnly("av1", env, delayMs);
 }
 
 /**
- * O formato de video mudou nas configuracoes (settings.ts → codec.onChange): fixado em H.265 depois do inicio da sessao,
- * a sonda do H.265 roda agora (settleH265, as mesmas regras: nunca com uma transmissao comecando ou no ar, nem ao lado
- * de outra sonda; com uma transmissao no ar, ela roda quando a transmissao acabar: onStreamStopped). Antes do inicio, ou com outra sonda rodando, quem vem depois (startLocalCaps, o botao) ja olha o
- * formato. Devolve a promessa da sonda quando ela roda (null = nao roda).
+ * O formato de video mudou nas configuracoes (settings.ts → codec.onChange): fixado em H.265 ou AV1 depois do inicio da
+ * sessao, a sonda dele roda agora (settleHwOnly, as mesmas regras: nunca com uma transmissao comecando ou no ar, nem ao
+ * lado de outra sonda; com uma transmissao no ar, ela roda quando a transmissao acabar: onStreamStopped). Antes do inicio,
+ * ou com outra sonda rodando, quem vem depois (startLocalCaps, o botao) ja olha o formato. Devolve a promessa da sonda
+ * quando ela roda (null = nao roda). O AV1 sem o WebRtcAV1HWEncode nesta partida nao roda (so depois de reiniciar).
  */
 export function onCodecSettingChanged(): Promise<void> | null {
-    return settleH265Now();
+    return settleHwOnlyNow();
 }
 
 /**
- * A transmissao acabou (streaming.ts → stopStreaming): com o H.265 fixado e a sonda dele ainda sem resultado (ela nao
- * roda com uma transmissao no ar), ela roda agora, PROBE_START.delayMs depois e com as mesmas regras (uma transmissao
- * que comeca nesse meio tempo a adia de novo). Com resultado salvo, ou sem o H.265 fixado, nada.
+ * A transmissao acabou (streaming.ts → stopStreaming): com o H.265 ou o AV1 fixado e a sonda dele ainda sem resultado
+ * (ela nao roda com uma transmissao no ar), ela roda agora, PROBE_START.delayMs depois e com as mesmas regras (uma
+ * transmissao que comeca nesse meio tempo a adia de novo). Com resultado salvo, ou sem nenhum dos dois fixado, nada.
  */
 export function onStreamStopped(): Promise<void> | null {
-    return settleH265Now();
+    return settleHwOnlyNow();
 }
 
-function settleH265Now(): Promise<void> | null {
-    if (!h265Forced() || !started || !envNow || probeRunning || highProbeRunning || h265ProbeRunning) return null;
-    return settleH265(envNow, PROBE_START.delayMs);
+function settleHwOnlyNow(): Promise<void> | null {
+    const codecs = HW_ONLY_CODECS.filter(wanted);
+    if (!codecs.length || !started || !envNow || probeRunning || highProbeRunning || HW_ONLY_CODECS.some(c => hwOnlyRunning[c])) return null;
+    const env = envNow;
+    let chain: Promise<void> | null = null;
+    for (const codec of codecs) chain = chain ? chain.then(() => settleHwOnly(codec, env, 0) ?? undefined) : settleHwOnly(codec, env, PROBE_START.delayMs);
+    return chain;
 }
 
 /**
@@ -568,9 +655,9 @@ function sessionOnly(note: string, why: string) {
         + "e a sonda roda de novo na próxima vez que o Discord abrir");
 }
 
-/** Uma rodada da sonda, com a linha do log quando o Worker fica preso. `what` = "H.264" (o Baseline), "H.264 High" ou "H.265". */
+/** Uma rodada da sonda, com a linha do log quando o Worker fica preso. `what` = "H.264" (o Baseline), "H.264 High", "H.265" ou "AV1". */
 async function probeOnce(profile: string, what = "H.264"): Promise<ProbeResult> {
-    const result = await runEncoderProbe(profile, what === "H.265" ? "h265" : "h264");
+    const result = await runEncoderProbe(profile, what === "H.265" ? "h265" : what === "AV1" ? "av1" : "h264");
     if (result.hung) log.warn(`Sonda WebCodecs do ${what} da placa de vídeo: o encoder ficou preso (${result.detail}); o Worker dela fica como está até o Discord fechar`);
     return result;
 }
@@ -718,53 +805,55 @@ export async function runHighProbe(env: EncoderEnv, profile: string, delayMs = P
     }
 }
 
-/** a sonda WebCodecs do H.265 esta rodando: nao comeca outra */
-let h265ProbeRunning = false;
+/** as sondas WebCodecs do H.265 e do AV1 rodando: nao comeca outra do mesmo */
+const hwOnlyRunning: Record<HwOnlyCodec, boolean> = { h265: false, av1: false };
 
 /**
- * A sonda WebCodecs do H.265 (`codec`, ex.: hvc1.1.6.L123.B0; core/encoderProbe.ts), uma vez por ambiente, depois das do
- * Baseline e do High (settleUpgrades). As mesmas regras da do High: nao roda com uma transmissao comecando ou no ar, nem
- * com o H.264 da placa desligado; enquanto roda (com a confirmacao), segura o H.264 da placa (hold "h265"), entao nenhum
- * encoder do WebRTC na placa sobe ao lado do dela.
+ * A sonda WebCodecs do H.265 ou do AV1 (`tested`, ex.: hvc1.1.6.L123.B0, av01.0.05M.08; core/encoderProbe.ts), uma vez
+ * por ambiente, depois das do Baseline e do High (settleUpgrades). As mesmas regras da do High: nao roda com uma
+ * transmissao comecando ou no ar, nem com o H.264 da placa desligado; enquanto roda (com a confirmacao), segura o H.264
+ * da placa (hold "h265"/"av1"), entao nenhum encoder do WebRTC na placa sobe ao lado do dela.
  * - Travou ou ficou presa: confirma com uma 2a rodada PROBE_START.confirmMs depois. Ok na 2a = ok. Travou ou presa de novo
- *   = "travou", salvo: o H.265 desligado neste ambiente (o botao nao esquece) e, com um encoder preso na placa, VP9 no
- *   resto desta sessao. Inconclusiva sem nada preso na 2a, ou uma transmissao comecando antes dela: nada salvo, VP9 nesta sessao.
- * - Ok: fica salvo; o automatico usa H.265 com quem tambem decodifica H.265 por hardware.
- * - Inconclusiva sem nada preso: nada salvo; sem H.265 nesta sessao (o H.264 continua) e ela roda de novo na proxima abertura.
+ *   = "travou", salvo: ele desligado neste ambiente (o botao nao esquece) e, com um encoder preso na placa, VP9 no resto
+ *   desta sessao. Inconclusiva sem nada preso na 2a, ou uma transmissao comecando antes dela: nada salvo, VP9 nesta sessao.
+ * - Ok: fica salvo; com ele fixado, vai ele para quem tambem o decodifica por hardware.
+ * - Inconclusiva sem nada preso: nada salvo; sem ele nesta sessao (o H.264 continua) e ela roda de novo na proxima abertura.
  */
-export async function runH265Probe(env: EncoderEnv, codec: string, delayMs = PROBE_START.delayMs) {
-    if (h265ProbeRunning) return;
-    h265ProbeRunning = true;
-    setH265ProbeOk(false);
+export async function runHwOnlyProbe(codec: HwOnlyCodec, env: EncoderEnv, tested: string, delayMs = PROBE_START.delayMs) {
+    if (hwOnlyRunning[codec]) return;
+    const { label, setOk } = HW_ONLY[codec];
+    const note = (text: string) => { hwOnlyNotes[codec] = text; };
+    hwOnlyRunning[codec] = true;
+    setOk(false);
     try {
         await sleep(delayMs);
         if (streamBusy()) {
-            h265Note = "não feita (uma transmissão estava começando ou no ar; tenta de novo na próxima vez que o Discord abrir)";
+            note("não feita (uma transmissão estava começando ou no ar; tenta de novo na próxima vez que o Discord abrir)");
             return;
         }
         if (isH264HwStuck()) {
-            h265Note = "não feita (o H.264 da placa está desligado neste PC, e o H.265 vai junto)";
+            note(`não feita (o H.264 da placa está desligado neste PC, e o ${label} vai junto)`);
             return;
         }
-        hold("h265", true);
-        h265Note = "rodando";
-        const first = await probeOnce(codec, "H.265");
+        hold(codec, true);
+        note("rodando");
+        const first = await probeOnce(tested, label);
         let result = first;
         if (isBad(first)) {
-            log.info(`Sonda WebCodecs do H.265 (${codec}) da placa de vídeo: travou (${first.detail}); confirmando em ${PROBE_START.confirmMs / 1000} s`);
-            h265Note = "travou uma vez; confirmando";
+            log.info(`Sonda WebCodecs do ${label} (${tested}) da placa de vídeo: travou (${first.detail}); confirmando em ${PROBE_START.confirmMs / 1000} s`);
+            note("travou uma vez; confirmando");
             await sleep(PROBE_START.confirmMs);
-            const unconfirmed = (note: string, why: string) => {
-                h265Note = `${note}: VP9 nesta sessão`;
+            const unconfirmed = (text: string, why: string) => {
+                note(`${text}: VP9 nesta sessão`);
                 setH264HwStuck(true);
-                log.warn(`A sonda WebCodecs travou com o H.265 da placa de vídeo, mas ${why}: o automático vai em VP9 nesta sessão, `
-                    + "e a sonda do H.265 roda de novo na próxima vez que o Discord abrir");
+                log.warn(`A sonda WebCodecs travou com o ${label} da placa de vídeo, mas ${why}: o automático vai em VP9 nesta sessão, `
+                    + `e a sonda do ${label} roda de novo na próxima vez que o Discord abrir`);
             };
             if (streamBusy()) {
                 unconfirmed(`travou uma vez (${first.detail}), sem confirmar (uma transmissão começou)`, "uma transmissão começou antes da confirmação");
                 return;
             }
-            const second = await probeOnce(codec, "H.265");
+            const second = await probeOnce(tested, label);
             if (second.verdict === "ok") result = { verdict: "ok", detail: `${second.detail} (a 1ª rodada tinha travado: ${first.detail})` };
             else if (isBad(second)) result = { verdict: "broken", detail: `${second.detail}; confirmado na 2ª rodada` };
             else {
@@ -772,39 +861,60 @@ export async function runH265Probe(env: EncoderEnv, codec: string, delayMs = PRO
                 return;
             }
         }
-        h265Note = `${PROBE_LABEL[result.verdict]} (${result.detail})`;
-        if (result.verdict !== "unknown") saveH265({ at: Date.now(), env, verdict: result.verdict, detail: result.detail, codec });
+        note(`${PROBE_LABEL[result.verdict]} (${result.detail})`);
+        if (result.verdict !== "unknown") saveHwOnly(codec, { at: Date.now(), env, verdict: result.verdict, detail: result.detail, codec: tested });
         if (result.verdict === "ok") {
-            setH265ProbeOk(true);
-            log.info(`Sonda WebCodecs do H.265 (${codec}) da placa de vídeo: ok (${result.detail}); `
-                + "com o H.265 fixado, vai H.265 para quem também decodifica H.265 por hardware");
+            setOk(true);
+            log.info(`Sonda WebCodecs do ${label} (${tested}) da placa de vídeo: ok (${result.detail}); `
+                + `com o ${label} fixado, vai ${label} para quem também decodifica ${label} por hardware`);
         } else if (result.verdict === "broken") {
             // antes de soltar a trava (finally): nenhum envio da placa comeca no meio
             setH264HwStuck(true);
-            log.warn(`A sonda WebCodecs do H.265 (${codec}) travou neste PC (${result.detail}): o H.265 fica desligado neste ambiente `
+            log.warn(`A sonda WebCodecs do ${label} (${tested}) travou neste PC (${result.detail}): o ${label} fica desligado neste ambiente `
                 + "(só o H.264) e, com um encoder preso na placa de vídeo, o automático vai em VP9 nesta sessão");
         } else {
-            log.info(`Sonda WebCodecs do H.265 (${codec}) da placa de vídeo: inconclusiva (${result.detail}); `
-                + "sem H.265 nesta sessão (o H.264 continua), e ela roda de novo na próxima vez que o Discord abrir");
+            log.info(`Sonda WebCodecs do ${label} (${tested}) da placa de vídeo: inconclusiva (${result.detail}); `
+                + `sem ${label} nesta sessão (o H.264 continua), e ela roda de novo na próxima vez que o Discord abrir`);
         }
     } finally {
-        h265ProbeRunning = false;
-        hold("h265", false);
+        hwOnlyRunning[codec] = false;
+        hold(codec, false);
     }
 }
 
+/** runHwOnlyProbe do H.265 (`codec`, ex.: hvc1.1.6.L123.B0). */
+export function runH265Probe(env: EncoderEnv, codec: string, delayMs = PROBE_START.delayMs) {
+    return runHwOnlyProbe("h265", env, codec, delayMs);
+}
+
+/** runHwOnlyProbe do AV1 (`codec`, ex.: av01.0.05M.08). */
+export function runAv1Probe(env: EncoderEnv, codec: string, delayMs = PROBE_START.delayMs) {
+    return runHwOnlyProbe("av1", env, codec, delayMs);
+}
+
 /**
- * Um envio em H.265 falhou no ar (streaming.ts): travou (containStuck → noteStuckEncoder) ou saiu da placa (o WebRTC
- * trocou sozinho para o H.264 reserva, ou o encoder deixou de ser da placa). A culpa e do H.265, nunca do H.264: fica
- * salvo "travou" para o H.265 neste ambiente (source "stream") e o automatico deixa de mandar H.265 agora, sem o registro
- * "H.264 da placa travado". O botao nao esquece; so um ambiente novo testa o H.265 de novo.
+ * Um envio em H.265 ou AV1 falhou no ar (streaming.ts): travou (containStuck → noteStuckEncoder) ou saiu da placa (o
+ * WebRTC trocou sozinho para o H.264 reserva, ou o encoder deixou de ser da placa: no AV1, o libaom por software). A culpa
+ * e dele, nunca do H.264: fica salvo "travou" para ele neste ambiente (source "stream") e o automatico deixa de manda-lo
+ * agora, sem o registro "H.264 da placa travado". O botao nao esquece; so um ambiente novo testa ele de novo.
  */
-export function noteH265Failed(detail: string) {
+export function noteHwOnlyFailed(codec: HwOnlyCodec, detail: string) {
     const at = Date.now();
-    const codec = h265ProbeCodec(getLocalCaps().h265HwFmtp);
-    setH265ProbeOk(false);
-    h265Note = `travou num envio (${detail.slice(0, 200)})`;
-    void environment().then(env => saveH265({ at, env, verdict: "broken", detail: detail.slice(0, 200), codec, source: "stream" }));
+    const spec = HW_ONLY[codec];
+    const tested = spec.probeCodec(spec.fmtp(getLocalCaps()));
+    spec.setOk(false);
+    hwOnlyNotes[codec] = `travou num envio (${detail.slice(0, 200)})`;
+    void environment().then(env => saveHwOnly(codec, { at, env, verdict: "broken", detail: detail.slice(0, 200), codec: tested, source: "stream" }));
+}
+
+/** noteHwOnlyFailed do H.265. */
+export function noteH265Failed(detail: string) {
+    noteHwOnlyFailed("h265", detail);
+}
+
+/** noteHwOnlyFailed do AV1. */
+export function noteAv1Failed(detail: string) {
+    noteHwOnlyFailed("av1", detail);
 }
 
 /**
@@ -828,15 +938,15 @@ export function noteStreamStarting(starting: boolean) {
  * A placa de video travou num envio H.264 (streaming.ts → containStuck): o H.264 automatico desliga agora para o resto
  * da sessao e o PC lembra (com o ambiente atual; desconhecido tambem vale). Envio em High (`highProfile`): lembra que o
  * HIGH trava (noteHighFailed), nao o Baseline, que passou na sonda dele; depois de reiniciar o Discord, vai o Baseline.
- * Envio em H.265 (`h265`, pelo codec que estava de fato no ar): lembra que o H.265 trava (noteH265Failed), sem o
+ * Envio em H.265 ou AV1 (`hwOnly`, pelo codec que estava de fato no ar): lembra que ELE trava (noteHwOnlyFailed), sem o
  * registro do H.264; depois de reiniciar o Discord, vai o H.264.
  */
-export function noteStuckEncoder(highProfile?: string | null, h265 = false) {
+export function noteStuckEncoder(highProfile?: string | null, hwOnly: HwOnlyCodec | null = null) {
     const at = Date.now();
     stuckThisSession = true;
     setH264HwStuck(true);
-    if (h265) {
-        noteH265Failed("o encoder da placa de vídeo travou numa transmissão em H.265");
+    if (hwOnly) {
+        noteHwOnlyFailed(hwOnly, `o encoder da placa de vídeo travou numa transmissão em ${HW_ONLY[hwOnly].label}`);
         return;
     }
     if (highProfile) {
@@ -873,12 +983,14 @@ export function forgetStuckEncoder(): RetryOutcome {
         highNote = "não feita (esquecida pelo botão; roda depois da do Baseline)";
     }
     setH264HighProbeOk(false);
-    const h265 = h265ProbeRecord();
-    if (h265?.verdict !== "broken") {
-        save("hwH265Probe", null, "o resultado da sonda do H.265");
-        h265Note = "não feita (esquecida pelo botão; roda depois da do Baseline)";
+    for (const codec of HW_ONLY_CODECS) {
+        const spec = HW_ONLY[codec];
+        if (hwOnlyProbeRecord(codec)?.verdict !== "broken") {
+            save(spec.key, null, `o resultado da sonda do ${spec.label}`);
+            hwOnlyNotes[codec] = "não feita (esquecida pelo botão; roda depois da do Baseline)";
+        }
+        spec.setOk(false);
     }
-    setH265ProbeOk(false);
     const profile = getLocalCaps().h264HwProfile;
     const probeable = canProbe() && !!profile;
     let outcome: RetryOutcome;
@@ -921,6 +1033,9 @@ export function stuckEncoderDiagnostics(): string {
     const highOn = caps.h264HwEncode && !!caps.h264HighHwProfile && caps.h264HighProbeOk;
     const savedH265 = h265ProbeRecord();
     const h265On = caps.h264HwEncode && caps.sendable.has("h265") && !!caps.h265HwFmtp && caps.h265ProbeOk === true;
+    const savedAv1 = av1ProbeRecord();
+    const av1On = caps.h264HwEncode && caps.sendable.has("av1") && caps.av1HwFeature !== false && !!caps.av1HwFmtp && caps.av1ProbeOk === true;
+    const feature = caps.av1HwFeature === true ? "ligado" : caps.av1HwFeature === false ? "desligado" : "desconhecido";
     return [
         `ambiente do encoder: ${env ? `${describeEnv(env)} (placa via ${envSource})` : "ainda lendo"}`,
         `H.264 da placa travado neste PC: ${remembered}${record?.source === "probe" ? " [visto pela sonda]" : ""}; H.264 automático ${isH264HwStuck() ? "desligado" : "ligado"}`,
@@ -930,9 +1045,14 @@ export function stuckEncoderDiagnostics(): string {
         + `sonda WebCodecs High: ${highNote}${savedHigh ? `; salva: ${PROBE_LABEL[savedHigh.verdict]} em ${new Date(savedHigh.at).toISOString()} (perfil ${savedHigh.profile ?? "?"}: ${savedHigh.detail})${savedHigh.source === "stream" ? " [visto numa transmissão]" : ""}` : ""}; `
         + `High automático ${highOn ? "ligado (só com quem anuncia High por hardware)" : "desligado"}`,
         `H.265: codifica na placa ${caps.h265HwFmtp ? `sim (${caps.h265HwFmtp})` : "não"}, decodifica na placa ${caps.h265HwDecode ? "sim" : "não"}, `
-        + `envia ${caps.sendable.has("h265") ? "sim" : "não (o Chromium não oferece)"}; sonda WebCodecs H.265: ${h265Note}`
+        + `envia ${caps.sendable.has("h265") ? "sim" : "não (o Chromium não oferece)"}; sonda WebCodecs H.265: ${hwOnlyNotes.h265}`
         + `${savedH265 ? `; salva: ${PROBE_LABEL[savedH265.verdict]} em ${new Date(savedH265.at).toISOString()} (${savedH265.codec ?? "?"}: ${savedH265.detail})${savedH265.source === "stream" ? " [visto numa transmissão]" : ""}` : ""}; `
-        + (!h265Forced() ? "H.265 fixado desligado (o formato de vídeo não está em H.265)"
-            : `H.265 fixado ${h265On ? "ligado (só com quem anuncia H.265 por hardware)" : "desligado"}`)
+        + (!wanted("h265") ? "H.265 fixado desligado (o formato de vídeo não está em H.265)"
+            : `H.265 fixado ${h265On ? "ligado (só com quem anuncia H.265 por hardware)" : "desligado"}`),
+        `AV1: codifica na placa ${caps.av1HwFmtp ? `sim (${caps.av1HwFmtp})` : "não"}, decodifica na placa ${caps.av1HwDecode ? "sim" : "não"}, `
+        + `WebRtcAV1HWEncode nesta partida ${feature}; sonda WebCodecs AV1: ${hwOnlyNotes.av1}`
+        + `${savedAv1 ? `; salva: ${PROBE_LABEL[savedAv1.verdict]} em ${new Date(savedAv1.at).toISOString()} (${savedAv1.codec ?? "?"}: ${savedAv1.detail})${savedAv1.source === "stream" ? " [visto numa transmissão]" : ""}` : ""}; `
+        + (!wanted("av1") ? "AV1 fixado desligado (o formato de vídeo não está em AV1)"
+            : `AV1 fixado ${av1On ? "ligado (só com quem anuncia AV1 por hardware)" : "desligado (vai o do automático)"}`)
     ].join("\n");
 }
