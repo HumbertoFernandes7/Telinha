@@ -25,12 +25,14 @@
 //
 // H.265 (HEVC Main, depois da v0.3.3): ~25-40% menos bits que o H.264 na mesma qualidade, pelo mesmo encoder da placa
 // (MediaFoundation NVENC). O Chromium nao tem H.265 por software (nem encoder, nem decoder): sem a placa dos DOIS lados
-// nao ha imagem. Por isso o automatico (chooseCodec) so manda H.265 quando, alem de tudo que o H.264 da placa precisa
-// (h264HwEncode: nada travado, nenhuma sonda rodando, sem as quedas), este PC envia H.265 (sender.getCapabilities) e o
-// codifica na placa (encodingInfo do fmtp Main do sender, h265HwFmtp), a sonda WebCodecs do H.265 deu "ok" neste ambiente
-// (core/stuckEncoder.ts → setH265ProbeOk) E o espectador anuncia que decodifica na placa (caps.hwDecode.h265, protocol.ts
-// passo 11). A ordem no automatico: H.265 → H.264 High → H.264 Baseline → VP9. Com H.265, o H.264 que iria sem ele vai
-// logo depois na negociacao (h264Profile/h264Backup da decisao): se o outro lado nao negociar H.265, fica a placa em H.264.
+// nao ha imagem. E so MANUAL ("H.265" no formato de video): o automatico nunca o escolhe, porque com pouca banda o
+// controle de taxa dele para no qp 42 e descarta quadros (medido no Chrome 156, RTX 3070: 13 fps a 3 Mbps, onde o H.264
+// High ia a 46). Fixado, ele so vai quando, alem de tudo que o H.264 da placa precisa (h264HwEncode: nada travado, nenhuma
+// sonda rodando, sem as quedas), este PC envia H.265 (sender.getCapabilities) e o codifica na placa (encodingInfo do fmtp
+// Main do sender, h265HwFmtp), a sonda WebCodecs do H.265 deu "ok" neste ambiente (core/stuckEncoder.ts → setH265ProbeOk;
+// ela so roda com o H.265 fixado) E o espectador anuncia que decodifica na placa (caps.hwDecode.h265, protocol.ts passo
+// 11); senao, o que o automatico escolheria. Com H.265, o H.264 que o automatico escolheria vai logo depois na negociacao
+// (h264Profile/h264Backup da decisao): se o outro lado nao negociar H.265, fica a placa em H.264.
 
 import { H264_PROBE, HW_DECODE_CAPS_VERSION, type HwDecodeCaps } from "@plugins/telinha/protocol";
 import type { CodecSetting } from "@plugins/telinha/settings";
@@ -253,7 +255,7 @@ export function setH264HighProbeOk(ok: boolean) {
 
 /**
  * A sonda WebCodecs do H.265 neste ambiente (core/stuckEncoder.ts): true = passou; false = nao rodou, inconclusiva,
- * travou, ou um envio em H.265 falhou no ar nesta sessao. Sem ela o automatico nunca escolhe H.265.
+ * travou, ou um envio em H.265 falhou no ar nesta sessao. Sem ela, nem o H.265 fixado vai.
  */
 export function setH265ProbeOk(ok: boolean) {
     h265ProbeOk = ok;
@@ -330,9 +332,10 @@ export function noteH264Fallback(): H264FallbackTally {
  * High (whyNoHigh): no automatico, com H.264 por hardware nos dois lados, vai High (6400xx, com o Baseline da placa como
  * reserva) so se este PC codifica High por hardware com a sonda do High ok E o espectador anuncia High por hardware.
  * Fixado em H.264 nas configuracoes continua o Baseline de antes.
- * H.265 (whyNoH265): no automatico, na frente de tudo isso, so com a placa dos dois lados e a sonda do H.265 ok; o H.264
- * que iria sem ele vira a reserva na negociacao. Fixado em H.265: as mesmas redes de seguranca (nunca sem a placa dos dois
- * lados, sem a sonda ou com o H.264 da placa desligado); sem elas, o que o automatico escolheria, e o motivo diz isso.
+ * H.265 (whyNoH265): so MANUAL (decisao do dono, 02/11: com internet fraca o H.265 da placa perde fps; o automatico nunca o
+ * escolhe). Fixado em H.265: vai so com as redes de seguranca (a placa dos dois lados, a sonda do H.265 ok, o H.264 da placa
+ * ligado), com o H.264 que o automatico escolheria como reserva na negociacao; sem elas, o que o automatico escolheria, e o
+ * motivo diz isso.
  */
 export function chooseCodec(viewerCaps: ViewerCodecCaps | undefined, setting: CodecSetting, local: LocalCodecCaps = localCaps): CodecDecision {
     const canSend = (c: VideoCodecName) => local.sendable.size === 0 || local.sendable.has(c);
@@ -342,12 +345,19 @@ export function chooseCodec(viewerCaps: ViewerCodecCaps | undefined, setting: Co
     const h264 = (reason: string): CodecDecision => ({ codec: "h264", h264Profile: local.h264HwProfile, reason });
 
     if (setting === "h265") {
-        // as redes de seguranca do automatico valem; o espectador sem H.264 na placa ainda recebe H.265 (sem reserva H.264)
+        // o que o automatico escolheria: a reserva H.264 (so a da placa) ou, sem as redes de seguranca, o codec que vai
         const auto = chooseCodec(viewerCaps, "auto", local);
-        if (auto.codec === "h265") return { ...auto, reason: `fixado nas configurações (${auto.reason.replace(/^automático: /, "")})` };
         const noH265 = whyNoH265(viewerCaps, local);
-        if (!noH265) return { codec: "h265", reason: "fixado nas configurações (H.265 por hardware nos dois lados, com a sonda do H.265 ok; sem reserva H.264 na placa para este espectador)" };
-        return { ...auto, reason: `H.265 fixado nas configurações, mas ${noH265} → ${auto.reason}` };
+        if (noH265) return { ...auto, reason: `H.265 fixado nas configurações, mas ${noH265} → ${auto.reason}` };
+        if (auto.codec !== "h264") {
+            // o espectador sem H.264 na placa ainda decodifica H.265 na placa: H.265 sem reserva H.264
+            return { codec: "h265", reason: "fixado nas configurações (H.265 por hardware nos dois lados, com a sonda do H.265 ok; sem reserva H.264 na placa para este espectador)" };
+        }
+        return {
+            codec: "h265", h264Profile: auto.h264Profile, ...(auto.h264Backup ? { h264Backup: auto.h264Backup } : {}),
+            reason: "fixado nas configurações (H.265 por hardware nos dois lados: este PC codifica H.265 na placa, com a sonda do H.265 ok, e o espectador "
+                + `decodifica H.265 na placa; reserva H.264 perfil ${auto.h264Profile ?? "?"}${auto.h264Backup ? `/${auto.h264Backup}` : ""})`
+        };
     }
 
     if (setting && setting !== "auto") {
@@ -356,19 +366,8 @@ export function chooseCodec(viewerCaps: ViewerCodecCaps | undefined, setting: Co
     }
 
     const viewerHw = viewerCaps?.h264HwDecode === true;
-    if (viewerHw && local.h264HwEncode && canSend("h264")) {
-        const reserve = chooseH264Hw(viewerCaps, local);
-        const noH265 = whyNoH265(viewerCaps, local);
-        if (!noH265) {
-            return {
-                codec: "h265", h264Profile: reserve.h264Profile, ...(reserve.h264Backup ? { h264Backup: reserve.h264Backup } : {}),
-                reason: "automático: H.265 por hardware nos dois lados (este PC codifica H.265 na placa, com a sonda do H.265 ok, e o espectador "
-                    + `decodifica H.265 na placa; reserva H.264 perfil ${reserve.h264Profile ?? "?"}${reserve.h264Backup ? `/${reserve.h264Backup}` : ""})`
-            };
-        }
-        // so num PC que codifica H.265 na placa o motivo do "sem H.265" interessa (os outros: a linha de antes)
-        return local.h265HwFmtp ? { ...reserve, reason: `${reserve.reason}; H.265 não: ${noH265}` } : reserve;
-    }
+    // o automatico nunca escolhe H.265 (so fixado): H.264 High → Baseline → VP9, como na v0.3.3
+    if (viewerHw && local.h264HwEncode && canSend("h264")) return chooseH264Hw(viewerCaps, local);
 
     return fallback(`automático: ${!viewerHw ? "o espectador não decodifica H.264 por hardware" : "este PC não codifica H.264 por hardware"}`);
 }

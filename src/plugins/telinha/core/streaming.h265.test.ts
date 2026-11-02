@@ -5,7 +5,7 @@
  */
 
 // H.265 de ponta a ponta no envio (core/streaming.ts → sendTo → chooseCodec → sendPlanFor → tick), com este PC
-// codificando 42001f, 640032 e H.265 Main na placa e as tres sondas WebCodecs ja "ok" neste ambiente. Cada espectador
+// codificando 42001f, 640032 e H.265 Main na placa, o H.265 fixado (ele e so manual) e as tres sondas ja "ok". Cada espectador
 // recebe o que a presenca dele permite (H.265 so com caps.hwDecode.h265; a v0.3.3 recebe o High). Quando algo falha no
 // ar, a culpa e do codec DE FATO no ar (o das estatisticas), nao do que a decisao pediu: um H.265 que trava ou sai da
 // placa marca o H.265 (nunca o registro do H.264); uma decisao H.265 negociada em H.264 que trava culpa o H.264.
@@ -56,6 +56,8 @@ before(async () => {
     await enterCall(rig, []);
     pluginSettings.set("autoQuality", false);
     pluginSettings.set("requireVerifiedIdentity", false);
+    // o H.265 e so manual
+    pluginSettings.set("codec", "h265");
     await startStreaming(screenOptions());
 });
 
@@ -88,17 +90,29 @@ const h265Stats = (over: Parameters<typeof videoSenderStats>[0] = {}) => videoSe
     bytesSent: 900_000, frameWidth: 1920, frameHeight: 1080, ...over
 });
 
-test("H.265 so para quem anuncia H.265 na placa (com o High de reserva); a v0.3.3 recebe o High; o log diz o codec, a reserva e o porque", async () => {
+test("H.265 fixado: so para quem anuncia H.265 na placa (com o High de reserva); a v0.3.3 recebe o High; o log diz o codec, a reserva e o porque", async () => {
     const since = logMark();
     const both = await watcher("ambos", BOTH);
     const v033 = await watcher("v033", { v: 1, h264High: true });
     const lines = since();
     assert.deepEqual(plan(both.peerId), { codec: "h265", h264Profile: "640032", h264Backup: "42001f", bitrate: undefined, label: undefined });
     assert.deepEqual(plan(v033.peerId), { codec: "h264", h264Profile: "640032", h264Backup: "42001f", bitrate: undefined, label: undefined });
-    assert.ok(lines.includes(`Enviando para ${both.label}: codec H265 (automático: H.265 por hardware nos dois lados (este PC codifica H.265 na placa, com a sonda do H.265 ok, `
-        + "e o espectador decodifica H.265 na placa; reserva H.264 perfil 640032/42001f))"), lines.join("\n"));
-    assert.ok(lines.some(l => l.startsWith(`Enviando para ${v033.label}: codec H264 (automático: H.264 High por hardware`) && l.endsWith("; H.265 não: o espectador não anuncia H.265 por hardware (não tem, ou é uma versão antiga do Telinha))")));
-    assert.ok(stuckEncoderDiagnostics().includes("H.265 automático ligado (só com quem anuncia H.265 por hardware)"));
+    assert.ok(lines.includes(`Enviando para ${both.label}: codec H265 (fixado nas configurações (H.265 por hardware nos dois lados: este PC codifica H.265 na placa, `
+        + "com a sonda do H.265 ok, e o espectador decodifica H.265 na placa; reserva H.264 perfil 640032/42001f))"), lines.join("\n"));
+    assert.ok(lines.some(l => l.startsWith(`Enviando para ${v033.label}: codec H264 (H.265 fixado nas configurações, mas o espectador não anuncia H.265 por hardware `
+        + "(não tem, ou é uma versão antiga do Telinha) → automático: H.264 High por hardware")), lines.join("\n"));
+    assert.ok(stuckEncoderDiagnostics().includes("H.265 fixado ligado (só com quem anuncia H.265 por hardware)"));
+});
+
+test("no automatico, nunca H.265 (nem com tudo ok): o High de antes", async () => {
+    pluginSettings.set("codec", "auto");
+    try {
+        const v = await watcher("auto", BOTH);
+        assert.deepEqual(plan(v.peerId), { codec: "h264", h264Profile: "640032", h264Backup: "42001f", bitrate: undefined, label: undefined });
+        assert.ok(stuckEncoderDiagnostics().includes("H.265 fixado desligado (o formato de vídeo não está em H.265)"));
+    } finally {
+        pluginSettings.set("codec", "h265");
+    }
 });
 
 test("Codificando para: o codec negociado de fato, com o nivel do H.265 (sem os x-google-*)", async () => {
@@ -199,7 +213,7 @@ test("H.265 fixado, espectador sem H.264 na placa (sem reserva): o outro lado ne
         assert.equal(plan(b.peerId).codec, "vp8");
         assert.equal(getLocalCaps().h265ProbeOk, true);
     } finally {
-        pluginSettings.set("codec", "auto");
+        pluginSettings.set("codec", "h265");
     }
 });
 
@@ -223,7 +237,7 @@ test("H.265 fixado sem reserva que sai da placa antes de soltar algo (checkStall
         assert.equal(h265ProbeRecord()?.verdict, "broken");
         assert.equal(stuckRecord(), null);
     } finally {
-        pluginSettings.set("codec", "auto");
+        pluginSettings.set("codec", "h265");
     }
 });
 

@@ -39,7 +39,8 @@
 //
 // H.265 (depois da v0.3.3; core/codec.ts): o mesmo desenho do High, com a SUA sonda (runH265Probe: um VideoEncoder
 // WebCodecs "hvc1.1.6.L<nivel>.B0" Main, h265ProbeCodec) e o seu resultado salvo (chave privada hwH265Probe, com o codec
-// testado), uma vez por ambiente. Ela so roda depois de a do Baseline dizer "ok" neste ambiente (e depois da do High),
+// testado), uma vez por ambiente, e SO com o H.265 fixado no formato de video (o automatico nunca usa H.265; fixado depois
+// do inicio, ela roda na hora: onCodecSettingChanged). Ela so roda depois de a do Baseline dizer "ok" neste ambiente (e depois da do High),
 // nunca com o H.264 da placa travado ou desligado (a placa AMD que trava com H.264 nunca cria um encoder H.265), nunca com
 // uma transmissao comecando ou no ar, e segura o H.264 da placa enquanto roda (hold "h265": o automatico vai em VP9 nesse
 // meio tempo, e nenhum encoder H.264/H.265 do WebRTC sobe ao lado do dela). Travou (ou ficou presa) duas vezes = "travou":
@@ -401,6 +402,15 @@ function settleChangedEnv(record: StuckRecord, env: EncoderEnv, verdict: ProbeVe
         + `ambiente não confirmou que ela funciona (${PROBE_LABEL[verdict]}): continua em VP9`);
 }
 
+/** O formato de video fixado em H.265 (o H.265 e so manual). Configuracoes indisponiveis = nao (o diagnostico continua). */
+function h265Forced(): boolean {
+    try {
+        return settings.store.codec === "h265";
+    } catch {
+        return false;
+    }
+}
+
 const canProbe = () => typeof (globalThis as { Worker?: unknown; }).Worker === "function";
 const streamBusy = () => streamStarting || !!rt.local;
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -515,10 +525,23 @@ export function settleH265(env: EncoderEnv, delayMs: number): Promise<void> | nu
         h265Note = `${PROBE_LABEL[done.verdict]} (feita em ${shortDate(done.at)} neste ambiente: ${done.detail})${done.source === "stream" ? " [visto numa transmissão]" : ""}`;
         return null;
     }
+    // o H.265 e so manual: sem ele fixado, a sonda nunca roda (a abertura do Discord custa o mesmo de antes)
+    if (!h265Forced()) return skip("só roda com o H.265 fixado no formato de vídeo");
     if (isH264HwStuck()) return skip("o H.264 da placa está desligado neste PC, e o H.265 vai junto");
     if (!baselineOkIn(env)) return skip("a sonda do H.264 Baseline não deu ok neste ambiente; sem H.265 nesta sessão");
     if (!canProbe()) return skip("sem Worker");
     return runH265Probe(env, codec, delayMs);
+}
+
+/**
+ * O formato de video mudou nas configuracoes (settings.ts → codec.onChange): fixado em H.265 depois do inicio da sessao,
+ * a sonda do H.265 roda agora (settleH265, as mesmas regras: nunca com uma transmissao comecando ou no ar, nem ao lado
+ * de outra sonda). Antes do inicio, ou com outra sonda rodando, quem vem depois (startLocalCaps, o botao) ja olha o
+ * formato. Devolve a promessa da sonda quando ela roda (null = nao roda).
+ */
+export function onCodecSettingChanged(): Promise<void> | null {
+    if (!h265Forced() || !started || !envNow || probeRunning || highProbeRunning || h265ProbeRunning) return null;
+    return settleH265(envNow, PROBE_START.delayMs);
 }
 
 /**
@@ -741,7 +764,7 @@ export async function runH265Probe(env: EncoderEnv, codec: string, delayMs = PRO
         if (result.verdict === "ok") {
             setH265ProbeOk(true);
             log.info(`Sonda WebCodecs do H.265 (${codec}) da placa de vídeo: ok (${result.detail}); `
-                + "o automático manda H.265 para quem também decodifica H.265 por hardware");
+                + "com o H.265 fixado, vai H.265 para quem também decodifica H.265 por hardware");
         } else if (result.verdict === "broken") {
             // antes de soltar a trava (finally): nenhum envio da placa comeca no meio
             setH264HwStuck(true);
@@ -896,6 +919,7 @@ export function stuckEncoderDiagnostics(): string {
         `H.265: codifica na placa ${caps.h265HwFmtp ? `sim (${caps.h265HwFmtp})` : "não"}, decodifica na placa ${caps.h265HwDecode ? "sim" : "não"}, `
         + `envia ${caps.sendable.has("h265") ? "sim" : "não (o Chromium não oferece)"}; sonda WebCodecs H.265: ${h265Note}`
         + `${savedH265 ? `; salva: ${PROBE_LABEL[savedH265.verdict]} em ${new Date(savedH265.at).toISOString()} (${savedH265.codec ?? "?"}: ${savedH265.detail})${savedH265.source === "stream" ? " [visto numa transmissão]" : ""}` : ""}; `
-        + `H.265 automático ${h265On ? "ligado (só com quem anuncia H.265 por hardware)" : "desligado"}`
+        + (!h265Forced() ? "H.265 fixado desligado (o formato de vídeo não está em H.265)"
+            : `H.265 fixado ${h265On ? "ligado (só com quem anuncia H.265 por hardware)" : "desligado"}`)
     ].join("\n");
 }

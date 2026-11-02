@@ -6,7 +6,7 @@
 
 // O PC do amigo de 31/10 (AMD Radeon RX 9070 XT) com H.265 na lista (core/stuckEncoder.ts → startLocalCaps): o
 // encodingInfo diz que a placa codifica 42001f, 640032 e H.265, mas o encoder H.264 dela trava. A sonda do Baseline trava
-// duas vezes, o PC fica marcado e as do High e do H.265 NUNCA rodam: nenhum encoder H.265 e criado, nem fixado em H.265.
+// duas vezes, o PC fica marcado e as do High e do H.265 NUNCA rodam: nenhum encoder H.265 e criado, mesmo com o H.265 fixado.
 // Um processo so para isto: o inicio roda uma vez por sessao do Discord.
 // Rodar:  pnpm test:file src/plugins/telinha/core/stuckEncoder.h265Amd.test.ts  (todos: pnpm test:unit)
 
@@ -45,7 +45,7 @@ test("o Baseline trava (confirmado): nenhuma sonda do H.265, nenhum H.265 (nem f
     rtpCapabilities.receiver = { ...rtpCapabilities.receiver, video };
     rtc.mediaCapabilities.hwEncode = ["42001f", "640032", "h265"];
     rtc.mediaCapabilities.hwDecode = ["42001f", "640032", "h265"];
-    pluginSettings.load({});
+    pluginSettings.load({ codec: "h265" });
     Object.assign(PROBE_START, { delayMs: 0, confirmMs: 0 });
     Object.assign(ENCODER_PROBE_TIMING, { configureMs: 40, noChunkMs: 60, flushMs: 60 });
 
@@ -61,5 +61,5 @@ test("o Baseline trava (confirmado): nenhuma sonda do H.265, nenhum H.265 (nem f
     assert.equal(chooseCodec(viewer, "auto").codec, "vp9");
     assert.equal(chooseCodec(viewer, "h265").codec, "vp9", "fixado em H.265 tambem nao");
     assert.ok(lines[0].includes("; sonda WebCodecs H.265: não feita (o H.264 da placa está desligado neste PC, e o H.265 vai junto)"), lines[0]);
-    assert.ok(stuckEncoderDiagnostics().includes("sonda WebCodecs H.265: não feita (o H.264 da placa está desligado neste PC, e o H.265 vai junto); H.265 automático desligado"));
+    assert.ok(stuckEncoderDiagnostics().includes("sonda WebCodecs H.265: não feita (o H.264 da placa está desligado neste PC, e o H.265 vai junto); H.265 fixado desligado"));
 });

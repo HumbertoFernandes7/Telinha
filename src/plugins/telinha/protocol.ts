@@ -126,8 +126,9 @@
 //    nunca anunciam High e recebem o Baseline de sempre; como transmissoras ignoram o campo de quem assiste.
 //    - h265 (depois da v0.3.3, a mesma `v`): este PC decodifica H.265 Main na placa de video (mediaCapabilities
 //      .decodingInfo "video/H265;<fmtp Main do receiver>", powerEfficient). O Chromium nao tem decodificador H.265 por
-//      software, entao sem isto o transmissor NUNCA manda H.265 (core/codec.ts → chooseCodec: H.265 so com a placa dos
-//      dois lados e a sonda WebCodecs do H.265 "ok" no transmissor; senao, o H.264 de antes).
+//      software, entao sem isto o transmissor NUNCA manda H.265 (core/codec.ts → chooseCodec: H.265 so com ele fixado
+//      no formato de video, a placa dos dois lados e a sonda WebCodecs do H.265 "ok" no transmissor; o automatico nunca
+//      o escolhe; senao, o H.264 de antes).
 //      Compatibilidade: a v0.3.3 le { v: 1, h264High: true, h265: true } como { v: 1, h264High: true } (o parse dela
 //      reconstroi o campo so com o h264High), e { v: 1, h265: true } como sem o campo: nunca manda H.265 e o High
 //      continua valendo. Como espectadora, a v0.3.3 nunca anuncia h265 e recebe o H.264 de sempre.

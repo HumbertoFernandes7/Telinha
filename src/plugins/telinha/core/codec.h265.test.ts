@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-// H.265 na escolha do codec (core/codec.ts → chooseCodec/whyNoH265/sortCodecs/measureLocalCaps): a ordem do automatico
-// H.265 → H.264 High → H.264 Baseline → VP9, as redes de seguranca (a placa dos dois lados, a sonda do H.265, o H.264 da
+// H.265 na escolha do codec (core/codec.ts → chooseCodec/whyNoH265/sortCodecs/measureLocalCaps): so manual (o automatico
+// continua H.264 High → H.264 Baseline → VP9), as redes de seguranca (a placa dos dois lados, a sonda do H.265, o H.264 da
 // placa ligado), o espectador de outra versao (v0.3.3 sem caps.hwDecode.h265) e o H.265 fixado nas configuracoes. As
 // capacidades e o fmtp sao os do Chrome 156 numa RTX 3070 (sender "level-id=123;profile-id=1;tier-flag=0;tx-mode=SRST").
 // Rodar:  pnpm test:file src/plugins/telinha/core/codec.h265.test.ts  (todos: pnpm test:unit)
@@ -52,16 +52,27 @@ const V032 = { h264HwDecode: true };
 const NO_HW = { h264HwDecode: false, hwDecode: { v: 1, h265: true } };
 const FUTURE = { h264HwDecode: true, hwDecode: { v: 2, h264High: true, h265: true } };
 
-const H265_REASON = "automático: H.265 por hardware nos dois lados (este PC codifica H.265 na placa, com a sonda do H.265 ok, e o espectador "
+const H265_REASON = "fixado nas configurações (H.265 por hardware nos dois lados: este PC codifica H.265 na placa, com a sonda do H.265 ok, e o espectador "
     + "decodifica H.265 na placa; reserva H.264 perfil 640032/42001f)";
 
-describe("chooseCodec com H.265: a ordem do automatico", () => {
+describe("automatico: nunca H.265 (so manual), a ordem de antes", () => {
+    test("os dois lados com H.265 na placa e a sonda ok: o automatico continua High → Baseline → VP9, com o motivo de antes", () => {
+        const both = chooseCodec(BOTH, "auto", pc());
+        assert.deepEqual([both.codec, both.h264Profile, both.h264Backup], ["h264", "640032", "42001f"]);
+        assert.ok(!both.reason.includes("H.265"), both.reason);
+        assert.deepEqual([chooseCodec(H265_ONLY, "auto", pc()).codec, chooseCodec(H265_ONLY, "auto", pc()).h264Profile], ["h264", "42001f"]);
+        assert.equal(chooseCodec(NO_HW, "auto", pc()).codec, "vp9");
+        assert.deepEqual(chooseCodec(BOTH, "auto", pc({ h264HwEncode: false })), { codec: "vp9", reason: "automático: este PC não codifica H.264 por hardware → VP9" });
+    });
+});
+
+describe("H.265 fixado: decisao e versoes", () => {
     test("os dois lados com H.265 na placa e a sonda ok: H.265, com o High (e o Baseline) de reserva", () => {
-        assert.deepEqual(chooseCodec(BOTH, "auto", pc()), { codec: "h265", h264Profile: "640032", h264Backup: "42001f", reason: H265_REASON });
+        assert.deepEqual(chooseCodec(BOTH, "h265", pc()), { codec: "h265", h264Profile: "640032", h264Backup: "42001f", reason: H265_REASON });
     });
 
     test("o espectador sem High mas com H.265: H.265 com o Baseline de reserva", () => {
-        const d = chooseCodec(H265_ONLY, "auto", pc());
+        const d = chooseCodec(H265_ONLY, "h265", pc());
         assert.equal(d.codec, "h265");
         assert.equal(d.h264Profile, "42001f");
         assert.equal(d.h264Backup, undefined);
@@ -69,40 +80,31 @@ describe("chooseCodec com H.265: a ordem do automatico", () => {
     });
 
     test("versoes antigas: a v0.3.3 (so High) recebe High, a v0.3.2 o Baseline, uma versao futura do campo nunca H.265; o motivo diz o porque", () => {
-        const v033 = chooseCodec(V033, "auto", pc());
-        assert.equal(v033.codec, "h264");
-        assert.equal(v033.h264Profile, "640032");
-        assert.match(v033.reason, /; H\.265 não: o espectador não anuncia H\.265 por hardware \(não tem, ou é uma versão antiga do Telinha\)$/);
-        assert.deepEqual([chooseCodec(V032, "auto", pc()).codec, chooseCodec(V032, "auto", pc()).h264Profile], ["h264", "42001f"]);
+        const v033 = chooseCodec(V033, "h265", pc());
+        assert.deepEqual([v033.codec, v033.h264Profile], ["h264", "640032"]);
+        assert.match(v033.reason, /^H\.265 fixado nas configurações, mas o espectador não anuncia H\.265 por hardware \(não tem, ou é uma versão antiga do Telinha\) → automático: H\.264 High/);
+        assert.deepEqual([chooseCodec(V032, "h265", pc()).codec, chooseCodec(V032, "h265", pc()).h264Profile], ["h264", "42001f"]);
         // outra `v` (o sanitizePresence ja a descarta; aqui chega crua): nunca H.265
-        assert.equal(chooseCodec(FUTURE, "auto", pc()).codec, "h264");
+        assert.equal(chooseCodec(FUTURE, "h265", pc()).codec, "h264");
     });
 
-    test("este PC: sem H.265 na placa, sem a sonda do H.265 ok, ou um Chromium que nao oferece H.265: o H.264 de antes", () => {
-        const noHw = chooseCodec(BOTH, "auto", pc({ h265HwFmtp: null }));
+    test("este PC: sem H.265 na placa, sem a sonda do H.265 ok, ou um Chromium que nao oferece H.265: o H.264 do automatico", () => {
+        const noHw = chooseCodec(BOTH, "h265", pc({ h265HwFmtp: null }));
         assert.deepEqual([noHw.codec, noHw.h264Profile], ["h264", "640032"]);
-        assert.ok(!noHw.reason.includes("H.265"), "sem H.265 na placa: a linha de antes");
-        const noProbe = chooseCodec(BOTH, "auto", pc({ h265ProbeOk: false }));
-        assert.equal(noProbe.codec, "h264");
-        assert.match(noProbe.reason, /H\.265 não: a sonda WebCodecs do H\.265 não passou neste PC$/);
-        const edge = chooseCodec(BOTH, "auto", pc({ sendable: new Set(["vp8", "h264", "vp9"]) }));
+        assert.match(noHw.reason, /^H\.265 fixado nas configurações, mas este PC não codifica H\.265 por hardware → /);
+        const edge = chooseCodec(BOTH, "h265", pc({ sendable: new Set(["vp8", "h264", "vp9"]) }));
         assert.equal(edge.codec, "h264");
-        assert.match(edge.reason, /H\.265 não: este cliente não envia H\.265/);
-        assert.equal(chooseCodec(BOTH, "auto", pc({ sendable: new Set() })).codec, "h264", "lista de envio desconhecida: nunca H.265");
+        assert.match(edge.reason, /mas este cliente não envia H\.265/);
+        assert.equal(chooseCodec(BOTH, "h265", pc({ sendable: new Set() })).codec, "h264", "lista de envio desconhecida: nunca H.265");
     });
 
     test("medido antes desta versao (sem os campos do H.265): nunca H.265", () => {
         const { h265HwDecode: _d, h265HwFmtp: _f, h265ProbeOk: _p, ...old } = pc();
-        assert.equal(chooseCodec(BOTH, "auto", old as LocalCodecCaps).codec, "h264");
+        assert.equal(chooseCodec(BOTH, "h265", old as LocalCodecCaps).codec, "h264");
     });
 
-    test("a placa travada, uma sonda segurando o H.264 ou as quedas (h264HwEncode false): nem H.265 nem H.264, VP9 (a placa AMD nunca cria um encoder H.265)", () => {
-        assert.deepEqual(chooseCodec(BOTH, "auto", pc({ h264HwEncode: false })), { codec: "vp9", reason: "automático: este PC não codifica H.264 por hardware → VP9" });
+    test("a placa travada, uma sonda segurando o H.264 ou as quedas (h264HwEncode false): VP9 (a placa AMD nunca cria um encoder H.265)", () => {
         assert.equal(whyNoH265(BOTH, pc({ h264HwEncode: false })), "o H.264 da placa está desligado neste PC (travou, sonda rodando ou quedas para software), e o H.265 vai junto");
-    });
-
-    test("o espectador sem H.264 na placa: VP9 no automatico (o H.265 so entra no ramo da placa)", () => {
-        assert.equal(chooseCodec(NO_HW, "auto", pc()).codec, "vp9");
     });
 });
 
@@ -141,7 +143,7 @@ describe("H.265 fixado nas configuracoes: as mesmas redes de seguranca", () => {
 
 describe("a reserva H.264 de um envio H.265", () => {
     test("h264ReserveOf: a decisao H.264 que a negociacao leva logo depois do H.265", () => {
-        const d = chooseCodec(BOTH, "auto", pc());
+        const d = chooseCodec(BOTH, "h265", pc());
         assert.deepEqual(h264ReserveOf(d, "x"), { codec: "h264", h264Profile: "640032", h264Backup: "42001f", reason: "x" });
         assert.equal(h264ReserveOf({ codec: "h265", reason: "" }, "x"), null, "sem reserva");
         assert.equal(h264ReserveOf({ codec: "h264", h264Profile: "42001f", reason: "" }, "x"), null, "nao e H.265");

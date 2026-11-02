@@ -25,7 +25,7 @@ import { type FakeWorker, healthyProbe, installWorker, stuckProbe, type WorkerEn
 import { chooseCodec, getLocalCaps, setH264HwStuck } from "./codec";
 import { ENCODER_PROBE_TIMING } from "./encoderProbe";
 import {
-    type EncoderEnv, forgetStuckEncoder, h265ProbeCodec, h265ProbeRecord, noteH265Failed, noteStreamStarting, noteStuckEncoder, PROBE_START, probeRecord,
+    type EncoderEnv, forgetStuckEncoder, h265ProbeCodec, h265ProbeRecord, noteH265Failed, noteStreamStarting, noteStuckEncoder, onCodecSettingChanged, PROBE_START, probeRecord,
     runH265Probe, settleH265, startLocalCaps, stuckEncoderDiagnostics, stuckRecord
 } from "./stuckEncoder";
 
@@ -68,7 +68,8 @@ before(() => {
     native = installNative({
         gpuEnvironment: async () => ({ vendorId: 0x10de, deviceId: 0x2484, driverVersion: NV_ENV.driver, chrome: NV_ENV.chrome, discord: NV_ENV.discord, error: null })
     });
-    pluginSettings.load({});
+    // o H.265 e so manual: a sonda dele so roda com ele fixado
+    pluginSettings.load({ codec: "h265" });
     Object.assign(PROBE_START, { delayMs: 0, confirmMs: 0 });
     Object.assign(ENCODER_PROBE_TIMING, { configureMs: 40, noChunkMs: 60, flushMs: 60 });
 });
@@ -95,13 +96,13 @@ describe("inicio da sessao num ambiente novo", () => {
         assert.match(lines[0], new RegExp(`H\\.265 por hardware — decodifica: sim, codifica: sim \\(${H265_SEND}\\); placa de vídeo 10de:2484, `));
         assert.ok(lines[0].endsWith(`; sonda WebCodecs H.264 High: ok (${OK_DETAIL}); sonda WebCodecs H.265: ok (${OK_DETAIL})`), lines[0]);
         assert.deepEqual({ ...h265ProbeRecord()!, at: 0 }, { at: 0, env: NV_ENV, verdict: "ok", detail: OK_DETAIL, codec: CODEC });
-        assert.ok(since().includes(`info: Sonda WebCodecs do H.265 (${CODEC}) da placa de vídeo: ok (${OK_DETAIL}); o automático manda H.265 para quem também decodifica H.265 por hardware`));
+        assert.ok(since().includes(`info: Sonda WebCodecs do H.265 (${CODEC}) da placa de vídeo: ok (${OK_DETAIL}); com o H.265 fixado, vai H.265 para quem também decodifica H.265 por hardware`));
 
         assert.equal(getLocalCaps().h265ProbeOk, true);
-        assert.deepEqual({ ...chooseCodec(BOTH, "auto"), reason: "" }, { codec: "h265", h264Profile: "640032", h264Backup: "42001f", reason: "" });
+        assert.deepEqual({ ...chooseCodec(BOTH, "h265"), reason: "" }, { codec: "h265", h264Profile: "640032", h264Backup: "42001f", reason: "" });
         assert.equal(chooseCodec(V033, "auto").h264Profile, "640032", "espectador na v0.3.3: o High de antes");
         assert.match(h265Line()!, new RegExp(`^H\\.265: codifica na placa sim \\(${H265_SEND}\\), decodifica na placa sim, envia sim; sonda WebCodecs H\\.265: ok \\(${OK_DETAIL}\\); `
-            + `salva: ok em \\S+ \\(${CODEC}: ${OK_DETAIL}\\); H\\.265 automático ligado \\(só com quem anuncia H\\.265 por hardware\\)$`));
+            + `salva: ok em \\S+ \\(${CODEC}: ${OK_DETAIL}\\); H\\.265 fixado ligado \\(só com quem anuncia H\\.265 por hardware\\)$`));
         workers.restore();
         workers = null;
     });
@@ -115,7 +116,7 @@ describe("settleH265: o resultado salvo deste ambiente, ou por que a sonda nao r
         pluginSettings.set("hwH265Probe", { at: AT, env: NV_ENV, verdict: "broken", detail: "x", codec: CODEC, source: "stream" });
         assert.equal(settleH265(NV_ENV, 0), null);
         assert.equal(getLocalCaps().h265ProbeOk, false);
-        assert.match(h265Line()!, /sonda WebCodecs H\.265: travou \(feita em 02\/11 neste ambiente: x\) \[visto numa transmissão\]; salva: travou .* H\.265 automático desligado$/);
+        assert.match(h265Line()!, /sonda WebCodecs H\.265: travou \(feita em 02\/11 neste ambiente: x\) \[visto numa transmissão\]; salva: travou .* H\.265 fixado desligado$/);
         assert.equal(chooseCodec(BOTH, "auto").codec, "h264", "o H.265 travado: o High");
         assert.equal(workers.instances.length, 0);
 
@@ -149,6 +150,29 @@ describe("settleH265: o resultado salvo deste ambiente, ou por que a sonda nao r
         assert.match(h265Line()!, /não feita \(sem Worker\)/);
     });
 
+    test("no automatico (o H.265 nao fixado) a sonda nunca roda; fixar o H.265 depois do inicio roda ela na hora", async () => {
+        pluginSettings.set("hwH265Probe", null);
+        pluginSettings.set("codec", "auto");
+        workers = installWorker(healthyProbe());
+        try {
+            assert.equal(settleH265(NV_ENV, 0), null);
+            assert.match(h265Line()!, /sonda WebCodecs H\.265: não feita \(só roda com o H\.265 fixado no formato de vídeo\)/);
+            assert.equal(onCodecSettingChanged(), null, "o automatico: nada");
+            assert.equal(workers.instances.length, 0, "nenhum encoder H.265 criado");
+            // o onChange da opcao (settings.ts) chama onCodecSettingChanged: a sonda roda na hora
+            pluginSettings.set("codec", "h265");
+            assert.equal(onCodecSettingChanged(), null, "ja rodando: nao abre outra");
+            await eventually(() => h265ProbeRecord()?.verdict === "ok");
+            assert.equal(workers.instances.length, 1);
+            assert.equal(h265ProbeRecord()?.verdict, "ok");
+            assert.equal(chooseCodec(BOTH, "h265").codec, "h265");
+            assert.equal(chooseCodec(BOTH, "auto").codec, "h264", "o automatico nunca usa H.265, nem com a sonda ok");
+        } finally {
+            pluginSettings.set("codec", "h265");
+            workers.restore();
+        }
+    });
+
     test("h265ProbeCodec: o nivel do level-id do Chromium; sem ele, L120", () => {
         assert.equal(h265ProbeCodec(H265_SEND), CODEC);
         assert.equal(h265ProbeCodec("profile-id=1"), "hvc1.1.6.L120.B0");
@@ -173,7 +197,7 @@ describe("runH265Probe", () => {
         healthyProbe()(held!, null);
         await run;
         assert.equal(getLocalCaps().h264HwEncode, true, "solto");
-        assert.equal(chooseCodec(BOTH, "auto").codec, "h265");
+        assert.equal(chooseCodec(BOTH, "h265").codec, "h265");
         workers.restore();
     });
 
@@ -239,7 +263,7 @@ describe("runH265Probe", () => {
         assert.equal(workers.instances.length, 2, "a 2a rodada confirma");
         assert.equal(workers.instances[0].terminated, false);
         assert.deepEqual({ ...h265ProbeRecord()!, at: 0 }, { at: 0, env: NV_ENV, verdict: "ok", detail: `${OK_DETAIL} (a 1ª rodada tinha travado: ${STUCK})`, codec: CODEC });
-        assert.equal(chooseCodec(BOTH, "auto").codec, "h265");
+        assert.equal(chooseCodec(BOTH, "h265").codec, "h265");
         workers.restore();
     });
 
@@ -289,7 +313,7 @@ describe("falhas no ar e o botao", () => {
     test("noteH265Failed: travou salvo para o H.265 (source stream), o H.265 sai agora; nada do H.264", async () => {
         pluginSettings.set("hwH265Probe", { at: AT, env: NV_ENV, verdict: "ok", detail: "x", codec: CODEC });
         settleH265(NV_ENV, 0);
-        assert.equal(chooseCodec(BOTH, "auto").codec, "h265");
+        assert.equal(chooseCodec(BOTH, "h265").codec, "h265");
         noteH265Failed("o WebRTC trocou o H.265 por H264");
         assert.equal(chooseCodec(BOTH, "auto").codec, "h264");
         await eventually(() => h265ProbeRecord()?.verdict === "broken");

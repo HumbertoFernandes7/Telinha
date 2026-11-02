@@ -12,6 +12,7 @@ import { isIdentityConfigured } from "@plugins/telinha/core/identity/config";
 import { migrateQualitySetting } from "@plugins/telinha/core/quality/choice";
 import { onAdmissionSettingChanged, onPasswordChanged } from "@plugins/telinha/core/session";
 import { onApprovalPolicyChanged, onAutoQualitySettingChanged } from "@plugins/telinha/core/streaming";
+import { onCodecSettingChanged } from "@plugins/telinha/core/stuckEncoder";
 import { onJitterCushionChanged } from "@plugins/telinha/core/viewing";
 import { captureBoostStatusElement } from "@plugins/telinha/ui/CaptureBoostStatus";
 import { OptionType } from "@utils/types";
@@ -113,8 +114,8 @@ export const settings = definePluginSettings({
     codec: {
         type: OptionType.SELECT,
         displayName: "Formato de vídeo (codec)",
-        description: "Codec de vídeo ao transmitir. Automático: H.265 ou H.264 quando o seu PC codifica e o do amigo decodifica por hardware; senão VP9. "
-            + "H.265 só vai com a placa de vídeo dos dois lados e o teste dela ok neste PC; senão, vai o que o automático escolher.",
+        description: "Codec de vídeo ao transmitir. Automático: H.264 quando o seu PC codifica e o do amigo decodifica por hardware; senão VP9. "
+            + "H.265 só ajuda com internet boa; com internet fraca pode perder fps. Ele só vai com a placa de vídeo dos dois lados; senão, vai o do automático.",
         options: [
             { label: "Automático (recomendado)", value: "auto", default: true },
             { label: "H.265", value: "h265" },
@@ -122,7 +123,9 @@ export const settings = definePluginSettings({
             { label: "VP8", value: "vp8" },
             { label: "VP9", value: "vp9" },
             { label: "AV1", value: "av1" }
-        ]
+        ],
+        // fixado em H.265: a sonda dele roda agora (so com ele fixado)
+        onChange: () => void onCodecSettingChanged()
     },
     autoUpdate: {
         type: OptionType.BOOLEAN,
