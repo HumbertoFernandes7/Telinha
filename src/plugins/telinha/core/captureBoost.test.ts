@@ -255,8 +255,11 @@ describe("diagnostico", () => {
 describe("prioridade da captura na placa de video", () => {
     const P = "Prioridade da captura na placa de vídeo";
     const both = (before: string | null, after: string | null, error: string | null = null): GpuPriorityReport["targets"] => [
-        { pid: 1234, role: "Discord", before, after, error }, { pid: 5678, role: "GPU", before, after, error }
+        { pid: 1234, role: "Discord", before, after, kept: false, error }, { pid: 5678, role: "GPU", before, after, kept: false, error }
     ];
+    /** como o main descreve o processo da GPU que o Discord ja deixou em REALTIME (o Telinha nao mexe) */
+    const gpuRealtime: GpuPriorityReport["targets"][number] = { pid: 5678, role: "GPU", before: "REALTIME", after: "REALTIME", kept: true, error: null };
+    const NORMAL_TO_HIGH = "Discord NORMAL→HIGH, GPU do Discord NORMAL→HIGH";
     const report = (patch: Partial<GpuPriorityReport> = {}): GpuPriorityReport => ({
         mode: "high", ok: true, done: 2, hags: "on", reason: null, refused: false, raised: 2, quiet: false, notes: [], targets: both("NORMAL", "HIGH"), ...patch
     });
@@ -283,7 +286,7 @@ describe("prioridade da captura na placa de video", () => {
         await flush();
         assert.deepEqual(priorityCalls(), ["high"]);
         assert.equal(messages().at(-1), `${P}: alta — Discord 1234 NORMAL→HIGH, GPU do Discord 5678 NORMAL→HIGH; HAGS ligado`);
-        assert.deepEqual(captureBoostLines(), [`${P}: alta nesta transmissão.`]);
+        assert.deepEqual(captureBoostLines(), [`${P}: alta nesta transmissão — ${NORMAL_TO_HIGH}.`]);
         assert.match(captureBoostDiagnostics().split("\n")[1], /^prioridade da captura na placa de vídeo: opção ligada; agora alta \(pedida nesta transmissão\); última: alta — Discord 1234/);
 
         // trocar de fonte: continua alta, sem pedir de novo
@@ -296,12 +299,30 @@ describe("prioridade da captura na placa de video", () => {
         await flush();
         assert.deepEqual(priorityCalls(), ["high", "restore"]);
         assert.equal(messages().at(-1), `${P}: de volta ao normal (transmissão encerrada) — Discord 1234 HIGH→NORMAL, GPU do Discord 5678 HIGH→NORMAL; HAGS ligado`);
-        assert.deepEqual(captureBoostLines(), [`${P}: vale quando você transmitir (na última vez ficou alta).`]);
+        assert.deepEqual(captureBoostLines(), [`${P}: vale quando você transmitir (na última vez ficou alta) — ${NORMAL_TO_HIGH}.`]);
 
         // parar de novo: nada a voltar
         noteCaptureStopped();
         await flush();
         assert.deepEqual(priorityCalls(), ["high", "restore"]);
+    });
+
+    test("o processo da GPU ja em REALTIME: o log e a pagina dizem 'já estava REALTIME', na subida e na volta", async () => {
+        // o log do dono em 02/11/2026 dizia "GPU do Discord 17188 REALTIME→HIGH", e a volta nem citava o processo da GPU
+        pluginSettings.load({ gpuPriority: true });
+        nativeWith(
+            report({ raised: 1, targets: [both("NORMAL", "HIGH")[0], gpuRealtime] }),
+            restored({ targets: [both("HIGH", "NORMAL")[0], gpuRealtime] })
+        );
+        noteCaptureStarted();
+        await flush();
+        assert.equal(getEventLog().at(-1)!.level, "info");
+        assert.equal(messages().at(-1), `${P}: alta — Discord 1234 NORMAL→HIGH, GPU do Discord 5678 já estava REALTIME; HAGS ligado`);
+        assert.deepEqual(captureBoostLines(), [`${P}: alta nesta transmissão — Discord NORMAL→HIGH, GPU do Discord já estava REALTIME.`]);
+        assert.match(captureBoostDiagnostics().split("\n")[1], /; última: alta — Discord 1234 NORMAL→HIGH, GPU do Discord 5678 já estava REALTIME; HAGS ligado$/);
+        noteCaptureStopped();
+        await flush();
+        assert.equal(messages().at(-1), `${P}: de volta ao normal (transmissão encerrada) — Discord 1234 HIGH→NORMAL, GPU do Discord 5678 já estava REALTIME; HAGS ligado`);
     });
 
     test("o Windows recusa: a transmissao segue; aviso no log e 'não foi possível: o Windows recusou (talvez precise de administrador)'", async () => {
@@ -322,20 +343,23 @@ describe("prioridade da captura na placa de video", () => {
         pluginSettings.load({ gpuPriority: true });
         const partial = report({ ok: false, done: 1, refused: true, raised: 1, hags: null });
         partial.targets[1] = { ...partial.targets[1], before: null, after: null, error: "open 0x80070005 Acesso negado." };
-        const cases: [GpuPriorityReport, string, string][] = [
-            [partial, "alta em 1 de 2 processos do Discord; no resto, o Windows recusou (talvez precise de administrador)", " — Discord 1234 NORMAL→HIGH, GPU do Discord 5678 open 0x80070005 Acesso negado.; HAGS desconhecido"],
-            [report({ ok: false, done: 1, refused: false, targets: [partial.targets[0], { ...partial.targets[1], error: "sem resposta do ajudante" }] }), "alta em 1 de 2 processos do Discord", " — Discord 1234 NORMAL→HIGH, GPU do Discord 5678 sem resposta do ajudante; HAGS ligado"],
-            [report({ ok: false, done: 0, reason: "o ajudante do Telinha (telinha-audio.exe) não foi instalado", targets: both(null, null) }), "não foi possível: o ajudante do Telinha (telinha-audio.exe) não foi instalado", "; HAGS ligado"],
-            [report({ ok: false, done: 0, targets: both(null, null, "tree 0x80070005") }), "não foi possível: detalhes em \"Copiar diagnóstico\"", " — Discord 1234 tree 0x80070005, GPU do Discord 5678 tree 0x80070005; HAGS ligado"]
+        // [relatorio, resultado, resto da linha do log, resto da linha da pagina (sem pids; o que nao mudou nao diz o erro)]
+        const cases: [GpuPriorityReport, string, string, string][] = [
+            [partial, "alta em 1 de 2 processos do Discord; no resto, o Windows recusou (talvez precise de administrador)", " — Discord 1234 NORMAL→HIGH, GPU do Discord 5678 open 0x80070005 Acesso negado.; HAGS desconhecido",
+                " — Discord NORMAL→HIGH, GPU do Discord não mudou"],
+            [report({ ok: false, done: 1, refused: false, targets: [partial.targets[0], { ...partial.targets[1], error: "sem resposta do ajudante" }] }), "alta em 1 de 2 processos do Discord", " — Discord 1234 NORMAL→HIGH, GPU do Discord 5678 sem resposta do ajudante; HAGS ligado",
+                " — Discord NORMAL→HIGH, GPU do Discord não mudou"],
+            [report({ ok: false, done: 0, reason: "o ajudante do Telinha (telinha-audio.exe) não foi instalado", targets: both(null, null) }), "não foi possível: o ajudante do Telinha (telinha-audio.exe) não foi instalado", "; HAGS ligado", ""],
+            [report({ ok: false, done: 0, targets: both(null, null, "tree 0x80070005") }), "não foi possível: detalhes em \"Copiar diagnóstico\"", " — Discord 1234 tree 0x80070005, GPU do Discord 5678 tree 0x80070005; HAGS ligado", ""]
         ];
-        for (const [high, outcome, rest] of cases) {
+        for (const [high, outcome, rest, page] of cases) {
             resetCaptureBoostForTests();
             env?.restore();
             nativeWith(high, restored({ targets: [] }));
             noteCaptureStarted();
             await flush();
             assert.equal(messages().at(-1), `${P}: ${outcome}${rest}`);
-            assert.deepEqual(captureBoostLines(), [`${P}: ${outcome}.`]);
+            assert.deepEqual(captureBoostLines(), [`${P}: ${outcome}${page}.`]);
         }
     });
 
@@ -352,7 +376,7 @@ describe("prioridade da captura na placa de video", () => {
 
         resetCaptureBoostForTests();
         env!.restore();
-        nativeWith(report(), restored({ ok: false, done: 1, targets: [both("HIGH", "NORMAL")[0], { pid: 5678, role: "GPU", before: null, after: null, error: "open 0x80070057 O parâmetro está incorreto." }] }));
+        nativeWith(report(), restored({ ok: false, done: 1, targets: [both("HIGH", "NORMAL")[0], { pid: 5678, role: "GPU", before: null, after: null, kept: false, error: "open 0x80070057 O parâmetro está incorreto." }] }));
         noteCaptureStarted();
         await flush();
         noteCaptureStopped();

@@ -6,7 +6,8 @@
 /*
  * The REAL telinha-audio.exe of the built payload, in its one-shot modes (whole-screen audio is run-main-test.mjs S1's
  * --probe): --version, and --gpu-priority, which sets the GPU scheduling priority class of processes in the caller's own
- * process tree (the plugin calls it for Discord's main and GPU processes while streaming, core/captureBoostMain.ts).
+ * process tree (the plugin calls it for Discord's main and GPU processes while streaming, core/captureBoostMain.ts, with
+ * --raise so that a class already at HIGH or above is never lowered, and back with --if-class high).
  *
  *   node addon/test/run-helper-test.mjs [--payload <dir>]       (also run by `pnpm test:addon`, after build:addon)
  *
@@ -63,13 +64,16 @@ function setClass(label, pid, cls) {
 console.log("H1 version");
 {
     const r = run("--version");
-    check("--version says telinha-audio 2 (the --gpu-priority mode)", r.code === 0 && r.out[0] === "telinha-audio 2", r);
+    check("--version says telinha-audio 3 (--gpu-priority with --raise / --if-class)", r.code === 0 && r.out[0] === "telinha-audio 3", r);
 }
 
 // ---------------------------------------------------------------------------------------------- H2 this process
 console.log("H2 --gpu-priority on the caller (what the plugin does with Discord main)");
+/** Windows accepted HIGH on this process (a runner may refuse: H5 then only checks the protocol) */
+let accepted = false;
 {
     const up = setClass("HIGH on this node process", process.pid, "high");
+    accepted = up.code === 0;
     if (up.code === 0) {
         const down = setClass("back to NORMAL", process.pid, "normal");
         check("the class stayed HIGH after the helper exited (read back as 'before' by the next call)", down.before === "HIGH" && down.after === "NORMAL", down);
@@ -121,11 +125,50 @@ console.log("H4 refusals: outside the caller's tree, REALTIME, bad arguments");
         ["--gpu-priority", String(process.pid), "--class", "turbo"],
         ["--gpu-priority", String(process.pid), "--class", "high", "--probe"],
         ["--gpu-priority", String(process.pid), "--class", "high", "--parent", String(process.pid)],
-        ["--gpu-priority", String(process.pid), "--class", "high", "--class", "normal"]
+        ["--gpu-priority", String(process.pid), "--class", "high", "--class", "normal"],
+        ["--gpu-priority", String(process.pid), "--class", "high", "--raise", "--if-class", "high"],
+        ["--gpu-priority", String(process.pid), "--class", "high", "--raise", "--raise"],
+        ["--gpu-priority", String(process.pid), "--class", "normal", "--if-class", "realtime"],
+        ["--gpu-priority", String(process.pid), "--class", "normal", "--if-class"],
+        ["--probe", "--raise"],
+        ["--sessions", "--if-class", "high"]
     ];
     for (const args of bad) {
         const b = run(...args);
         check(`usage error: ${args.join(" ")}`, b.code === 2 && b.out.length === 0 && /^error usage 0x80070057 /.test(b.err), b);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------- H5 raise / if-class
+console.log("H5 --raise never lowers; --if-class only changes a process still in that class (what the plugin does)");
+{
+    const keepLine = pid => new RegExp(`^keep pid=${pid} class=([A-Z_]+|CLASS-?\\d+)$`);
+    /** One conditional call on this process: exit 0 with "ok ..." or "keep ...", or exit 6 with an error line. */
+    const call = (label, cls, ...extra) => {
+        const r = run("--gpu-priority", String(process.pid), "--class", cls, ...extra);
+        const ok = r.out[1] && okLine(process.pid).exec(r.out[1]);
+        const keep = r.out[1] && keepLine(process.pid).exec(r.out[1]);
+        const fine = r.out.length === 2 && HAGS_RE.test(r.out[0]) && r.err === ""
+            && (r.code === 0 ? !!(ok || keep) : r.code === 6 && errorLine(process.pid, "open|get|set").test(r.out[1]));
+        console.log(`        (${label}: exit ${r.code}, ${JSON.stringify(r.out)})`);
+        check(`${label}: protocol (hags line + one ok/keep/error line, exit 0/6)`, fine, r);
+        return { ...r, before: ok?.[1] ?? null, after: ok?.[2] ?? null, kept: keep?.[1] ?? null };
+    };
+    const start = accepted ? setClass("this process at NORMAL to start", process.pid, "normal") : null;
+    if (start?.code === 0) {
+        const up = call("--raise from NORMAL", "high", "--raise");
+        check("--raise from NORMAL sets HIGH", up.before === "NORMAL" && up.after === "HIGH", up);
+        const again = call("--raise again", "high", "--raise");
+        check("--raise on a process already at HIGH leaves it (keep class=HIGH)", again.kept === "HIGH", again);
+        const lower = call("--raise to a lower class", "above_normal", "--raise");
+        check("--raise never lowers (above_normal over HIGH: keep class=HIGH)", lower.kept === "HIGH", lower);
+        const other = call("--if-class of another class", "normal", "--if-class", "above_normal");
+        check("--if-class leaves a process that is in another class (keep class=HIGH)", other.kept === "HIGH", other);
+        const back = call("--if-class high back to NORMAL", "normal", "--if-class", "high");
+        check("--if-class high puts a process still at HIGH back to NORMAL", back.before === "HIGH" && back.after === "NORMAL", back);
+    } else {
+        call("--raise on a machine that refused HIGH", "high", "--raise");
+        console.log("        (this machine refused the change: only the protocol is checked)");
     }
 }
 
