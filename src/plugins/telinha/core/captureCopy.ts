@@ -146,14 +146,17 @@ export const COPY_FLOW_POLLS = 2;
  * dos quadros e os amigos viam 18 a 39 fps). Numa janela de COPY_RATE_POLLS respostas (~12 s), se o gerador aceitou menos que
  * COPY_RATE_MIN dos quadros que o Worker leu, em 2 avaliacoes seguidas (um tropeco de 1 a 2 s nao derruba a copia a transmissao
  * inteira): onFail. COPY_RATE_MIN_FRAMES e o minimo de quadros lidos na janela, para a tela parada (quase nenhum quadro) nunca
- * contar. Nos primeiros COPY_RATE_GRACE_MS depois de ligar a copia nada e avaliado (aquecimento da placa e do encoder). Uma mudanca
- * de tamanho da captura recomeca a janela.
+ * contar. Nos primeiros COPY_RATE_GRACE_MS depois de ligar a copia nenhuma resposta entra na janela (aquecimento da placa e do
+ * encoder): a primeira janela comeca depois dele. Uma mudanca de tamanho da captura recomeca a janela, mas so COPY_RATE_RESIZE_RESETS
+ * vezes por COPY_RATE_RESIZE_WINDOW_MS: a fonte que muda de tamanho o tempo todo continua sendo julgada pela taxa de quadros.
  */
 export const COPY_RATE_MIN = 0.75;
 export const COPY_RATE_POLLS = 6;
 export const COPY_RATE_MIN_FRAMES = 60;
 export const COPY_RATE_FAILS = 2;
 export const COPY_RATE_GRACE_MS = 10_000;
+export const COPY_RATE_RESIZE_RESETS = 2;
+export const COPY_RATE_RESIZE_WINDOW_MS = 60_000;
 /** Uma linha de custo no log a cada este tempo. */
 export const COPY_LOG_MS = 30_000;
 const POLL_MS = 2000;
@@ -161,7 +164,7 @@ const POLL_MS = 2000;
 const METHOD_TEXT: Record<CopyMethod, string> = { webgpu: "WebGPU", canvas2d: "canvas 2D" };
 
 /** A ultima leitura dos contadores (para o "Copiar diagnóstico"). */
-let lastReport: { method: CopyMethod; adapter: string | null; stats: CaptureCopyStats | null; failed: string | null; } | null = null;
+let lastReport: { method: CopyMethod; adapter: string | null; stats: CaptureCopyStats | null; failed: string | null; writeMax: number; } | null = null;
 let lastUnavailable: string | null = null;
 
 let envOverride: CaptureCopyEnv | null = null;
@@ -296,7 +299,7 @@ export async function startCaptureCopy(source: MediaStreamTrack, env: CaptureCop
     const { method } = ready;
     const holder = refreshHolder(env, source);
     lastUnavailable = null;
-    lastReport = { method, adapter: ready.adapter ?? null, stats: null, failed: null };
+    lastReport = { method, adapter: ready.adapter ?? null, stats: null, failed: null, writeMax: 0 };
     const report = lastReport;
     log.info(`Captura pela placa: cópia na hora ligada (${METHOD_TEXT[method]}${ready.adapter ? `, ${ready.adapter}` : ""}): cada quadro é copiado na placa de vídeo `
         + "assim que chega, para o encoder nunca ler uma textura que o Windows já reaproveitou");
@@ -308,7 +311,7 @@ export async function startCaptureCopy(source: MediaStreamTrack, env: CaptureCop
     /** pedidos de contadores do vigia ainda sem resposta (COPY_UNANSWERED_POLLS) */
     let unanswered = 0;
     let logged: { stats: CaptureCopyStats; at: number; } | null = null;
-    /** o maior writeMax das respostas desde a ultima linha de custo (cada resposta traz so o da sua janela) */
+    /** o maior writeMax das respostas desde a ultima linha de custo (cada resposta traz so o da sua janela; o da sessao inteira fica em report.writeMax) */
     let windowWriteMax = 0;
     /** a ultima resposta julgada: uma resposta resolve todos os pedidos pendentes de uma vez, e cada uma e julgada so uma vez */
     let lastSeen: CaptureCopyStats | null = null;
@@ -344,17 +347,32 @@ export async function startCaptureCopy(source: MediaStreamTrack, env: CaptureCop
     let rate: { frames: number; written: number; resized: number; width: number; height: number; at: number; }[] = [];
     /** avaliacoes ruins seguidas (COPY_RATE_FAILS) */
     let rateFails = 0;
+    /** a hora das ultimas janelas recomecadas por mudanca de tamanho (so as dos ultimos COPY_RATE_RESIZE_WINDOW_MS) */
+    let resizeResets: number[] = [];
     const watchRate = (s: CaptureCopyStats) => {
         const cur = { frames: s.frames, written: s.written ?? 0, resized: s.resized ?? 0, width: s.width, height: s.height, at: performance.now() };
+        // aquecimento: nada entra na janela, a primeira janela comeca quando ele acaba
+        if (cur.at - startedAt < COPY_RATE_GRACE_MS) return;
         const last = rate[rate.length - 1];
-        // um contador que volta (Worker reiniciado) ou uma mudanca de tamanho da captura invalida a janela
-        if (last && (cur.frames < last.frames || cur.written < last.written || cur.resized !== last.resized || cur.width !== last.width || cur.height !== last.height)) {
-            rate = [];
-            rateFails = 0;
+        if (last) {
+            // um contador que volta (Worker reiniciado) sempre invalida a janela
+            let reset = cur.frames < last.frames || cur.written < last.written;
+            // uma mudanca de tamanho tambem, mas so ate COPY_RATE_RESIZE_RESETS vezes por minuto: a fonte que nao para de mudar de tamanho nunca seria julgada
+            if (!reset && (cur.resized !== last.resized || cur.width !== last.width || cur.height !== last.height)) {
+                resizeResets = resizeResets.filter(at => cur.at - at <= COPY_RATE_RESIZE_WINDOW_MS);
+                if (resizeResets.length <= COPY_RATE_RESIZE_RESETS) {
+                    resizeResets.push(cur.at);
+                    reset = true;
+                }
+            }
+            if (reset) {
+                rate = [];
+                rateFails = 0;
+            }
         }
         rate.push(cur);
         if (rate.length > COPY_RATE_POLLS + 1) rate.shift();
-        if (rate.length <= COPY_RATE_POLLS || cur.at - startedAt < COPY_RATE_GRACE_MS) return;
+        if (rate.length <= COPY_RATE_POLLS) return;
         const first = rate[0];
         const df = cur.frames - first.frames;
         const dw = cur.written - first.written;
@@ -380,7 +398,9 @@ export async function startCaptureCopy(source: MediaStreamTrack, env: CaptureCop
         if (d.type === "stats") {
             unanswered = 0;
             report.stats = d as CaptureCopyStats;
-            windowWriteMax = Math.max(windowWriteMax, (d as CaptureCopyStats).writeMax ?? 0);
+            const writeMax = (d as CaptureCopyStats).writeMax ?? 0;
+            windowWriteMax = Math.max(windowWriteMax, writeMax);
+            report.writeMax = Math.max(report.writeMax, writeMax);
             for (const r of pending.splice(0)) r(d as CaptureCopyStats);
         } else if (d.type === "warn") {
             log.warn(`Captura pela placa: ${String(d.message)}`);
@@ -468,7 +488,7 @@ export function captureCopyDiagnostics(): string | null {
     const s = r.stats;
     const base = `cópia na hora: ${METHOD_TEXT[r.method]}${r.adapter ? ` (${r.adapter})` : ""}${r.failed ? `, parou: ${r.failed}` : ""}`;
     if (!s) return base;
-    const line = copyStatsLine(null, s, 0)?.replace(/^Cópia na hora \([^)]*\): /, "").replace(/ em 0 s/, "");
+    const line = copyStatsLine(null, s, 0, r.writeMax)?.replace(/^Cópia na hora \([^)]*\): /, "").replace(/ em 0 s/, "");
     return `${base}; desde o início: ${line ?? "nenhum quadro"}`;
 }
 
