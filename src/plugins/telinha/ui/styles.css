@@ -231,7 +231,22 @@
     font-size: 12px;
 }
 
-/* "Resolução" and "FPS" of the live stream: two small button groups side by side, like Discord's stream quality */
+/* "Qualidade: 1080p · 60 fps  Mudar" of the live stream (same look as the "Quem assiste" row); off while the quality is locked */
+.vc-telinha-bar-quality-row {
+    font-size: 12px;
+}
+
+.vc-telinha-bar-quality-row:disabled {
+    cursor: default;
+    opacity: 0.6;
+}
+
+.vc-telinha-bar-quality-row:disabled:hover {
+    background: transparent;
+    color: var(--interactive-normal, var(--text-muted));
+}
+
+/* "Resolução" and "FPS" of the live stream (in the quality modal): two small button groups side by side, like Discord's stream quality */
 .vc-telinha-bar-quality {
     display: flex;
     flex-wrap: wrap;
@@ -239,7 +254,6 @@
     gap: 4px 10px;
     width: 100%;
     min-width: 0;
-    padding: 2px 6px;
 }
 
 .vc-telinha-bar-seg {
