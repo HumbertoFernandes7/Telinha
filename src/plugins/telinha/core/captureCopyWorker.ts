@@ -28,7 +28,9 @@ var SLOW_MS = 2.5, SLOW_SAMPLE = 120, slowChecked = false, allowed = [];
 var method = null, device = null, canvas = null, gctx = null, c2d = null, pipeline = null, sampler = null, layout = null;
 var reader = null, writer = null, stopped = false, passthrough = false, fails = 0, inflight = 0;
 var last = null, lastAt = 0;
-var st = { frames: 0, copied: 0, passed: 0, written: 0, dropped: 0, dropGpu: 0, dropWrite: 0, refreshed: 0, copyMs: 0, copyMax: 0, gpuMs: 0, gpuN: 0, gpuMax: 0, gpuLate: 0, writeMs: 0, writeN: 0, writeMax: 0, writeSlow: 0, width: 0, height: 0 };
+var st = { frames: 0, copied: 0, passed: 0, written: 0, dropped: 0, dropGpu: 0, dropWrite: 0, refreshed: 0, copyMs: 0, copyMax: 0, gpuMs: 0, gpuN: 0, gpuMax: 0, gpuLate: 0, writeMs: 0, writeN: 0, writeSlow: 0, resized: 0, width: 0, height: 0 };
+// maior escrita no gerador desde a ultima resposta de stats (zera ao responder: o main junta as janelas)
+var writeMaxWin = 0;
 var warned = {};
 function post(type, data) { var m = data || {}; m.type = type; self.postMessage(m); }
 function describe(e) { return e && e.name ? e.name + ": " + e.message : String(e); }
@@ -128,7 +130,7 @@ function emit(out) {
 // quanto a escrita no gerador levou (aceita ou recusada): soma, quantas, maximo, quantas passaram de um quadro a 60 fps
 function wrote(t0) {
   var ms = performance.now() - t0;
-  st.writeMs += ms; st.writeN++; if (ms > st.writeMax) st.writeMax = ms;
+  st.writeMs += ms; st.writeN++; if (ms > writeMaxWin) writeMaxWin = ms;
   if (ms > 16.7) st.writeSlow++;
 }
 function next() {
@@ -149,6 +151,7 @@ async function loop() {
     if (r.done || stopped) { if (r.value) r.value.close(); break; }
     var frame = r.value;
     st.frames++;
+    if (st.width && (frame.displayWidth !== st.width || frame.displayHeight !== st.height)) st.resized++;
     st.width = frame.displayWidth; st.height = frame.displayHeight;
     if (passthrough) { st.passed++; emit(frame); continue; }
     if (method === "webgpu" && inflight >= MAX_INFLIGHT) { frame.close(); st.dropped++; st.dropGpu++; continue; }
@@ -219,6 +222,7 @@ self.onmessage = function (e) {
   } else if (d.op === "stats") {
     var s = {}; for (var k in st) s[k] = st[k];
     s.method = passthrough ? "passthrough" : method; s.inflight = inflight;
+    s.writeMax = writeMaxWin; writeMaxWin = 0;
     post("stats", s);
   } else if (d.op === "stop") {
     finish();

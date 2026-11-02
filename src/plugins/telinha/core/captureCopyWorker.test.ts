@@ -330,6 +330,50 @@ describe("Worker da cópia na hora", () => {
         assert.equal(s.writeSlow, 1, "só a de 20 ms passou de 16,7 (16 ms não conta)");
     });
 
+    test("writeMax é o maior da janela: cada resposta de stats zera o máximo", async () => {
+        let t = 0;
+        const r = rig({ perf: { now: () => t } });
+        r.autoAck = false;
+        await started(r);
+        r.push(captured(1000));
+        await flush();
+        t = 90;
+        r.ack();
+        await flush();
+        let s = await r.stats();
+        assert.equal(s.writeMax, 90, "o pico entra na janela em que aconteceu");
+        r.push(captured(2000));
+        await flush();
+        t = 90 + 4;
+        r.ack();
+        await flush();
+        s = await r.stats();
+        assert.equal(s.writeMax, 4, "o pico da janela anterior não aparece na seguinte");
+        assert.equal(s.writeN, 2, "os outros contadores seguem acumulando");
+        s = await r.stats();
+        assert.equal(s.writeMax, 0, "janela sem escrita");
+    });
+
+    test("conta os quadros com tamanho diferente do anterior (o primeiro não conta)", async () => {
+        const r = rig();
+        await started(r);
+        r.push(captured(1000, 1920, 1080));
+        await flush();
+        r.push(captured(2000, 1920, 1080));
+        await flush();
+        assert.equal((await r.stats()).resized, 0);
+        r.push(captured(3000, 1280, 720));
+        await flush();
+        r.push(captured(4000, 1280, 720));
+        await flush();
+        r.push(captured(5000, 1280, 800));
+        await flush();
+        const s = await r.stats();
+        assert.equal(s.resized, 2, "1920x1080 → 1280x720 e 1280x720 → 1280x800");
+        assert.equal(s.width, 1280);
+        assert.equal(s.height, 800);
+    });
+
     test("a escrita recusada também conta o tempo, fecha a cópia e libera o próximo quadro", async () => {
         let t = 0;
         const r = rig({ perf: { now: () => t } });

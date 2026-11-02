@@ -19,7 +19,7 @@ import { fakeCopyEnv, zeroStats } from "@test/fakes/captureCopy";
 import { flushPromises, useFakeClock } from "@test/fakes/clock";
 import { videoTrack } from "@test/fakes/webrtc";
 
-import { captureCopyDiagnostics, COPY_FLOW_MIN_FRAMES, COPY_FLOW_POLLS, COPY_LOG_MS, COPY_RATE_MIN_FRAMES, COPY_RATE_POLLS, COPY_START_TIMEOUT_MS, COPY_UNANSWERED_POLLS, copyStatsLine, resetCaptureCopyForTests, startCaptureCopy } from "./captureCopy";
+import { captureCopyDiagnostics, COPY_FLOW_MIN_FRAMES, COPY_FLOW_POLLS, COPY_LOG_MS, COPY_RATE_GRACE_MS, COPY_RATE_MIN, COPY_RATE_MIN_FRAMES, COPY_RATE_POLLS, COPY_START_TIMEOUT_MS, COPY_UNANSWERED_POLLS, copyStatsLine, resetCaptureCopyForTests, startCaptureCopy } from "./captureCopy";
 
 function logMark() {
     const seen = new Set(getEventLog());
@@ -278,20 +278,53 @@ describe("cópia na hora: no ar", () => {
         };
     }
 
-    test("vigia da taxa: o gerador aceita só 50% por 3 respostas → onFail uma vez, com a taxa no motivo", async t => {
+    /** o Worker com uma resposta por pedido: `step(n)` devolve os contadores acumulados da n-esima (1, 2, ...) */
+    function script(fake: ReturnType<typeof fakeCopyEnv>, step: (n: number) => Partial<ReturnType<typeof zeroStats>>) {
+        let n = 0;
+        fake.script = (w, d) => {
+            if (d?.op !== "stats") return;
+            const o = step(++n);
+            w.emit({ type: "stats", ...zeroStats(), copied: o.frames, ...o });
+        };
+    }
+
+    test("vigia da taxa: o gerador aceita só 50% → onFail uma vez, com a taxa no motivo, só na 2ª avaliação seguida", async t => {
         const { clock, fake, copy } = await live(t);
         const reasons: string[] = [];
         copy.onFail(r => reasons.push(r));
         feed(fake, [[120, 60]]);
-        // a 1a resposta e so a base da janela; as 3 seguintes completam COPY_RATE_POLLS
+        // a 1a resposta (2 s) e so a base; a janela de COPY_RATE_POLLS respostas fecha na 7a (14 s): 1a avaliacao ruim
         await clock.tickAsync(2000 * COPY_RATE_POLLS);
         assert.deepEqual(reasons, [], "ainda sem janela completa");
-        await clock.tickAsync(2000);
-        assert.equal(reasons.length, 1);
+        await clock.tickAsync(3000);
+        assert.deepEqual(reasons, [], "1ª avaliação ruim (14 s): uma só não desliga");
+        await clock.tickAsync(1000);
+        assert.equal(reasons.length, 1, "2ª avaliação ruim seguida (16 s)");
         assert.match(reasons[0], /entrega só 50% dos quadros/);
-        assert.equal(reasons[0], "a cópia entrega só 50% dos quadros ao envio (180 de 360 em 6 s)");
         await clock.tickAsync(20_000);
         assert.equal(reasons.length, 1, "falhou uma vez; a cópia fica desligada");
+    });
+
+    for (const pct of [36, 61, 66]) {
+        test(`vigia da taxa: a janela ruim do ar (${pct}%) desliga, nunca antes de ${COPY_RATE_GRACE_MS / 1000} s e só na 2ª avaliação seguida`, async t => {
+            const { clock, fake, copy } = await live(t);
+            const reasons: string[] = [];
+            copy.onFail(r => reasons.push(r));
+            feed(fake, [[100, pct]]);
+            await clock.tickAsync(COPY_RATE_GRACE_MS);
+            assert.deepEqual(reasons, [], "dentro dos primeiros 10 s");
+            await clock.tickAsync(5999);
+            assert.deepEqual(reasons, [], "só 1 avaliação ruim (a janela fecha aos 14 s); a 2ª vem aos 16 s");
+            await clock.tickAsync(1);
+            assert.equal(reasons.length, 1);
+            assert.equal(reasons[0], `a cópia entrega só ${pct}% dos quadros ao envio (${6 * pct} de 600 em 12 s)`);
+        });
+    }
+
+    test("vigia da taxa: a taxa mínima e a janela são as combinadas (75% em ~12 s)", () => {
+        assert.equal(COPY_RATE_MIN, 0.75);
+        assert.equal(COPY_RATE_POLLS, 6);
+        assert.equal(COPY_RATE_GRACE_MS, 10_000);
     });
 
     test("vigia da taxa: 90% dos quadros chegando ao envio nunca desliga a cópia", async t => {
@@ -319,17 +352,78 @@ describe("cópia na hora: no ar", () => {
         copy.stop();
     });
 
-    test("vigia da taxa: uma resposta ruim entre boas não desliga (a janela dá 83%)", async t => {
+    test("vigia da taxa: uma resposta de 2 s a 0% entre boas não desliga (a janela dá 83%)", async t => {
         const { clock, fake, copy } = await live(t);
         const reasons: string[] = [];
         copy.onFail(r => reasons.push(r));
-        feed(fake, [[120, 120], [120, 120], [120, 120], [120, 60], [120, 120], [120, 120], [120, 120]]);
-        await clock.tickAsync(2000 * 20);
+        const good: [number, number] = [120, 120];
+        feed(fake, [...Array(10).fill(good), [120, 0], ...Array(10).fill(good)]);
+        await clock.tickAsync(2000 * 30);
         assert.deepEqual(reasons, []);
         copy.stop();
     });
 
-    test("vigia da taxa: contador que volta (Worker novo) recomeça a janela, que só fecha 3 respostas depois da nova base", async t => {
+    test("vigia da taxa: respostas ruins nos primeiros 10 s e depois tudo certo → não desliga", async t => {
+        const { clock, fake, copy } = await live(t);
+        const reasons: string[] = [];
+        copy.onFail(r => reasons.push(r));
+        // as 4 primeiras respostas (ate 8 s) a 36%, depois 100%: as janelas que ainda pegam o trecho ruim ficam acima de 75%
+        const bad: [number, number] = [100, 36];
+        feed(fake, [bad, bad, bad, bad, [100, 100]]);
+        await clock.tickAsync(2000 * 30);
+        assert.deepEqual(reasons, []);
+        copy.stop();
+    });
+
+    test("vigia da taxa: mudança de tamanho (resized) recomeça a janela e a contagem, sem desligar", async t => {
+        const { clock, fake, copy } = await live(t);
+        const reasons: string[] = [];
+        copy.onFail(r => reasons.push(r));
+        // 50% sempre; na 8a resposta (16 s) a captura muda de tamanho, justo quando a 2a avaliacao ruim desligaria
+        script(fake, n => ({ frames: 120 * n, written: 60 * n, resized: n >= 8 ? 1 : 0, width: 1920, height: 1080 }));
+        await clock.tickAsync(16_000);
+        assert.deepEqual(reasons, [], "a janela recomeçou na 8ª resposta");
+        await clock.tickAsync(11_999);
+        assert.deepEqual(reasons, [], "a nova janela só fecha 6 respostas depois da nova base (28 s)");
+        await clock.tickAsync(2001);
+        assert.equal(reasons.length, 1, "e a 2ª avaliação ruim da nova janela desliga (30 s)");
+    });
+
+    test("vigia da taxa: width/height diferentes da resposta anterior também recomeçam a janela", async t => {
+        const { clock, fake, copy } = await live(t);
+        const reasons: string[] = [];
+        copy.onFail(r => reasons.push(r));
+        script(fake, n => ({ frames: 120 * n, written: 60 * n, width: n >= 8 ? 1280 : 1920, height: n >= 8 ? 720 : 1080 }));
+        await clock.tickAsync(29_999);
+        assert.deepEqual(reasons, []);
+        await clock.tickAsync(2001);
+        assert.equal(reasons.length, 1);
+        copy.stop();
+    });
+
+    test("uma resposta que resolve dois pedidos juntos é julgada uma vez só", async t => {
+        const clock = useFakeClock(t);
+        const fake = fakeCopyEnv();
+        const copy = (await startCaptureCopy(videoTrack() as unknown as MediaStreamTrack, fake.env))!;
+        const reasons: string[] = [];
+        copy.onFail(r => reasons.push(r));
+        let n = 0;
+        fake.script = (w, d) => {
+            if (d?.op !== "stats") return;
+            n++;
+            if (n === 2) return; // sem resposta: o pedido fica pendente
+            // 1a: a base; 3a: a captura andou COPY_FLOW_MIN_FRAMES sem o gerador aceitar nada, e uma só resposta resolve os pedidos 2 e 3
+            const frames = n === 1 ? 10 : 10 + COPY_FLOW_MIN_FRAMES;
+            w.emit({ type: "stats", ...zeroStats(), frames, copied: frames, written: 10 });
+        };
+        await clock.tickAsync(6000);
+        assert.equal(n, 3);
+        assert.deepEqual(reasons, [], "julgada duas vezes seriam COPY_FLOW_POLLS seguidas e desligaria");
+        assert.equal(copy.outputFlat(), true, "mas contou uma vez");
+        copy.stop();
+    });
+
+    test("vigia da taxa: contador que volta (Worker novo) recomeça a janela, que só fecha 6 respostas depois da nova base", async t => {
         const { clock, fake, copy } = await live(t);
         const reasons: string[] = [];
         copy.onFail(r => reasons.push(r));
@@ -337,15 +431,16 @@ describe("cópia na hora: no ar", () => {
         fake.script = (w, d) => {
             if (d?.op !== "stats") return;
             n++;
-            // 2 respostas boas, os contadores voltam a zero e passam a aceitar só 50%
-            const [frames, written] = n <= 2 ? [1000 * n, 1000 * n] : [120 * (n - 2), 60 * (n - 2)];
+            // 7 respostas boas, os contadores voltam a zero e passam a aceitar só 50%
+            const [frames, written] = n <= 7 ? [1000 * n, 1000 * n] : [120 * (n - 7), 60 * (n - 7)];
             w.emit({ type: "stats", ...zeroStats(), frames, copied: frames, written });
         };
-        await clock.tickAsync(2000 * (2 + COPY_RATE_POLLS));
-        assert.deepEqual(reasons, [], "a nova base é a 3a resposta; faltam 3 depois dela");
-        await clock.tickAsync(2000);
+        // a nova base e a 8a resposta (16 s): a janela fecha na 14a (28 s) e a 2a avaliacao ruim e a 15a (30 s)
+        await clock.tickAsync(29_999);
+        assert.deepEqual(reasons, []);
+        await clock.tickAsync(2001);
         assert.equal(reasons.length, 1);
-        assert.match(reasons[0], /entrega só 50% dos quadros ao envio \(180 de 360 em 6 s\)/);
+        assert.match(reasons[0], /entrega só 50% dos quadros ao envio \(360 de 720 em 12 s\)/);
     });
 
     test("vigia da taxa: stop() antes de a janela fechar → nada", async t => {
@@ -357,6 +452,22 @@ describe("cópia na hora: no ar", () => {
         copy.stop();
         await clock.tickAsync(30_000);
         assert.deepEqual(reasons, []);
+    });
+
+    test("linha de custo: o máximo de escrita é o da janela (um pico de uma janela anterior não volta)", async t => {
+        const { clock, fake, copy } = await live(t);
+        const since = logMark();
+        // cada resposta traz o writeMax da sua janela de 2 s: um pico de 80 ms na 5a, o resto 4 ms
+        script(fake, n => ({ frames: 100 * n, written: 100 * n, writeMs: 200 * n, writeN: 100 * n, writeMax: n === 5 ? 80 : 4 }));
+        await clock.tickAsync(COPY_LOG_MS + 2000);
+        const first = since();
+        assert.equal(first.length, 1);
+        assert.match(first[0], /escrita no gerador 2,00 ms \(máx\. 80\)/, "o pico entra na linha da janela em que aconteceu");
+        await clock.tickAsync(COPY_LOG_MS);
+        const second = since();
+        assert.equal(second.length, 2);
+        assert.match(second[1], /escrita no gerador 2,00 ms \(máx\. 4,00\)/, "a linha seguinte não herda o pico");
+        copy.stop();
     });
 
     test("a leitura da captura falha no Worker com a captura no ar: onFail; o fim normal (captura parou) não", async t => {
@@ -395,7 +506,7 @@ describe("cópia na hora: linha de custo", () => {
             "Cópia na hora (desligada, direto): 5 quadros em 1 s · ? ms/quadro no Worker · nenhum descartado · 5 sem cópia");
     });
 
-    test("escrita no gerador: o trecho só aparece quando writeN cresceu na janela; média da janela, máximo acumulado", () => {
+    test("escrita no gerador: o trecho só aparece quando writeN cresceu na janela; média da janela, máximo da janela", () => {
         const base = zeroStats("canvas2d");
         // sem escritas novas: nada (mesmo com o acumulado de antes)
         const before = { ...base, frames: 60, copied: 60, copyMs: 6, writeMs: 100, writeN: 50, writeMax: 40, writeSlow: 5 };
@@ -404,9 +515,11 @@ describe("cópia na hora: linha de custo", () => {
         // com escritas novas e nenhuma lenta: sem o ", Z acima…"
         assert.equal(copyStatsLine(base, { ...base, frames: 60, copied: 60, copyMs: 6, writeMs: 120, writeN: 60, writeMax: 4 }, 1),
             "Cópia na hora (canvas 2D): 60 quadros em 1 s · 0,10 ms/quadro no Worker · escrita no gerador 2,00 ms (máx. 4,00) · nenhum descartado");
-        // com lentas na janela: a média e as lentas são da janela, o máximo é o acumulado
+        // com lentas na janela: a média e as lentas são da janela, o máximo é o da resposta (ou o passado: o maior de várias respostas)
         assert.equal(copyStatsLine(before, { ...before, frames: 120, copied: 120, copyMs: 12, writeMs: 100 + 1800, writeN: 50 + 60, writeMax: 55, writeSlow: 5 + 31 }, 2),
             "Cópia na hora (canvas 2D): 60 quadros em 2 s · 0,10 ms/quadro no Worker · escrita no gerador 30 ms (máx. 55, 31 acima de 16,7 ms) · nenhum descartado");
+        assert.equal(copyStatsLine(before, { ...before, frames: 120, copied: 120, copyMs: 12, writeMs: 100 + 1800, writeN: 50 + 60, writeMax: 55, writeSlow: 5 + 31 }, 2, 90),
+            "Cópia na hora (canvas 2D): 60 quadros em 2 s · 0,10 ms/quadro no Worker · escrita no gerador 30 ms (máx. 90, 31 acima de 16,7 ms) · nenhum descartado");
     });
 
     test("diagnóstico: nada antes da primeira transmissão", () => {
