@@ -16,6 +16,7 @@ import { isIdentityConfigured } from "./identity/config";
 import type { PeerIdentity } from "./identity/policy";
 import type { IdentityFailure } from "./identity/verify";
 import { shortId } from "./log";
+import { sourceSizeNote } from "./quality/choice";
 import type { ReceiverLog } from "./statsLog";
 import type { TeredoSide } from "./teredo";
 
@@ -295,6 +296,8 @@ function buildSnapshot(): TelinhaState {
     const hasDiag = diag.sendingTo.length > 0 || diag.requested.length > 0 || diag.receivingFrom.length > 0;
 
     const { local } = rt;
+    // 2K numa captura de 1080p ou menos: a altura de agora (a janela pode mudar de tamanho no meio; sem leitura, a do inicio)
+    const sizeNote = local && sourceSizeNote(local.quality, local.info.kind, local.stream.getVideoTracks()[0]?.getSettings().height ?? local.info.height);
     return {
         inRoom: !!rt.room,
         channelId: rt.channelId,
@@ -308,6 +311,7 @@ function buildSnapshot(): TelinhaState {
                 viewers: [...local.viewers],
                 autoQuality: local.autoQuality ?? null,
                 captureWarning: local.captureWarning ?? null,
+                ...(sizeNote ? { sizeNote } : {}),
                 pendingViewers,
                 access: local.access
             }

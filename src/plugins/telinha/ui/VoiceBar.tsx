@@ -10,6 +10,8 @@
 //   [ Transmitir com Telinha ]             idle
 //   ● Ao vivo · 2 assistindo                streaming (click: who is watching → kick / switch source)
 //   🔒 Com senha · Mudar  Copiar senha      "Quem pode assistir" of the live stream (click: change it)
+//   Resolução 720p 1080p 2K  FPS 30 60      quality of the live stream (click: captures the same source again)
+//   2K escolhido, a tela tem 1080p: …       2K chosen on a smaller capture (sent at its size)
 //   Ana quer assistir  Permitir  Recusar    request waiting for approval ("Só quem eu aprovar", or unverified)
 //   ⚠ Duas conexões dizem ser Ana…          suspicious identity (click: details)
 //   720p60 · menor: processador             auto quality (current level; reason when lowered, full text in tooltip)
@@ -20,15 +22,18 @@
 //   ⚠ <last error>  ×                       core reported an error
 
 import ErrorBoundary from "@components/ErrorBoundary";
-import { clearLastError, stopStreaming } from "@plugins/telinha/actions";
+import { changeStreamQuality, clearLastError, stopStreaming } from "@plugins/telinha/actions";
 import { ACCESS_LABEL } from "@plugins/telinha/core/access";
+import { HINT_2K, qualityLabel, qualityOf, splitQuality } from "@plugins/telinha/core/quality/choice";
 import { useTelinhaState } from "@plugins/telinha/store";
-import type { AccessMode, QualityReason } from "@plugins/telinha/types";
-import { SelectedChannelStore, Tooltip, useStateFromStores } from "@webpack/common";
+import type { AccessMode, Quality, QualityReason } from "@plugins/telinha/types";
+import { SelectedChannelStore, showToast, Tooltip, useState, useStateFromStores } from "@webpack/common";
 import type { ReactNode } from "react";
 
 import { copyStreamPassword, openAccessModal } from "./AccessPicker";
-import { accessBadge, cl, displayName, findPeer, identityAlertBlocksAll, identityAlertText, peerName, runAction, watchersLabel } from "./common";
+import {
+    accessBadge, cl, displayName, findPeer, FPS_OPTIONS, identityAlertBlocksAll, identityAlertText, logger, peerName, RESOLUTION_OPTIONS, runAction, watchersLabel
+} from "./common";
 import { BroadcastIcon, CloseIcon, EyeIcon, StopIcon, WarningIcon } from "./icons";
 import { IdentityBadge, IdentityBanner } from "./IdentityUI";
 import { openSourcePicker } from "./SourcePickerModal";
@@ -50,6 +55,77 @@ const REASON_SHORT: Record<QualityReason, string> = {
     upload: "seu upload",
     bandwidth: "conexão de quem assiste"
 };
+
+/** "Resolução" or "FPS" in the narrow bar: small buttons side by side, the chosen one highlighted */
+function Segmented<T extends number>({ label, options, value, disabled, titleOf, onPick }: {
+    label: string;
+    options: readonly { value: T; label: string; }[];
+    value: T;
+    disabled: boolean;
+    titleOf?(value: T): string | undefined;
+    onPick(value: T): void;
+}) {
+    return (
+        <div className={cl("bar-seg")} role="group" aria-label={label}>
+            <span className={cl("bar-seg-label")} aria-hidden="true">{label}</span>
+            <div className={cl("bar-seg-buttons")}>
+                {options.map(o => (
+                    <button
+                        key={o.value}
+                        className={cl("bar-seg-btn", o.value === value && "bar-seg-active")}
+                        aria-pressed={o.value === value}
+                        title={titleOf?.(o.value)}
+                        disabled={disabled}
+                        onClick={() => onPick(o.value)}
+                    >
+                        {o.label}
+                    </button>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+/**
+ * Resolução and FPS of the live stream. Picking one captures the same source again at the new quality (changeStreamQuality,
+ * like "Trocar" in the source picker): viewers keep watching. A failure shows up as the bar's last error.
+ */
+function LiveQuality({ quality, sizeNote }: { quality: Quality; sizeNote?: string | null; }) {
+    const [busy, setBusy] = useState(false);
+    const { resolution, fps } = splitQuality(quality);
+
+    const change = (next: Quality) => {
+        if (busy || next === quality) return;
+        setBusy(true);
+        changeStreamQuality(next)
+            .then(
+                () => showToast({ text: `Telinha: transmitindo em ${qualityLabel(next)}`, variant: "success" }),
+                e => logger.error("changeStreamQuality falhou", e)
+            )
+            .finally(() => setBusy(false));
+    };
+
+    return (
+        <>
+            <div className={cl("bar-quality")}>
+                <Segmented
+                    label="Resolução"
+                    options={RESOLUTION_OPTIONS}
+                    value={resolution}
+                    disabled={busy}
+                    titleOf={r => (r === 1440 ? HINT_2K : undefined)}
+                    onPick={r => change(qualityOf(r, fps))}
+                />
+                <Segmented label="FPS" options={FPS_OPTIONS} value={fps} disabled={busy} onPick={f => change(qualityOf(resolution, f))} />
+            </div>
+            {sizeNote && (
+                <div className={cl("bar-info", "bar-wrap")} title={sizeNote}>
+                    <span className={cl("bar-row-text")}>{sizeNote}</span>
+                </div>
+            )}
+        </>
+    );
+}
 
 function VoiceBarInner() {
     const inVoice = useStateFromStores([SelectedChannelStore], () => SelectedChannelStore.getVoiceChannelId() != null);
@@ -120,6 +196,8 @@ function VoiceBarInner() {
                     )}
                 </div>
             )}
+
+            {local && <LiveQuality quality={local.quality} sizeNote={local.sizeNote} />}
 
             {local?.pendingViewers?.map(p => {
                 const name = displayName(p.discordUserId, p.username);

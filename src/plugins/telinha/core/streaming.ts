@@ -41,8 +41,9 @@ import { getNative } from "./nativeApi";
 import { containPeerConnection, isContained, type SendPlan } from "./peerConnection";
 import { me, sendPresence } from "./presence";
 import { CaptureMonitor } from "./quality/captureMonitor";
+import { isQuality, QUALITIES, RESOLUTION_WIDTH, sourceSizeNote } from "./quality/choice";
 import { QualityController } from "./quality/controller";
-import { encodingFor, levelText, scaledSize } from "./quality/levels";
+import { encodingFor, LEVELS, levelText, scaledSize } from "./quality/levels";
 import { isHardwareEncoder } from "./quality/stats";
 import { h264ProfileLevelId, isH264High, sameH264Profile } from "./sdp";
 import { noteHighFailed, noteStreamStarting, noteStuckEncoder, STUCK_NOTICE, STUCK_NOTICE_HIGH, STUCK_NOTICE_PINNED } from "./stuckEncoder";
@@ -55,12 +56,15 @@ export interface QualityProfile {
     maxKbps: number;
 }
 
-/** Perfis de qualidade. */
-export const QUALITY: Record<Quality, QualityProfile> = {
-    "1080p60": { width: 1920, height: 1080, fps: 60, maxKbps: 20000 },
-    "720p60": { width: 1280, height: 720, fps: 60, maxKbps: 12000 },
-    "1080p30": { width: 1920, height: 1080, fps: 30, maxKbps: 12000 }
-};
+/**
+ * Perfis das 6 qualidades escolhiveis: a captura pede ate width x height (16:9) no fps escolhido, e o teto do encoder e o
+ * do degrau (quality/levels.ts → LEVELS). Uma captura menor nao e ampliada: o getDisplayMedia so reduz para caber, e a
+ * qualidade automatica nunca usa escala abaixo de 1.
+ */
+export const QUALITY = Object.fromEntries(QUALITIES.map(q => {
+    const { height, fps, maxKbps } = LEVELS[q];
+    return [q, { width: RESOLUTION_WIDTH[height], height, fps, maxKbps }];
+})) as Record<Quality, QualityProfile>;
 
 /**
  * x-google-start-bitrate, o MESMO em toda negociacao com todo peer (sendPlanFor). O libwebrtc so reaplica o inicio quando
@@ -260,7 +264,7 @@ function validateAccess(mode: unknown, rawPassword: unknown): AccessChoice {
 function validateOptions(opts: StreamOptions) {
     const source = opts?.source as CaptureSource | undefined;
     if (!source || typeof source.id !== "string" || !SOURCE_ID_RE.test(source.id)) throw new Error("Fonte de captura inválida.");
-    if (!QUALITY[opts.quality]) throw new Error("Qualidade inválida.");
+    if (!isQuality(opts.quality)) throw new Error("Qualidade inválida.");
     // sem escolha: trocando de fonte, continua o modo atual; transmissao nova, "Todos da call"
     const access = opts.access === undefined ? null : validateAccess(opts.access, opts.password);
     return { source, profile: QUALITY[opts.quality], access };
@@ -375,6 +379,9 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
         });
 
         log.info(`Transmitindo ${info.width}x${info.height} @ ${info.fps} fps${info.hasAudio ? " com áudio" : ""} · quem pode assistir: ${ACCESS_LABEL[local.access]}`);
+        // 2K numa tela/janela de 1080p ou menos: vai no tamanho dela (sem ampliar), uma linha so
+        const sizeNote = sourceSizeNote(local.quality, kind, info.height);
+        if (sizeNote) log.info(sizeNote);
         // o modo da captura (live com jogo pesado, core/captureBoost.ts): para comparar com e sem pelo "fonte N" do envio
         noteCaptureStarted();
         sendPresence();

@@ -8,12 +8,12 @@
 // so muda o encoder de UM espectador via RTCRtpSender.setParameters (scaleResolutionDownBy,
 // maxFramerate, maxBitrate), sem renegociar.
 
-import type { Quality, QualityLevel } from "@plugins/telinha/types";
+import type { FrameRate, Quality, QualityLevel, Resolution } from "@plugins/telinha/types";
 
 export interface LevelSpec {
-    height: number;
-    fps: number;
-    /** teto do encoder neste degrau (os tres primeiros batem com QUALITY em streaming.ts) */
+    height: Resolution;
+    fps: FrameRate;
+    /** teto do encoder neste degrau (QUALITY em streaming.ts usa este) */
     maxKbps: number;
     /** banda estimada abaixo disto: o degrau fica borrado demais, desce */
     minKbps: number;
@@ -30,16 +30,29 @@ export function inBandwidthGrace(readyAt: number, now: number): boolean {
     return now - readyAt < BW_GRACE_MS;
 }
 
+/**
+ * Banda de cada degrau, pela taxa de pixels (largura x altura x fps), como os quatro de 1080p e 720p ja eram: 720p60
+ * (55 Mpx/s) e 1080p30 (62 Mpx/s) tem os mesmos 12000/2500.
+ * - 1440p30 = 2560x1440x30 = 111 Mpx/s, quase o 1080p60 (124 Mpx/s): os mesmos 20000/4500.
+ * - 1440p60 = 221 Mpx/s, 1,8x o 1080p60: o piso cresce como de 1080p30 para 1080p60 (2500 → 4500, 1,8x), 4500 x 1,8 ≈
+ *   8000 (~0,036 bit por pixel, o mesmo do 1080p60 no piso). O teto fica em 20000: 20 Mbps por espectador e o teto do
+ *   Telinha em qualquer escolha (regra do dono), entao o 2K a 60 fps tem menos bits por pixel que o 1080p60.
+ */
 export const LEVELS: Record<QualityLevel, LevelSpec> = {
+    "1440p60": { height: 1440, fps: 60, maxKbps: 20000, minKbps: 8000 },
+    "1440p30": { height: 1440, fps: 30, maxKbps: 20000, minKbps: 4500 },
     "1080p60": { height: 1080, fps: 60, maxKbps: 20000, minKbps: 4500 },
     "720p60": { height: 720, fps: 60, maxKbps: 12000, minKbps: 2500 },
     "1080p30": { height: 1080, fps: 30, maxKbps: 12000, minKbps: 2500 },
     "720p30": { height: 720, fps: 30, maxKbps: 6000, minKbps: 0 }
 };
 
+/** Captura ate isto acima da altura do degrau: sem reducao (encodingFor) e sem os degraus 2K numa de 1080p (fitToSource). */
+export const SOURCE_SLACK = 1.02;
+
 function levelOf(height: number, fps: number): QualityLevel {
-    if (height >= 1080) return fps >= 60 ? "1080p60" : "1080p30";
-    return fps >= 60 ? "720p60" : "720p30";
+    const h: Resolution = height >= 1440 ? 1440 : height >= 1080 ? 1080 : 720;
+    return `${h}p${fps >= 60 ? 60 : 30}`;
 }
 
 /** O mais restritivo dos dois (menor altura e menor fps): ex. 720p60 + 1080p30 = 720p30. */
@@ -58,11 +71,14 @@ export function rank(level: QualityLevel): number {
 }
 
 /**
- * Proximo degrau abaixo. De 1080p60: 720p60 para conteudo em movimento (jogos: mantem 60 fps) ou
- * 1080p30 para conteudo parado (texto nitido). Null = ja no piso (720p30).
+ * Proximo degrau abaixo. De 60 fps com as duas saidas: conteudo em movimento (jogos) mantem 60 fps e desce a resolucao
+ * (1440p60 → 1080p60, 1080p60 → 720p60); conteudo parado mantem a resolucao (texto nitido) e desce para 30 fps
+ * (1440p60 → 1440p30, 1080p60 → 1080p30). Depois: 1440p30 → 1080p30 → 720p30, 720p60 → 720p30. Null = ja no piso (720p30).
  */
 export function stepDown(level: QualityLevel, preferMotion: boolean): QualityLevel | null {
     switch (level) {
+        case "1440p60": return preferMotion ? "1080p60" : "1440p30";
+        case "1440p30": return "1080p30";
         case "1080p60": return preferMotion ? "720p60" : "1080p30";
         case "720p60":
         case "1080p30": return "720p30";
@@ -70,12 +86,31 @@ export function stepDown(level: QualityLevel, preferMotion: boolean): QualityLev
     }
 }
 
-/** Proximo degrau acima sem passar do teto (a qualidade escolhida). Null = ja no teto. */
+/**
+ * Proximo degrau acima (o caminho do stepDown ao contrario) sem passar do teto (a qualidade escolhida). Com as duas
+ * saidas, movimento sobe o fps primeiro e conteudo parado a resolucao; a que passa do teto fica de fora. Null = ja no teto.
+ */
 export function stepUp(level: QualityLevel, ceiling: Quality, preferMotion: boolean): QualityLevel | null {
-    const options: QualityLevel[] = level === "720p30"
-        ? (preferMotion ? ["720p60", "1080p30"] : ["1080p30", "720p60"])
-        : level === "1080p60" ? [] : ["1080p60"];
+    let options: QualityLevel[];
+    switch (level) {
+        case "720p30": options = preferMotion ? ["720p60", "1080p30"] : ["1080p30", "720p60"]; break;
+        case "720p60": options = ["1080p60"]; break;
+        case "1080p30": options = preferMotion ? ["1080p60", "1440p30"] : ["1440p30", "1080p60"]; break;
+        case "1080p60":
+        case "1440p30": options = ["1440p60"]; break;
+        default: options = [];
+    }
     return options.find(l => isAtMost(l, ceiling)) ?? null;
+}
+
+/**
+ * O degrau numa captura de altura `sourceHeight`: os 2K (1440p) viram os de 1080p no mesmo fps quando a captura tem
+ * 1080p ou menos (ate SOURCE_SLACK acima). Nada amplia (encodingFor nunca usa escala abaixo de 1): ali o 2K mandaria o
+ * mesmo tamanho que o 1080p, e descer de um para o outro nao mudaria nada. Altura desconhecida (0): fica como esta.
+ */
+export function fitToSource(level: QualityLevel, sourceHeight: number): QualityLevel {
+    const { height, fps } = LEVELS[level];
+    return height > 1080 && sourceHeight > 0 && sourceHeight <= 1080 * SOURCE_SLACK ? levelOf(1080, fps) : level;
 }
 
 export interface EncodingTarget {
@@ -157,7 +192,7 @@ export function evenScale(width: number, height: number, targetHeight: number): 
  */
 export function encodingFor(level: QualityLevel, captureWidth: number, captureHeight: number): EncodingTarget {
     const spec = LEVELS[level];
-    const scale = captureHeight > spec.height * 1.02 ? evenScale(captureWidth, captureHeight, spec.height) : 1;
+    const scale = captureHeight > spec.height * SOURCE_SLACK ? evenScale(captureWidth, captureHeight, spec.height) : 1;
     return {
         maxBitrate: spec.maxKbps * 1000,
         maxFramerate: spec.fps,

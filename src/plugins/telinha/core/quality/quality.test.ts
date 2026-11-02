@@ -13,8 +13,12 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { h264HwAcceptsSize } from "@plugins/telinha/core/codec";
+import type { Quality, QualityLevel } from "@plugins/telinha/types";
 
-import { BW_GRACE_MS, encodingFor, evenScale, inBandwidthGrace, isAtMost, LEVELS, levelText, meet, pixelRate, rank, scaledSide, scaledSize, stepDown, stepUp } from "./levels";
+import {
+    BW_GRACE_MS, encodingFor, evenScale, fitToSource, inBandwidthGrace, isAtMost, LEVELS, levelText, meet, pixelRate, rank, scaledSide, scaledSize, SOURCE_SLACK,
+    stepDown, stepUp
+} from "./levels";
 
 describe("carencia de banda do espectador novo", () => {
     test("sao 20 s", () => {
@@ -170,6 +174,48 @@ describe("degraus da qualidade automatica", () => {
         assert.equal(stepDown("720p30", true), null);
     });
 
+    test("descer de 2K: 1440p60 vai a 1080p60 com movimento ou a 1440p30 parado; 1440p30 vai a 1080p30", () => {
+        assert.equal(stepDown("1440p60", true), "1080p60");
+        assert.equal(stepDown("1440p60", false), "1440p30");
+        assert.equal(stepDown("1440p30", true), "1080p30");
+        assert.equal(stepDown("1440p30", false), "1080p30");
+    });
+
+    // Para cada qualidade escolhida (o teto) e cada tipo de conteudo: o caminho todo para baixo ate o piso e de volta ate
+    // o teto, um degrau por vez, sem nunca passar dele
+    const LADDERS: [ceiling: Quality, motion: QualityLevel[], still: QualityLevel[]][] = [
+        ["1440p60", ["1440p60", "1080p60", "720p60", "720p30"], ["1440p60", "1440p30", "1080p30", "720p30"]],
+        ["1440p30", ["1440p30", "1080p30", "720p30"], ["1440p30", "1080p30", "720p30"]],
+        ["1080p60", ["1080p60", "720p60", "720p30"], ["1080p60", "1080p30", "720p30"]],
+        ["1080p30", ["1080p30", "720p30"], ["1080p30", "720p30"]],
+        ["720p60", ["720p60", "720p30"], ["720p60", "720p30"]],
+        ["720p30", ["720p30"], ["720p30"]]
+    ];
+    for (const [ceiling, motion, still] of LADDERS) {
+        for (const [what, preferMotion, expected] of [["movimento", true, motion], ["parado", false, still]] as const) {
+            test(`teto ${ceiling}, ${what}: ${expected.join(" → ")} e de volta`, () => {
+                const down: QualityLevel[] = [ceiling];
+                for (let l = stepDown(ceiling, preferMotion); l; l = stepDown(l, preferMotion)) down.push(l);
+                assert.deepEqual(down, expected);
+
+                const up: QualityLevel[] = ["720p30"];
+                for (let l = stepUp("720p30", ceiling, preferMotion); l; l = stepUp(l, ceiling, preferMotion)) up.push(l);
+                assert.deepEqual(up, [...expected].reverse(), "subir e o mesmo caminho ao contrario");
+                for (const l of [...down, ...up]) assert.ok(isAtMost(l, ceiling), `${l} passa do teto ${ceiling}`);
+            });
+        }
+    }
+
+    test("subir com o conteudo mudando no meio: de 1080p30 movimento sobe o fps (1080p60), parado a resolucao (1440p30)", () => {
+        assert.equal(stepUp("1080p30", "1440p60", true), "1080p60");
+        assert.equal(stepUp("1080p30", "1440p60", false), "1440p30");
+        assert.equal(stepUp("1080p60", "1440p60", false), "1440p60");
+        assert.equal(stepUp("1440p30", "1440p60", true), "1440p60");
+        assert.equal(stepUp("1440p60", "1440p60", true), null, "ja no teto");
+        assert.equal(stepUp("1080p60", "1080p60", true), null, "o 2K nunca passa de um teto de 1080p");
+        assert.equal(stepUp("1080p30", "1080p60", false), "1080p60", "parado, com teto de 1080p, sobe o fps");
+    });
+
     test("subir: um degrau por vez, sem passar da qualidade escolhida", () => {
         assert.equal(stepUp("720p30", "1080p60", true), "720p60");
         assert.equal(stepUp("720p30", "1080p60", false), "1080p30");
@@ -190,5 +236,76 @@ describe("degraus da qualidade automatica", () => {
         assert.equal(isAtMost("1080p30", "720p60"), false);
         assert.deepEqual((["1080p60", "720p30", "1080p30", "720p60"] as const).slice().sort((a, b) => rank(a) - rank(b)), ["720p30", "720p60", "1080p30", "1080p60"]);
         assert.deepEqual((["1080p60", "720p60", "1080p30", "720p30"] as const).map(levelText), ["1080p 60 fps", "720p 60 fps", "1080p 30 fps", "720p 30 fps"]);
+    });
+
+    test("meet, isAtMost, rank e texto com o 2K", () => {
+        assert.equal(meet("1440p60", "1440p60"), "1440p60");
+        assert.equal(meet("1440p60", "1440p30"), "1440p30");
+        assert.equal(meet("1440p30", "1080p60"), "1080p30");
+        assert.equal(meet("1440p60", "720p60"), "720p60");
+        assert.equal(isAtMost("1080p60", "1440p60"), true);
+        assert.equal(isAtMost("1080p60", "1440p30"), false, "60 fps passa de um teto de 30");
+        assert.equal(isAtMost("1440p30", "1080p60"), false, "2K passa de um teto de 1080p");
+        // pior primeiro (menor taxa de pixels): 2K a 30 fps fica entre o 1080p30 e o 1080p60
+        const all: QualityLevel[] = ["1440p60", "1080p60", "1440p30", "720p60", "720p30", "1080p30"];
+        assert.deepEqual(all.sort((a, b) => rank(a) - rank(b)), ["720p30", "720p60", "1080p30", "1440p30", "1080p60", "1440p60"]);
+        assert.deepEqual((["1440p60", "1440p30"] as const).map(levelText), ["1440p 60 fps", "1440p 30 fps"]);
+    });
+});
+
+describe("tabela de banda (LEVELS) e o 2K", () => {
+    test("os 6 degraus: os quatro de antes sem mudar; 2K com teto de 20 Mbps e piso pela taxa de pixels", () => {
+        assert.deepEqual(LEVELS, {
+            "1440p60": { height: 1440, fps: 60, maxKbps: 20000, minKbps: 8000 },
+            "1440p30": { height: 1440, fps: 30, maxKbps: 20000, minKbps: 4500 },
+            "1080p60": { height: 1080, fps: 60, maxKbps: 20000, minKbps: 4500 },
+            "720p60": { height: 720, fps: 60, maxKbps: 12000, minKbps: 2500 },
+            "1080p30": { height: 1080, fps: 30, maxKbps: 12000, minKbps: 2500 },
+            "720p30": { height: 720, fps: 30, maxKbps: 6000, minKbps: 0 }
+        });
+    });
+
+    test("nada passa de 20 Mbps; mais pixels por segundo nunca pede menos banda; descer sempre pede menos ou igual", () => {
+        const levels = Object.keys(LEVELS) as QualityLevel[];
+        for (const a of levels) {
+            assert.ok(LEVELS[a].maxKbps <= 20000, a);
+            assert.ok(LEVELS[a].minKbps < LEVELS[a].maxKbps, a);
+            for (const b of levels) {
+                if (rank(a) > rank(b)) assert.ok(LEVELS[a].minKbps >= LEVELS[b].minKbps && LEVELS[a].maxKbps >= LEVELS[b].maxKbps, `${a} x ${b}`);
+            }
+            for (const motion of [true, false]) {
+                const down = stepDown(a, motion);
+                if (down) assert.ok(LEVELS[down].minKbps <= LEVELS[a].minKbps && LEVELS[down].maxKbps <= LEVELS[a].maxKbps, `${a} → ${down}`);
+            }
+        }
+    });
+
+    test("captura 2560x1440: o 2K vai inteiro, o 1080p reduz para 1920x1080 e o 720p para 1280x720", () => {
+        assert.deepEqual(encodingFor("1440p60", 2560, 1440), { maxBitrate: 20_000_000, maxFramerate: 60, scaleResolutionDownBy: 1 });
+        assert.deepEqual(encodingFor("1440p30", 2560, 1440), { maxBitrate: 20_000_000, maxFramerate: 30, scaleResolutionDownBy: 1 });
+        const e1080 = encodingFor("1080p60", 2560, 1440);
+        assert.deepEqual(scaledSize(2560, 1440, e1080.scaleResolutionDownBy), { width: 1920, height: 1080 });
+        const e720 = encodingFor("720p60", 2560, 1440);
+        assert.deepEqual(scaledSize(2560, 1440, e720.scaleResolutionDownBy), { width: 1280, height: 720 });
+        assert.equal(pixelRate("1440p60", 2560, 1440), 2560 * 1440 * 60);
+    });
+
+    test("2K numa captura de 1080p (tela ou janela menor): nada amplia, vai no tamanho dela", () => {
+        for (const [w, h] of [[1920, 1080], [1798, 1080], [1280, 720]]) {
+            assert.equal(encodingFor("1440p60", w, h).scaleResolutionDownBy, 1, `${w}x${h}`);
+            assert.equal(pixelRate("1440p60", w, h), pixelRate("1080p60", w, h), `${w}x${h}: o mesmo que o 1080p60`);
+        }
+    });
+
+    test("fitToSource: 2K numa captura de ate 1080p (2% de folga) vira o 1080p no mesmo fps; o resto fica", () => {
+        assert.equal(SOURCE_SLACK, 1.02);
+        assert.equal(fitToSource("1440p60", 1080), "1080p60");
+        assert.equal(fitToSource("1440p30", 1080), "1080p30");
+        assert.equal(fitToSource("1440p60", 720), "1080p60");
+        assert.equal(fitToSource("1440p60", 1101), "1080p60", "ate 2% acima de 1080");
+        assert.equal(fitToSource("1440p60", 1102), "1440p60", "acima disso o 2K reduz menos que o 1080p");
+        assert.equal(fitToSource("1440p60", 1440), "1440p60");
+        assert.equal(fitToSource("1440p60", 0), "1440p60", "tamanho desconhecido: fica");
+        for (const level of ["1080p60", "1080p30", "720p60", "720p30"] as const) assert.equal(fitToSource(level, 480), level, `${level} nunca muda`);
     });
 });

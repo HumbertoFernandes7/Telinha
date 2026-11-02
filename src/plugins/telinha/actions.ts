@@ -18,7 +18,7 @@ import * as session from "./core/session";
 import * as streaming from "./core/streaming";
 import * as viewing from "./core/viewing";
 import { getState } from "./store";
-import type { AccessMode, CaptureSource, PeerId, RemotePeer, StreamOptions } from "./types";
+import type { AccessMode, CaptureSource, PeerId, Quality, RemotePeer, StreamOptions } from "./types";
 
 /**
  * O plugin sabe transmitir o audio da tela inteira (todo o som do PC, menos o do Discord, via
@@ -64,6 +64,18 @@ export async function listSources(): Promise<CaptureSource[]> {
  */
 export function startStreaming(opts: StreamOptions): Promise<void> {
     return streaming.startStreaming(opts);
+}
+
+/**
+ * Troca a resolucao e o fps com a transmissao no ar (seletores da barra do Telinha): captura de novo a mesma fonte, com o
+ * mesmo som e o mesmo "Quem pode assistir", como o Trocar do seletor de fonte; quem assiste continua assistindo. Chame
+ * direto do clique (a captura precisa de um gesto). Rejeita com a frase pronta em pt-BR (tambem vai para lastError).
+ */
+export function changeStreamQuality(quality: Quality): Promise<void> {
+    const { local } = rt;
+    if (!local) return Promise.reject(new Error("Você não está transmitindo."));
+    if (local.quality === quality) return Promise.resolve();
+    return streaming.startStreaming({ source: local.source, quality, withAudio: local.info.hasAudio });
 }
 
 export function stopStreaming(): void {

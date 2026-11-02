@@ -9,8 +9,9 @@
 
 import { ACCESS_BADGE, initialAccess } from "@plugins/telinha/core/access";
 import { isIdentityConfigured } from "@plugins/telinha/core/identity/config";
+import { FRAME_RATES, qualityFromSettings, RESOLUTION_LABEL, RESOLUTIONS } from "@plugins/telinha/core/quality/choice";
 import { settings } from "@plugins/telinha/settings";
-import type { AccessMode, IdentityAlert, PeerId, Quality, RemotePeer, StreamInfo, TelinhaState, ViewDeniedReason } from "@plugins/telinha/types";
+import type { AccessMode, FrameRate, IdentityAlert, PeerId, Quality, RemotePeer, Resolution, StreamInfo, TelinhaState, ViewDeniedReason } from "@plugins/telinha/types";
 import { classNameFactory } from "@utils/css";
 import { Logger } from "@utils/Logger";
 import { SelectedChannelStore, showToast, UserStore } from "@webpack/common";
@@ -21,11 +22,11 @@ export const logger = new Logger("Telinha UI", "#0b8a83");
 /** Telinha's own accent (teal): distinct from Discord's red "AO VIVO" and from its blurple app/bot tags */
 export const ACCENT = "#0b8a83";
 
-export const QUALITY_OPTIONS: readonly { value: Quality; label: string; }[] = [
-    { value: "1080p60", label: "1080p · 60 fps" },
-    { value: "720p60", label: "720p · 60 fps" },
-    { value: "1080p30", label: "1080p · 30 fps" }
-];
+/** "Resolução": 720p · 1080p · 2K (1440p), como no Discord */
+export const RESOLUTION_OPTIONS: readonly { value: Resolution; label: string; }[] = RESOLUTIONS.map(value => ({ value, label: RESOLUTION_LABEL[value] }));
+
+/** "FPS": 30 · 60 */
+export const FPS_OPTIONS: readonly { value: FrameRate; label: string; }[] = FRAME_RATES.map(value => ({ value, label: String(value) }));
 
 export function errorText(e: unknown): string {
     if (e instanceof Error) return e.message || e.name;
@@ -57,9 +58,9 @@ export function runAction(what: string, fn: () => unknown, onError?: (message: s
     }
 }
 
+/** A qualidade que os seletores ja trazem: "Resolução padrão" x "FPS padrão" (valor invalido: 1080p, 60). */
 export function defaultQuality(): Quality {
-    const value = settings.store.defaultQuality as string | undefined;
-    return QUALITY_OPTIONS.some(o => o.value === value) ? value as Quality : "1080p60";
+    return qualityFromSettings(settings.store.defaultResolution, settings.store.defaultFps);
 }
 
 /** "Quem pode assistir" que o seletor ja traz marcado ("Só meus amigos" sem Client ID cai para "Só quem eu aprovar"). */

@@ -9,13 +9,14 @@ import ErrorBoundary from "@components/ErrorBoundary";
 import { FormSwitch } from "@components/FormSwitch";
 import { Paragraph } from "@components/Paragraph";
 import { getScreenAudioStatus, listSources, screenAudioSupported, startStreaming } from "@plugins/telinha/actions";
+import { HINT_2K, qualityOf, splitQuality } from "@plugins/telinha/core/quality/choice";
 import { getState } from "@plugins/telinha/store";
-import type { AccessMode, CaptureSource, Quality } from "@plugins/telinha/types";
+import type { AccessMode, CaptureSource, FrameRate, Quality, Resolution } from "@plugins/telinha/types";
 import { RenderModalProps } from "@vencord/discord-types";
 import { Modal, openModal, Select, showToast, useEffect, useState } from "@webpack/common";
 
 import { AccessPicker, accessReady } from "./AccessPicker";
-import { cl, defaultAccess, defaultQuality, errorText, inVoiceChannel, logger, QUALITY_OPTIONS, shareAudioByDefault } from "./common";
+import { cl, defaultAccess, defaultQuality, errorText, FPS_OPTIONS, inVoiceChannel, logger, RESOLUTION_OPTIONS, shareAudioByDefault } from "./common";
 
 type Kind = CaptureSource["kind"];
 
@@ -55,7 +56,9 @@ function SourcePickerModal({ modalProps, switching, initialQuality }: { modalPro
     const [loadError, setLoadError] = useState<string | null>(null);
     const [tab, setTab] = useState<Kind>("window");
     const [selectedId, setSelectedId] = useState<string | null>(null);
-    const [quality, setQuality] = useState<Quality>(initialQuality);
+    // Resolução x FPS, como no Discord (trocando de fonte, vem a da transmissao no ar)
+    const [resolution, setResolution] = useState<Resolution>(() => splitQuality(initialQuality).resolution);
+    const [fps, setFps] = useState<FrameRate>(() => splitQuality(initialQuality).fps);
     const [audio, setAudio] = useState(shareAudioByDefault);
     // "Quem pode assistir": so ao comecar (trocando de fonte, o modo atual continua; muda-se pela barra do Telinha).
     // A senha nunca vem preenchida: digitada ou gerada a cada transmissao, nunca salva.
@@ -126,7 +129,7 @@ function SourcePickerModal({ modalProps, switching, initialQuality }: { modalPro
         try {
             await startStreaming({
                 source,
-                quality,
+                quality: qualityOf(resolution, fps),
                 withAudio: audio && (source.kind !== "screen" || screenAudioReady),
                 ...(switching ? {} : { access, ...(access === "password" ? { password } : {}) })
             });
@@ -210,18 +213,33 @@ function SourcePickerModal({ modalProps, switching, initialQuality }: { modalPro
                 {body}
 
                 <div className={cl("options")}>
-                    <div className={cl("option-row")}>
-                        <span className={cl("option-label")}>Qualidade</span>
-                        <div className={cl("option-control")}>
-                            <Select
-                                options={QUALITY_OPTIONS}
-                                isSelected={v => v === quality}
-                                select={v => setQuality(v)}
-                                serialize={v => String(v)}
-                                closeOnSelect={true}
-                            />
+                    <div className={cl("quality")}>
+                        <div className={cl("quality-field")}>
+                            <span className={cl("option-label")}>Resolução</span>
+                            <div className={cl("quality-control")}>
+                                <Select
+                                    options={RESOLUTION_OPTIONS}
+                                    isSelected={v => v === resolution}
+                                    select={v => setResolution(v)}
+                                    serialize={v => String(v)}
+                                    closeOnSelect={true}
+                                />
+                            </div>
+                        </div>
+                        <div className={cl("quality-field")}>
+                            <span className={cl("option-label")}>FPS</span>
+                            <div className={cl("quality-control")}>
+                                <Select
+                                    options={FPS_OPTIONS}
+                                    isSelected={v => v === fps}
+                                    select={v => setFps(v)}
+                                    serialize={v => String(v)}
+                                    closeOnSelect={true}
+                                />
+                            </div>
                         </div>
                     </div>
+                    {resolution === 1440 && <span className={cl("quality-hint")}>{HINT_2K}</span>}
                     <FormSwitch
                         title="Compartilhar som"
                         description={audioDescription}

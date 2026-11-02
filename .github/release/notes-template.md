@@ -8,7 +8,7 @@
   Every placeholder must stay. This comment is not published. Edit the fixed text below freely: CI renders this file
   and runs the result through the updater's own checks on every pull request (addon/test/run-release-test.mjs).
 -->
-O **Telinha** deixa quem está no **mesmo canal de voz** transmitir a **tela inteira ou uma janela** pros outros e assistir **dentro do Discord**, direto de PC pra PC, até 1080p a 60 fps, sem servidor e de graça.
+O **Telinha** deixa quem está no **mesmo canal de voz** transmitir a **tela inteira ou uma janela** pros outros e assistir **dentro do Discord**, direto de PC pra PC, até 2K (1440p) a 60 fps, sem servidor e de graça.
 
 **Já tem o Telinha?** Não precisa fazer nada: ele baixa a {{VERSION}} sozinho e avisa dentro do Discord ("Reiniciar agora / Depois").
 
@@ -43,7 +43,7 @@ Todos que vão transmitir ou assistir precisam ter o Telinha e estar no mesmo ca
 ## Avisos
 
 - **Privacidade:** a conexão é direta, então quem está na call consegue ver o IP dos outros. Só quem está no mesmo canal de voz é aceito, e você escolhe quem pode assistir.
-- **Upload:** cada pessoa que assiste recebe uma cópia separada da sua transmissão (até 20 Mbps cada em 1080p60). Se a sua internet não aguentar, a qualidade baixa sozinha.
+- **Upload:** cada pessoa que assiste recebe uma cópia separada da sua transmissão (até 20 Mbps cada em 1080p60 ou 2K). Se a sua internet não aguentar, a qualidade baixa sozinha.
 - **Atualização do Discord e do Vencord:** o Telinha continua funcionando. Se você usar o **"Reparar"** do instalador do Vencord, rode o instalador do Telinha de novo.
 - **Som da tela inteira:** usa o `telinha-audio.exe` (código aberto neste repositório), ainda sem assinatura; o antivírus pode bloquear. Se bloquear, a tela vai sem som.
 - Mods de cliente vão contra os Termos de Serviço do Discord: use por sua conta e risco.
