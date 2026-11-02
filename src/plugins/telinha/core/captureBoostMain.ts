@@ -190,6 +190,8 @@ const OUTPUT_MAX_CHARS = 8 * 1024;
 /** o processo da GPU que caiu: o Chromium abre outro; espera ele aparecer no app.getAppMetrics() */
 const GPU_RESTART_DELAY_MS = 2000;
 const GPU_RESTART_TRIES = 3;
+/** o processo novo pode nascer um pouco antes de o evento chegar ao JS */
+const GPU_RESTART_SLACK_MS = 5000;
 const HIGH = "HIGH";
 /** as classes abaixo de HIGH: so estas sao lembradas para voltar (um processo ja em HIGH fica como estava) */
 const BELOW_HIGH = new Set(["IDLE", "BELOW_NORMAL", "NORMAL", "ABOVE_NORMAL"]);
@@ -219,12 +221,12 @@ function enqueue<T>(job: () => Promise<T>): Promise<T> {
     return next;
 }
 
-/** O processo principal do Discord (este) e o da GPU (app.getAppMetrics). */
-function discordTargets(): { pid: number; role: Role; }[] {
-    const targets: { pid: number; role: Role; }[] = [{ pid: process.pid, role: "Discord" }];
+/** O processo principal do Discord (este) e o da GPU (app.getAppMetrics). `created`: ProcessMetric.creationTime (NaN = sem). */
+function discordTargets(): { pid: number; role: Role; created: number; }[] {
+    const targets: { pid: number; role: Role; created: number; }[] = [{ pid: process.pid, role: "Discord", created: NaN }];
     try {
         for (const m of app.getAppMetrics())
-            if (m?.type === "GPU" && Number.isInteger(m.pid) && m.pid > 0 && m.pid !== process.pid) targets.push({ pid: m.pid, role: "GPU" });
+            if (m?.type === "GPU" && Number.isInteger(m.pid) && m.pid > 0 && m.pid !== process.pid) targets.push({ pid: m.pid, role: "GPU", created: Number(m.creationTime) });
     } catch { }
     return targets;
 }
@@ -293,7 +295,7 @@ function summarize(mode: GpuPriorityMode, targets: GpuPriorityTarget[], hags: Gp
 
 /** As linhas do helper → o que aconteceu com cada processo. */
 function readAnswer(wanted: { pid: number; role: Role; }[], answer: HelperAnswer) {
-    const targets = wanted.map((t): GpuPriorityTarget => ({ ...t, before: null, after: null, error: null }));
+    const targets = wanted.map(({ pid, role }): GpuPriorityTarget => ({ pid, role, before: null, after: null, error: null }));
     const byPid = new Map(targets.map(t => [t.pid, t]));
     let hags: GpuPriorityReport["hags"] = null;
     let { reason } = answer;
@@ -387,12 +389,14 @@ function onChildProcessGone(_event: unknown, details: { type?: string; } | undef
     if (details?.type !== "GPU" || !active) return;
     const old = [...raised].filter(([, entry]) => entry.role === "GPU").map(([pid]) => pid);
     for (const pid of old) raised.delete(pid);
-    const at = new Date().toISOString().slice(11, 19);
+    const goneAt = Date.now();
+    const at = new Date(goneAt).toISOString().slice(11, 19);
     let tries = 0;
     const attempt = () => {
         const timer = setTimeout(() => void enqueue(async () => {
             if (!active) return;
-            const gpu = discordTargets().find(t => t.role === "GPU" && !old.includes(t.pid));
+            // o Windows pode dar o pid antigo ao processo novo: entao vale o que nasceu depois da queda (creationTime)
+            const gpu = discordTargets().find(t => t.role === "GPU" && (!old.includes(t.pid) || t.created >= goneAt - GPU_RESTART_SLACK_MS));
             if (!gpu) {
                 if (++tries < GPU_RESTART_TRIES) attempt();
                 else notes.push(`o processo da GPU do Discord reiniciou às ${at} UTC e o novo não apareceu: alta só no principal`);

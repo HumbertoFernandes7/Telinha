@@ -154,7 +154,7 @@ describe("prioridade na placa de video (telinha-audio.exe --gpu-priority)", () =
 
     beforeEach(() => {
         resetGpuPriorityForTests();
-        app.appMetrics = [{ pid: ME, type: "Browser" }, { pid: GPU, type: "GPU" }, { pid: 51_300, type: "Tab" }];
+        app.appMetrics = [{ pid: ME, type: "Browser" }, { pid: GPU, type: "GPU" }, { pid: 51_302, type: "Tab" }];
         app.getAppMetricsImpl = null;
         app.listeners = {};
         app.onImpl = null;
@@ -403,7 +403,7 @@ describe("prioridade na placa de video (telinha-audio.exe --gpu-priority)", () =
     });
 
     test("a proxima transmissao volta em silencio o que ficou de um processo da GPU antigo, e o mesmo processo sobe lembrando a classe de antes", async t => {
-        const NEW_GPU = 60_000;
+        const NEW_GPU = 60_002; // nao e multiplo de 4: nunca e o pid deste processo (no Windows os pids sao)
         const procs = replies(t,
             ["hags on", ok(ME, "ABOVE_NORMAL", "HIGH"), ok(GPU, "NORMAL", "HIGH")],
             ["hags on", `error open 0x80070005 pid=${ME} Acesso negado.`],
@@ -424,7 +424,8 @@ describe("prioridade na placa de video (telinha-audio.exe --gpu-priority)", () =
         ]);
         assert.deepEqual([up.ok, up.raised, up.targets.map(t => t.pid)], [true, 2, [ME, NEW_GPU]]);
         await setGpuPriorityMain("restore");
-        assert.deepEqual(procs.spawned.slice(5).map(p => p.args.slice(1)).sort(), [[`${ME}`, "--class", "above_normal"], [`${NEW_GPU}`, "--class", "normal"]]);
+        // a ordem das chamadas segue a da lista, nao a dos pids: compara por pid
+        assert.deepEqual(Object.fromEntries(procs.spawned.slice(5).map(p => [p.args[1], p.args[3]])), { [ME]: "above_normal", [NEW_GPU]: "normal" });
     });
 
     test("sem resposta a tempo: o que o helper ja tinha escrito vale; a volta que nao responde fica para depois", async t => {
@@ -449,7 +450,7 @@ describe("prioridade na placa de video (telinha-audio.exe --gpu-priority)", () =
     });
 
     describe("o processo da GPU do Discord reinicia no meio da transmissao", () => {
-        const NEW_GPU = 60_000;
+        const NEW_GPU = 60_002; // nao e multiplo de 4: nunca e o pid deste processo (no Windows os pids sao)
         const gone = (type = "GPU") => app.emit("child-process-gone", {}, { type, reason: "crashed", exitCode: 1 });
 
         /** espera os timers de 2 s e a fila (helper respondendo por setImmediate) */
@@ -474,6 +475,22 @@ describe("prioridade na placa de video (telinha-audio.exe --gpu-priority)", () =
             assert.match(down.notes[0], new RegExp(`^o processo da GPU do Discord reiniciou às \\d\\d:\\d\\d:\\d\\d UTC \\(${GPU} → ${NEW_GPU}\\): alta de novo$`));
             assert.deepEqual(procs.spawned[2].args, ["--gpu-priority", `${ME},${NEW_GPU}`, "--class", "normal"], "o antigo nao esta mais na volta");
             assert.deepEqual((await setGpuPriorityMain("restore")).notes, [], "a nota sai uma vez so");
+        });
+
+        test("o Windows deu o pid antigo ao processo novo: vale o que nasceu depois da queda (creationTime)", async t => {
+            const clock = useFakeClock(t);
+            const procs = helperAnswers(t);
+            await setGpuPriorityMain("high");
+            const crashedAt = clock.epoch();
+            app.appMetrics = [{ pid: ME, type: "Browser" }, { pid: GPU, type: "GPU", creationTime: crashedAt - 3_600_000 }];
+            gone();
+            await after(clock, 2000); // ainda o antigo (nasceu bem antes da queda)
+            assert.equal(procs.spawned.length, 1);
+            app.appMetrics = [{ pid: ME, type: "Browser" }, { pid: GPU, type: "GPU", creationTime: crashedAt - 1000 }];
+            await after(clock, 2000);
+            assert.deepEqual(procs.spawned[1].args, ["--gpu-priority", `${ME},${GPU}`, "--class", "high"]);
+            const down = await setGpuPriorityMain("restore");
+            assert.match(down.notes[0], new RegExp(`\\(${GPU} → ${GPU}\\): alta de novo$`));
         });
 
         test("o novo nao aparece: 3 tentativas e uma nota", async t => {
@@ -503,12 +520,12 @@ describe("prioridade na placa de video (telinha-audio.exe --gpu-priority)", () =
             await after(clock, 2000);
             gone(); // de novo: o novo tambem cai, e o helper sumiu
             host.setExe(false);
-            app.appMetrics = [{ pid: ME, type: "Browser" }, { pid: NEW_GPU + 1, type: "GPU" }];
+            app.appMetrics = [{ pid: ME, type: "Browser" }, { pid: NEW_GPU + 4, type: "GPU" }];
             await after(clock, 2000);
             host.setExe(true);
             const { notes } = await setGpuPriorityMain("high");
             assert.match(notes[0], new RegExp(`\\(${GPU} → ${NEW_GPU}\\): não subiu de novo \\(open 0x80070005 Acesso negado\\.\\)$`));
-            assert.match(notes[1], new RegExp(`\\(\\? → ${NEW_GPU + 1}\\): não subiu de novo \\(o ajudante do Telinha \\(telinha-audio\\.exe\\) não foi instalado\\)$`));
+            assert.match(notes[1], new RegExp(`\\(\\? → ${NEW_GPU + 4}\\): não subiu de novo \\(o ajudante do Telinha \\(telinha-audio\\.exe\\) não foi instalado\\)$`));
         });
 
         test("outro tipo de processo, ou sem transmissao: nada; a transmissao que para antes do novo aparecer: nada sobe", async t => {
