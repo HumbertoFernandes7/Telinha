@@ -91,6 +91,8 @@ export interface ProbeTiming {
     totalMs: number;
 }
 
+/** Menos que isto de prazo nao vale outra consulta. */
+const MIN_CALL_MS = 10;
 export const PROBE_TIMING: ProbeTiming = { callMs: 3000, totalMs: 6000 };
 
 let localCaps: LocalCodecCaps = {
@@ -166,7 +168,8 @@ async function firstPowerEfficient(kind: "decodingInfo" | "encodingInfo", fmtps:
     const deadline = Date.now() + timing.totalMs;
     for (const fmtp of fmtps) {
         const left = deadline - Date.now();
-        if (left <= 0) break;
+        // o timer do Windows acorda alguns ms antes do Date.now chegar ao prazo; uma consulta com tao pouco tempo nao responde
+        if (left < MIN_CALL_MS) break;
         try {
             const config = { ...H264_PROBE, video: { ...H264_PROBE.video, contentType: `video/${mime};${fmtp}` } };
             const res = await withTimeout(Promise.resolve(mc[kind](config)), Math.min(timing.callMs, left));
