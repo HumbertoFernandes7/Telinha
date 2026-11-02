@@ -475,13 +475,11 @@ describe("VoiceBar (so com o estado do Telinha)", () => {
     describe("qualidade automatica", () => {
         const auto = (patch: Partial<NonNullable<LocalStream["autoQuality"]>> = {}) => ({ current: "1080p60" as const, reason: null, reasonText: null, viewers: {}, ...patch });
 
-        test("no maximo escolhido: so o nivel atual, com a explicacao padrao no tooltip", () => {
+        test("no maximo escolhido: nenhuma linha extra (a linha Qualidade ja diz o nivel)", () => {
             show({ local: mine({ autoQuality: auto() }) });
             renderBar();
-            const info = document.querySelector(".vc-telinha-bar-info") as HTMLElement;
-            assert.equal(info.textContent, "1080p60");
-            assert.equal(info.title, "Qualidade automática: no máximo escolhido");
-            assert.ok(!info.className.includes("bar-info-lowered"));
+            assert.equal(document.querySelector(".vc-telinha-bar-info"), null);
+            assert.ok(!texts().some(t => t.startsWith("Agora:")));
         });
 
         const reasons: [QualityReason, string][] = [["cpu", "processador"], ["upload", "seu upload"], ["bandwidth", "conexão de quem assiste"]];
@@ -490,11 +488,17 @@ describe("VoiceBar (so com o estado do Telinha)", () => {
                 show({ local: mine({ autoQuality: auto({ current: "720p30", reason, reasonText: `720p 30 fps — motivo ${reason}` }) }) });
                 renderBar();
                 const info = document.querySelector(".vc-telinha-bar-info") as HTMLElement;
-                assert.equal(info.textContent, `720p30 · menor: ${text}`);
+                assert.equal(info.textContent, `Agora: 720p · 30 fps · menor: ${text}`);
                 assert.equal(info.title, `720p 30 fps — motivo ${reason}`);
                 assert.ok(info.className.includes("vc-telinha-bar-info-lowered"));
             });
         }
+
+        test("2K escolhido e reduzida: o nivel aparece como 2K", () => {
+            show({ local: mine({ quality: "1440p60", autoQuality: auto({ current: "1440p30", reason: "cpu", reasonText: "2K 30 fps" }) }) });
+            renderBar();
+            assert.equal((document.querySelector(".vc-telinha-bar-info") as HTMLElement).textContent, "Agora: 2K · 30 fps · menor: processador");
+        });
 
         test("desligada (sem autoQuality): sem a linha", () => {
             show({ local: mine({ autoQuality: null }) });
@@ -612,7 +616,7 @@ describe("VoiceBar (so com o estado do Telinha)", () => {
             "Qualidade: 1080p · 60 fps",
             "beto quer assistir",
             "Duas conexões dizem ser Ana — uma pode ser falsa. Nenhuma recebe sua transmissão.",
-            "720p60 · menor: processador",
+            "Agora: 720p · 60 fps · menor: processador",
             "congelada",
             "carla está transmitindo",
             "falhou"
