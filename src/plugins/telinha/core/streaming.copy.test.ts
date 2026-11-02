@@ -26,7 +26,7 @@ import {
 } from "@test/helpers/wpb-streaming";
 
 import { refreshGpuCapture, resetCaptureBoostForTests } from "./captureBoost";
-import { resetCaptureCopyForTests, setCaptureCopyEnvForTests } from "./captureCopy";
+import { resetCaptureCopyForTests, setCaptureCopyEnvForTests, setCopyOnArrivalForTests } from "./captureCopy";
 import { captureTrackOf, rt } from "./context";
 import { startStreaming, stopStreaming } from "./streaming";
 
@@ -67,6 +67,7 @@ after(async () => {
 beforeEach(() => {
     fake = fakeCopyEnv();
     setCaptureCopyEnvForTests(fake.env);
+    setCopyOnArrivalForTests(true);
 });
 
 afterEach(async () => {
@@ -177,6 +178,18 @@ describe("cópia na hora na transmissão", () => {
             stopStreaming();
             await textureCapture(true);
         }
+    });
+
+    test("de fábrica a cópia fica desligada: com a captura pela placa, a captura original vai direto e uma linha avisa", async () => {
+        setCopyOnArrivalForTests(null);
+        const since = logMark();
+        await startStreaming(screenOptions());
+        assert.equal(fake.workers.length, 0, "nenhum Worker de cópia");
+        assert.equal(fake.processors.length, 0);
+        assert.equal(rt.local!.copy, null);
+        assert.deepEqual(rt.local!.stream.getVideoTracks(), [captured]);
+        assert.equal(captured!.contentHint, "motion");
+        assert.deepEqual(since().filter(l => l.includes("cópia na hora desligada")), ["Captura pela placa: cópia na hora desligada (padrão desde a 0.3.8)"]);
     });
 
     test("trocar de fonte no ar: a cópia antiga para e a nova liga", async () => {

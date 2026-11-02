@@ -30,7 +30,7 @@ import {
 } from "./access";
 import { startScreenAudioCapture } from "./audio/screenAudio";
 import { captureEndedText, noteCaptureStarted, noteCaptureStopped, textureCaptureActive } from "./captureBoost";
-import { startCaptureCopy } from "./captureCopy";
+import { copyOnArrival, startCaptureCopy } from "./captureCopy";
 import {
     AV1_HW_MIN_HEIGHT, chooseCodec, type CodecDecision, type EncoderReport, getLocalCaps, h264ReserveOf, HW_ONLY_LABEL, isOffHardwareHwOnly, isSoftwareH264, isTransientSoftwareH264, noteH264Fallback,
     pickNegotiatedCodec, softwareFallback, whyNoHwOnlyHere
@@ -365,9 +365,12 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
                 log.warn(`${e instanceof Error ? e.message : String(e)} Transmitindo a tela sem áudio.`);
             }
         }
-        // captura pela placa de video: cada quadro e copiado na chegada para uma textura nossa antes dos envios (o
-        // "mini rollback", core/captureCopy.ts). Indisponivel: null, e os envios usam a captura direto
-        const copy = textureCaptureActive() ? await startCaptureCopy(video) : null;
+        // captura pela placa de video: a copia na hora (cada quadro copiado na chegada para uma textura nossa antes dos
+        // envios, o "mini rollback", core/captureCopy.ts) esta desligada de fabrica desde a 0.3.8 (COPY_ON_ARRIVAL):
+        // os envios usam a captura direto. Ligada (so em teste) e indisponivel: null, tambem direto
+        const texture = textureCaptureActive();
+        const copy = texture && copyOnArrival() ? await startCaptureCopy(video) : null;
+        if (texture && !copyOnArrival()) log.info("Captura pela placa: cópia na hora desligada (padrão desde a 0.3.8)");
         if (!rt.room) {
             copy?.stop();
             stream.getTracks().forEach(t => t.stop());

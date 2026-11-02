@@ -24,7 +24,7 @@ import { captureStream, type FakeMediaStreamTrack, videoSenderStats } from "@tes
 import { connectViewer, createRig, destroyRig, enterCall, logMark, screenOptions, seconds, type StreamingRig, turns, videoSenderOf } from "@test/helpers/wpb-streaming";
 
 import { refreshGpuCapture, resetCaptureBoostForTests } from "./captureBoost";
-import { COPY_FLOW_MIN_FRAMES, resetCaptureCopyForTests, setCaptureCopyEnvForTests } from "./captureCopy";
+import { COPY_FLOW_MIN_FRAMES, resetCaptureCopyForTests, setCaptureCopyEnvForTests, setCopyOnArrivalForTests } from "./captureCopy";
 import { getLocalCaps } from "./codec";
 import { rt } from "./context";
 import { isContained } from "./peerConnection";
@@ -74,6 +74,7 @@ after(async () => {
 beforeEach(async () => {
     fake = fakeCopyEnv();
     setCaptureCopyEnvForTests(fake.env);
+    setCopyOnArrivalForTests(true);
     await startStreaming(screenOptions());
 });
 
