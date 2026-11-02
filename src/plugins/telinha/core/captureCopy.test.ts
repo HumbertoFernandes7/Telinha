@@ -19,7 +19,7 @@ import { fakeCopyEnv, zeroStats } from "@test/fakes/captureCopy";
 import { flushPromises, useFakeClock } from "@test/fakes/clock";
 import { videoTrack } from "@test/fakes/webrtc";
 
-import { captureCopyDiagnostics, COPY_LOG_MS, COPY_STALL_MS, COPY_START_TIMEOUT_MS, copyStatsLine, resetCaptureCopyForTests, startCaptureCopy } from "./captureCopy";
+import { captureCopyDiagnostics, COPY_FLOW_MIN_FRAMES, COPY_FLOW_POLLS, COPY_LOG_MS, COPY_START_TIMEOUT_MS, COPY_UNANSWERED_POLLS, copyStatsLine, resetCaptureCopyForTests, startCaptureCopy } from "./captureCopy";
 
 function logMark() {
     const seen = new Set(getEventLog());
@@ -154,9 +154,9 @@ describe("cópia na hora: no ar", () => {
     test("stats pergunta ao Worker; a linha de custo sai a cada 30 s com a janela", async t => {
         const { clock, fake, copy } = await live(t);
         const since = logMark();
-        fake.stats = { frames: 100, copied: 100, copyMs: 20, gpuMs: 300, gpuN: 100, gpuMax: 40 };
+        fake.stats = { frames: 100, copied: 100, written: 100, copyMs: 20, gpuMs: 300, gpuN: 100, gpuMax: 40 };
         await clock.tickAsync(2000);
-        fake.stats = { frames: 1900, copied: 1890, copyMs: 400, gpuMs: 2700, gpuN: 1890, gpuMax: 41, gpuLate: 2, dropped: 10, dropGpu: 4, dropWrite: 6 };
+        fake.stats = { frames: 1900, copied: 1890, written: 1890, copyMs: 400, gpuMs: 2700, gpuN: 1890, gpuMax: 41, gpuLate: 2, dropped: 10, dropGpu: 4, dropWrite: 6 };
         await clock.tickAsync(COPY_LOG_MS);
         assert.deepEqual(since(), ["info: Cópia na hora (WebGPU): 1800 quadros em 30 s · 0,21 ms/quadro no Worker · placa termina a cópia em 1,34 ms (máx. 41, 2 acima de 33 ms) "
             + "· 10 descartados pela fila (placa 4, envio 6)"]);
@@ -192,23 +192,76 @@ describe("cópia na hora: no ar", () => {
         assert.equal(fake.worker.ops().at(-1), "stop");
     });
 
-    test("o Worker para de responder com a captura no ar: onFail; com a captura já encerrada, nada", async t => {
+    test("o Worker para de responder com a captura no ar: onFail depois de 3 pedidos sem resposta; com a captura já encerrada, nada", async t => {
         const { clock, fake, source, copy } = await live(t);
         const reasons: string[] = [];
         copy.onFail(r => reasons.push(r));
         fake.mute = true;
-        await clock.tickAsync(COPY_STALL_MS + 2500);
-        assert.deepEqual(reasons, [`o Worker não responde há ${COPY_STALL_MS / 1000} s`]);
+        await clock.tickAsync(2000 * COPY_UNANSWERED_POLLS);
+        assert.deepEqual(reasons, [], "3 pedidos ainda sem resposta: espera mais um");
+        await clock.tickAsync(2000);
+        assert.deepEqual(reasons, [`o Worker não respondeu a ${COPY_UNANSWERED_POLLS} pedidos seguidos`]);
 
         const other = await live(t, clock);
         const r2: string[] = [];
         other.copy.onFail(r => r2.push(r));
         other.fake.mute = true;
         other.source.stop();
-        await other.clock.tickAsync(COPY_STALL_MS * 2);
+        await other.clock.tickAsync(2000 * COPY_UNANSWERED_POLLS * 3);
         assert.deepEqual(r2, []);
         other.copy.stop();
         void source;
+    });
+
+    test("o Worker lento (o timer atrasado, o Discord minimizado): responde antes do próximo pedido e nunca cai", async t => {
+        const { clock, fake, copy } = await live(t);
+        const reasons: string[] = [];
+        copy.onFail(r => reasons.push(r));
+        fake.script = (w, d) => {
+            if (d?.op === "stats") setTimeout(() => w.emit({ type: "stats", ...zeroStats() }), 1900);
+        };
+        await clock.tickAsync(60_000);
+        assert.deepEqual(reasons, []);
+        copy.stop();
+    });
+
+    test("vigia do fluxo: a captura anda e nada chega ao gerador → onFail; a captura parada não conta", async t => {
+        const clock = useFakeClock(t);
+        const fake = fakeCopyEnv();
+        let total = 0;
+        const source = Object.defineProperty(videoTrack(), "stats", { get: () => ({ totalFrames: total }) });
+        const copy = (await startCaptureCopy(source as unknown as MediaStreamTrack, fake.env))!;
+        const reasons: string[] = [];
+        copy.onFail(r => reasons.push(r));
+        // tela parada: a captura não entrega nada e o gerador também não; nunca é culpa da cópia
+        await clock.tickAsync(20_000);
+        assert.deepEqual(reasons, []);
+        assert.equal(copy.outputFlat(), false);
+        // a captura volta a andar e o gerador fica parado
+        total += COPY_FLOW_MIN_FRAMES;
+        assert.equal(copy.outputFlat(), true, "já conta na hora, sem esperar o próximo pedido");
+        await clock.tickAsync(2000 * COPY_FLOW_POLLS);
+        assert.deepEqual(reasons, [`os quadros não saem da cópia: ${COPY_FLOW_MIN_FRAMES} quadros da captura sem nenhum chegar aos envios`]);
+        assert.equal(copy.outputFlat(), false, "parada, não diz mais nada");
+    });
+
+    test("vigia do fluxo: sem MediaStreamTrack.stats, usa os quadros que o Worker leu; abandon desiste na hora", async t => {
+        const clock = useFakeClock(t);
+        const fake = fakeCopyEnv();
+        const copy = (await startCaptureCopy(videoTrack() as unknown as MediaStreamTrack, fake.env))!;
+        const reasons: string[] = [];
+        copy.onFail(r => reasons.push(r));
+        fake.stats = { frames: 10, written: 10 };
+        await clock.tickAsync(2000);
+        fake.stats = { frames: 10 + COPY_FLOW_MIN_FRAMES, written: 10 };
+        await clock.tickAsync(2000 * COPY_FLOW_POLLS);
+        assert.equal(reasons.length, 1);
+        const b = await live(t, clock);
+        const r2: string[] = [];
+        b.copy.onFail(r => r2.push(r));
+        b.copy.abandon("pedido do checkStall");
+        b.copy.abandon("de novo");
+        assert.deepEqual(r2, ["pedido do checkStall"]);
     });
 
     test("a leitura da captura falha no Worker com a captura no ar: onFail; o fim normal (captura parou) não", async t => {

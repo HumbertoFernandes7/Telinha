@@ -518,8 +518,9 @@ function checkCaptureSize(ex: CaptureExtras) {
 }
 
 /**
- * A copia na hora parou no meio (core/captureCopy.ts → onFail): cada envio volta para a faixa original da captura
- * (replaceTrack, sem renegociar) e quem pedir depois recebe a original. Envio travado (contained) fica como esta.
+ * A copia na hora parou no meio (core/captureCopy.ts → onFail, ou o checkStall vendo a copia parada): cada envio volta
+ * para a faixa original da captura (replaceTrack, sem renegociar) com a janela do checkStall do zero, e quem pedir
+ * depois recebe a original. Envio travado (contained) fica como esta.
  */
 function dropCopy(local: LocalCapture) {
     const { copy } = local;
@@ -527,6 +528,9 @@ function dropCopy(local: LocalCapture) {
     if (!copy || !source) return;
     for (const peerId of local.viewers) {
         if (contained(peerId)) continue;
+        // o encoder passa a receber outra faixa: a janela do checkStall recomeca (sem quadro ate aqui nao era culpa dele)
+        const send = sends.get(peerId);
+        if (send) send.stall = undefined;
         videoSender(peerId, local)?.replaceTrack(source).catch(e => log.warn(`Falha ao voltar ${peerLabel(peerId)} para a captura direta: ${errorText(e)}`));
     }
     local.stream.removeTrack(copy.track);
@@ -1478,6 +1482,13 @@ function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: 
 
     const label = peerLabel(peerId);
     const secs = Math.round((now - w.since) / 1000);
+    // a copia na hora (core/captureCopy.ts) nao entrega quadros ao gerador com a captura andando: o encoder esta sem
+    // quadro, nao travado. Os envios voltam para a captura direta (dropCopy, via onFail) e a janela recomeca
+    if (local.copy?.outputFlat()) {
+        send.stall = undefined;
+        local.copy.abandon(`os quadros não saem da cópia (o envio para ${label} ficou ${secs} s sem vídeo com a captura entregando quadros)`);
+        return;
+    }
     const name = /h265/i.test(enc.mimeType) ? "H.265" : "H.264";
     const what = encoded === 0
         ? `O encoder ${name} para ${label} não codificou nenhum quadro em ${secs} s`

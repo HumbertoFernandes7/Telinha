@@ -17,10 +17,10 @@
 // Worker → main, alem das respostas: { type: "warn", message } (uma vez por problema) e { type: "ended", error? }.
 //
 // Por quadro: le da fonte, copia na placa de video para uma textura nossa, fecha o original na hora e escreve a copia
-// no gerador com o MESMO timestamp. Nada volta para o processador. Contrapressao: com MAX_INFLIGHT copias ainda na fila
-// da placa, ou o gerador sem espaco, o quadro novo e descartado (o processador ja guarda so o mais novo, maxBufferSize
-// 1): nada fica enfileirado. A copia falhando: o quadro original segue (o comportamento de antes), e depois de
-// FAIL_LIMIT falhas seguidas a copia desliga e o resto passa direto.
+// no gerador com o MESMO timestamp. Nada volta para o processador. Contrapressao: no WebGPU com MAX_INFLIGHT copias
+// ainda na fila da placa, ou o gerador sem espaco, o quadro novo e descartado (o processador ja guarda so o mais novo,
+// maxBufferSize 1): nada fica enfileirado. A copia falhando: o quadro original segue (o comportamento de antes), e
+// depois de FAIL_LIMIT falhas seguidas a copia desliga e o resto passa direto. st.written conta o que o gerador aceitou.
 export const COPY_WORKER_SOURCE = String.raw`"use strict";
 var MAX_INFLIGHT = 3;
 var FAIL_LIMIT = 30;
@@ -28,7 +28,7 @@ var SLOW_MS = 2.5, SLOW_SAMPLE = 120, slowChecked = false, allowed = [];
 var method = null, device = null, canvas = null, gctx = null, c2d = null, pipeline = null, sampler = null, layout = null;
 var reader = null, writer = null, stopped = false, passthrough = false, fails = 0, inflight = 0;
 var last = null, lastAt = 0;
-var st = { frames: 0, copied: 0, passed: 0, dropped: 0, dropGpu: 0, dropWrite: 0, refreshed: 0, copyMs: 0, copyMax: 0, gpuMs: 0, gpuN: 0, gpuMax: 0, gpuLate: 0, width: 0, height: 0 };
+var st = { frames: 0, copied: 0, passed: 0, written: 0, dropped: 0, dropGpu: 0, dropWrite: 0, refreshed: 0, copyMs: 0, copyMax: 0, gpuMs: 0, gpuN: 0, gpuMax: 0, gpuLate: 0, width: 0, height: 0 };
 var warned = {};
 function post(type, data) { var m = data || {}; m.type = type; self.postMessage(m); }
 function describe(e) { return e && e.name ? e.name + ": " + e.message : String(e); }
@@ -47,6 +47,7 @@ async function initWebGpu() {
   device.lost.then(function (info) {
     if (stopped) return;
     device = null;
+    inflight = 0;
     if (c2dReady()) { method = "canvas2d"; warnOnce("lost", "WebGPU perdeu a placa de vídeo (" + (info && info.message || "sem motivo") + "): a cópia continua pelo canvas 2D"); }
     else { passthrough = true; warnOnce("lost", "WebGPU perdeu a placa de vídeo (" + (info && info.message || "sem motivo") + "): a cópia na hora desligou e a captura segue direto"); }
   });
@@ -120,7 +121,8 @@ function emit(out) {
   if (!writer) { out.close(); return; }
   if (writing) { if (waiting) { waiting.close(); st.dropped++; st.dropWrite++; } waiting = out; return; }
   writing = true;
-  writer.write(out).then(next, next);
+  // written: o gerador aceitou o quadro (o main confere que a copia anda: captureCopy.ts → o vigia do fluxo)
+  writer.write(out).then(function () { st.written++; next(); }, function () { out.close(); next(); });
 }
 function next() {
   writing = false;
@@ -142,7 +144,7 @@ async function loop() {
     st.frames++;
     st.width = frame.displayWidth; st.height = frame.displayHeight;
     if (passthrough) { st.passed++; emit(frame); continue; }
-    if (inflight >= MAX_INFLIGHT) { frame.close(); st.dropped++; st.dropGpu++; continue; }
+    if (method === "webgpu" && inflight >= MAX_INFLIGHT) { frame.close(); st.dropped++; st.dropGpu++; continue; }
     var t0 = performance.now(), out = null;
     try { out = copy(frame); fails = 0; }
     catch (e) {

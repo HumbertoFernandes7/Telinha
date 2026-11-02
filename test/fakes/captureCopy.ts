@@ -164,7 +164,7 @@ export function fakeCopyEnv(over: Partial<Pick<FakeCopyEnv, "hello" | "method" |
 
 export function zeroStats(method: CaptureCopyStats["method"] = "webgpu"): CaptureCopyStats {
     return {
-        frames: 0, copied: 0, passed: 0, dropped: 0, dropGpu: 0, dropWrite: 0, refreshed: 0, copyMs: 0, copyMax: 0,
+        frames: 0, copied: 0, written: 0, passed: 0, dropped: 0, dropGpu: 0, dropWrite: 0, refreshed: 0, copyMs: 0, copyMax: 0,
         gpuMs: 0, gpuN: 0, gpuMax: 0, gpuLate: 0, width: 0, height: 0, method, inflight: 0
     };
 }

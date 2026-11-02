@@ -236,6 +236,7 @@ describe("Worker da cópia na hora", () => {
         const s = await r.stats();
         assert.equal(s.frames, 1);
         assert.equal(s.copied, 1);
+        assert.equal(s.written, 1, "o gerador aceitou");
         assert.equal(s.dropped, 0);
         assert.equal(s.method, "canvas2d");
         assert.equal(s.width, 1920);
@@ -281,6 +282,37 @@ describe("Worker da cópia na hora", () => {
         s = await r.stats();
         assert.equal(s.gpuN, 3);
         assert.equal(s.copied, 4);
+    });
+
+    test("a escrita no gerador recusada: a cópia é fechada (não vaza) e a próxima segue", async () => {
+        const r = rig();
+        await started(r);
+        const w = (r as any).writable.getWriter;
+        (r as any).writable.getWriter = () => ({ ...w(), write: (f: Frame) => { r.written.push(f); return Promise.reject(new Error("errored")); } });
+        r.send({ op: "run", readable: (r as any).readable, writable: (r as any).writable });
+        await flush();
+        r.push(captured(1000));
+        await flush();
+        r.push(captured(2000));
+        await flush();
+        assert.ok(r.written.length >= 1);
+        assert.ok(r.written.every(f => f.closed), "cada cópia recusada foi fechada");
+        assert.equal((await r.stats()).written, 0);
+    });
+
+    test("WebGPU perde a placa com cópias na fila: o canvas 2D não herda a fila (nenhum quadro descartado por ela)", async () => {
+        const { navigatorGpu, gpu } = fakeGpu();
+        const r = rig({ gpu: navigatorGpu });
+        await started(r, ["webgpu", "canvas2d"]);
+        for (const i of [1, 2, 3]) { r.push(captured(i * 1000)); await flush(); }
+        assert.equal(gpu.submits, 3, "3 na fila da placa, que nunca termina");
+        gpu.lose("TDR");
+        await flush();
+        for (const i of [4, 5, 6, 7]) { r.push(captured(i * 1000)); await flush(); }
+        const s = await r.stats();
+        assert.equal(s.dropGpu, 0);
+        assert.equal(s.inflight, 0);
+        assert.equal(r.drawImage.calls.length, 4);
     });
 
     test("WebGPU perde a placa: a cópia continua pelo canvas 2D, um aviso", async () => {

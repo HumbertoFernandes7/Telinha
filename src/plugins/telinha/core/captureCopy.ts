@@ -32,7 +32,8 @@
 // nunca negociada segurando a faixa ORIGINAL (refreshHolder) devolve esse pedido: 1 quadro por segundo de novo.
 //
 // Falha mole: sem Worker/processador/gerador, sem WebGPU nem canvas 2D, o Worker recusado pelo CSP ou mudo: null (quem
-// chama usa a faixa original, uma linha no log). No meio da transmissao, o Worker morrendo ou parando de responder chama
+// chama usa a faixa original, uma linha no log). No meio da transmissao, o Worker morrendo, parando de responder ou os
+// quadros parando de chegar ao gerador com a captura andando (o vigia do fluxo, COPY_FLOW_MIN_FRAMES) chama
 // onFail (core/streaming.ts volta os envios para a faixa original).
 //
 // O resto do Telinha continua lendo a faixa ORIGINAL (LocalCapture.captureTrack): getSettings/tamanho, contador de
@@ -47,6 +48,8 @@ export type CopyMethod = "webgpu" | "canvas2d";
 export interface CaptureCopyStats {
     frames: number;
     copied: number;
+    /** quadros que o gerador aceitou (escrita terminada): o que de fato chega nos envios */
+    written: number;
     /** quadros que seguiram sem copia (a copia falhou nesse quadro, ou desligou) */
     passed: number;
     /** descartados pela contrapressao: dropGpu (fila da placa cheia) + dropWrite (o gerador ainda com um quadro esperando) */
@@ -76,8 +79,15 @@ export interface CaptureCopy {
     refresh(): void;
     /** contadores do Worker; null = sem resposta */
     stats(): Promise<CaptureCopyStats | null>;
-    /** chamado uma vez se a copia morrer no meio (o Worker caiu ou parou de responder) */
+    /** chamado uma vez se a copia morrer no meio (o Worker caiu, parou de responder ou os quadros pararam de sair) */
     onFail(cb: (reason: string) => void): void;
+    /**
+     * Desde a ultima vez que o gerador aceitou um quadro, a captura ja entregou COPY_FLOW_MIN_FRAMES ou mais: a copia
+     * esta parada com a captura andando (core/streaming.ts → checkStall culpa a copia, nao o encoder)
+     */
+    outputFlat(): boolean;
+    /** desiste da copia agora (onFail com `reason`): os envios voltam para a faixa original */
+    abandon(reason: string): void;
     stop(): void;
 }
 
@@ -110,8 +120,18 @@ function refreshHolder(env: CaptureCopyEnv, source: MediaStreamTrack): { close()
 
 /** Tempo para o Worker dizer "hello" (carregou) e "ready" (WebGPU ou canvas pronto). */
 export const COPY_START_TIMEOUT_MS = 3000;
-/** O Worker sem responder aos contadores por este tempo, com a transmissao no ar: parou (onFail). */
-export const COPY_STALL_MS = 6000;
+/**
+ * Pedidos de contadores seguidos sem resposta, com a transmissao no ar: o Worker parou (onFail). Conta pedidos, nao
+ * tempo: com o Discord minimizado o timer atrasa e o relogio andaria sem o Worker ter culpa.
+ */
+export const COPY_UNANSWERED_POLLS = 3;
+/**
+ * Fluxo: com a captura entregando COPY_FLOW_MIN_FRAMES ou mais sem o gerador aceitar nenhum quadro, por
+ * COPY_FLOW_POLLS respostas seguidas, a copia parou com o Worker vivo (ex.: a escrita no gerador nunca termina, o
+ * processador sem entregar nada): onFail, antes de o checkStall culpar o encoder da placa (H264_STALL_MS).
+ */
+export const COPY_FLOW_MIN_FRAMES = 8;
+export const COPY_FLOW_POLLS = 2;
 /** Uma linha de custo no log a cada este tempo. */
 export const COPY_LOG_MS = 30_000;
 const POLL_MS = 2000;
@@ -261,8 +281,35 @@ export async function startCaptureCopy(source: MediaStreamTrack, env: CaptureCop
     let failCb: ((reason: string) => void) | null = null;
     let failed: string | null = null;
     const pending: ((s: CaptureCopyStats | null) => void)[] = [];
-    let answeredAt = performance.now();
+    /** pedidos de contadores do vigia ainda sem resposta (COPY_UNANSWERED_POLLS) */
+    let unanswered = 0;
     let logged: { stats: CaptureCopyStats; at: number; } | null = null;
+    /** fluxo: `written` e o contador da captura na ultima vez que o gerador aceitou um quadro; respostas sem andar desde ela */
+    let flow: { written: number; src: number; flat: number; } | null = null;
+    let lastSrc = 0;
+    /** MediaStreamTrack.stats.totalFrames da captura (Chromium); null = nao relatado */
+    const trackFrames = (): number | null => {
+        let total: unknown;
+        try {
+            total = (source as any).stats?.totalFrames;
+        } catch { }
+        return typeof total === "number" && Number.isFinite(total) ? total : null;
+    };
+    /** quadros que a captura entregou: os da faixa, sem eles os lidos pelo Worker */
+    const sourceFrames = (s: CaptureCopyStats) => trackFrames() ?? s.frames;
+    const sourceNow = () => trackFrames() ?? lastSrc;
+    const watchFlow = (s: CaptureCopyStats) => {
+        const src = sourceFrames(s);
+        const written = s.written ?? 0;
+        lastSrc = src;
+        if (!flow || written > flow.written || src < flow.src) {
+            flow = { written, src, flat: 0 };
+            return;
+        }
+        if (src - flow.src < COPY_FLOW_MIN_FRAMES) return;
+        if (++flow.flat >= COPY_FLOW_POLLS)
+            fail(`os quadros não saem da cópia: ${src - flow.src} quadros da captura sem nenhum chegar aos envios`);
+    };
 
     const fail = (reason: string) => {
         if (stopped || failed) return;
@@ -275,7 +322,7 @@ export async function startCaptureCopy(source: MediaStreamTrack, env: CaptureCop
     worker.addEventListener("message", (e: MessageEvent) => {
         const d = e.data ?? {};
         if (d.type === "stats") {
-            answeredAt = performance.now();
+            unanswered = 0;
             report.stats = d as CaptureCopyStats;
             for (const r of pending.splice(0)) r(d as CaptureCopyStats);
         } else if (d.type === "warn") {
@@ -296,12 +343,15 @@ export async function startCaptureCopy(source: MediaStreamTrack, env: CaptureCop
     const poll = setInterval(() => {
         if (stopped) return;
         if (source.readyState !== "live") return;
-        if (performance.now() - answeredAt > COPY_STALL_MS) {
-            fail(`o Worker não responde há ${Math.round(COPY_STALL_MS / 1000)} s`);
+        if (unanswered >= COPY_UNANSWERED_POLLS) {
+            fail(`o Worker não respondeu a ${unanswered} pedidos seguidos`);
             return;
         }
+        unanswered++;
         void askStats().then(s => {
             if (!s || stopped) return;
+            watchFlow(s);
+            if (stopped) return;
             const now = performance.now();
             if (!logged) logged = { stats: s, at: now };
             else if (now - logged.at >= COPY_LOG_MS) {
@@ -332,6 +382,12 @@ export async function startCaptureCopy(source: MediaStreamTrack, env: CaptureCop
         stats: askStats,
         onFail(cb) {
             failCb = cb;
+        },
+        outputFlat() {
+            return !stopped && flow != null && sourceNow() - flow.src >= COPY_FLOW_MIN_FRAMES;
+        },
+        abandon(reason) {
+            fail(reason);
         },
         stop() {
             cleanup();

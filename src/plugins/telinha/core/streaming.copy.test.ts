@@ -137,6 +137,7 @@ describe("cópia na hora na transmissão", () => {
         const pc = await connectViewer(rig, "peerB", OTHER_ID, "bia");
         rig.room.receive("watch", { op: "start" }, "peerB");
         await turns();
+        const refreshes = fake.worker.ops().filter(o => o === "refresh").length;
         assert.equal(videoSenderOf(pc)?.track, fake.generators[0]);
         const since = logMark();
         fake.worker.fail("out of memory");
@@ -147,6 +148,13 @@ describe("cópia na hora na transmissão", () => {
         assert.equal(fake.generators[0].readyState, "ended");
         assert.deepEqual(since(), ["Captura pela placa: a cópia na hora parou (o Worker caiu: out of memory); os envios voltam para a captura direta"]);
         assert.ok(rt.local, "a transmissão continua");
+
+        // quem entra depois da falha recebe a captura original
+        const late = await connectViewer(rig, "peerC", "600000000000000006", "caio");
+        rig.room.receive("watch", { op: "start" }, "peerC");
+        await turns();
+        assert.equal(videoSenderOf(late)?.track, captured);
+        assert.equal(fake.worker.ops().filter(o => o === "refresh").length, refreshes, "sem cópia, nada de reenvio");
     });
 
     test("sem MediaStreamTrackGenerator: uma linha, e a captura vai direto (como antes)", async () => {
