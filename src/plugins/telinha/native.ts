@@ -13,7 +13,7 @@ import { app, desktopCapturer, type IpcMainInvokeEvent } from "electron";
 
 import { readScreenAudioMain, screenAudioStatusMain, startScreenAudioMain, stopScreenAudioMain } from "./core/audio/screenAudioMain";
 import type { ScreenAudioRead, ScreenAudioStart, ScreenAudioStatus } from "./core/audio/types";
-import { type GpuCaptureStatus, gpuCaptureStatusMain, setGpuCaptureMain } from "./core/captureBoostMain";
+import { type GpuCaptureStatus, gpuCaptureStatusMain, type GpuPriorityReport, setGpuCaptureMain, setGpuPriorityMain } from "./core/captureBoostMain";
 import { appendDiagLogMain, clearDiagLogMain, readDiagLogMain } from "./core/diagLogMain";
 import { getWindowProcessInfo } from "./nativeWindowPid";
 import { RELAY_URLS } from "./protocol";
@@ -314,6 +314,14 @@ export function gpuCaptureStatus(_: IpcMainInvokeEvent): GpuCaptureStatus {
 /** Liga/desliga a "Captura pela placa de vídeo" para a proxima partida do Discord (%APPDATA%\Telinha\capture-flags.json). */
 export function setGpuCapture(_: IpcMainInvokeEvent, on: boolean): GpuCaptureStatus {
     return setGpuCaptureMain(on === true);
+}
+
+/**
+ * "Prioridade da captura na placa de vídeo": "high" poe o processo principal do Discord e o da GPU em HIGH na placa de
+ * video (inicio da transmissao); qualquer outro valor volta o que o "high" mudou (fim da transmissao). Nunca REALTIME.
+ */
+export function setGpuPriority(_: IpcMainInvokeEvent, mode: string): Promise<GpuPriorityReport> {
+    return setGpuPriorityMain(mode === "high" ? "high" : "restore");
 }
 
 // #endregion

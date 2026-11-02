@@ -4,23 +4,31 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-// Testes do lado main da "Captura pela placa de vídeo" (core/captureBoostMain.ts, pelos natives de native.ts): o estado
-// vem do que o loader do add-on publicou nesta partida (globalThis.__TelinhaAddon.capture) e do capture-flags.json, que
-// a opcao grava para a proxima partida. O Windows (os.release / process.platform) e trocado por teste (helperHost); o
-// arquivo fica numa pasta temporaria. Nunca toca o %APPDATA% de verdade.
+// Testes do lado main da live com jogo pesado (core/captureBoostMain.ts, pelos natives de native.ts).
+// "Captura pela placa de vídeo": o estado vem do que o loader do add-on publicou nesta partida
+// (globalThis.__TelinhaAddon.capture) e do capture-flags.json, que a opcao grava para a proxima partida; o arquivo fica
+// numa pasta temporaria. "Prioridade da captura na placa de vídeo": o telinha-audio.exe --gpu-priority de mentira
+// (mockSpawn) responde como o de verdade; o processo da GPU vem do app.getAppMetrics() do electron falso.
+// O Windows (os.release / process.platform) e o exe sao trocados por teste (helperHost). Nunca roda o helper de verdade
+// (addon/test/run-helper-test.mjs faz isso) nem toca o %APPDATA% de verdade.
 // Rodar:  pnpm test:file src/plugins/telinha/core/captureBoostMain.test.ts  (todos: pnpm test:unit)
 
 import assert from "node:assert/strict";
+import childProcess from "node:child_process";
 import fs, { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, test } from "node:test";
+import { afterEach, beforeEach, describe, test, type TestContext } from "node:test";
 
-import { gpuCaptureStatus, setGpuCapture } from "@plugins/telinha/native";
-import { ipcEvent } from "@test/fakes/electron";
-import { helperHost } from "@test/helpers/wpd-audio";
+import { gpuCaptureStatus, setGpuCapture, setGpuPriority } from "@plugins/telinha/native";
+import { mockSpawn } from "@test/fakes/childProcess";
+import { flushPromises, useFakeClock } from "@test/fakes/clock";
+import { app, ipcEvent } from "@test/fakes/electron";
+import { answer, feed, helperHost } from "@test/helpers/wpd-audio";
 
-import { GPU_CAPTURE_MIN_BUILD, gpuCaptureStatusMain, setGpuCaptureMain } from "./captureBoostMain";
+import {
+    GPU_CAPTURE_MIN_BUILD, gpuCaptureStatusMain, type GpuPriorityReport, resetGpuPriorityForTests, setGpuCaptureMain, setGpuPriorityMain
+} from "./captureBoostMain";
 
 const g = globalThis as { __TelinhaAddon?: unknown; };
 let dir: string;
@@ -137,5 +145,213 @@ describe("gravar a opcao para a proxima partida", () => {
         const st = setGpuCaptureMain(true);
         t.mock.restoreAll(); // antes do afterEach, que apaga a pasta com o rmSync de verdade
         assert.equal(st.saveError, "não consegui salvar a opção (disco cheio)");
+    });
+});
+
+describe("prioridade na placa de video (telinha-audio.exe --gpu-priority)", () => {
+    const GPU = 51_234;
+    const ME = process.pid;
+
+    beforeEach(() => {
+        resetGpuPriorityForTests();
+        app.appMetrics = [{ pid: ME, type: "Browser" }, { pid: GPU, type: "GPU" }, { pid: 51_300, type: "Tab" }];
+        app.getAppMetricsImpl = null;
+    });
+
+    /** O helper responde como o de verdade: `before(pid)` = a classe de cada um antes; `refuse` = os pids recusados. */
+    function helperAnswers(t: TestContext, { before = (_pid: string): string => "NORMAL", refuse = [] as string[], hags = "on" } = {}) {
+        helperHost(t);
+        return mockSpawn(t, p => {
+            const pids = p.args[1].split(",");
+            const cls = p.args[3].toUpperCase();
+            const lines = [`hags ${hags}`, ...pids.map(pid => (refuse.includes(pid) ? `error open 0x80070005 pid=${pid} Acesso negado.` : `ok pid=${pid} before=${before(pid)} after=${cls}`))];
+            answer(p, { stdout: lines.join("\r\n") + "\r\n", code: refuse.some(r => pids.includes(r)) ? 6 : 0 });
+        });
+    }
+
+    const target = (pid: number, role: "Discord" | "GPU", before: string | null, after: string | null, error: string | null = null) => ({ pid, role, before, after, error });
+
+    test("HIGH no Discord e no processo da GPU; ao parar, cada um volta ao que era; sem nada a voltar, nem abre o helper", async t => {
+        const procs = helperAnswers(t);
+        const up = await setGpuPriority(ipcEvent(), "high");
+        assert.deepEqual(procs.spawned[0].args, ["--gpu-priority", `${ME},${GPU}`, "--class", "high"]);
+        assert.deepEqual(procs.spawned[0].options, { windowsHide: true, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+        const expected: GpuPriorityReport = {
+            mode: "high", ok: true, done: 2, hags: "on", reason: null, adminNeeded: false, raised: 2,
+            targets: [target(ME, "Discord", "NORMAL", "HIGH"), target(GPU, "GPU", "NORMAL", "HIGH")]
+        };
+        assert.deepEqual(up, expected);
+
+        const down = await setGpuPriority(ipcEvent(), "restore");
+        assert.deepEqual(procs.spawned[1].args, ["--gpu-priority", `${ME},${GPU}`, "--class", "normal"]);
+        assert.deepEqual([down.mode, down.ok, down.done, down.raised], ["restore", true, 2, 0]);
+
+        const again = await setGpuPriorityMain("restore");
+        assert.equal(procs.spawned.length, 2);
+        assert.deepEqual([again.ok, again.done, again.targets, again.hags], [true, 0, [], null]);
+    });
+
+    test("sem administrador o Windows recusa: diz que precisa de administrador, nada fica lembrado para voltar", async t => {
+        const procs = helperAnswers(t, { refuse: [String(ME), String(GPU)] });
+        const up = await setGpuPriorityMain("high");
+        assert.deepEqual([up.ok, up.done, up.adminNeeded, up.raised, up.reason], [false, 0, true, 0, null]);
+        assert.equal(up.targets[0].error, "open 0x80070005 Acesso negado.");
+        await setGpuPriorityMain("restore");
+        assert.equal(procs.spawned.length, 1);
+    });
+
+    test("so o processo da GPU recusado: o principal sobe e so ele volta", async t => {
+        const procs = helperAnswers(t, { refuse: [String(GPU)] });
+        const up = await setGpuPriorityMain("high");
+        assert.deepEqual([up.ok, up.done, up.adminNeeded, up.raised], [false, 1, true, 1]);
+        await setGpuPriorityMain("restore");
+        assert.deepEqual(procs.spawned[1].args, ["--gpu-priority", `${ME}`, "--class", "normal"]);
+    });
+
+    test("quem ja estava em HIGH fica como estava; a classe de antes e a que volta", async t => {
+        const procs = helperAnswers(t, { before: pid => (pid === String(ME) ? "ABOVE_NORMAL" : "HIGH") });
+        const up = await setGpuPriorityMain("high");
+        assert.deepEqual([up.ok, up.raised], [true, 1]);
+        await setGpuPriorityMain("restore");
+        assert.deepEqual(procs.spawned[1].args, ["--gpu-priority", `${ME}`, "--class", "above_normal"]);
+    });
+
+    test("dois processos com classes diferentes antes: um helper por classe na volta", async t => {
+        const procs = helperAnswers(t, { before: pid => (pid === String(ME) ? "BELOW_NORMAL" : "IDLE") });
+        await setGpuPriorityMain("high");
+        const down = await setGpuPriorityMain("restore");
+        assert.deepEqual(procs.spawned.slice(1).map(p => p.args[3]).sort(), ["below_normal", "idle"]);
+        assert.deepEqual([down.ok, down.done, down.targets.length, down.hags], [true, 2, 2, "on"]);
+    });
+
+    test("subir duas vezes (trocar de fonte) nao esquece a classe de antes", async t => {
+        let call = 0;
+        const procs = helperAnswers(t, { before: () => (call++ < 2 ? "NORMAL" : "HIGH") });
+        await setGpuPriorityMain("high");
+        const second = await setGpuPriorityMain("high");
+        assert.deepEqual([second.ok, second.raised], [true, 2]);
+        await setGpuPriorityMain("restore");
+        assert.equal(procs.spawned[2].args[3], "normal");
+    });
+
+    test("os pedidos vao um de cada vez, na ordem", async t => {
+        const procs = helperAnswers(t);
+        const up = setGpuPriorityMain("high");
+        const down = setGpuPriorityMain("restore");
+        await flushPromises();
+        assert.equal(procs.spawned.length, 1, "o restore espera o high terminar");
+        assert.deepEqual([(await up).ok, (await down).done], [true, 2]);
+        assert.deepEqual(procs.spawned.map(p => p.args[3]), ["high", "normal"]);
+    });
+
+    test("quem e o processo da GPU: so type GPU com pid valido; getAppMetrics que lanca = so o principal", async t => {
+        const procs = helperAnswers(t);
+        app.appMetrics = [null, { pid: ME, type: "GPU" }, { pid: 0, type: "GPU" }, { pid: 1.5, type: "GPU" }, { pid: 777, type: "Utility" }];
+        await setGpuPriorityMain("high");
+        assert.equal(procs.spawned[0].args[1], `${ME}`);
+        resetGpuPriorityForTests();
+        app.getAppMetricsImpl = () => {
+            throw new Error("not ready");
+        };
+        await setGpuPriorityMain("high");
+        assert.equal(procs.spawned[1].args[1], `${ME}`);
+    });
+
+    test("respostas estranhas do helper: linhas de outros pids, erro sem texto, HAGS desligado ou desconhecido, pid sem resposta", async t => {
+        helperHost(t);
+        const replies = [
+            { stdout: `hags off\nok pid=999 before=NORMAL after=HIGH\nerror set 0xC0000061 pid=999 x\nerror tree 0x80070005 pid=${GPU}\nok pid=${ME} before=NORMAL after=HIGH\n`, code: 6 },
+            { stdout: `hags unknown\nok pid=${ME} before=NORMAL after=HIGH\n`, code: 0 },
+            { stdout: `ok pid=${ME} before=NORMAL after=ABOVE_NORMAL\nok pid=${GPU} before=NORMAL after=HIGH\nalgo que o helper nao diz\n`, code: 0 }
+        ];
+        mockSpawn(t, p => answer(p, replies.shift()));
+
+        const tree = await setGpuPriorityMain("high");
+        assert.deepEqual([tree.hags, tree.ok, tree.done, tree.adminNeeded], ["off", false, 1, false], "fora da arvore nao e falta de administrador");
+        assert.equal(tree.targets[1].error, "tree 0x80070005");
+        resetGpuPriorityForTests();
+
+        const missing = await setGpuPriorityMain("high");
+        assert.deepEqual([missing.hags, missing.ok, missing.done], [null, false, 1]);
+        assert.equal(missing.targets[1].error, "sem resposta do ajudante");
+        resetGpuPriorityForTests();
+
+        const clamped = await setGpuPriorityMain("high");
+        assert.deepEqual([clamped.ok, clamped.done, clamped.raised], [false, 1, 1], "o que nao ficou em HIGH nao conta e nao volta");
+    });
+
+    test("o helper nao serve: antigo (sem o modo), Windows sem a funcao, saida estranha", async t => {
+        helperHost(t);
+        const replies: Parameters<typeof answer>[1][] = [
+            { stderr: "error usage 0x80070057 uso: telinha-audio.exe ...\n", code: 2 },
+            { stdout: "error api 0x8007007F D3DKMTSetProcessSchedulingPriorityClass indisponivel neste Windows\n", code: 6 },
+            { code: 1 },
+            { code: null, signal: "SIGKILL" }
+        ];
+        mockSpawn(t, p => answer(p, replies.shift()));
+        assert.equal((await setGpuPriorityMain("high")).reason, "o ajudante do Telinha é de uma versão antiga");
+        assert.equal((await setGpuPriorityMain("high")).reason, "o Windows não tem a função (0x8007007F)");
+        assert.equal((await setGpuPriorityMain("high")).reason, "o ajudante do Telinha fechou com o código 1");
+        const killed = await setGpuPriorityMain("high");
+        assert.deepEqual([killed.ok, killed.reason, killed.targets[0].error], [false, "o ajudante do Telinha fechou com o código null", null]);
+    });
+
+    test("sem o helper ou fora do Windows: nem tenta, e diz por que; o restore sem o helper esquece o que subiu", async t => {
+        const host = helperHost(t, { exe: false });
+        const procs = mockSpawn(t, p => answer(p, { stdout: `ok pid=${ME} before=NORMAL after=HIGH\nok pid=${GPU} before=NORMAL after=HIGH\n` }));
+        assert.equal((await setGpuPriorityMain("high")).reason, "o ajudante do Telinha (telinha-audio.exe) não foi instalado");
+        host.setExe(true);
+        host.setPlatform("linux");
+        assert.equal((await setGpuPriorityMain("high")).reason, "só funciona no Windows");
+        assert.equal(procs.spawned.length, 0);
+
+        host.setPlatform("win32");
+        assert.equal((await setGpuPriorityMain("high")).raised, 2);
+        host.setExe(false);
+        const down = await setGpuPriorityMain("restore");
+        assert.deepEqual([down.ok, down.reason, down.raised], [false, "o ajudante do Telinha (telinha-audio.exe) não foi instalado", 0]);
+    });
+
+    test("o Windows ou o antivirus bloqueia o helper (na hora do spawn ou depois)", async t => {
+        helperHost(t);
+        const blocked = t.mock.method(childProcess, "spawn", (() => {
+            throw Object.assign(new Error("spawn EPERM"), { code: "EPERM" });
+        }) as never);
+        assert.match((await setGpuPriorityMain("high")).reason ?? "", /bloqueou o ajudante/);
+        blocked.mock.restore();
+        // o erro de abertura e depois a saida: a primeira resposta vence
+        mockSpawn(t, p => setImmediate(() => {
+            p.fail(Object.assign(new Error("x"), { code: "ENOENT" }));
+            p.exit(0);
+        }));
+        assert.match((await setGpuPriorityMain("high")).reason ?? "", /não foi encontrado/);
+    });
+
+    test("helper que nao responde em 5 s: morto, e o relatorio diz; kill que lanca e pipes com erro nao derrubam o main", async t => {
+        helperHost(t);
+        const clock = useFakeClock(t);
+        const procs = mockSpawn(t, p => {
+            p.kill = () => {
+                throw new Error("EPERM");
+            };
+        });
+        const pending = setGpuPriorityMain("high");
+        await flushPromises();
+        const [proc] = procs.spawned;
+        proc.stdout.emit("error", new Error("EIO"));
+        proc.stderr.emit("error", new Error("EIO"));
+        clock.tick(5000);
+        assert.equal((await pending).reason, "o ajudante do Telinha não respondeu");
+    });
+
+    test("saida grande demais e cortada (o resto e ignorado)", async t => {
+        helperHost(t);
+        mockSpawn(t, p => setImmediate(async () => {
+            await feed(p, `ok pid=${ME} before=NORMAL after=HIGH\n` + "x".repeat(9000) + "\n");
+            await feed(p, `ok pid=${GPU} before=NORMAL after=HIGH\n`);
+            p.exit(0);
+        }));
+        const up = await setGpuPriorityMain("high");
+        assert.deepEqual([up.done, up.targets[1].error], [1, "sem resposta do ajudante"]);
     });
 });

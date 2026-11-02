@@ -210,7 +210,7 @@ describe("startStreaming: tela, janela e audio", () => {
             'Iniciando transmissão: tela "Tela inteira" em 1080p30 sem áudio',
             "Transmitindo 1920x1080 @ 60 fps · quem pode assistir: Todos da call",
             // core/captureBoost.ts: o modo da captura, para comparar com e sem a "Captura pela placa de vídeo"
-            "Modo da captura: padrão (cópia pelo processador)"
+            "Modo da captura: padrão (cópia pelo processador) · prioridade na placa de vídeo: normal (opção desligada)"
         ]);
 
         const stopLogs = logMark();
@@ -253,7 +253,7 @@ describe("startStreaming: tela, janela e audio", () => {
             'Iniciando transmissão: janela "Jogo" em 1080p60 com áudio',
             "Áudio: capturando — processo do jogo (pid 1234)",
             "Transmitindo 1920x1080 @ 60 fps com áudio · quem pode assistir: Todos da call",
-            "Modo da captura: padrão (cópia pelo processador)"
+            "Modo da captura: padrão (cópia pelo processador) · prioridade na placa de vídeo: normal (opção desligada)"
         ]);
     });
 

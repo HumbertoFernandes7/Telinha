@@ -96,6 +96,21 @@ test("o que settings.ts entrega ao Vencord (OptionType.COMPONENT chama a funcao 
     assert.ok(screen.getByText("Captura pela placa de vídeo: ligada."));
 });
 
+test("ligar a prioridade na placa de video: a linha dela aparece (sem botao: nao precisa reiniciar)", async () => {
+    main();
+    env!.restore();
+    env = installNative({ ...env!.telinha, setGpuPriority: async () => null });
+    render(<CaptureBoostStatus />);
+    await settle();
+    assert.equal(screen.queryByText(/Prioridade/), null);
+    act(() => {
+        settings.store.gpuPriority = true;
+    });
+    await settle();
+    assert.ok(screen.getByText("Prioridade da captura na placa de vídeo: vale quando você transmitir."));
+    assert.equal(screen.queryByRole("button"), null);
+});
+
 test("Windows mais antigo que o 24H2: a linha aparece mesmo com a opcao desligada", async () => {
     main({ supported: false, build: 22631 });
     render(<CaptureBoostStatus />);

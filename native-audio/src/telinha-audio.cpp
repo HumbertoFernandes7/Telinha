@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-// telinha-audio.exe: helper do Telinha para o audio da TELA INTEIRA.
+// telinha-audio.exe: helper do Telinha para o audio da TELA INTEIRA (e, num modo a parte, a prioridade do Discord na
+// placa de video enquanto transmite: --gpu-priority, la embaixo).
 //
 // Captura tudo o que o Windows esta tocando EXCETO o audio de uma arvore de processos (o Discord),
 // via WASAPI process loopback (ActivateAudioInterfaceAsync + AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
@@ -20,6 +21,8 @@
 //     telinha-audio.exe --include <pid> [--parent <pid>] [--seconds <n>]   so a arvore <pid> (autoteste)
 //     telinha-audio.exe --probe       sai com 0 se o process loopback funciona nesta maquina
 //     telinha-audio.exe --sessions    lista as sessoes de audio de saida (pid, pai, exe) para diagnostico
+//     telinha-audio.exe --gpu-priority <pid[,pid...]> --class <high|above_normal|normal|below_normal|idle>
+//                                     classe de prioridade na placa de video de processos da arvore de quem chamou
 //     telinha-audio.exe --version
 //
 // Para de capturar (saida 0) quando o stdin fecha (EOF ou pipe quebrado), o stdout fecha, o processo
@@ -30,7 +33,14 @@
 //     info <texto>
 //     error <etapa> 0x<HRESULT> <mensagem>
 //
-// Codigos de saida: 0 ok, 1 erro durante a captura, 2 argumentos, 3 Windows antigo, 4 ativacao, 5 inicializacao.
+// --gpu-priority ajusta e sai; uma linha por item no stdout:
+//     hags <on|off|unknown>                                   agendamento da placa por hardware (HAGS), para o log
+//     ok pid=<pid> before=<CLASSE> after=<CLASSE>
+//     error <tree|open|get|set> 0x<codigo> pid=<pid> <mensagem>
+//     error api 0x<HRESULT> <mensagem>                        o Windows nao tem a funcao
+//
+// Codigos de saida: 0 ok, 1 erro durante a captura, 2 argumentos, 3 Windows antigo, 4 ativacao, 5 inicializacao,
+// 6 algum processo do --gpu-priority nao ficou como pedido.
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -58,7 +68,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "telinha-audio 1";
+constexpr const char* kVersion = "telinha-audio 2";
 constexpr UINT32 kRate = 48000;
 constexpr UINT16 kChannels = 2;
 constexpr REFERENCE_TIME kBufferHns = 1000000;   // 100 ms de buffer no WASAPI (a latencia e o periodo, ~10 ms)
@@ -554,8 +564,218 @@ int ListSessions() {
 
 // #endregion
 
+// #region prioridade na placa de video (--gpu-priority)
+//
+// D3DKMTSetProcessSchedulingPriorityClass (gdi32) muda a classe de prioridade de um processo no agendador da placa de
+// video; vale ate o processo terminar, entao este modo so ajusta e sai. O Telinha usa no processo principal do Discord
+// (onde o Chromium copia cada quadro da captura da tela) e no processo da GPU (onde converte e codifica) enquanto
+// transmite, para a captura nao esperar atras de um jogo que usa a placa toda.
+// Nunca REALTIME: com o agendamento por hardware (HAGS) ligado, REALTIME pode travar o encoder NVENC (o OBS e o Sunshine
+// usam HIGH nesse caso), e sem administrador o Windows recusa. Medido em 01/11/2026 (Windows 11 build 26300, sem
+// administrador, nivel de integridade medio, HAGS ligado): HIGH num outro processo do mesmo usuario funciona com um handle
+// PROCESS_SET_INFORMATION; com so PROCESS_QUERY_LIMITED_INFORMATION ou PROCESS_SET_LIMITED_INFORMATION o Windows responde
+// 0xC0000022 (acesso negado) ate para ler a classe.
+// So aceita processos da arvore de quem abriu o helper (o Discord): nao serve para mexer em qualquer processo.
+
+// D3DKMT_SCHEDULINGPRIORITYCLASS e as structs abaixo vem do d3dkmthk.h (WDK): declaradas aqui, so o que se usa, para o
+// build precisar so do Windows SDK. Layout conferido no Windows 11 x64 (EnumAdapters2 + QueryAdapterInfo).
+constexpr INT kGpuClassHigh = 4;
+constexpr INT kGpuClassRealtime = 5;
+constexpr size_t kMaxGpuTargets = 8;
+constexpr int kGpuExitFailed = 6;
+constexpr INT kQaiWddm27Caps = 70;   // KMTQAITYPE_WDDM_2_7_CAPS: bit 1 = HwSchEnabled (HAGS ligado)
+
+struct KmtAdapterInfo {               // D3DKMT_ADAPTERINFO
+    UINT hAdapter;
+    LUID AdapterLuid;
+    ULONG NumOfSources;
+    BOOL bPrecisePresentRegionsPreferred;
+};
+struct KmtEnumAdapters2 {             // D3DKMT_ENUMADAPTERS2
+    ULONG NumAdapters;
+    KmtAdapterInfo* pAdapters;
+};
+struct KmtQueryAdapterInfo {          // D3DKMT_QUERYADAPTERINFO
+    UINT hAdapter;
+    INT Type;
+    void* pPrivateDriverData;
+    UINT PrivateDriverDataSize;
+};
+struct KmtCloseAdapter {              // D3DKMT_CLOSEADAPTER
+    UINT hAdapter;
+};
+static_assert(sizeof(KmtAdapterInfo) == 20, "D3DKMT_ADAPTERINFO");
+static_assert(sizeof(void*) != 8 || (sizeof(KmtEnumAdapters2) == 16 && sizeof(KmtQueryAdapterInfo) == 24), "D3DKMT x64 layout");
+
+using KmtSetPriorityFn = LONG(APIENTRY*)(HANDLE, INT);
+using KmtGetPriorityFn = LONG(APIENTRY*)(HANDLE, INT*);
+using KmtEnumAdapters2Fn = LONG(APIENTRY*)(KmtEnumAdapters2*);
+using KmtQueryAdapterInfoFn = LONG(APIENTRY*)(KmtQueryAdapterInfo*);
+using KmtCloseAdapterFn = LONG(APIENTRY*)(KmtCloseAdapter*);
+
+/** Uma linha no stdout (o --gpu-priority responde por la, como o --sessions). */
+void Out(const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+    putchar('\n');
+    fflush(stdout);
+}
+
+template <typename Fn>
+Fn GdiProc(HMODULE gdi, const char* name) {
+    return reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(gdi, name)));
+}
+
+std::string GpuClassName(INT value) {
+    static const char* const kNames[] = { "IDLE", "BELOW_NORMAL", "NORMAL", "ABOVE_NORMAL", "HIGH", "REALTIME" };
+    if (value >= 0 && value <= kGpuClassRealtime) return kNames[value];
+    return "CLASS" + std::to_string(value);
+}
+
+/** Nome da classe (maiusculas ou minusculas) -> valor. REALTIME nunca. */
+bool ParseGpuClass(const wchar_t* text, INT& out) {
+    static const struct {
+        const wchar_t* name;
+        INT value;
+    } kAllowed[] = { { L"idle", 0 }, { L"below_normal", 1 }, { L"normal", 2 }, { L"above_normal", 3 }, { L"high", kGpuClassHigh } };
+    if (!text) return false;
+    for (const auto& allowed : kAllowed) {
+        if (!_wcsicmp(text, allowed.name)) {
+            out = allowed.value;
+            return true;
+        }
+    }
+    return false;
+}
+
+/** "1234,5678" -> pids (1 a kMaxGpuTargets, cada um como no ParseUInt). */
+bool ParsePidList(const wchar_t* text, std::vector<DWORD>& out) {
+    if (!text || !*text) return false;
+    const std::wstring list(text);
+    size_t start = 0;
+    for (;;) {
+        const size_t comma = list.find(L',', start);
+        const std::wstring part = list.substr(start, comma == std::wstring::npos ? std::wstring::npos : comma - start);
+        unsigned long long n = 0;
+        if (out.size() >= kMaxGpuTargets || !ParseUInt(part.c_str(), 0xFFFFFFFFull, n)) return false;
+        out.push_back(static_cast<DWORD>(n));
+        if (comma == std::wstring::npos) return true;
+        start = comma + 1;
+    }
+}
+
+const ProcInfo* FindProc(const std::vector<std::pair<DWORD, ProcInfo>>& procs, DWORD pid) {
+    for (const auto& p : procs)
+        if (p.first == pid) return &p.second;
+    return nullptr;
+}
+
+/** true = `pid` e `root` ou descende dele (pela cadeia de pais do snapshot). */
+bool InTree(const std::vector<std::pair<DWORD, ProcInfo>>& procs, DWORD root, DWORD pid) {
+    for (int depth = 0; depth < 32 && pid; depth++) {
+        if (pid == root) return true;
+        const ProcInfo* info = FindProc(procs, pid);
+        if (!info || info->ppid == pid) return false;
+        pid = info->ppid;
+    }
+    return false;
+}
+
+/** HAGS ligado em alguma placa: "on"; consultado e desligado em todas: "off"; sem resposta: "unknown". */
+const char* HagsState(HMODULE gdi) {
+    const auto enumFn = GdiProc<KmtEnumAdapters2Fn>(gdi, "D3DKMTEnumAdapters2");
+    const auto queryFn = GdiProc<KmtQueryAdapterInfoFn>(gdi, "D3DKMTQueryAdapterInfo");
+    const auto closeFn = GdiProc<KmtCloseAdapterFn>(gdi, "D3DKMTCloseAdapter");
+    if (!enumFn || !queryFn || !closeFn) return "unknown";
+    KmtEnumAdapters2 list = {};
+    if (enumFn(&list) < 0 || list.NumAdapters == 0) return "unknown";
+    std::vector<KmtAdapterInfo> adapters(list.NumAdapters);
+    list.pAdapters = adapters.data();
+    if (enumFn(&list) < 0) return "unknown";
+    bool known = false;
+    bool on = false;
+    for (ULONG i = 0; i < list.NumAdapters && i < adapters.size(); i++) {
+        UINT caps = 0;
+        KmtQueryAdapterInfo info = { adapters[i].hAdapter, kQaiWddm27Caps, &caps, static_cast<UINT>(sizeof(caps)) };
+        if (queryFn(&info) >= 0) {
+            known = true;
+            if (caps & 2u) on = true;
+        }
+        KmtCloseAdapter closing = { adapters[i].hAdapter };
+        closeFn(&closing);
+    }
+    return on ? "on" : known ? "off" : "unknown";
+}
+
+const char* NtText(LONG status) {
+    switch (static_cast<unsigned long>(status)) {
+    case 0xC0000022ul: return "acesso negado";
+    case 0xC0000061ul: return "privilegio ausente (precisa de administrador)";
+    case 0xC000000Dul: return "parametro invalido";
+    default: return "falha do Windows";
+    }
+}
+
+int RunGpuPriority(const std::vector<DWORD>& pids, INT cls) {
+    const HMODULE gdi = LoadLibraryExW(L"gdi32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    const auto setPriority = gdi ? GdiProc<KmtSetPriorityFn>(gdi, "D3DKMTSetProcessSchedulingPriorityClass") : nullptr;
+    const auto getPriority = gdi ? GdiProc<KmtGetPriorityFn>(gdi, "D3DKMTGetProcessSchedulingPriorityClass") : nullptr;
+    if (!setPriority || !getPriority) {
+        Out("error api 0x%08lX D3DKMTSetProcessSchedulingPriorityClass indisponivel neste Windows",
+            static_cast<unsigned long>(HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND)));
+        return kGpuExitFailed;
+    }
+    Out("hags %s", HagsState(gdi));
+
+    const auto procs = SnapshotProcesses();
+    const ProcInfo* self = FindProc(procs, GetCurrentProcessId());
+    const DWORD root = self ? self->ppid : 0;
+    int failed = 0;
+    for (const DWORD pid : pids) {
+        const unsigned long shownPid = static_cast<unsigned long>(pid);
+        if (!root || !InTree(procs, root, pid)) {
+            Out("error tree 0x%08lX pid=%lu fora da arvore de processos de quem chamou", static_cast<unsigned long>(E_ACCESSDENIED), shownPid);
+            failed++;
+            continue;
+        }
+        const HANDLE target = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!target) {
+            const HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
+            Out("error open 0x%08lX pid=%lu %s", static_cast<unsigned long>(hr), shownPid, HrText(hr).c_str());
+            failed++;
+            continue;
+        }
+        INT before = -1;
+        INT after = -1;
+        const char* stage = "get";
+        LONG status = getPriority(target, &before);
+        if (status >= 0) {
+            stage = "set";
+            status = setPriority(target, cls);
+        }
+        if (status >= 0) {
+            stage = "get";
+            status = getPriority(target, &after);
+        }
+        CloseHandle(target);
+        if (status < 0) {
+            Out("error %s 0x%08lX pid=%lu %s", stage, static_cast<unsigned long>(status), shownPid, NtText(status));
+            failed++;
+            continue;
+        }
+        Out("ok pid=%lu before=%s after=%s", shownPid, GpuClassName(before).c_str(), GpuClassName(after).c_str());
+    }
+    FreeLibrary(gdi);
+    return failed ? kGpuExitFailed : 0;
+}
+
+// #endregion
+
 int Usage() {
-    Line("error usage 0x80070057 uso: telinha-audio.exe (--exclude <pid> | --include <pid>) [--parent <pid>] [--seconds <n>] | --probe | --sessions | --version");
+    Line("error usage 0x80070057 uso: telinha-audio.exe (--exclude <pid> | --include <pid>) [--parent <pid>] [--seconds <n>] | --probe | --sessions"
+         " | --gpu-priority <pid[,pid...]> --class <high|above_normal|normal|below_normal|idle> | --version");
     return 2;
 }
 
@@ -564,6 +784,8 @@ int Usage() {
 int wmain(int argc, wchar_t** argv) {
     CaptureOptions o;
     bool probe = false, sessions = false, haveTarget = false;
+    std::vector<DWORD> gpuPids;
+    INT gpuClass = -1;
 
     for (int i = 1; i < argc; i++) {
         const wchar_t* a = argv[i];
@@ -587,11 +809,22 @@ int wmain(int argc, wchar_t** argv) {
         } else if (!wcscmp(a, L"--seconds") && ParseUInt(v, 86400, n)) {
             o.seconds = static_cast<double>(n);
             i++;
+        } else if (!wcscmp(a, L"--gpu-priority") && gpuPids.empty() && ParsePidList(v, gpuPids)) {
+            i++;
+        } else if (!wcscmp(a, L"--class") && v && !_wcsicmp(v, L"realtime")) {
+            Line("error usage 0x80070057 --class realtime nao e permitido (pode travar o encoder da placa de video com o HAGS ligado)");
+            return 2;
+        } else if (!wcscmp(a, L"--class") && gpuClass < 0 && ParseGpuClass(v, gpuClass)) {
+            i++;
         } else {
             return Usage();
         }
     }
-    if (static_cast<int>(probe) + static_cast<int>(sessions) + static_cast<int>(haveTarget) != 1) return Usage();
+    const bool gpu = !gpuPids.empty();
+    if (static_cast<int>(probe) + static_cast<int>(sessions) + static_cast<int>(haveTarget) + static_cast<int>(gpu) != 1) return Usage();
+    if (gpu != (gpuClass >= 0) || (gpu && (o.parent || o.seconds > 0))) return Usage();
+    // so a placa de video: sem audio, sem COM e sem exigir o Windows 10 2004
+    if (gpu) return RunGpuPriority(gpuPids, gpuClass);
 
     const DWORD build = OsBuild();
     if (!sessions && build < kMinBuild) {

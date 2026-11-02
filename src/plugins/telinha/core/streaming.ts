@@ -29,7 +29,7 @@ import {
     type ProofState, verifyPasswordProof, type WatchAccessInput, type WatchDecision
 } from "./access";
 import { startScreenAudioCapture } from "./audio/screenAudio";
-import { noteCaptureStarted } from "./captureBoost";
+import { noteCaptureStarted, noteCaptureStopped } from "./captureBoost";
 import {
     chooseCodec, type CodecDecision, type EncoderReport, getLocalCaps, isSoftwareH264, isTransientSoftwareH264, noteH264Fallback, pickNegotiatedCodec, softwareFallback
 } from "./codec";
@@ -506,6 +506,8 @@ export function stopStreaming(reason = "parada pelo usuário") {
     const { local } = rt;
     if (!local) return;
     stopCapture(local, reason);
+    // "Prioridade da captura na placa de vídeo": o Discord volta para a classe que tinha (core/captureBoost.ts)
+    noteCaptureStopped();
     endOfStreamGuards();
     sendPresence();
     publish();

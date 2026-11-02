@@ -94,6 +94,13 @@ export const app = {
     getGPUInfo(infoType: string): Promise<unknown> {
         return app.getGPUInfoImpl ? app.getGPUInfoImpl(infoType) : Promise.resolve(app.gpuInfo);
     },
+    /** what getAppMetrics() answers (default: this process as the browser, and a GPU process); replace per test */
+    appMetrics: [{ pid: process.pid, type: "Browser" }, { pid: 51_234, type: "GPU" }] as unknown[],
+    /** replace to make getAppMetrics throw */
+    getAppMetricsImpl: null as (() => unknown[]) | null,
+    getAppMetrics(): any[] {
+        return app.getAppMetricsImpl ? app.getAppMetricsImpl() : app.appMetrics;
+    },
     on() { },
     relaunch() { },
     exit() { }

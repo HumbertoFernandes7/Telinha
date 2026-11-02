@@ -30,7 +30,7 @@ import { migrateAccessSettings, settings } from "./settings";
 
 const STORED_KEYS = [
     "groupPassword", "rejectOutsiders", "defaultAccess", "requireVerifiedIdentity", "defaultQuality", "autoQuality", "jitterCushion", "shareAudioByDefault",
-    "playSounds", "codec", "autoUpdate", "shareDiagnostics", "gpuCapture", "captureBoostStatus"
+    "playSounds", "codec", "autoUpdate", "shareDiagnostics", "gpuCapture", "gpuPriority", "captureBoostStatus"
 ];
 
 describe("as opcoes", () => {
@@ -56,7 +56,8 @@ describe("as opcoes", () => {
             codec: "auto",
             autoUpdate: true,
             shareDiagnostics: false,
-            gpuCapture: false
+            gpuCapture: false,
+            gpuPriority: false
         });
     });
 

@@ -19,10 +19,12 @@ import { installNative, type NativeEnv } from "@test/fakes/native";
 import { pluginSettings, resetVencordFakes } from "@test/fakes/vencord";
 
 import {
-    captureBoostDiagnostics, captureBoostLines, captureBoostNeedsRestart, gpuCaptureNeedsRestart, gpuCaptureState, noteCaptureStarted, onGpuCaptureSettingChanged,
-    refreshGpuCapture, resetCaptureBoostForTests, startCaptureBoost, subscribeCaptureBoost
+    captureBoostDiagnostics, captureBoostLines, captureBoostNeedsRestart, gpuCaptureNeedsRestart, gpuCaptureState, gpuPriorityState, noteCaptureStarted,
+    noteCaptureStopped, onGpuCaptureSettingChanged, onGpuPrioritySettingChanged, refreshGpuCapture, resetCaptureBoostForTests, startCaptureBoost,
+    subscribeCaptureBoost
 } from "./captureBoost";
-import type { GpuCaptureStatus } from "./captureBoostMain";
+import type { GpuCaptureStatus, GpuPriorityReport } from "./captureBoostMain";
+import { rt } from "./context";
 
 /** O estado que o main devolve: Windows 11 24H2+, loader presente, nada pedido. */
 function status(patch: Partial<GpuCaptureStatus> = {}): GpuCaptureStatus {
@@ -41,6 +43,8 @@ function mainWith(initial: Partial<GpuCaptureStatus> = {}, extra: Record<string,
 }
 
 const messages = () => getEventLog().map(e => e.msg);
+/** a linha da "Captura pela placa de vídeo" no "Copiar diagnóstico" (a segunda e a da prioridade) */
+const firstDiagLine = () => captureBoostDiagnostics().split("\n")[0];
 let env: NativeEnv | null = null;
 
 beforeEach(() => {
@@ -117,7 +121,7 @@ describe("inicio do plugin e mudar a opcao", () => {
         assert.deepEqual(captureBoostLines(), ["Captura pela placa de vídeo: ligada."]);
         assert.ok(messages().includes("Modo da captura nesta partida do Discord: pela placa de vídeo (WebRtcAllowWgcUsingTexture ligado nesta partida)"));
         noteCaptureStarted();
-        assert.equal(messages().at(-1), "Modo da captura: pela placa de vídeo (WebRtcAllowWgcUsingTexture ligado nesta partida)");
+        assert.equal(messages().at(-1), "Modo da captura: pela placa de vídeo (WebRtcAllowWgcUsingTexture ligado nesta partida) · prioridade na placa de vídeo: normal (opção desligada)");
     });
 
     test("a linha 'Modo da captura' quando a opcao nao pegou, e com a opcao desligada", async () => {
@@ -125,10 +129,10 @@ describe("inicio do plugin e mudar a opcao", () => {
         ({ env } = mainWith({ saved: true, requested: true, applied: false }));
         await refreshGpuCapture();
         noteCaptureStarted();
-        assert.equal(messages().at(-1), "Modo da captura: padrão (cópia pelo processador); captura pela placa de vídeo: não ligou nesta partida do Discord (detalhes em \"Copiar diagnóstico\")");
+        assert.equal(messages().at(-1), "Modo da captura: padrão (cópia pelo processador); captura pela placa de vídeo: não ligou nesta partida do Discord (detalhes em \"Copiar diagnóstico\") · prioridade na placa de vídeo: normal (opção desligada)");
         pluginSettings.load({ gpuCapture: false });
         noteCaptureStarted();
-        assert.equal(messages().at(-1), "Modo da captura: padrão (cópia pelo processador)");
+        assert.equal(messages().at(-1), "Modo da captura: padrão (cópia pelo processador) · prioridade na placa de vídeo: normal (opção desligada)");
     });
 
     test("desligada, mas pedida nesta partida: loga o modo e o arquivo volta a dizer desligada", async () => {
@@ -201,30 +205,30 @@ describe("inicio do plugin e mudar a opcao", () => {
         assert.deepEqual(env.calls, []);
         assert.deepEqual(captureBoostLines(), ["Captura pela placa de vídeo: só funciona com o Telinha instalado pelo TelinhaInstaller."]);
         noteCaptureStarted();
-        assert.equal(messages().at(-1), "Modo da captura: padrão (cópia pelo processador); captura pela placa de vídeo: só funciona com o Telinha instalado pelo TelinhaInstaller");
+        assert.equal(messages().at(-1), "Modo da captura: padrão (cópia pelo processador); captura pela placa de vídeo: só funciona com o Telinha instalado pelo TelinhaInstaller · prioridade na placa de vídeo: normal (opção desligada)");
     });
 });
 
 describe("diagnostico", () => {
     test("sem a parte nativa, e com cada estado", async () => {
-        assert.equal(captureBoostDiagnostics(), "captura pela placa de vídeo (WebRtcAllowWgcUsingTexture): opção desligada; parte nativa sem a opção");
+        assert.equal(firstDiagLine(), "captura pela placa de vídeo (WebRtcAllowWgcUsingTexture): opção desligada; parte nativa sem a opção");
 
         pluginSettings.load({ gpuCapture: true });
         ({ env } = mainWith({ saved: true, requested: true, applied: true, enableFeatures: "A,WebRtcAllowWgcUsingTexture" }));
         await refreshGpuCapture();
-        assert.equal(captureBoostDiagnostics(), "captura pela placa de vídeo (WebRtcAllowWgcUsingTexture): opção ligada; nesta partida aplicada; salva para a próxima: ligada; "
+        assert.equal(firstDiagLine(), "captura pela placa de vídeo (WebRtcAllowWgcUsingTexture): opção ligada; nesta partida aplicada; salva para a próxima: ligada; "
             + "Windows build 26300 (suporta); enable-features: A,WebRtcAllowWgcUsingTexture");
         env.restore();
 
         ({ env } = mainWith({ build: 22631, supported: false, requested: true, applied: false, loaderNote: "Windows build 22631: needs 24H2", saveError: "não consegui salvar a opção (EPERM)" }));
         await refreshGpuCapture();
-        assert.equal(captureBoostDiagnostics(), "captura pela placa de vídeo (WebRtcAllowWgcUsingTexture): opção ligada; nesta partida pedida mas NÃO aplicada; "
+        assert.equal(firstDiagLine(), "captura pela placa de vídeo (WebRtcAllowWgcUsingTexture): opção ligada; nesta partida pedida mas NÃO aplicada; "
             + "salva para a próxima: desligada; Windows build 22631 (não suporta); loader: Windows build 22631: needs 24H2; não consegui salvar a opção (EPERM)");
         env.restore();
 
         ({ env } = mainWith({ loader: false, build: 0, supported: false }));
         await refreshGpuCapture();
-        assert.equal(captureBoostDiagnostics(), "captura pela placa de vídeo (WebRtcAllowWgcUsingTexture): opção ligada; nesta partida não pedida; "
+        assert.equal(firstDiagLine(), "captura pela placa de vídeo (WebRtcAllowWgcUsingTexture): opção ligada; nesta partida não pedida; "
             + "salva para a próxima: sem o loader do add-on; Windows build ? (não suporta)");
         env.restore();
 
@@ -232,7 +236,8 @@ describe("diagnostico", () => {
         await refreshGpuCapture();
         assert.match(captureBoostDiagnostics(), /; nesta partida pedida; /);
         noteCaptureStarted();
-        assert.equal(messages().at(-1), "Modo da captura: pela placa de vídeo (WebRtcAllowWgcUsingTexture ligado nesta partida)", "pedida, ainda sem a leitura do app ready");
+        assert.equal(messages().at(-1), "Modo da captura: pela placa de vídeo (WebRtcAllowWgcUsingTexture ligado nesta partida) · prioridade na placa de vídeo: normal (opção desligada)",
+            "pedida, ainda sem a leitura do app ready");
     });
 
     test("configuracoes indisponiveis: uma linha de aviso, nunca uma excecao (o resto do diagnostico copia)", t => {
@@ -244,5 +249,182 @@ describe("diagnostico", () => {
             throw "texto solto";
         });
         assert.equal(captureBoostDiagnostics(), "captura pela placa de vídeo: diagnóstico indisponível (texto solto)");
+    });
+});
+
+describe("prioridade da captura na placa de video", () => {
+    const P = "Prioridade da captura na placa de vídeo";
+    const both = (before: string | null, after: string | null, error: string | null = null): GpuPriorityReport["targets"] => [
+        { pid: 1234, role: "Discord", before, after, error }, { pid: 5678, role: "GPU", before, after, error }
+    ];
+    const report = (patch: Partial<GpuPriorityReport> = {}): GpuPriorityReport => ({
+        mode: "high", ok: true, done: 2, hags: "on", reason: null, adminNeeded: false, raised: 2, targets: both("NORMAL", "HIGH"), ...patch
+    });
+    const restored = (patch: Partial<GpuPriorityReport> = {}) => report({ mode: "restore", raised: 0, targets: both("HIGH", "NORMAL"), ...patch });
+    const flush = () => new Promise(resolve => setImmediate(resolve));
+    const priorityCalls = () => env!.calls.filter(c => c.name === "setGpuPriority").map(c => c.args[0]);
+
+    /** natives: o "high" responde `high`, o "restore" responde `restore` */
+    function nativeWith(high: unknown = report(), restore: unknown = restored()) {
+        env = installNative({ setGpuPriority: async (mode: string) => (mode === "high" ? high : restore) });
+    }
+
+    afterEach(() => {
+        rt.local = null;
+    });
+
+    test("ligada: a transmissao pede HIGH, o log diz o modo e a resposta; parar volta ao normal", async () => {
+        pluginSettings.load({ gpuPriority: true });
+        nativeWith();
+        assert.deepEqual(captureBoostLines(), [`${P}: vale quando você transmitir.`]);
+        noteCaptureStarted();
+        assert.equal(messages().at(-1), "Modo da captura: padrão (cópia pelo processador) · prioridade na placa de vídeo: pedindo alta");
+        assert.deepEqual(captureBoostLines(), [`${P}: pedindo prioridade alta.`]);
+        await flush();
+        assert.deepEqual(priorityCalls(), ["high"]);
+        assert.equal(messages().at(-1), `${P}: alta — Discord 1234 NORMAL→HIGH, GPU do Discord 5678 NORMAL→HIGH; HAGS ligado`);
+        assert.deepEqual(captureBoostLines(), [`${P}: alta nesta transmissão.`]);
+        assert.match(captureBoostDiagnostics().split("\n")[1], /^prioridade da captura na placa de vídeo: opção ligada; agora alta \(pedida nesta transmissão\); última: alta — Discord 1234/);
+
+        // trocar de fonte: continua alta, sem pedir de novo
+        noteCaptureStarted();
+        assert.equal(messages().at(-1), "Modo da captura: padrão (cópia pelo processador) · prioridade na placa de vídeo: alta (continua da fonte anterior)");
+        await flush();
+        assert.deepEqual(priorityCalls(), ["high"]);
+
+        noteCaptureStopped();
+        await flush();
+        assert.deepEqual(priorityCalls(), ["high", "restore"]);
+        assert.equal(messages().at(-1), `${P}: de volta ao normal (transmissão encerrada) — Discord 1234 HIGH→NORMAL, GPU do Discord 5678 HIGH→NORMAL; HAGS ligado`);
+        assert.deepEqual(captureBoostLines(), [`${P}: vale quando você transmitir (na última vez ficou alta).`]);
+
+        // parar de novo: nada a voltar
+        noteCaptureStopped();
+        await flush();
+        assert.deepEqual(priorityCalls(), ["high", "restore"]);
+    });
+
+    test("o Windows recusa sem administrador: a transmissao segue; aviso no log e 'não foi possível (precisa de administrador)'", async () => {
+        pluginSettings.load({ gpuPriority: true });
+        nativeWith(report({ ok: false, done: 0, adminNeeded: true, raised: 0, hags: "off", targets: both(null, null, "open 0x80070005 Acesso negado.") }), restored({ targets: [] }));
+        noteCaptureStarted();
+        await flush();
+        const last = getEventLog().at(-1)!;
+        assert.equal(last.level, "warn");
+        assert.equal(last.msg, `${P}: não foi possível (precisa de administrador) — Discord 1234 open 0x80070005 Acesso negado., GPU do Discord 5678 open 0x80070005 Acesso negado.; HAGS desligado`);
+        assert.deepEqual(captureBoostLines(), [`${P}: não foi possível (precisa de administrador).`]);
+        noteCaptureStopped();
+        await flush();
+        assert.equal(getEventLog().at(-1)!.msg, last.msg, "nada voltou: sem linha nova");
+    });
+
+    test("so parte subiu, um motivo geral, ou um erro que nao e de administrador", async () => {
+        pluginSettings.load({ gpuPriority: true });
+        const partial = report({ ok: false, done: 1, adminNeeded: true, raised: 1, hags: null });
+        partial.targets[1] = { ...partial.targets[1], before: null, after: null, error: "open 0x80070005 Acesso negado." };
+        const cases: [GpuPriorityReport, string, string][] = [
+            [partial, "alta em 1 de 2 processos do Discord (no resto precisa de administrador)", " — Discord 1234 NORMAL→HIGH, GPU do Discord 5678 open 0x80070005 Acesso negado.; HAGS desconhecido"],
+            [report({ ok: false, done: 1, adminNeeded: false, targets: [partial.targets[0], { ...partial.targets[1], error: "sem resposta do ajudante" }] }), "alta em 1 de 2 processos do Discord", " — Discord 1234 NORMAL→HIGH, GPU do Discord 5678 sem resposta do ajudante; HAGS ligado"],
+            [report({ ok: false, done: 0, reason: "o ajudante do Telinha (telinha-audio.exe) não foi instalado", targets: both(null, null) }), "não foi possível (o ajudante do Telinha (telinha-audio.exe) não foi instalado)", "; HAGS ligado"],
+            [report({ ok: false, done: 0, targets: both(null, null, "tree 0x80070005") }), "não foi possível (detalhes em \"Copiar diagnóstico\")", " — Discord 1234 tree 0x80070005, GPU do Discord 5678 tree 0x80070005; HAGS ligado"]
+        ];
+        for (const [high, outcome, rest] of cases) {
+            resetCaptureBoostForTests();
+            env?.restore();
+            nativeWith(high, restored({ targets: [] }));
+            noteCaptureStarted();
+            await flush();
+            assert.equal(messages().at(-1), `${P}: ${outcome}${rest}`);
+            assert.deepEqual(captureBoostLines(), [`${P}: ${outcome}.`]);
+        }
+    });
+
+    test("a volta que falha tambem so avisa", async () => {
+        pluginSettings.load({ gpuPriority: true });
+        nativeWith(report(), restored({ ok: false, done: 0, reason: "o ajudante do Telinha (telinha-audio.exe) não foi instalado", targets: both(null, null) }));
+        noteCaptureStarted();
+        await flush();
+        noteCaptureStopped();
+        await flush();
+        assert.equal(getEventLog().at(-1)!.level, "warn");
+        assert.equal(messages().at(-1), `${P}: não voltou tudo ao normal (transmissão encerrada): o ajudante do Telinha (telinha-audio.exe) não foi instalado; HAGS ligado`);
+
+        resetCaptureBoostForTests();
+        env!.restore();
+        nativeWith(report(), restored({ ok: false, done: 1, targets: [both("HIGH", "NORMAL")[0], { pid: 5678, role: "GPU", before: null, after: null, error: "open 0x80070057 O parâmetro está incorreto." }] }));
+        noteCaptureStarted();
+        await flush();
+        noteCaptureStopped();
+        await flush();
+        assert.equal(messages().at(-1), `${P}: não voltou tudo ao normal (transmissão encerrada) — Discord 1234 HIGH→NORMAL, GPU do Discord 5678 open 0x80070057 O parâmetro está incorreto.; HAGS ligado`);
+    });
+
+    test("o pedido que falha no IPC ou volta lixo: aviso no log, a transmissao segue, e parar ainda tenta voltar", async () => {
+        pluginSettings.load({ gpuPriority: true });
+        env = installNative({
+            setGpuPriority: async (mode: string) => {
+                if (mode === "high") throw new Error("ipc caiu");
+                return { lixo: true };
+            }
+        });
+        noteCaptureStarted();
+        await flush();
+        assert.equal(messages().at(-1), `${P}: o pedido falhou (Error: ipc caiu)`);
+        assert.deepEqual(captureBoostLines(), [`${P}: pedindo prioridade alta.`]);
+        assert.match(captureBoostDiagnostics().split("\n")[1], /; agora alta \(pedida nesta transmissão\); nenhuma tentativa nesta partida$/);
+        noteCaptureStopped();
+        await flush();
+        assert.deepEqual(priorityCalls(), ["high", "restore"]);
+    });
+
+    test("sem a funcao na parte nativa: nada pedido, e a pagina e o log dizem", async () => {
+        pluginSettings.load({ gpuPriority: true });
+        env = installNative({});
+        noteCaptureStarted();
+        await flush();
+        assert.equal(messages().at(-1), "Modo da captura: padrão (cópia pelo processador) · prioridade na placa de vídeo: normal (só funciona com o Telinha instalado pelo TelinhaInstaller)");
+        assert.deepEqual(captureBoostLines(), [`${P}: só funciona com o Telinha instalado pelo TelinhaInstaller.`]);
+        assert.equal(captureBoostDiagnostics().split("\n")[1], "prioridade da captura na placa de vídeo: opção ligada; agora normal; parte nativa sem a opção; nenhuma tentativa nesta partida");
+        assert.equal(gpuPriorityState(false, true, false, null), null);
+    });
+
+    test("mudar a opcao: fora do ar so vale na proxima; no ar liga e desliga na hora (onChange de settings.ts)", async () => {
+        nativeWith();
+        pluginSettings.set("gpuPriority", true);
+        assert.equal(messages().at(-1), `${P} ligada nas configurações: vale na próxima transmissão`);
+        await flush();
+        assert.deepEqual(priorityCalls(), []);
+
+        rt.local = {} as typeof rt.local;
+        pluginSettings.set("gpuPriority", false);
+        assert.equal(messages().at(-1), `${P} desligada nas configurações`);
+        pluginSettings.set("gpuPriority", true);
+        assert.equal(messages().at(-1), `${P} ligada nas configurações`);
+        await flush();
+        assert.deepEqual(priorityCalls(), ["high"]);
+        onGpuPrioritySettingChanged(); // de novo, ja alta: nada
+        await flush();
+        assert.deepEqual(priorityCalls(), ["high"]);
+        pluginSettings.set("gpuPriority", false);
+        await flush();
+        assert.deepEqual(priorityCalls(), ["high", "restore"]);
+        assert.equal(messages().at(-1), `${P}: de volta ao normal (opção desligada) — Discord 1234 HIGH→NORMAL, GPU do Discord 5678 HIGH→NORMAL; HAGS ligado`);
+
+        env!.restore();
+        env = installNative({});
+        pluginSettings.set("gpuPriority", true);
+        await flush();
+        assert.deepEqual(priorityCalls(), [], "sem a funcao na parte nativa: nada");
+    });
+
+    test("inicio do plugin: o que ficou em HIGH de antes de recarregar volta ao normal; sem nada, nenhum log", async () => {
+        nativeWith(report(), restored());
+        await startCaptureBoost();
+        assert.equal(messages().at(-1), `${P}: de volta ao normal (o Discord recarregou no meio de uma transmissão) — Discord 1234 HIGH→NORMAL, GPU do Discord 5678 HIGH→NORMAL; HAGS ligado`);
+        env!.restore();
+        const before = messages().length;
+        nativeWith(report(), restored({ targets: [] }));
+        await startCaptureBoost();
+        assert.equal(messages().length, before);
     });
 });

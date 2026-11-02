@@ -6,7 +6,7 @@
 
 import { definePluginSettings } from "@api/Settings";
 import { migrateAccessSetting } from "@plugins/telinha/core/access";
-import { onGpuCaptureSettingChanged } from "@plugins/telinha/core/captureBoost";
+import { onGpuCaptureSettingChanged, onGpuPrioritySettingChanged } from "@plugins/telinha/core/captureBoost";
 import { onShareDiagnosticsChanged } from "@plugins/telinha/core/diagShare";
 import { isIdentityConfigured } from "@plugins/telinha/core/identity/config";
 import { onAdmissionSettingChanged, onPasswordChanged } from "@plugins/telinha/core/session";
@@ -132,6 +132,13 @@ export const settings = definePluginSettings({
         description: "Deixa a live mais fluida quando um jogo usa a placa de vídeo toda: a imagem da tela fica na placa de vídeo, sem passar pelo processador.",
         default: false,
         onChange: () => void onGpuCaptureSettingChanged()
+    },
+    gpuPriority: {
+        type: OptionType.BOOLEAN,
+        displayName: "Prioridade da captura na placa de vídeo (experimental)",
+        description: "Deixa a live mais fluida quando um jogo usa a placa de vídeo toda: enquanto você transmite, a captura passa na frente na fila da placa de vídeo.",
+        default: false,
+        onChange: () => onGpuPrioritySettingChanged()
     },
     // o que as opcoes acima fazem agora (ui/CaptureBoostStatus.tsx); nada fica salvo nesta chave
     captureBoostStatus: {

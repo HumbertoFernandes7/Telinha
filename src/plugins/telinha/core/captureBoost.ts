@@ -12,19 +12,32 @@
 // quadro na placa de video. So vale a partir da proxima partida do Discord: a opcao e gravada pelo main
 // (core/captureBoostMain.ts) num arquivo que o loader do add-on le antes do app ficar pronto. Windows 11 24H2 ou mais novo.
 //
-// Para comparar com e sem (A/B), cada transmissao comeca com uma linha "Modo da captura: ..." no log; o "fonte N" das
-// linhas do envio (core/statsLog.ts) e quantos quadros por segundo a captura entregou.
+// "Prioridade da captura na placa de vídeo" (settings.ts → gpuPriority): enquanto transmite, o processo principal do
+// Discord (a copia da captura) e o da GPU (conversao e codificacao) ficam na classe HIGH da placa de video, para nao
+// esperar atras do jogo. Vale do inicio ao fim de cada transmissao (core/streaming.ts → noteCaptureStarted /
+// noteCaptureStopped); no fim, cada processo volta para a classe que tinha. Sem administrador; se o Windows recusar, so o
+// log e a pagina do plugin dizem ("não foi possível (precisa de administrador)").
+//
+// Para comparar com e sem (A/B), cada transmissao comeca com uma linha "Modo da captura: ..." no log (o modo e a
+// prioridade) e a resposta da prioridade logo depois; o "fonte N" das linhas do envio (core/statsLog.ts) e quantos
+// quadros por segundo a captura entregou.
 
 import { settings } from "@plugins/telinha/settings";
 
-import type { GpuCaptureStatus } from "./captureBoostMain";
+import type { GpuCaptureStatus, GpuPriorityReport } from "./captureBoostMain";
+import { rt } from "./context";
 import { errorText, log } from "./log";
 import { getNativeOrNull } from "./nativeApi";
 
 const GPU_CAPTURE = "Captura pela placa de vídeo";
+const GPU_PRIORITY = "Prioridade da captura na placa de vídeo";
 
 /** O que o main disse da "Captura pela placa de vídeo" (null: ainda nao lido, ou a parte nativa nao tem a opcao). */
 let gpuCapture: GpuCaptureStatus | null = null;
+/** O ultimo "high" respondido pelo main nesta partida (null: nenhum ainda). */
+let lastRaise: GpuPriorityReport | null = null;
+/** A prioridade foi pedida para a transmissao atual e ainda nao voltou ao normal. */
+let priorityActive = false;
 const listeners = new Set<() => void>();
 
 function changed() {
@@ -127,6 +140,122 @@ function gpuCaptureDiagnostics(st: GpuCaptureStatus | null): string {
 
 // #endregion
 
+// #region prioridade na placa de video
+
+const gpuPriorityOn = () => settings.store.gpuPriority === true;
+const hasPriorityNative = () => typeof getNativeOrNull()?.setGpuPriority === "function";
+
+function isPriorityReport(v: unknown): v is GpuPriorityReport {
+    return !!v && typeof v === "object" && Array.isArray((v as GpuPriorityReport).targets) && typeof (v as GpuPriorityReport).ok === "boolean";
+}
+
+/** Pede ao main ("high" ou "restore"). null: sem a funcao na parte nativa, ou o pedido falhou (fica no log). */
+async function askPriority(mode: "high" | "restore"): Promise<GpuPriorityReport | null> {
+    const native = getNativeOrNull();
+    if (typeof native?.setGpuPriority !== "function") return null;
+    try {
+        const report = await native.setGpuPriority(mode);
+        return isPriorityReport(report) ? report : null;
+    } catch (e) {
+        log.warn(`${GPU_PRIORITY}: o pedido falhou (${errorText(e)})`);
+        return null;
+    }
+}
+
+/** "Discord 1234 NORMAL→HIGH, GPU do Discord 5678 open 0x80070005 Acesso negado." ("" quando o helper nem rodou) */
+function targetsText(r: GpuPriorityReport): string {
+    return r.targets
+        .filter(t => t.error || t.after)
+        .map(t => `${t.role === "GPU" ? "GPU do Discord" : "Discord"} ${t.pid} ${t.error ?? `${t.before}→${t.after}`}`)
+        .join(", ");
+}
+
+const withTargets = (r: GpuPriorityReport) => {
+    const text = targetsText(r);
+    return text ? ` — ${text}` : "";
+};
+
+const HAGS_TEXT: Record<string, string> = { on: "HAGS ligado", off: "HAGS desligado" };
+const hagsText = (r: GpuPriorityReport) => HAGS_TEXT[r.hags ?? ""] ?? "HAGS desconhecido";
+
+/** O resultado de um "high", curto: "alta", "não foi possível (precisa de administrador)"... */
+function raiseOutcome(r: GpuPriorityReport): string {
+    if (r.ok) return "alta";
+    if (r.reason) return `não foi possível (${r.reason})`;
+    if (r.done) return `alta em ${r.done} de ${r.targets.length} processos do Discord${r.adminNeeded ? " (no resto precisa de administrador)" : ""}`;
+    return r.adminNeeded ? "não foi possível (precisa de administrador)" : "não foi possível (detalhes em \"Copiar diagnóstico\")";
+}
+
+/** Uma linha do log: info quando deu certo, aviso quando nao (nunca mais que isso: a falha e silenciosa). */
+function logPriority(r: GpuPriorityReport, text: string) {
+    const line = `${GPU_PRIORITY}: ${text}${withTargets(r)}; ${hagsText(r)}`;
+    if (r.ok) log.info(line);
+    else log.warn(line);
+}
+
+/** A volta ao normal: o que voltou, ou por que nao deu (o processo fechou, o ajudante sumiu...). */
+function logRestore(r: GpuPriorityReport, why: string) {
+    logPriority(r, r.ok ? `de volta ao normal (${why})` : `não voltou tudo ao normal (${why})${r.reason ? `: ${r.reason}` : ""}`);
+}
+
+async function raisePriority(): Promise<void> {
+    priorityActive = true;
+    changed();
+    const report = await askPriority("high");
+    if (!report) return;
+    lastRaise = report;
+    changed();
+    logPriority(report, raiseOutcome(report));
+}
+
+async function restorePriority(why: string): Promise<void> {
+    if (!priorityActive) return;
+    priorityActive = false;
+    changed();
+    const report = await askPriority("restore");
+    if (report?.targets.length) logRestore(report, why);
+}
+
+/** O que a prioridade faz nesta transmissao, para a linha "Modo da captura". */
+function priorityModeText(): string {
+    if (!gpuPriorityOn()) return "normal (opção desligada)";
+    if (!hasPriorityNative()) return "normal (só funciona com o Telinha instalado pelo TelinhaInstaller)";
+    return priorityActive ? "alta (continua da fonte anterior)" : "pedindo alta";
+}
+
+/** A opcao mudou na pagina do plugin (settings.ts): no ar, vale na hora; senao, na proxima transmissao. */
+export function onGpuPrioritySettingChanged(): void {
+    const on = gpuPriorityOn();
+    log.info(`${GPU_PRIORITY} ${on ? "ligada" : "desligada"} nas configurações${on && !rt.local ? ": vale na próxima transmissão" : ""}`);
+    if (!on) void restorePriority("opção desligada");
+    else if (rt.local && hasPriorityNative() && !priorityActive) void raisePriority();
+    changed();
+}
+
+/**
+ * Como a opcao esta: vale quando transmitir, alta nesta transmissao, nao foi possivel (precisa de administrador)...
+ * null = desligada.
+ */
+export function gpuPriorityState(on: boolean, native: boolean, active: boolean, last: GpuPriorityReport | null): string | null {
+    if (!on) return null;
+    if (!native) return "só funciona com o Telinha instalado pelo TelinhaInstaller";
+    if (!last) return active ? "pedindo prioridade alta" : "vale quando você transmitir";
+    if (!last.ok) return raiseOutcome(last);
+    return active ? "alta nesta transmissão" : "vale quando você transmitir (na última vez ficou alta)";
+}
+
+function gpuPriorityDiagnostics(): string {
+    const last = lastRaise;
+    return [
+        `prioridade da captura na placa de vídeo: opção ${gpuPriorityOn() ? "ligada" : "desligada"}`,
+        `agora ${priorityActive ? "alta (pedida nesta transmissão)" : "normal"}`,
+        !hasPriorityNative() && "parte nativa sem a opção",
+        last ? `última: ${raiseOutcome(last)}${withTargets(last)}; ${hagsText(last)}` : "nenhuma tentativa nesta partida"
+    ].filter(Boolean).join("; ");
+}
+
+// #endregion
+
 /**
  * Inicio do plugin: le o estado e acerta o arquivo com a opcao salva no Vencord (a opcao pode ter mudado sem a parte
  * nativa, ou o arquivo pode ter sumido). Loga o modo da captura desta partida quando a opcao esta em uso. Nunca lanca.
@@ -136,17 +265,30 @@ export async function startCaptureBoost(): Promise<void> {
     const on = gpuCaptureOn();
     if (st?.loader && st.saved !== on) await saveGpuCapture(on);
     if (on || st?.requested) log.info(`Modo da captura nesta partida do Discord: ${captureModeText(gpuCapture)}`);
+    // o renderer recarregou no meio de uma transmissao: o main ainda tem o Discord em HIGH (sem nada a voltar, nao faz nada)
+    const leftover = await askPriority("restore");
+    if (leftover?.targets.length) logRestore(leftover, "o Discord recarregou no meio de uma transmissão");
 }
 
-/** Uma transmissao acabou de comecar (core/streaming.ts): a linha do modo da captura, para comparar com e sem. */
+/**
+ * Uma transmissao acabou de comecar (core/streaming.ts): a linha do modo da captura e da prioridade, para comparar com e
+ * sem; com a opcao ligada, pede a prioridade alta (a resposta vem numa linha logo depois). Trocar de fonte no ar mantem.
+ */
 export function noteCaptureStarted(): void {
-    log.info(`Modo da captura: ${captureModeText(gpuCapture)}`);
+    log.info(`Modo da captura: ${captureModeText(gpuCapture)} · prioridade na placa de vídeo: ${priorityModeText()}`);
+    if (gpuPriorityOn() && hasPriorityNative() && !priorityActive) void raisePriority();
+}
+
+/** A transmissao acabou (core/streaming.ts → stopStreaming): a prioridade volta ao que era. */
+export function noteCaptureStopped(): void {
+    void restorePriority("transmissão encerrada");
 }
 
 /** As linhas da pagina do plugin, logo abaixo das opcoes. */
 export function captureBoostLines(): string[] {
     const capture = gpuCaptureState(gpuCapture, gpuCaptureOn());
-    return capture ? [`${GPU_CAPTURE}: ${capture}.`] : [];
+    const priority = gpuPriorityState(gpuPriorityOn(), hasPriorityNative(), priorityActive, lastRaise);
+    return [capture && `${GPU_CAPTURE}: ${capture}.`, priority && `${GPU_PRIORITY}: ${priority}.`].filter((l): l is string => !!l);
 }
 
 /** Alguma opcao espera o Discord reiniciar (a pagina do plugin mostra o botao). */
@@ -157,7 +299,7 @@ export function captureBoostNeedsRestart(): boolean {
 /** Para o "Copiar diagnóstico". Nunca lanca (as configuracoes podem nao estar disponiveis). */
 export function captureBoostDiagnostics(): string {
     try {
-        return gpuCaptureDiagnostics(gpuCapture);
+        return `${gpuCaptureDiagnostics(gpuCapture)}\n${gpuPriorityDiagnostics()}`;
     } catch (e) {
         return `captura pela placa de vídeo: diagnóstico indisponível (${e instanceof Error ? e.message : String(e)})`;
     }
@@ -166,5 +308,7 @@ export function captureBoostDiagnostics(): string {
 /** So para testes: esquece o estado lido do main e os ouvintes. */
 export function resetCaptureBoostForTests() {
     gpuCapture = null;
+    lastRaise = null;
+    priorityActive = false;
     listeners.clear();
 }

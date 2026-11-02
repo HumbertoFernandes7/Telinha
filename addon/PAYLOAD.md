@@ -41,7 +41,7 @@ dist/addon/
 | `addon.json` | runtime manifest (below) | `main.js` |
 | `telinha.renderer.js` | the Telinha plugin, renderer side (built from `src/plugins/telinha`, CSS inlined; **no `telinha.css`**) | `main.js` |
 | `telinha.main.js` | the Telinha plugin natives (`native.ts`), CommonJS | `main.js` |
-| `telinha-audio.exe` | whole-screen audio helper (`native-audio/`), spawned by `telinha.main.js` | `telinha.main.js` |
+| `telinha-audio.exe` | whole-screen audio helper (`native-audio/`), spawned by `telinha.main.js`; also its one-shot `--gpu-priority` mode (Discord's GPU priority while streaming, section 6.1) | `telinha.main.js` |
 | `stub-template.js` | template of the stub's `index.js` (section 3) | installers |
 | `version.json` | build identity + SHA-256 of every other file (below) | installers |
 
@@ -250,12 +250,12 @@ installer's Repair/Install replaced our stub with its own (kind `vencord-stub` a
 
 | Situation | Result |
 |---|---|
-| normal | Vencord + Telinha. `main.log`: `boot`, `loaded {"version":…,"commit":…,"rendererHooked":true,"ipcMapHooked":true,"natives":14,…,"errors":0}`, then `CSP: added 8 sources (chained)` and `renderer served {"metaPatched":true,…}` |
+| normal | Vencord + Telinha. `main.log`: `boot`, `loaded {"version":…,"commit":…,"rendererHooked":true,"ipcMapHooked":true,"natives":15,…,"errors":0}`, then `CSP: added 8 sources (chained)` and `renderer served {"metaPatched":true,…}` |
 | `%APPDATA%\Telinha\addon\` missing | stub requires Vencord directly: plain Vencord |
 | `main.js` throws while loading | stub logs `[Telinha] loader failed` to stderr and requires Vencord: plain Vencord |
 | `addon.json` broken / unreadable | logged; no hooks installed; plain Vencord |
 | `telinha.main.js` throws | logged; renderer part still loads; `pluginHelpers.Telinha` is left out, so the plugin reports "a parte nativa do Telinha não está carregada" |
-| `telinha-audio.exe` missing / quarantined | everything works except whole-screen audio (the plugin says the helper is missing) |
+| `telinha-audio.exe` missing / quarantined | everything works except whole-screen audio and "Prioridade da captura na placa de vídeo" (the plugin says the helper is missing) |
 | Vencord's `patcher.js` missing or throws before loading Discord | logged; Discord starts **vanilla** |
 | Discord itself throws | rethrown (not ours to hide), same as with Vencord's stub |
 | Vencord renamed its IPC channels | dormant fallback preload takes over (logged `preload fallback`) |
@@ -301,6 +301,15 @@ Chromium's 50 % rule on top, the capture fell to ~10 fps). WGC screen capture, a
 
 The plugin shows the result next to the option: on, "restart Discord", or "does nothing on this PC". It also logs the
 capture mode at the start of every stream (`Modo da captura: …`), and "Copiar diagnóstico" has a line for it.
+
+The other option of the same group, "Prioridade da captura na placa de vídeo" (`gpuPriority`, experimental, off by
+default), needs no restart and no file. While a stream is live, the plugin's natives (`core/captureBoostMain.ts`) run
+`telinha-audio.exe --gpu-priority <Discord main pid>,<GPU process pid> --class high` once. The GPU process pid comes from
+`app.getAppMetrics()`. The helper calls `D3DKMTSetProcessSchedulingPriorityClass`, accepts only processes in its
+caller's own process tree, refuses REALTIME, and exits. When the stream stops, each process goes back to the class it
+had before. Without admin rights Windows accepts HIGH for another process of the same user (checked on Windows 11 build
+26300, medium integrity, HAGS on, with a `PROCESS_SET_INFORMATION` handle). If it refuses, the plugin only logs it and
+shows "não foi possível (precisa de administrador)". It never asks for elevation.
 
 ## 7. Interplay with Vencord and Discord updates
 
