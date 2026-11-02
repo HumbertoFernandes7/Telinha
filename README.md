@@ -18,7 +18,7 @@ O Telinha é um plugin para o [Vencord](https://github.com/Vendicated/Vencord) (
 
 - **Peer-to-peer (P2P):** o vídeo vai direto de um PC para o outro, via WebRTC.
 - **Gratuito e sem servidor nosso:** não existe backend do Telinha. Ninguém paga nada e nada passa por nós.
-- **Até 1080p a 60 fps.** (A captura no Windows moderno é limitada a cerca de 60 fps.)
+- **Até 2K (1440p) a 60 fps:** escolha a resolução (720p, 1080p ou 2K) e o fps (30 ou 60), como no Discord. 2K precisa de uma tela 2K; numa menor, vai no tamanho dela. (A captura no Windows moderno é limitada a cerca de 60 fps.)
 - **Som da janela:** ao transmitir uma janela, o som daquele aplicativo vai junto (só dele, não do resto do PC).
 - **Som da tela inteira:** ao transmitir a tela inteira, vai todo o som do PC, **menos o do Discord** (seus amigos não ouvem a própria voz de volta). Exige Windows 10 versão 2004 ou superior.
 - **Codec automático:** H.264 por hardware quando os dois lados suportam; caso contrário, VP9.
@@ -102,7 +102,7 @@ Instalou uma das versões de teste antigas (o ZIP com `instalar.cmd`)? Veja a [n
 1. Entre no mesmo canal de voz que os amigos (todos com o Telinha).
 2. No painel da conexão de voz (canto inferior esquerdo), clique em **"Transmitir com Telinha"**.
 3. Escolha uma **tela** ou uma **janela**. Janela = vai com o som daquela janela; tela inteira = vai todo o som do PC, menos o do Discord.
-4. Escolha a qualidade (até 1080p60) e **quem pode assistir** (veja abaixo), e clique em **Transmitir**.
+4. Escolha a **resolução** (720p, 1080p ou 2K) e o **FPS** (30 ou 60), e **quem pode assistir** (veja abaixo), e clique em **Transmitir**. Resolução e FPS também mudam durante a transmissão, na barra do Telinha.
 
 **Quem pode assistir**
 
@@ -149,7 +149,7 @@ Quem transmite clica em **"Ao vivo · N assistindo"**, na barra do Telinha, e v�
 
 ## Limitações
 
-- **Cada espectador recebe uma cópia separada** do vídeo, enviada pelo PC de quem transmite. O upload cresce com o número de espectadores: em 1080p60 cada um pode usar até 20 Mbps (se a internet não aguentar, a qualidade automática baixa sozinha). Recomendamos **2 a 4 espectadores**. Em 1080p60, 1 ou 2 é o ideal.
+- **Cada espectador recebe uma cópia separada** do vídeo, enviada pelo PC de quem transmite. O upload cresce com o número de espectadores: em 1080p60 ou 2K cada um pode usar até 20 Mbps (se a internet não aguentar, a qualidade automática baixa sozinha). Recomendamos **2 a 4 espectadores**. Em 1080p60, 1 ou 2 é o ideal.
 - Sem aceleração de hardware no Discord, o Telinha usa mais CPU.
 - Jogos em **tela cheia exclusiva** podem aparecer pretos. Use borderless.
 - Como só usamos STUN (sem servidor de retransmissão), em redes muito restritivas a conexão direta pode não se estabelecer.
@@ -248,7 +248,7 @@ As primeiras versões de teste (`teste-1` e `teste-2`) eram um fork do Vencord 1
 
 ## English summary
 
-**Telinha** lets friends in the same Discord voice channel stream their screen or a window to each other and watch **inside Discord**, directly between their PCs (peer-to-peer, WebRTC). It is free and there is no server of ours: public Nostr relays (through the Trystero library) are used only so peers can find each other, and the video goes straight PC to PC (STUN only). It supports up to 1080p at 60 fps, and captures audio: the sound of a single window, or, for whole-screen streams, all PC sound except Discord's (Windows 10 2004+; done by a small unsigned helper, `telinha-audio.exe`, which antivirus or Smart App Control may block, in which case the screen streams without sound).
+**Telinha** lets friends in the same Discord voice channel stream their screen or a window to each other and watch **inside Discord**, directly between their PCs (peer-to-peer, WebRTC). It is free and there is no server of ours: public Nostr relays (through the Trystero library) are used only so peers can find each other, and the video goes straight PC to PC (STUN only). It supports up to 1440p (2K) at 60 fps (resolution and fps picked separately, like Discord), and captures audio: the sound of a single window, or, for whole-screen streams, all PC sound except Discord's (Windows 10 2004+; done by a small unsigned helper, `telinha-audio.exe`, which antivirus or Smart App Control may block, in which case the screen streams without sound).
 
 It is a plugin for [Vencord](https://github.com/Vendicated/Vencord) (a Discord client mod): early, but an official release ([latest version](https://github.com/HumbertoFernandes7/Telinha/releases/latest)). You keep the **official Vencord**: install Telinha with [**`TelinhaInstaller.exe`**](https://github.com/HumbertoFernandes7/Telinha/releases/latest/download/TelinhaInstaller.exe) (direct download of the latest release; notes on the [latest release page](https://github.com/HumbertoFernandes7/Telinha/releases/latest)). SmartScreen will warn because it is not code-signed yet: "More info" > "Run anyway". Click Install and reopen Discord; Telinha comes enabled. It does not modify Vencord's files; running the installer again and choosing Uninstall puts Vencord back exactly as before. Telinha updates itself: when Discord opens (and every 6 hours) it checks GitHub, downloads a new version in the background, verifies its SHA-256 and applies it on the next Discord restart, rolling back on its own if the new version fails to start ("Atualizar automaticamente" in the plugin settings turns this into a notice only). If you use the Vencord installer's "Repair", run the Telinha installer again. It needs official Vencord to be installed first.
 

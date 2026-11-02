@@ -17,8 +17,8 @@ import { flushPromises } from "@test/fakes/clock";
 import { FRIEND_ID, loggerLines, makeUser, ME_ID, OTHER_ID, pluginSettings, resetVencordFakes, SelectedChannelStore, toasts, UserStore, VOICE_CHANNEL_ID } from "@test/fakes/vencord";
 
 import {
-    ACCENT, accessBadge, avatarUrl, cl, currentUserId, defaultAccess, defaultQuality, deniedTitle, displayName, errorText, findPeer,
-    identityAlertBlocksAll, identityAlertText, inVoiceChannel, peerName, pluralPeople, QUALITY_OPTIONS, runAction, shareAudioByDefault,
+    ACCENT, accessBadge, avatarUrl, cl, currentUserId, defaultAccess, defaultQuality, deniedTitle, displayName, errorText, findPeer, FPS_OPTIONS,
+    identityAlertBlocksAll, identityAlertText, inVoiceChannel, peerName, pluralPeople, RESOLUTION_OPTIONS, runAction, shareAudioByDefault,
     streamSummary, watchersLabel
 } from "./common";
 
@@ -35,9 +35,9 @@ describe("ui/common: textos e valores padrao", () => {
         assert.equal(ACCENT, "#0b8a83");
     });
 
-    test("QUALITY_OPTIONS oferece as 3 qualidades escolhiveis", () => {
-        assert.deepEqual(QUALITY_OPTIONS.map(o => o.value), ["1080p60", "720p60", "1080p30"]);
-        assert.deepEqual(QUALITY_OPTIONS.map(o => o.label), ["1080p · 60 fps", "720p · 60 fps", "1080p · 30 fps"]);
+    test("os seletores Resolução (720p · 1080p · 2K) e FPS (30 · 60), como no Discord", () => {
+        assert.deepEqual(RESOLUTION_OPTIONS, [{ value: 720, label: "720p" }, { value: 1080, label: "1080p" }, { value: 1440, label: "2K" }]);
+        assert.deepEqual(FPS_OPTIONS, [{ value: 30, label: "30" }, { value: 60, label: "60" }]);
     });
 
     describe("errorText", () => {
@@ -108,13 +108,19 @@ describe("ui/common: textos e valores padrao", () => {
     });
 
     describe("valores padrao vindos das configuracoes do plugin", () => {
-        test("defaultQuality: a escolhida; valor invalido cai para 1080p60", () => {
+        test("defaultQuality: Resolução padrão x FPS padrão; cada valor invalido cai para o padrao (1080p, 60)", () => {
             assert.equal(defaultQuality(), "1080p60");
-            pluginSettings.set("defaultQuality", "720p60");
-            assert.equal(defaultQuality(), "720p60");
-            pluginSettings.set("defaultQuality", "4k");
-            assert.equal(defaultQuality(), "1080p60");
-            pluginSettings.set("defaultQuality", undefined);
+            pluginSettings.set("defaultResolution", 1440);
+            pluginSettings.set("defaultFps", 30);
+            assert.equal(defaultQuality(), "1440p30");
+            pluginSettings.set("defaultResolution", 720);
+            assert.equal(defaultQuality(), "720p30", "720p30 agora e escolhivel");
+            pluginSettings.set("defaultResolution", 2160);
+            assert.equal(defaultQuality(), "1080p30", "so a resolucao invalida volta ao padrao");
+            pluginSettings.set("defaultFps", "60");
+            assert.equal(defaultQuality(), "1080p60", "texto nao e um fps");
+            pluginSettings.set("defaultResolution", undefined);
+            pluginSettings.set("defaultFps", undefined);
             assert.equal(defaultQuality(), "1080p60");
         });
 

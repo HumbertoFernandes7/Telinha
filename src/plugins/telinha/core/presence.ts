@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { buildHello, type HelloMessage, type PresenceMessage, PROTOCOL_VERSION, truncateName } from "@plugins/telinha/protocol";
+import { buildHello, buildHwDecodeCaps, type HelloMessage, type PresenceMessage, PROTOCOL_VERSION, truncateName } from "@plugins/telinha/protocol";
 import { settings } from "@plugins/telinha/settings";
 import type { PeerId } from "@plugins/telinha/types";
 import { UserStore } from "@webpack/common";
@@ -34,6 +34,9 @@ export function selfHello(): HelloMessage {
 export function selfPresence(): PresenceMessage {
     const { id, username } = me();
     const { local } = rt;
+    const caps = getLocalCaps();
+    // caps.hwDecode (protocol.ts, passo 11): so com algo a anunciar (sem High na placa = a presenca de antes)
+    const hwDecode = buildHwDecodeCaps(caps.h264HighHwDecode);
     return {
         v: PROTOCOL_VERSION,
         discordUserId: id,
@@ -42,7 +45,7 @@ export function selfPresence(): PresenceMessage {
         // stream.access: quem pode assistir (a v0.1.0 ignora); nunca a senha
         ...(local ? { stream: { ...local.info, access: local.access } } : {}),
         // caps.diag: "Compartilhar diagnóstico" ligado (protocol.ts, passo 9); desligado = a presenca de antes
-        caps: { h264HwDecode: getLocalCaps().h264HwDecode, ...(settings.store.shareDiagnostics === true ? { diag: true } : {}) }
+        caps: { h264HwDecode: caps.h264HwDecode, ...(settings.store.shareDiagnostics === true ? { diag: true } : {}), ...(hwDecode ? { hwDecode } : {}) }
     };
 }
 

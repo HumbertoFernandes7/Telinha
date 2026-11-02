@@ -29,14 +29,31 @@ export function isPacketizationMode1(fmtp: string): boolean {
     return /packetization-mode=1(?!\d)/.test(fmtp);
 }
 
+/** O mesmo perfil H.264: mesmos profile_idc e profile_iop (os 4 primeiros digitos do profile-level-id); o nivel nao importa. */
+export function sameH264Profile(a: string | null | undefined, b: string | null | undefined): boolean {
+    return !!a && !!b && a.slice(0, 4).toLowerCase() === b.slice(0, 4).toLowerCase();
+}
+
+/**
+ * H.264 High (profile_idc 100 sem restricoes: "6400" + nivel, ex.: 640032). O Chromium oferece 6400xx para os encoders
+ * de placa de video e nunca 640c (Constrained High); 640c1f e outro perfil e nunca conta como High aqui.
+ */
+export function isH264High(profileLevelId: string | null | undefined): boolean {
+    return /^6400[0-9a-f]{2}$/i.test(profileLevelId ?? "");
+}
+
 /**
  * Ordem das variantes H.264 (menor vai antes): 0 = o perfil por hardware deste PC com packetization-mode=1 (mesmo perfil
- * = mesmos profile_idc e profile_iop, os 4 primeiros digitos do profile-level-id; o nivel nao importa); 1 = outro
- * packetization-mode=1; 2 = o resto. Sem perfil por hardware, so packetization-mode=1 na frente.
+ * = sameH264Profile; o nivel nao importa); com `backup` (o High escolhido e o Baseline da placa como reserva), 1 = o
+ * perfil reserva; depois os outros packetization-mode=1; por ultimo o resto. Sem perfil por hardware, so
+ * packetization-mode=1 na frente. Sem reserva, os valores sao os de antes (0, 1, 2).
  */
-export function h264Rank(fmtp: string, hwProfile: string | null | undefined): number {
-    if (!isPacketizationMode1(fmtp)) return 2;
-    return hwProfile && h264ProfileLevelId(fmtp)?.slice(0, 4) === hwProfile.slice(0, 4).toLowerCase() ? 0 : 1;
+export function h264Rank(fmtp: string, hwProfile: string | null | undefined, backup?: string | null): number {
+    const extra = backup ? 1 : 0;
+    if (!isPacketizationMode1(fmtp)) return 2 + extra;
+    const profile = h264ProfileLevelId(fmtp);
+    if (sameH264Profile(profile, hwProfile)) return 0;
+    return backup && sameH264Profile(profile, backup) ? 1 : 1 + extra;
 }
 
 export interface RemoteSdpPlan {
@@ -48,6 +65,8 @@ export interface RemoteSdpPlan {
     codec: VideoCodecName | null;
     /** H.264: perfil por hardware deste PC (profile-level-id), na frente das outras variantes H.264 */
     h264Profile?: string | null;
+    /** H.264 High: o perfil Baseline da placa, logo depois do High (se o outro lado nao tiver High, fica ele, nunca o 42e01f) */
+    h264Backup?: string | null;
     /**
      * x-google-start/max-bitrate em kbps nos codecs de video reais de TODAS as m-sections de video (as que enviamos e as que
      * so recebemos): a banda da conexao e uma so, e cada m-section de video reaplica a dela quando o codec muda; uma sem o
@@ -84,19 +103,21 @@ function fmtpIndex(lines: string[], pt: string) {
 }
 
 /**
- * Poe as variantes do codec escolhido no inicio da linha m= (H.264: o perfil por hardware, depois packetization-mode=1;
- * VP9 perfil 0 primeiro). Ex.: o outro lado lista 42e01f (OpenH264 aqui) antes de 42001f (placa de video): 42001f vai na frente.
+ * Poe as variantes do codec escolhido no inicio da linha m= (H.264: o perfil por hardware, depois o reserva, depois
+ * packetization-mode=1; VP9 perfil 0 primeiro). Ex.: o outro lado lista 42e01f (OpenH264 aqui) antes de 42001f (placa de
+ * video): 42001f vai na frente. Com High (640032) e reserva 42001f: 6400xx, depois 42001f, depois o resto.
  */
-function reorderVideoCodecs(lines: string[], codec: VideoCodecName, h264Profile: string | null | undefined, notes: string[]): string | null {
+function reorderVideoCodecs(lines: string[], codec: VideoCodecName, h264Profile: string | null | undefined, h264Backup: string | null | undefined, notes: string[]): string | null {
     const parts = lines[0].split(" ");
     if (parts.length < 4) return null;
     const pts = parts.slice(3);
     const wantedName = CODEC_RTP_NAME[codec];
     const names = new Map(parseRtpmaps(lines).map(r => [r.pt, r.name.toUpperCase()]));
     const fmtp = (pt: string) => lines[fmtpIndex(lines, pt)] ?? "";
+    const backup = codec === "h264" && h264Profile && !sameH264Profile(h264Profile, h264Backup) ? h264Backup : null;
 
     const rank = (pt: string) => {
-        if (codec === "h264") return h264Rank(fmtp(pt), h264Profile);
+        if (codec === "h264") return h264Rank(fmtp(pt), h264Profile, backup);
         if (codec === "vp9") return /profile-id=[1-3]/.test(fmtp(pt)) ? 1 : 0;
         return 0;
     };
@@ -107,13 +128,16 @@ function reorderVideoCodecs(lines: string[], codec: VideoCodecName, h264Profile:
         return null;
     }
     const hwFirst = codec === "h264" && !!h264Profile && rank(wanted[0]) === 0;
-    if (codec === "h264" && h264Profile && !hwFirst) notes.push(`perfil H.264 ${h264Profile} (placa de vídeo) ausente no SDP do outro lado; fica outra variante H.264`);
+    const backupFirst = !hwFirst && !!backup && rank(wanted[0]) === 1;
+    if (codec === "h264" && h264Profile && !hwFirst) {
+        notes.push(`perfil H.264 ${h264Profile} (placa de vídeo) ausente no SDP do outro lado; ${backupFirst ? `fica o perfil reserva ${backup}` : "fica outra variante H.264"}`);
+    }
 
     const next = [...wanted, ...pts.filter(pt => !wanted.includes(pt))];
     if (next.every((pt, i) => pt === pts[i])) return null;
 
     lines[0] = [...parts.slice(0, 3), ...next].join(" ");
-    return `${wantedName}${hwFirst ? ` (perfil ${h264Profile})` : ""} primeiro`;
+    return `${wantedName}${hwFirst ? ` (perfil ${h264Profile})` : backupFirst ? ` (perfil ${backup})` : ""} primeiro`;
 }
 
 function addVideoBitrate(lines: string[], startKbps: number, maxKbps: number): string | null {
@@ -172,7 +196,7 @@ export function mungeRemoteSdp(sdp: string, plan: RemoteSdpPlan): MungeResult {
 
         if (kind === "video") {
             if (plan.codec && plan.videoMids.has(mid)) {
-                const c = reorderVideoCodecs(lines, plan.codec, plan.h264Profile, notes);
+                const c = reorderVideoCodecs(lines, plan.codec, plan.h264Profile, plan.h264Backup, notes);
                 if (c) changes.push(`mid ${mid}: ${c}`);
             }
             if (plan.bitrate) {

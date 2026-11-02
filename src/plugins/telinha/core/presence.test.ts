@@ -11,13 +11,18 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, test } from "node:test";
 
-import { buildHello, PROTOCOL_VERSION } from "@plugins/telinha/protocol";
+import { buildHello, buildHwDecodeCaps, HW_DECODE_CAPS_VERSION, isPresenceMessage, type PresenceMessage, PROTOCOL_VERSION, sanitizePresence } from "@plugins/telinha/protocol";
 import { FakeRoom } from "@test/fakes/trystero";
 import { makeUser, ME_ID, pluginSettings, UserStore } from "@test/fakes/vencord";
+import { DEFAULT_VIDEO_CODECS, installWebRtc, rtpCapabilities } from "@test/fakes/webrtc";
 import { logged, logMark } from "@test/helpers/wpa-session";
 
+import { getLocalCaps, probeLocalCaps } from "./codec";
 import { type LocalCapture, type PeerEntry, rt } from "./context";
 import { computeAdmitted, me, selfHello, selfPresence, sendPresence } from "./presence";
+
+/** H.264 High como o Chromium 152 lista com a placa de video (packetization-mode=1). */
+const HIGH_640032: RTCRtpCodec = { mimeType: "video/H264", clockRate: 90000, sdpFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640032" };
 
 function peer(peerId: string, patch: Partial<PeerEntry> = {}): PeerEntry {
     return {
@@ -70,6 +75,49 @@ describe("o que mandamos", () => {
         assert.deepEqual(p.stream, { kind: "window", title: "Jogo", hasAudio: true, width: 1280, height: 720, fps: 60, access: "password" });
         assert.equal(p.streaming, true);
         assert.equal(JSON.stringify(p).includes("segredo"), false);
+    });
+
+    test("selfPresence com High na placa: caps.hwDecode versionado (passo 11); o resto da presenca e o de antes", async () => {
+        const rtc = installWebRtc();
+        try {
+            rtpCapabilities.receiver = { ...rtpCapabilities.receiver, video: [...DEFAULT_VIDEO_CODECS, HIGH_640032] };
+            rtc.mediaCapabilities.hwDecode = ["42001f", "640032"];
+            await probeLocalCaps();
+            assert.equal(getLocalCaps().h264HighHwDecode, true);
+            assert.deepEqual(selfPresence().caps, { h264HwDecode: true, hwDecode: { v: HW_DECODE_CAPS_VERSION, h264High: true } });
+            pluginSettings.set("shareDiagnostics", true);
+            assert.deepEqual(selfPresence().caps, { h264HwDecode: true, diag: true, hwDecode: { v: 1, h264High: true } });
+        } finally {
+            pluginSettings.reset();
+            rtc.restore();
+        }
+    });
+});
+
+describe("presenca recebida: caps.hwDecode (protocol.ts passo 11)", () => {
+    const base = { v: PROTOCOL_VERSION, discordUserId: "200000000000000002", username: "amigo", streaming: false };
+    const capsOf = (caps: unknown) => sanitizePresence({ ...base, caps } as PresenceMessage).caps;
+
+    test("v1 com High: fica; marcas desconhecidas (H.265/AV1 futuros) e lixo saem", () => {
+        assert.deepEqual(capsOf({ h264HwDecode: true, hwDecode: { v: 1, h264High: true } }), { h264HwDecode: true, hwDecode: { v: 1, h264High: true } });
+        assert.deepEqual(capsOf({ h264HwDecode: true, hwDecode: { v: 1, h264High: true, av1: true, evil: "x" } }), { h264HwDecode: true, hwDecode: { v: 1, h264High: true } });
+    });
+
+    test("versao antiga (sem o campo), nada verdadeiro, outra versao ou formato errado: como sem o campo", () => {
+        for (const hwDecode of [undefined, null, "x", 1, [], [{ v: 1, h264High: true }], {}, { v: 1 }, { v: 1, h264High: false }, { v: 1, h264High: "true" },
+            { v: 2, h264High: true }, { v: "1", h264High: true }, { h264High: true }]) {
+            assert.deepEqual(capsOf({ h264HwDecode: true, ...(hwDecode !== undefined ? { hwDecode } : {}) }), { h264HwDecode: true }, JSON.stringify(hwDecode));
+        }
+    });
+
+    test("o que mandamos e o que a v0.3.2 aceita: o campo novo e opcional e o resto da presenca fica igual", () => {
+        assert.equal(buildHwDecodeCaps(false), null);
+        assert.deepEqual(buildHwDecodeCaps(true), { v: HW_DECODE_CAPS_VERSION, h264High: true });
+        const ours = { ...base, caps: { h264HwDecode: true, hwDecode: buildHwDecodeCaps(true)! } };
+        assert.equal(isPresenceMessage(ours), true);
+        // o sanitizePresence da v0.3.2 so copia h264HwDecode e diag: o mesmo resultado de uma presenca sem o campo
+        const { hwDecode: _ignored, ...oldView } = sanitizePresence(ours).caps;
+        assert.deepEqual(oldView, { h264HwDecode: true });
     });
 });
 

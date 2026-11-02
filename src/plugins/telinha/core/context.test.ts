@@ -14,6 +14,7 @@ import { afterEach, describe, test } from "node:test";
 
 import { buildHello } from "@plugins/telinha/protocol";
 import { getState, resetState, subscribe } from "@plugins/telinha/store";
+import { captureStream } from "@test/fakes/webrtc";
 import { presence } from "@test/helpers/wpa-session";
 
 import { blockOf, getPc, type LocalCapture, type PeerEntry, peerLabel, publish, rt, setLastError, type ViewerEntry } from "./context";
@@ -119,7 +120,7 @@ describe("snapshot (publish)", () => {
     });
 
     test("transmissao local com pedidos pendentes (identidade so de quem esta na sala)", async () => {
-        const stream = {} as MediaStream;
+        const stream = captureStream() as unknown as MediaStream;
         const local: LocalCapture = {
             stream, source: { id: "screen:0:0", name: "Tela", kind: "screen" }, quality: "1080p60",
             info: { kind: "screen", title: "Tela", hasAudio: true, width: 1920, height: 1080, fps: 60 },
@@ -148,6 +149,37 @@ describe("snapshot (publish)", () => {
         assert.equal(getState().local?.autoQuality?.current, "720p60");
         assert.equal(getState().local?.captureWarning, "tela preta");
         clearTimeout(timer);
+    });
+
+    test("2K numa captura de 1080p: o aviso de que vai no tamanho dela, pela altura de agora (a janela pode mudar)", async () => {
+        const stream = captureStream({ video: { width: 1920, height: 1080 } });
+        const local: LocalCapture = {
+            stream: stream as unknown as MediaStream, source: { id: "window:1:0", name: "Jogo", kind: "window" }, quality: "1440p60",
+            info: { kind: "window", title: "Jogo", hasAudio: false, width: 1920, height: 1080, fps: 60 },
+            startedAt: 0, viewers: new Set(), access: "all", password: null
+        };
+        rt.local = local;
+        publish();
+        await flush();
+        assert.equal(getState().local?.sizeNote, "2K escolhido, a janela tem 1080p: enviando 1080p");
+
+        // a janela cresceu para 2560x1440: o 2K vale de novo, sem aviso
+        stream.getVideoTracks()[0].setSettings({ width: 2560, height: 1440 });
+        publish();
+        await flush();
+        assert.equal("sizeNote" in getState().local!, false);
+
+        // sem a leitura do tamanho, vale o do inicio
+        stream.getVideoTracks()[0].setSettings({ width: undefined, height: undefined });
+        publish();
+        await flush();
+        assert.equal(getState().local?.sizeNote, "2K escolhido, a janela tem 1080p: enviando 1080p");
+
+        // 1080p escolhido nunca tem aviso, nem numa janela menor
+        local.quality = "1080p60";
+        publish();
+        await flush();
+        assert.equal(getState().local?.sizeNote, undefined);
     });
 
     test("sessoes assistidas: so os campos que valem para o status atual", async () => {

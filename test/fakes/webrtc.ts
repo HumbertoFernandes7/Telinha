@@ -559,6 +559,8 @@ export interface VideoSenderStatsInit {
     /** seconds per reason (cumulative); omit to leave the field out (old Chromium) */
     qualityLimitationDurations?: { none?: number; cpu?: number; bandwidth?: number; other?: number; } | null;
     mimeType?: string;
+    /** sdpFmtpLine of the codec in use (e.g. the negotiated H.264 profile-level-id); left out unless given */
+    codecFmtp?: string;
     encoderImplementation?: string;
     powerEfficientEncoder?: boolean;
     /** media-source: frames the capture delivered (cumulative) and its fps */
@@ -622,7 +624,7 @@ export function videoSenderStats(init: VideoSenderStatsInit = {}): StatsEntry[] 
     for (const field of init.omit ?? []) delete out[field];
     const entries: StatsEntry[] = [
         out,
-        { id: "COT01_96", type: "codec", mimeType: init.mimeType ?? "video/VP9", payloadType: 96, clockRate: 90000 },
+        { id: "COT01_96", type: "codec", mimeType: init.mimeType ?? "video/VP9", payloadType: 96, clockRate: 90000, ...(init.codecFmtp ? { sdpFmtpLine: init.codecFmtp } : {}) },
         {
             id: "SV1", type: "media-source", kind: "video",
             ...(init.sourceFrames != null ? { frames: init.sourceFrames } : {}),

@@ -17,7 +17,7 @@ import { after, afterEach, before, describe, test } from "node:test";
 
 import { STREAM_KIND_SCREEN } from "@plugins/telinha/protocol";
 import { getState } from "@plugins/telinha/store";
-import type { StreamOptions } from "@plugins/telinha/types";
+import type { Quality, StreamOptions } from "@plugins/telinha/types";
 import { installWebAudio } from "@test/fakes/audio";
 import { defaultTelinhaNatives, installNative } from "@test/fakes/native";
 import { FRIEND_ID, OTHER_ID, pluginSettings } from "@test/fakes/vencord";
@@ -31,7 +31,7 @@ import { refreshGpuCapture, resetCaptureBoostForTests } from "./captureBoost";
 import { rt } from "./context";
 import { BLACK_WARNING } from "./quality/captureMonitor";
 import {
-    approveViewer, getStreamAccess, getStreamPassword, kickViewer, sendPlanFor, startStreaming, stopStreaming, tick
+    approveViewer, getStreamAccess, getStreamPassword, kickViewer, QUALITY, sendPlanFor, startStreaming, stopStreaming, tick
 } from "./streaming";
 
 // discordUserIds (snowflakes) dos espectadores falsos, alem de FRIEND_ID e OTHER_ID
@@ -86,6 +86,8 @@ describe("startStreaming: validacao e erros de captura", () => {
             [{ source: { id: "screen:abc", name: "x", kind: "screen" } }, "Fonte de captura inválida."],
             [{ source: { id: 42, name: "x", kind: "screen" } }, "Fonte de captura inválida."],
             [{ quality: "4k" }, "Qualidade inválida."],
+            [{ quality: "1080p120" }, "Qualidade inválida."],
+            [{ quality: "constructor" }, "Qualidade inválida."],
             [{ access: "todos" }, "Opção de \"Quem pode assistir\" inválida."],
             [{ access: "password" }, "Digite ou gere uma senha para esta transmissão."],
             [{ access: "password", password: "   " }, "Digite ou gere uma senha para esta transmissão."],
@@ -106,8 +108,10 @@ describe("startStreaming: validacao e erros de captura", () => {
         });
         const first = startStreaming(screenOptions());
         await assert.rejects(startStreaming(screenOptions()), { message: "A transmissão já está sendo iniciada." });
+        assert.equal(rt.lastError, "A transmissão já está sendo iniciada.", "o motivo tambem aparece na barra (lastError)");
         release(true);
         await first;
+        assert.equal(rt.lastError, null, "a partida que seguiu limpa o aviso");
         assert.equal(getStreamAccess(), "all");
         assert.equal(rig.rtc.mediaDevices.displayMediaCalls.length, 1);
     });
@@ -225,6 +229,25 @@ describe("startStreaming: tela, janela e audio", () => {
         // parar de novo, sem transmissao: nada acontece
         stopStreaming();
         assert.deepEqual(stopLogs(), ["Transmissão encerrada (parada pelo usuário)"]);
+    });
+
+    test("as 6 qualidades: a captura pede ate a resolucao escolhida (16:9) no fps escolhido; o teto e o do degrau", async () => {
+        assert.deepEqual(QUALITY, {
+            "720p30": { width: 1280, height: 720, fps: 30, maxKbps: 6000 },
+            "720p60": { width: 1280, height: 720, fps: 60, maxKbps: 12000 },
+            "1080p30": { width: 1920, height: 1080, fps: 30, maxKbps: 12000 },
+            "1080p60": { width: 1920, height: 1080, fps: 60, maxKbps: 20000 },
+            "1440p30": { width: 2560, height: 1440, fps: 30, maxKbps: 20000 },
+            "1440p60": { width: 2560, height: 1440, fps: 60, maxKbps: 20000 }
+        });
+        for (const [quality, profile] of Object.entries(QUALITY)) {
+            await startStreaming(screenOptions({ quality: quality as Quality }));
+            assert.deepEqual(rig.rtc.mediaDevices.displayMediaCalls.at(-1)?.video, {
+                width: { ideal: profile.width, max: profile.width }, height: { ideal: profile.height, max: profile.height }, frameRate: { ideal: profile.fps, max: profile.fps }
+            }, quality);
+            assert.equal(rt.local?.quality, quality);
+            stopStreaming();
+        }
     });
 
     test("transmissao nova sem escolher quem pode assistir: 'Todos da call'", async () => {
@@ -496,6 +519,44 @@ describe("pedidos para assistir e o envio para cada espectador", () => {
         // "stop" de quem nao assiste: nada a tirar
         rig.room.receive("watch", { op: "stop" }, "peerE");
         assert.equal(removalsFrom(rig.room, "peerE").length, 1);
+    });
+
+    test("2K a 60 fps numa tela de 1080p: o envio sai em 1080p (sem ampliar), ate 20 Mbps, e o log avisa uma vez", async () => {
+        const pc = await connectViewer(rig, "peerE", ID.e, "edu");
+        const since = logMark();
+        await startStreaming(screenOptions({ quality: "1440p60" }));
+        assert.deepEqual(rig.rtc.mediaDevices.displayMediaCalls.at(-1)?.video, {
+            width: { ideal: 2560, max: 2560 }, height: { ideal: 1440, max: 1440 }, frameRate: { ideal: 60, max: 60 }
+        });
+        rig.room.receive("watch", { op: "start" }, "peerE");
+        await turns();
+        assert.deepEqual(videoSenderOf(pc)!.encoding, { active: true, maxBitrate: 20_000_000, maxFramerate: 60, scaleResolutionDownBy: 1, priority: "high", networkPriority: "high" });
+        assert.deepEqual(sendPlanFor("peerE")?.bitrate, { startKbps: 4000, maxKbps: 20000 });
+        const lines = since();
+        assert.deepEqual(lines.filter(l => /2K|1440/.test(l)), ['Iniciando transmissão: tela "Tela inteira" em 1440p60 sem áudio', "2K escolhido, a tela tem 1080p: enviando 1080p"]);
+        assert.ok(lines.includes("Envio para edu (peerE): 1080p 60 fps, até 20000 kbps, encoder por software: equilibra resolução e fps (num soluço os dois cedem um pouco)"));
+        assert.deepEqual(lastPresenceTo("peerE").stream, { kind: "screen", title: "Tela inteira", hasAudio: false, width: 1920, height: 1080, fps: 60, access: "all" });
+        assert.equal(getState().local?.sizeNote, "2K escolhido, a tela tem 1080p: enviando 1080p");
+    });
+
+    test("2K numa tela 2K: vai inteiro; a presenca leva so o tamanho e o fps (uma versao antiga ve uma transmissao como outra)", async () => {
+        rig.rtc.mediaDevices.getDisplayMediaImpl = () => Promise.resolve(captureStream({ video: { width: 2560, height: 1440, frameRate: 30 } }));
+        try {
+            const pc = await connectViewer(rig, "peerE", ID.e, "edu");
+            const since = logMark();
+            await startStreaming(screenOptions({ quality: "1440p30" }));
+            rig.room.receive("watch", { op: "start" }, "peerE");
+            await turns();
+            assert.deepEqual(videoSenderOf(pc)!.encoding, { active: true, maxBitrate: 20_000_000, maxFramerate: 30, scaleResolutionDownBy: 1, priority: "high", networkPriority: "high" });
+            assert.ok(since().includes("Envio para edu (peerE): 2K 30 fps, até 20000 kbps, encoder por software: equilibra resolução e fps (num soluço os dois cedem um pouco)"));
+            assert.equal(since().some(l => l.startsWith("2K escolhido")), false, "a tela comporta o 2K: sem aviso");
+            const presence = lastPresenceTo("peerE");
+            assert.deepEqual(presence.stream, { kind: "screen", title: "Tela inteira", hasAudio: false, width: 2560, height: 1440, fps: 30, access: "all" });
+            assert.equal(JSON.stringify(presence).includes("1440p"), false, "nenhum nome de qualidade vai para os outros");
+            assert.equal(getState().local?.sizeNote, undefined);
+        } finally {
+            rig.rtc.mediaDevices.getDisplayMediaImpl = constraints => Promise.resolve(captureStream({ audio: !!constraints.audio }));
+        }
     });
 
     test("sendPlanFor: a banda (inicio fixo, teto da qualidade) para qualquer peer; o codec so para quem assiste", async () => {

@@ -40,7 +40,8 @@ describe("harness: the core through the fakes", () => {
     });
 
     test("settings come with Vencord's defaults", () => {
-        assert.equal(settings.store.defaultQuality, "1080p60");
+        assert.equal(settings.store.defaultResolution, 1080);
+        assert.equal(settings.store.defaultFps, 60);
         assert.equal(settings.store.rejectOutsiders, true);
         assert.equal(settings.store.codec, "auto");
     });

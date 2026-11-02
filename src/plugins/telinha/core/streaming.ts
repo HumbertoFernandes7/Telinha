@@ -41,10 +41,12 @@ import { getNative } from "./nativeApi";
 import { containPeerConnection, isContained, type SendPlan } from "./peerConnection";
 import { me, sendPresence } from "./presence";
 import { CaptureMonitor } from "./quality/captureMonitor";
+import { isQuality, QUALITIES, RESOLUTION_WIDTH, sourceSizeNote } from "./quality/choice";
 import { QualityController } from "./quality/controller";
-import { encodingFor, levelText, scaledSize } from "./quality/levels";
+import { encodingFor, LEVELS, levelText, scaledSize } from "./quality/levels";
 import { isHardwareEncoder } from "./quality/stats";
-import { noteStreamStarting, noteStuckEncoder, STUCK_NOTICE, STUCK_NOTICE_PINNED } from "./stuckEncoder";
+import { h264ProfileLevelId, isH264High, sameH264Profile } from "./sdp";
+import { noteHighFailed, noteStreamStarting, noteStuckEncoder, STUCK_NOTICE, STUCK_NOTICE_HIGH, STUCK_NOTICE_PINNED } from "./stuckEncoder";
 
 export interface QualityProfile {
     width: number;
@@ -54,12 +56,15 @@ export interface QualityProfile {
     maxKbps: number;
 }
 
-/** Perfis de qualidade. */
-export const QUALITY: Record<Quality, QualityProfile> = {
-    "1080p60": { width: 1920, height: 1080, fps: 60, maxKbps: 20000 },
-    "720p60": { width: 1280, height: 720, fps: 60, maxKbps: 12000 },
-    "1080p30": { width: 1920, height: 1080, fps: 30, maxKbps: 12000 }
-};
+/**
+ * Perfis das 6 qualidades escolhiveis: a captura pede ate width x height (16:9) no fps escolhido, e o teto do encoder e o
+ * do degrau (quality/levels.ts → LEVELS). Uma captura menor nao e ampliada: o getDisplayMedia so reduz para caber, e a
+ * qualidade automatica nunca usa escala abaixo de 1.
+ */
+export const QUALITY = Object.fromEntries(QUALITIES.map(q => {
+    const { height, fps, maxKbps } = LEVELS[q];
+    return [q, { width: RESOLUTION_WIDTH[height], height, fps, maxKbps }];
+})) as Record<Quality, QualityProfile>;
 
 /**
  * x-google-start-bitrate, o MESMO em toda negociacao com todo peer (sendPlanFor). O libwebrtc so reaplica o inicio quando
@@ -115,6 +120,8 @@ interface ViewerSend {
     degradation?: { kind: EncoderKind; index: number; };
     /** onde o encoder roda, pelo 1o relato das estatisticas (depois de cada troca de codec); ausente = o esperado (encoderKindOf) */
     encoderKind?: EncoderKind;
+    /** onde o encoder deveria rodar, decidido quando o envio comecou ou trocou de codec (expectedKindFor) */
+    expectedKind?: EncoderKind;
     /** a checagem do encoder ja agiu neste espectador (H.264 por software): nunca de novo */
     fellBack?: boolean;
     /** o H.264 esta no OpenH264 de passagem (o WebRTC reduziu a resolucao para um tamanho que a placa nao aceita) */
@@ -193,6 +200,8 @@ const sends = new Map<PeerId, ViewerSend>();
 /** performance.now() do ultimo pedido de codec de cada conexao (onCodecRequest) */
 const codecRequestAt = new Map<PeerId, number>();
 let starting = false;
+/** startStreaming trocando a captura no ar: quem pede para assistir ate a troca acabar (sendTo espera; null = nao) */
+let deferredJoins: Set<PeerId> | null = null;
 let extras: CaptureExtras | null = null;
 let tickCount = 0;
 
@@ -222,6 +231,7 @@ export function sendPlanFor(peerId: PeerId | null): SendPlan | null {
     return {
         codec: send?.decision.codec ?? null,
         h264Profile: send?.decision.h264Profile ?? null,
+        ...(send?.decision.h264Backup ? { h264Backup: send.decision.h264Backup } : {}),
         bitrate: { startKbps: START_KBPS, maxKbps: QUALITY[local?.quality ?? "1080p60"].maxKbps },
         label: peerLabel(peerId)
     };
@@ -256,14 +266,19 @@ function validateAccess(mode: unknown, rawPassword: unknown): AccessChoice {
 function validateOptions(opts: StreamOptions) {
     const source = opts?.source as CaptureSource | undefined;
     if (!source || typeof source.id !== "string" || !SOURCE_ID_RE.test(source.id)) throw new Error("Fonte de captura inválida.");
-    if (!QUALITY[opts.quality]) throw new Error("Qualidade inválida.");
+    if (!isQuality(opts.quality)) throw new Error("Qualidade inválida.");
     // sem escolha: trocando de fonte, continua o modo atual; transmissao nova, "Todos da call"
     const access = opts.access === undefined ? null : validateAccess(opts.access, opts.password);
     return { source, profile: QUALITY[opts.quality], access };
 }
 
 export async function startStreaming(opts: StreamOptions): Promise<void> {
-    if (starting) throw new Error("A transmissão já está sendo iniciada.");
+    if (starting) {
+        // vai para lastError como as outras recusas (a barra e o seletor de fonte mostram o motivo); a partida em curso o limpa ao terminar
+        const msg = "A transmissão já está sendo iniciada.";
+        setLastError(msg);
+        throw new Error(msg);
+    }
     if (!rt.room) {
         const msg = "Entre em um canal de voz para transmitir.";
         setLastError(msg);
@@ -271,6 +286,9 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
     }
 
     const { source, profile, access: chosenAccess } = validateOptions(opts);
+    // com a transmissao no ar, capturar de novo desmonta o envio de cada espectador (stopCapture): recaptureLock
+    const early = rt.local && recaptureLock(qualityLockOf(rt.local), rt.local.source.id === source.id);
+    if (early) throw new Error(early);
     const kind = source.id.startsWith("screen:") ? "screen" : "window";
     // janela: audio so do processo da janela (getDisplayMedia); tela inteira: audio do PC sem o Discord (telinha-audio.exe)
     const wantAudio = !!opts.withAudio && kind === "window";
@@ -314,6 +332,17 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
             stream.getTracks().forEach(t => t.stop());
             throw new Error("A captura veio sem vídeo.");
         }
+        // de novo, antes do audio da tela (que toma o lugar do audio no ar: screenAudio.ts → superseded): um espectador
+        // pode ter entrado durante o getDisplayMedia (o envio H.264 dele ainda nao mandou nada). Desiste sem mexer na
+        // captura no ar: so a nova para. Daqui ate a troca, quem pede para assistir espera (deferredJoins) e recebe a
+        // captura nova: nada novo comeca no envio que o stopCapture vai desmontar
+        const onAir = rt.local;
+        const late = onAir && recaptureLock(qualityLockOf(onAir), onAir.source.id === source.id);
+        if (late) {
+            stream.getTracks().forEach(t => t.stop());
+            throw new Error(late);
+        }
+        if (onAir) deferredJoins = new Set();
         if (wantScreenAudio) {
             try {
                 const screenAudio = await startScreenAudioCapture({
@@ -351,6 +380,7 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
         const access: AccessChoice = chosenAccess ?? (previous ? { access: previous.access, password: previous.password } : { access: "all", password: null });
         // escolha nova de "Quem pode assistir" ao trocar de fonte: vale como setStreamAccess (antes de stopCapture apagar a senha)
         const accessChanged = !!previous && (access.access !== previous.access || access.password !== previous.password);
+        const carried = carryCodecs(keepViewers);
         if (previous) stopCapture(previous, "trocando de fonte");
 
         const local: LocalCapture = {
@@ -371,10 +401,15 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
         });
 
         log.info(`Transmitindo ${info.width}x${info.height} @ ${info.fps} fps${info.hasAudio ? " com áudio" : ""} · quem pode assistir: ${ACCESS_LABEL[local.access]}`);
+        // 2K numa tela/janela de 1080p ou menos: vai no tamanho dela (sem ampliar), uma linha so
+        const sizeNote = sourceSizeNote(local.quality, kind, info.height, info.width);
+        if (sizeNote) log.info(sizeNote);
         // o modo da captura (live com jogo pesado, core/captureBoost.ts): para comparar com e sem pelo "fonte N" do envio
         noteCaptureStarted();
         sendPresence();
-        for (const peerId of keepViewers) sendTo(peerId);
+        const waiting = deferredJoins ?? [];
+        deferredJoins = null;
+        for (const peerId of [...keepViewers, ...waiting]) sendTo(peerId, carried.get(peerId));
         if (accessChanged) resetAccessGuards();
         publish();
     } catch (e) {
@@ -385,6 +420,10 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
     } finally {
         starting = false;
         noteStreamStarting(false);
+        // a troca falhou: quem pediu enquanto isso vai para a captura que ficou no ar
+        const waiting = deferredJoins;
+        deferredJoins = null;
+        for (const peerId of waiting ?? []) sendTo(peerId);
     }
 }
 
@@ -443,6 +482,8 @@ function checkCaptureSize(ex: CaptureExtras) {
     if (now.width === before.width && now.height === before.height) return;
     ex.size = now;
     ex.resizedAt = performance.now();
+    // o aviso "2K escolhido, a janela tem 1080p" da barra so e refeito ao publicar: se o tamanho novo muda o texto, publica
+    if (sourceSizeNote(local.quality, local.info.kind, before.height, before.width) !== sourceSizeNote(local.quality, local.info.kind, now.height, now.width)) publish();
     const changed = [...local.viewers].some(peerId => {
         const level = quality.levelFor(peerId);
         return encodingFor(level, before.width, before.height).scaleResolutionDownBy !== encodingFor(level, now.width, now.height).scaleResolutionDownBy;
@@ -942,8 +983,83 @@ function retract(room: Room, local: LocalCapture, peerId: PeerId) {
     log.info(`Envio para ${peerLabel(peerId)} desfeito (ele deixou de ser espectador enquanto a mídia era preparada)`);
 }
 
-/** Comeca a mandar a captura atual para um espectador. */
-function sendTo(peerId: PeerId) {
+/** O codec de um envio que ja saiu do H.264 (queda do encoder ou pedido de quem assiste): carryCodecs → sendTo. */
+type CarriedCodec = Pick<ViewerSend, "decision" | "fellBack" | "codecRequested">;
+
+/**
+ * Antes de capturar de novo com os mesmos espectadores (trocar de fonte ou de qualidade): o codec de quem ja saiu do
+ * H.264 (fallBack, onCodecRequest), para o envio novo comecar nele. Sem isso, quem foi para o VP9 porque nao decodifica o
+ * H.264 recebia o H.264 de novo e ficava na tela preta ate o proximo pedido dele (~10 s ou mais). Quem continua em H.264
+ * (inclusive o fixado, depois de uma queda) recomeca do zero, com a checagem do envio novo (checkEncoder, checkStall).
+ */
+function carryCodecs(viewers: readonly PeerId[]): Map<PeerId, CarriedCodec> {
+    const carried = new Map<PeerId, CarriedCodec>();
+    for (const peerId of viewers) {
+        const send = sends.get(peerId);
+        if (!send || send.stuck || send.decision.codec === "h264" || !(send.fellBack || send.codecRequested)) continue;
+        carried.set(peerId, { decision: send.decision, fellBack: send.fellBack, codecRequested: send.codecRequested });
+    }
+    return carried;
+}
+
+/** quality lock: um envio H.264 da placa de video ainda no comeco (o video ainda nao saiu: checkStall → sending) */
+export const QUALITY_LOCK_STARTING = "A qualidade pode mudar assim que o vídeo começar a sair para todos (alguns segundos)";
+/** quality lock: um envio travado pela placa de video (containStuck) */
+export const QUALITY_LOCK_STUCK = "A placa de vídeo travou num envio: a qualidade só pode mudar depois de reiniciar o Discord";
+
+/**
+ * Por que a resolucao e o fps nao podem mudar agora; null = podem. Mudar captura de novo e desmonta o envio de cada
+ * espectador (stopCapture → removeStream). Num envio H.264 da placa de video cujo video ainda nao saiu (o mesmo sinal do
+ * checkStall: send.sending), o encoder pode estar travado sem o checkStall ter visto ainda (H264_STALL_MS), e desmontar um
+ * envio travado trava o Discord na placa AMD dos logs de 31/10 (containStuck). Com um envio travado (contido), espera o
+ * Discord reiniciar. O envio comecando vem primeiro: ele tambem segura o "Trocar" para outra fonte (recaptureLock).
+ *
+ * Codec fixado em H.264 com o h264HwEncode desligado (a sonda do High ou a marca de encoder travado, stuckEncoder.ts): o
+ * envio nasce "software" (expectedKindFor), mas o Chromium pode ainda usar a placa. Ate as estatisticas dizerem o encoder
+ * (no log da AMD de 31/10 elas nunca disseram), ele conta como da placa.
+ */
+function qualityLockOf(local: LocalCapture): string | null {
+    let stuck = false;
+    for (const peerId of local.viewers) {
+        const send = sends.get(peerId);
+        if (send?.stuck || contained(peerId)) {
+            stuck = true;
+            continue;
+        }
+        if (!send || send.sending || send.fellBack || !/^video\/h264$/i.test(send.reportedCodec ?? `video/${send.decision.codec}`)) continue;
+        const pinnedUnknown = !send.encoderKind && settings.store.codec === "h264";
+        if (pinnedUnknown || encoderKindOf(send) === "hardware") return QUALITY_LOCK_STARTING;
+    }
+    return stuck ? QUALITY_LOCK_STUCK : null;
+}
+
+/**
+ * O bloqueio de capturar de novo com a transmissao no ar (startStreaming com uma captura no ar; o seletor de fonte).
+ * A mesma fonte (so a qualidade muda): todo o qualityLockOf. Outra fonte ("Trocar"): so o envio H.264 da placa
+ * comecando; o travado ja esta contido e o stopCapture o deixa de fora do removeStream.
+ */
+export function recaptureLock(lock: string | null | undefined, sameSource: boolean): string | null {
+    return !lock || (lock === QUALITY_LOCK_STUCK && !sameSource) ? null : lock;
+}
+
+/** A barra (store) acompanha o qualityLockOf: publica quando ele muda. */
+function syncQualityLock(local: LocalCapture) {
+    const lock = qualityLockOf(local);
+    if ((local.qualityLock ?? null) === lock) return;
+    local.qualityLock = lock;
+    publish();
+}
+
+/** Por que a qualidade da transmissao no ar nao pode mudar agora (actions.ts → changeStreamQuality); null = pode. */
+export function qualityChangeBlocked(): string | null {
+    return rt.local ? qualityLockOf(rt.local) : null;
+}
+
+/**
+ * Comeca a mandar a captura atual para um espectador. `carried`: o codec dele na captura anterior (carryCodecs), quando
+ * ele ja tinha saido do H.264.
+ */
+function sendTo(peerId: PeerId, carried?: CarriedCodec) {
     const { local, room } = rt;
     const entry = rt.peers.get(peerId);
     if (!local || !room || !entry) return;
@@ -958,6 +1074,11 @@ function sendTo(peerId: PeerId) {
         return;
     }
     if (local.viewers.has(peerId)) return;
+    if (deferredJoins) {
+        // capturando de novo: um envio novo aqui seria desmontado ainda sem mandar video (qualityLockOf); vai para a nova
+        deferredJoins.add(peerId);
+        return;
+    }
     if (contained(peerId)) {
         // a faixa nova renegociaria a conexao do envio travado (e com o plano congelado dela, em H.264 de novo)
         logThrottled(`watch-stuck:${peerId}`, "warn", `${peerLabel(peerId)} pediu para assistir, mas a placa de vídeo travou no envio para ele nesta sessão: `
@@ -966,13 +1087,14 @@ function sendTo(peerId: PeerId) {
         return;
     }
 
-    const decision = chooseCodec(entry.presence?.caps, settings.store.codec as CodecSetting, getLocalCaps());
-    const send: ViewerSend = { decision };
+    const decision = carried?.decision ?? chooseCodec(entry.presence?.caps, settings.store.codec as CodecSetting, getLocalCaps());
+    const send: ViewerSend = { ...carried, decision, expectedKind: expectedKindFor(decision) };
     sends.set(peerId, send);
     local.viewers.add(peerId);
+    syncQualityLock(local);
     // H.264 com este PC codificando por hardware: mais um encoder na placa de video (a qualidade automatica preve o tempo dela)
-    qualityOf(local)?.addViewer(peerId, decision.codec === "h264" && getLocalCaps().h264HwEncode);
-    log.info(`Enviando para ${peerLabel(peerId)}: codec ${decision.codec.toUpperCase()} (${decision.reason})`);
+    qualityOf(local)?.addViewer(peerId, send.expectedKind === "hardware");
+    log.info(`Enviando para ${peerLabel(peerId)}: codec ${decision.codec.toUpperCase()} (${carried ? `o mesmo da captura anterior: ${decision.reason}` : decision.reason})`);
     if (decision.codec === "h264" && entry.presence?.caps.h264HwDecode !== true)
         log.warn(`${peerLabel(peerId)} não decodifica H.264 por hardware: o início pode travar por 15+ s`);
     publish();
@@ -1033,7 +1155,16 @@ function videoSender(peerId: PeerId, local: LocalCapture): RTCRtpSender | null {
  * placa de video = placa; o resto = software).
  */
 function encoderKindOf(send: ViewerSend | undefined): EncoderKind {
-    return send?.encoderKind ?? (send?.decision.codec === "h264" && getLocalCaps().h264HwEncode ? "hardware" : "software");
+    return send?.encoderKind ?? send?.expectedKind ?? expectedKindFor(send?.decision);
+}
+
+/**
+ * O tipo de encoder que uma decisao cria AGORA (H.264 com este PC codificando na placa = placa; o resto = software).
+ * Guardado no envio (expectedKind) quando ele comeca ou troca de codec: o h264HwEncode mudando depois (a sonda do High
+ * segurando o H.264, uma queda de outro envio) nao muda o encoder que ja esta no ar.
+ */
+function expectedKindFor(decision: CodecDecision | undefined): EncoderKind {
+    return decision?.codec === "h264" && getLocalCaps().h264HwEncode ? "hardware" : "software";
 }
 
 /**
@@ -1179,6 +1310,12 @@ function fallBack(peerId: PeerId, local: LocalCapture, send: ViewerSend, next: C
     send.fellBack = true;
     const label = peerLabel(peerId);
     const name = next.codec.toUpperCase();
+    // envio em High: a placa nao segurou o High; ele fica desligado neste PC (o Baseline nao leva a culpa)
+    const high = highProfileOf(send);
+    if (high) {
+        noteHighFailed(high, `caiu para o software numa transmissão em High (${label})`);
+        log.warn(`O H.264 High (perfil ${high}) para ${label} caiu para o software: o High fica desligado neste PC até o driver, o Chromium ou a placa mudarem`);
+    }
     const { count, disabledNow } = noteH264Fallback();
     if (next.codec === send.decision.codec) {
         const session = disabledNow ? ` Foi a ${count}ª queda nesta sessão: o H.264 automático fica desligado.` : "";
@@ -1257,6 +1394,7 @@ function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: 
     if (videoLeaving(encoded, sent)) {
         send.sending = true;
         send.stall = undefined;
+        syncQualityLock(local);
         return;
     }
     const now = performance.now();
@@ -1327,13 +1465,28 @@ function containStuck(peerId: PeerId, local: LocalCapture, send: ViewerSend, why
     send.stall = undefined;
     const pc = getPc(peerId);
     if (pc) containPeerConnection(pc, [send, videoSender(peerId, local), local.stream]);
+    syncQualityLock(local);
     qualityOf(local)?.removeViewer(peerId);
     const pinned = settings.store.codec === "h264";
-    noteStuckEncoder();
-    log.warn(`${why}: a placa de vídeo travou com H.264. O envio para ${label} fica como está até o Discord reiniciar (trocar o codec, `
-        + "parar ou fechar a conexão travaria o Discord inteiro). O H.264 automático fica desligado neste PC até o driver, o Chromium ou a placa mudarem.");
-    setLastError(pinned ? STUCK_NOTICE_PINNED : STUCK_NOTICE);
+    // envio em High: a culpa e do High (o Baseline passou na sonda dele); depois de reiniciar, vai o Baseline
+    const high = highProfileOf(send);
+    noteStuckEncoder(high);
+    log.warn(`${why}: a placa de vídeo travou com H.264${high ? ` High (perfil ${high})` : ""}. O envio para ${label} fica como está até o Discord reiniciar (trocar o codec, `
+        + "parar ou fechar a conexão travaria o Discord inteiro). "
+        + (high ? "O High fica desligado neste PC até o driver, o Chromium ou a placa mudarem; nesta sessão, o automático vai em VP9."
+            : "O H.264 automático fica desligado neste PC até o driver, o Chromium ou a placa mudarem."));
+    setLastError(high ? STUCK_NOTICE_HIGH : pinned ? STUCK_NOTICE_PINNED : STUCK_NOTICE);
     reply(peerId, { op: "stuck" });
+}
+
+/**
+ * O perfil High deste envio em H.264 (6400xx), ou null (Baseline, outro codec). Numa placa cujo unico perfil por hardware
+ * ja e o High (h264HwProfile 6400xx) nao ha Baseline para separar: null, e a falha marca o H.264 da placa como sempre.
+ */
+function highProfileOf(send: ViewerSend): string | null {
+    const profile = send.decision.h264Profile;
+    if (send.decision.codec !== "h264" || !isH264High(profile) || isH264High(getLocalCaps().h264HwProfile)) return null;
+    return profile!;
 }
 
 /**
@@ -1350,6 +1503,7 @@ async function switchSendCodec(peerId: PeerId, local: LocalCapture, send: Viewer
     const name = next.codec.toUpperCase();
     // renegociacoes futuras (sendPlanFor) ja vao com o codec novo
     send.decision = next;
+    send.expectedKind = expectedKindFor(next);
     let error = "";
     for (let attempt = 0; attempt < 2; attempt++) {
         if (attempt) await new Promise(resolve => setTimeout(resolve, 500));
@@ -1518,6 +1672,8 @@ export function tick() {
         if (refusal !== "outsider") deny(peerId, refusal);
         removeFrom(peerId, refusal === "outsider" ? "não está mais admitido" : REFUSAL_TEXT[refusal]);
     }
+    // quem saiu, trocou de codec ou ja manda video: a barra libera a qualidade (as mudancas sem chamada propria)
+    syncQualityLock(local);
     if (extras?.local === local) checkCaptureSize(extras);
     if (++tickCount % 2 === 0) void qualityOf(local)?.evaluate();
     for (const peerId of local.viewers) {
@@ -1538,7 +1694,8 @@ export function tick() {
             if (sends.get(peerId) !== send) return;
             const frames = capturedFrames(local, source);
             noteCapture(send, frames);
-            const codec = out?.codecId ? (report.get(out.codecId) as any)?.mimeType : undefined;
+            const codecStat: any = out?.codecId ? report.get(out.codecId) : undefined;
+            const codec = codecStat?.mimeType;
             if (!codec) return;
             const enc: EncoderReport = {
                 mimeType: codec, implementation: out.encoderImplementation, powerEfficient: out.powerEfficientEncoder, framesEncoded: out.framesEncoded,
@@ -1547,9 +1704,13 @@ export function tick() {
             if (!send.reportedCodec) {
                 send.reportedCodec = codec;
                 const expected = `video/${send.decision.codec}`.toLowerCase();
-                const msg = `Codificando para ${peerLabel(peerId)}: ${codec}${enc.implementation ? ` (${enc.implementation}${enc.powerEfficient ? ", hardware" : ""})` : ""}`;
-                if (codec.toLowerCase() === expected) log.info(msg);
-                else log.warn(`${msg} — esperado ${send.decision.codec.toUpperCase()}`);
+                // H.264: o perfil negociado de fato (o fmtp do codec em uso), para conferir o High no ar
+                const profile = /^video\/h264$/i.test(codec) ? h264ProfileLevelId(String(codecStat?.sdpFmtpLine ?? "")) : null;
+                const wantedProfile = send.decision.codec === "h264" ? send.decision.h264Profile : null;
+                const msg = `Codificando para ${peerLabel(peerId)}: ${codec}${profile ? ` perfil ${profile}` : ""}${enc.implementation ? ` (${enc.implementation}${enc.powerEfficient ? ", hardware" : ""})` : ""}`;
+                if (codec.toLowerCase() !== expected) log.warn(`${msg} — esperado ${send.decision.codec.toUpperCase()}`);
+                else if (profile && wantedProfile && !sameH264Profile(profile, wantedProfile)) log.warn(`${msg} — esperado o perfil ${wantedProfile}`);
+                else log.info(msg);
                 // onde o encoder roda decide a degradationPreference (DEGRADATION_FOR); vale o 1o relato (um OpenH264 de
                 // passagem nao troca nada)
                 if (enc.implementation || typeof enc.powerEfficient === "boolean")

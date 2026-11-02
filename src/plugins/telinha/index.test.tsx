@@ -275,7 +275,8 @@ describe("start e stop do plugin", () => {
 
     test("start migra a opcao antiga e liga a sessao, os avisos, os sons, os avisos de atualizacao e as verificacoes; stop desliga tudo", async t => {
         const clock = useFakeClock(t);
-        pluginSettings.load({ approveViewers: true }, { lazy: true }); // so a opcao antiga esta em disco, como na v0.1.0
+        // so as opcoes antigas estao em disco: "Aprovar quem vai assistir" (v0.1.0) e "Qualidade padrão" (ate a v0.3.x)
+        pluginSettings.load({ approveViewers: true, defaultQuality: "1080p30" }, { lazy: true });
 
         plugin.start();
         await clock.tickAsync(0);
@@ -283,6 +284,9 @@ describe("start e stop do plugin", () => {
         // v0.1.0 -> v0.2.0
         assert.equal(settings.plain.defaultAccess, "approval");
         assert.equal("approveViewers" in settings.plain, false);
+        // "Qualidade padrão" 1080p30 -> "Resolução padrão" 1080p + "FPS padrão" 30
+        assert.deepEqual([settings.plain.defaultResolution, settings.plain.defaultFps], [1080, 30]);
+        assert.equal("defaultQuality" in settings.plain, false);
         // a sessao assina o Discord
         assert.equal(FluxDispatcher.listenerCount("VOICE_CHANNEL_SELECT"), 1);
         // avisos de pedidos para assistir

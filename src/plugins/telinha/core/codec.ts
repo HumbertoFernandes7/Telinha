@@ -15,11 +15,18 @@
 // aqui, sdp.ts no SDP remoto) e o streaming.ts confere o encoder real no ar (softwareFallback). No ar, o Chromium
 // tambem troca a placa pelo OpenH264 DE PROPOSITO em quadros de tamanho impar ou abaixo de 360p (ver
 // isTransientSoftwareH264): isso nao e a placa falhando e nunca conta como queda.
+//
+// H.264 High (6400xx, desde depois da v0.3.2): CABAC e transformada 8x8, ~10-20% melhor por bit. O encoder da placa
+// (MediaFoundation NVENC) codifica Main e High, e o RTCVideoEncoder do Chromium passa o perfil negociado para ele. So vai
+// quando os dois lados tem High na placa: este PC codifica (encodingInfo do 6400xx do sender, h264HighHwProfile) com a
+// sonda WebCodecs do High "ok" neste ambiente (core/stuckEncoder.ts → setH264HighProbeOk) E o espectador anuncia que
+// decodifica (presenca caps.hwDecode.h264High, protocol.ts passo 11). Senao, exatamente o Baseline de antes. Tudo que
+// desliga o H.264 da placa (travou, sonda rodando, quedas para software) desliga o High junto (h264HwEncode).
 
-import { H264_PROBE } from "@plugins/telinha/protocol";
+import { H264_PROBE, type HwDecodeCaps } from "@plugins/telinha/protocol";
 import type { CodecSetting } from "@plugins/telinha/settings";
 
-import { CODEC_RTP_NAME, h264ProfileLevelId, h264Rank, isPacketizationMode1, type VideoCodecName } from "./sdp";
+import { CODEC_RTP_NAME, h264ProfileLevelId, h264Rank, isH264High, isPacketizationMode1, sameH264Profile, type VideoCodecName } from "./sdp";
 
 type Codec = RTCRtpCodec;
 
@@ -33,6 +40,12 @@ export interface LocalCodecCaps {
     h264HwEncode: boolean;
     /** profile-level-id (minusculo) do primeiro perfil H.264 que este PC codifica por hardware, ex.: "42001f"; null = nenhum */
     h264HwProfile: string | null;
+    /** decodifica H.264 High (6400xx) por hardware; vai na presenca como caps.hwDecode.h264High */
+    h264HighHwDecode: boolean;
+    /** profile-level-id do High que este PC codifica por hardware, no nivel que o Chromium oferece (ex.: "640032"); null = nenhum */
+    h264HighHwProfile: string | null;
+    /** a sonda WebCodecs do High passou neste ambiente (core/stuckEncoder.ts); sem ela, nunca High */
+    h264HighProbeOk: boolean;
     /** codecs de video que este cliente sabe enviar (vazio = desconhecido) */
     sendable: Set<VideoCodecName>;
 }
@@ -41,7 +54,15 @@ export interface CodecDecision {
     codec: VideoCodecName;
     /** H.264: perfil que vai na frente na negociacao (o por hardware); null/ausente = so packetization-mode=1 na frente */
     h264Profile?: string | null;
+    /** H.264 High: o perfil Baseline da placa logo depois (se o outro lado nao negociar High, fica ele, nunca o 42e01f) */
+    h264Backup?: string | null;
     reason: string;
+}
+
+/** O que importa do espectador na escolha: a presenca dele (caps). */
+export interface ViewerCodecCaps {
+    h264HwDecode: boolean;
+    hwDecode?: HwDecodeCaps;
 }
 
 /** Limites da sonda: cada consulta ao mediaCapabilities e a sonda inteira (os perfis vao um de cada vez). */
@@ -52,7 +73,9 @@ export interface ProbeTiming {
 
 export const PROBE_TIMING: ProbeTiming = { callMs: 3000, totalMs: 6000 };
 
-let localCaps: LocalCodecCaps = { h264HwDecode: false, h264HwEncode: false, h264HwProfile: null, sendable: new Set() };
+let localCaps: LocalCodecCaps = {
+    h264HwDecode: false, h264HwEncode: false, h264HwProfile: null, h264HighHwDecode: false, h264HighHwProfile: null, h264HighProbeOk: false, sendable: new Set()
+};
 let probing: Promise<LocalCodecCaps> | null = null;
 /** o que a sonda mediu (null = ainda nao mediu): o H.264 automatico volta para isto quando deixa de estar travado */
 let measured: LocalCodecCaps | null = null;
@@ -60,6 +83,8 @@ let measured: LocalCodecCaps | null = null;
 let h264HwStuck = false;
 /** a sonda WebCodecs do H.264 da placa esta rodando (core/encoderProbe.ts): ate ela acabar, o automatico vai de VP9 */
 let h264HwProbing = false;
+/** a sonda WebCodecs do High passou neste ambiente (core/stuckEncoder.ts → setH264HighProbeOk) */
+let h264HighProbeOk = false;
 
 export function getLocalCaps(): LocalCodecCaps {
     return localCaps;
@@ -129,35 +154,60 @@ function sendableCodecs(codecs: readonly Codec[]) {
     return out;
 }
 
+/** So as variantes High (6400xx) de uma lista de h264Candidates. */
+const highOnly = (fmtps: readonly string[]) => fmtps.filter(f => isH264High(h264ProfileLevelId(f)));
+
 /**
  * Mede as capacidades (sem memorizar). Codifica: o primeiro perfil H.264 packetization-mode=1 do sender que o
  * encodingInfo diz ser por hardware. Decodifica: o primeiro perfil packetization-mode=1 do receiver (o que o Chromium
- * lista primeiro, em geral 42001f, o mesmo que uma placa NVIDIA codifica).
+ * lista primeiro, em geral 42001f, o mesmo que uma placa NVIDIA codifica). High: as mesmas consultas so nas variantes
+ * 6400xx (no nivel que o Chromium lista), em paralelo; sem 6400xx na lista, nenhuma consulta e High nao.
  */
 export async function measureLocalCaps(timing: ProbeTiming = PROBE_TIMING): Promise<LocalCodecCaps> {
     const senderCodecs = videoCodecs("sender");
-    const [decodeFmtp, encodeFmtp] = await Promise.all([
-        firstPowerEfficient("decodingInfo", h264Candidates(videoCodecs("receiver")).slice(0, 1), timing),
-        firstPowerEfficient("encodingInfo", h264Candidates(senderCodecs), timing)
+    const senderH264 = h264Candidates(senderCodecs);
+    const receiverH264 = h264Candidates(videoCodecs("receiver"));
+    const [decodeFmtp, encodeFmtp, highDecodeFmtp, highEncodeFmtp] = await Promise.all([
+        firstPowerEfficient("decodingInfo", receiverH264.slice(0, 1), timing),
+        firstPowerEfficient("encodingInfo", senderH264, timing),
+        firstPowerEfficient("decodingInfo", highOnly(receiverH264).slice(0, 1), timing),
+        firstPowerEfficient("encodingInfo", highOnly(senderH264), timing)
     ]);
     const h264HwProfile = encodeFmtp ? h264ProfileLevelId(encodeFmtp) : null;
-    return { h264HwDecode: decodeFmtp !== null, h264HwEncode: h264HwProfile !== null, h264HwProfile, sendable: sendableCodecs(senderCodecs) };
+    return {
+        h264HwDecode: decodeFmtp !== null, h264HwEncode: h264HwProfile !== null, h264HwProfile,
+        h264HighHwDecode: highDecodeFmtp !== null, h264HighHwProfile: highEncodeFmtp ? h264ProfileLevelId(highEncodeFmtp) : null, h264HighProbeOk: false,
+        sendable: sendableCodecs(senderCodecs)
+    };
 }
 
-/** Linha do log de inicio (ex.: "... codifica: sim (perfil 42001f); envia: h264, vp8, vp9, av1"). */
+/**
+ * Linha do log de inicio (ex.: "... codifica: sim (perfil 42001f); envia: h264, vp8, vp9, av1; H.264 High por hardware —
+ * decodifica: sim, codifica: sim (perfil 640032)"). O "codifica" do High e o do encodingInfo; a sonda dele vem depois.
+ */
 export function describeLocalCaps(caps: LocalCodecCaps): string {
     const encode = caps.h264HwEncode ? `sim${caps.h264HwProfile ? ` (perfil ${caps.h264HwProfile})` : ""}` : "não";
-    return `Capacidades locais: H.264 por hardware — decodifica: ${caps.h264HwDecode ? "sim" : "não"}, codifica: ${encode}; envia: ${[...caps.sendable].join(", ") || "?"}`;
+    const high = `H.264 High por hardware — decodifica: ${caps.h264HighHwDecode ? "sim" : "não"}, codifica: ${caps.h264HighHwProfile ? `sim (perfil ${caps.h264HighHwProfile})` : "não"}`;
+    return `Capacidades locais: H.264 por hardware — decodifica: ${caps.h264HwDecode ? "sim" : "não"}, codifica: ${encode}; envia: ${[...caps.sendable].join(", ") || "?"}; ${high}`;
 }
 
 /** Mede uma vez por sessao do Discord. `report` recebe a linha de log da medicao (so na primeira chamada). */
 export function probeLocalCaps(report?: (line: string) => void): Promise<LocalCodecCaps> {
     return probing ??= measureLocalCaps().then(caps => {
         measured = caps;
-        localCaps = h264HwStuck || h264HwProbing ? { ...caps, h264HwEncode: false } : caps;
+        localCaps = { ...caps, h264HwEncode: caps.h264HwEncode && !h264HwStuck && !h264HwProbing, h264HighProbeOk };
         report?.(describeLocalCaps(caps));
         return caps;
     });
+}
+
+/**
+ * A sonda WebCodecs do High neste ambiente (core/stuckEncoder.ts): true = passou (ok salvo neste ambiente, ou agora);
+ * false = nao rodou, inconclusiva ou travou. Sem ela o automatico nunca escolhe High.
+ */
+export function setH264HighProbeOk(ok: boolean) {
+    h264HighProbeOk = ok;
+    if (localCaps.h264HighProbeOk !== ok) localCaps = { ...localCaps, h264HighProbeOk: ok };
 }
 
 /** h264HwEncode de novo a partir do que a sonda mediu, das travas (placa travada, sonda WebCodecs rodando) e das quedas. */
@@ -227,8 +277,11 @@ export function noteH264Fallback(): H264FallbackTally {
  * "Codifica por hardware" = a sonda achou um perfil por hardware e o encoder real nao caiu para software no ar
  * H264_FALLBACKS_TO_DISABLE vezes nesta sessao (h264HwEncode, noteH264Fallback). Com H.264, a decisao leva esse perfil (h264Profile), que vai na frente na negociacao: so o
  * packetization-mode=1 nao basta, porque 42e01f tambem e packetization-mode=1 e cai no OpenH264.
+ * High (whyNoHigh): no automatico, com H.264 por hardware nos dois lados, vai High (6400xx, com o Baseline da placa como
+ * reserva) so se este PC codifica High por hardware com a sonda do High ok E o espectador anuncia High por hardware.
+ * Fixado em H.264 nas configuracoes continua o Baseline de antes.
  */
-export function chooseCodec(viewerCaps: { h264HwDecode: boolean; } | undefined, setting: CodecSetting, local: LocalCodecCaps = localCaps): CodecDecision {
+export function chooseCodec(viewerCaps: ViewerCodecCaps | undefined, setting: CodecSetting, local: LocalCodecCaps = localCaps): CodecDecision {
     const canSend = (c: VideoCodecName) => local.sendable.size === 0 || local.sendable.has(c);
     const fallback = (why: string): CodecDecision => canSend("vp9")
         ? { codec: "vp9", reason: `${why} → VP9` }
@@ -241,22 +294,47 @@ export function chooseCodec(viewerCaps: { h264HwDecode: boolean; } | undefined, 
     }
 
     const viewerHw = viewerCaps?.h264HwDecode === true;
-    if (viewerHw && local.h264HwEncode && canSend("h264"))
-        return h264(`automático: H.264 por hardware nos dois lados${local.h264HwProfile ? ` (perfil ${local.h264HwProfile})` : ""}`);
+    if (viewerHw && local.h264HwEncode && canSend("h264")) {
+        const noHigh = whyNoHigh(viewerCaps, local);
+        if (!noHigh && local.h264HighHwProfile) {
+            const backup = local.h264HwProfile && !sameH264Profile(local.h264HwProfile, local.h264HighHwProfile) ? local.h264HwProfile : null;
+            return {
+                codec: "h264", h264Profile: local.h264HighHwProfile, ...(backup ? { h264Backup: backup } : {}),
+                reason: `automático: H.264 High por hardware nos dois lados (perfil ${local.h264HighHwProfile}: este PC codifica High na placa, `
+                    + `com a sonda do High ok, e o espectador decodifica High na placa${backup ? `; reserva ${backup}` : ""})`
+            };
+        }
+        // placa que so codifica High por hardware: o perfil dela e o High (como antes desta versao); o log diz a verdade
+        if (isH264High(local.h264HwProfile)) {
+            return h264(`automático: H.264 por hardware nos dois lados (perfil ${local.h264HwProfile}: o único que a placa codifica por hardware, `
+                + `então vai High mesmo assim, como antes; ${noHigh})`);
+        }
+        return h264(`automático: H.264 por hardware nos dois lados (${local.h264HwProfile ? `perfil ${local.h264HwProfile}; ` : ""}High não: ${noHigh})`);
+    }
 
     return fallback(`automático: ${!viewerHw ? "o espectador não decodifica H.264 por hardware" : "este PC não codifica H.264 por hardware"}`);
 }
 
+/** Por que o High nao vai para este espectador (null = vai). Nesta ordem: este PC, a sonda deste PC, o espectador. */
+export function whyNoHigh(viewerCaps: ViewerCodecCaps | undefined, local: LocalCodecCaps): string | null {
+    if (!local.h264HighHwProfile) return "este PC não codifica High por hardware";
+    if (!local.h264HighProbeOk) return "a sonda WebCodecs do High não passou neste PC";
+    if (viewerCaps?.hwDecode?.h264High !== true) return "o espectador não anuncia High por hardware (não tem, ou é uma versão antiga do Telinha)";
+    return null;
+}
+
 /**
  * Variantes do codec escolhido primeiro; o resto fica como alternativa (ordem original nos empates). H.264: o perfil por
- * hardware (h264Profile), depois os outros packetization-mode=1, depois o resto (sdp.ts → h264Rank). VP9: perfil 0 na frente.
+ * hardware (h264Profile), depois o reserva (h264Backup, o Baseline da placa quando vai High), depois os outros
+ * packetization-mode=1, depois o resto (sdp.ts → h264Rank). VP9: perfil 0 na frente.
  */
-export function sortCodecs<C extends Codec>(codecs: readonly C[], codec: VideoCodecName, h264Profile?: string | null) {
+export function sortCodecs<C extends Codec>(codecs: readonly C[], codec: VideoCodecName, h264Profile?: string | null, h264Backup?: string | null) {
     const wanted = `video/${CODEC_RTP_NAME[codec]}`.toLowerCase();
     const isWanted = (c: C) => c.mimeType.toLowerCase() === wanted;
+    const backup = h264Profile && !sameH264Profile(h264Profile, h264Backup) ? h264Backup : null;
     const rank = (c: C) => {
         const fmtp = c.sdpFmtpLine ?? "";
-        if (codec === "h264") return h264Rank(fmtp, h264Profile);
+        if (codec === "h264") return h264Rank(fmtp, h264Profile, backup);
         if (codec === "vp9") return /profile-id=[1-3]/.test(fmtp) ? 1 : 0;
         return 0;
     };
@@ -270,7 +348,7 @@ const describeError = (e: unknown) => (e instanceof Error ? `${e.name}: ${e.mess
  * setCodecPreferences no transceiver de envio (antes da oferta/resposta). Tenta as capacidades do
  * sender e depois as do receiver (o Chromium ja aceitou so as do receiver). Devolve uma descricao.
  */
-export function applyCodecPreferences(transceiver: RTCRtpTransceiver, codec: VideoCodecName, h264Profile?: string | null): string {
+export function applyCodecPreferences(transceiver: RTCRtpTransceiver, codec: VideoCodecName, h264Profile?: string | null, h264Backup?: string | null): string {
     const sources = [
         ["sender", () => RTCRtpSender.getCapabilities("video")?.codecs],
         ["receiver", () => RTCRtpReceiver.getCapabilities("video")?.codecs]
@@ -280,14 +358,17 @@ export function applyCodecPreferences(transceiver: RTCRtpTransceiver, codec: Vid
     for (const [name, get] of sources) {
         const caps = get();
         if (!caps?.length) continue;
-        const { sorted, matched } = sortCodecs(caps, codec, h264Profile);
+        const { sorted, matched } = sortCodecs(caps, codec, h264Profile, h264Backup);
         if (!matched) {
             lastError = `${CODEC_RTP_NAME[codec]} ausente em ${name}.getCapabilities`;
             continue;
         }
         try {
             transceiver.setCodecPreferences(sorted);
-            const profile = codec === "h264" && h264Profile && h264Rank(sorted[0].sdpFmtpLine ?? "", h264Profile) === 0 ? ` (perfil ${h264Profile})` : "";
+            const first = h264ProfileLevelId(sorted[0].sdpFmtpLine ?? "");
+            const firstOk = codec === "h264" && isPacketizationMode1(sorted[0].sdpFmtpLine ?? "");
+            const profile = firstOk && sameH264Profile(first, h264Profile) ? ` (perfil ${h264Profile})`
+                : firstOk && h264Profile && sameH264Profile(first, h264Backup) ? ` (perfil ${h264Backup}, sem o ${h264Profile})` : "";
             return `${CODEC_RTP_NAME[codec]}${profile} primeiro (${matched} variante(s), capacidades do ${name})`;
         } catch (e) {
             lastError = describeError(e);
@@ -302,7 +383,7 @@ export function applyCodecPreferences(transceiver: RTCRtpTransceiver, codec: Vid
  * negociado.
  */
 export function pickNegotiatedCodec(negotiated: readonly Codec[], decision: CodecDecision): RTCRtpCodec | null {
-    const { sorted, matched } = sortCodecs(negotiated, decision.codec, decision.h264Profile);
+    const { sorted, matched } = sortCodecs(negotiated, decision.codec, decision.h264Profile, decision.h264Backup);
     if (!matched) return null;
     const { mimeType, clockRate, channels, sdpFmtpLine } = sorted[0];
     return { mimeType, clockRate, ...(channels !== undefined ? { channels } : {}), ...(sdpFmtpLine !== undefined ? { sdpFmtpLine } : {}) };
@@ -372,7 +453,7 @@ export function isTransientSoftwareH264(r: EncoderReport): boolean {
  * outro codec ou ja tratado).
  */
 export function softwareFallback(
-    report: EncoderReport, alreadyChecked: boolean, viewerCaps: { h264HwDecode: boolean; } | undefined, setting: CodecSetting,
+    report: EncoderReport, alreadyChecked: boolean, viewerCaps: ViewerCodecCaps | undefined, setting: CodecSetting,
     local: LocalCodecCaps = localCaps
 ): CodecDecision | null {
     if (alreadyChecked || !isSoftwareH264(report) || isTransientSoftwareH264(report)) return null;

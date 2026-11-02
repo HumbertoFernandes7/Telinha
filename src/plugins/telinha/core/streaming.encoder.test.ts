@@ -531,6 +531,23 @@ describe("captura que muda de tamanho (checkCaptureSize)", () => {
         assert.equal(v.sender.setCalls.length, calls);
     });
 
+    test("o aviso de 2K numa captura menor, na barra, acompanha o tamanho da janela (sem esperar outra publicacao)", async () => {
+        await startStreaming(screenOptions({ quality: "1440p60" }));
+        const track = rt.local!.stream.getVideoTracks()[0] as FakeMediaStreamTrack;
+        await turns();
+        assert.equal(getState().local?.sizeNote, "2K escolhido, a tela tem 1080p: enviando 1080p");
+
+        // cresceu para 2560x1440: o 2K vale de novo, o aviso some no tick (sem ninguem assistindo, nada mais publica)
+        track.setSettings({ width: 2560, height: 1440 });
+        await seconds(rig, 1);
+        assert.equal(getState().local?.sizeNote, undefined);
+
+        // voltou a 1080p: o aviso volta
+        track.setSettings({ width: 1920, height: 1080 });
+        await seconds(rig, 1);
+        assert.equal(getState().local?.sizeNote, "2K escolhido, a tela tem 1080p: enviando 1080p");
+    });
+
     test("a escala nao muda (degrau na resolucao da captura) ou ninguem assiste: nada a reaplicar", async () => {
         await startStreaming(screenOptions());
         const track = rt.local!.stream.getVideoTracks()[0] as FakeMediaStreamTrack;

@@ -9,6 +9,7 @@ import { migrateAccessSetting } from "@plugins/telinha/core/access";
 import { onGpuCaptureSettingChanged, onGpuPrioritySettingChanged } from "@plugins/telinha/core/captureBoost";
 import { onShareDiagnosticsChanged } from "@plugins/telinha/core/diagShare";
 import { isIdentityConfigured } from "@plugins/telinha/core/identity/config";
+import { migrateQualitySetting } from "@plugins/telinha/core/quality/choice";
 import { onAdmissionSettingChanged, onPasswordChanged } from "@plugins/telinha/core/session";
 import { onApprovalPolicyChanged, onAutoQualitySettingChanged } from "@plugins/telinha/core/streaming";
 import { onJitterCushionChanged } from "@plugins/telinha/core/viewing";
@@ -57,20 +58,31 @@ export const settings = definePluginSettings({
         hidden: () => !isIdentityConfigured(),
         onChange: () => onApprovalPolicyChanged()
     },
-    defaultQuality: {
+    // as duas substituem "Qualidade padrão" (defaultQuality: "1080p60", "720p60" ou "1080p30" ate a v0.3.x), migrada em
+    // migrateQualitySettings; juntas dao a qualidade (core/quality/choice.ts)
+    defaultResolution: {
         type: OptionType.SELECT,
-        displayName: "Qualidade padrão",
-        description: "Qualidade padrão ao transmitir",
+        displayName: "Resolução padrão",
+        description: "A resolução que já vem marcada ao transmitir (dá para trocar a cada transmissão e também durante ela, na barra do Telinha). 2K precisa de uma tela 2K: numa tela ou janela menor, vai no tamanho dela. Por pessoa assistindo, até 20 Mbps (720p a 30 fps: até 6 Mbps; 720p a 60 fps e 1080p a 30 fps: até 12 Mbps).",
         options: [
-            { label: "1080p 60 fps (até 20 Mbps)", value: "1080p60", default: true },
-            { label: "720p 60 fps (até 12 Mbps)", value: "720p60" },
-            { label: "1080p 30 fps (até 12 Mbps)", value: "1080p30" }
+            { label: "720p", value: 720 },
+            { label: "1080p", value: 1080, default: true },
+            { label: "2K (1440p)", value: 1440 }
+        ]
+    },
+    defaultFps: {
+        type: OptionType.SELECT,
+        displayName: "FPS padrão",
+        description: "Os quadros por segundo que já vêm marcados ao transmitir. 60: jogos e movimento mais fluidos; 30: gasta menos processador e menos internet.",
+        options: [
+            { label: "30 fps", value: 30 },
+            { label: "60 fps", value: 60, default: true }
         ]
     },
     autoQuality: {
         type: OptionType.BOOLEAN,
         displayName: "Qualidade automática",
-        description: "Recomendado: a qualidade escolhida vira o máximo, e o Telinha reduz resolução/fps de quem assiste quando o seu processador, o seu upload ou a conexão do amigo não dão conta (cada espectador é mais uma codificação). Em jogos, mantém 60 fps sempre que possível e volta a subir sozinho quando estabiliza.",
+        description: "Recomendado: a resolução e o fps escolhidos viram o máximo, e o Telinha reduz resolução/fps de quem assiste quando o seu processador, o seu upload ou a conexão do amigo não dão conta (cada espectador é mais uma codificação). Em jogos, mantém 60 fps sempre que possível e volta a subir sozinho quando estabiliza.",
         default: true,
         onChange: () => onAutoQualitySettingChanged()
     },
@@ -162,5 +174,24 @@ export function migrateAccessSettings(): void {
         if (defaultAccess) settings.store.defaultAccess = defaultAccess;
     } catch (e) {
         console.warn("[Telinha] migração de \"Aprovar quem vai assistir\" falhou", e);
+    }
+}
+
+/**
+ * Ate a v0.3.x: "Qualidade padrão" (defaultQuality: "1080p60", "720p60" ou "1080p30") vira "Resolução padrão" + "FPS
+ * padrão" com o par dela; valor desconhecido: valem os padroes (1080p, 60). A chave antiga sai. Chamado no start() do
+ * plugin. Nunca lanca.
+ */
+export function migrateQualitySettings(): void {
+    try {
+        const plain = settings.plain as Record<string, unknown> | undefined;
+        if (!plain) return;
+        const { resolution, fps, dropOld } = migrateQualitySetting(plain);
+        // apagar primeiro: a gravacao abaixo salva o objeto inteiro (ja sem a chave antiga)
+        if (dropOld) delete plain.defaultQuality;
+        if (resolution) settings.store.defaultResolution = resolution;
+        if (fps) settings.store.defaultFps = fps;
+    } catch (e) {
+        console.warn("[Telinha] migração de \"Qualidade padrão\" falhou", e);
     }
 }
