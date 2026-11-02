@@ -300,7 +300,7 @@ export async function startCaptureBoost(): Promise<void> {
 
 /**
  * A "Captura pela placa de vídeo" (WebRtcAllowWgcUsingTexture) vale nesta partida do Discord: os quadros da captura sao
- * texturas do Windows Graphics Capture, e core/streaming.ts liga a copia na hora (core/captureCopy.ts).
+ * texturas do Windows Graphics Capture (a copia na hora, core/captureCopy.ts, so liga se COPY_ON_ARRIVAL: desligada de fabrica).
  */
 export function textureCaptureActive(): boolean {
     const st = gpuCapture;
