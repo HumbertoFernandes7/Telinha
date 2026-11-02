@@ -63,6 +63,19 @@ const tooltipOf = (el: Element) => el.closest("[data-tooltip]")?.getAttribute("d
 const segButtons = (group: string) => within(screen.getByRole("group", { name: group })).getAllByRole("button") as HTMLButtonElement[];
 const seg = (group: string, label: string) => within(screen.getByRole("group", { name: group })).getByRole("button", { name: label }) as HTMLButtonElement;
 
+/** the bar's "Qualidade: … Mudar" row */
+const qualityRow = () => document.querySelector(".vc-telinha-bar-quality-row") as HTMLButtonElement;
+/** Mudar → the modal with Resolução and FPS (no-op if it is already open) */
+async function openQualityModal() {
+    if (!document.querySelector("[role=dialog]")) fireEvent.click(qualityRow());
+    await settle();
+}
+/** Mudar → picks one button of the modal (the modal closes and the quality changes) */
+async function pickQuality(group: string, label: string) {
+    await openQualityModal();
+    fireEvent.click(seg(group, label));
+}
+
 function renderBar() {
     return render(<><VoiceBar /><ModalHost /></>);
 }
@@ -288,71 +301,151 @@ describe("VoiceBar (so com o estado do Telinha)", () => {
         });
     });
 
-    describe("Resolução e FPS da transmissao no ar", () => {
-        test("os dois seletores lado a lado, logo depois de Quem assiste, com a qualidade do ar marcada", () => {
+    describe("Qualidade da transmissao no ar: uma linha com Mudar, e o modal com Resolução e FPS", () => {
+        const LOCK = "A qualidade pode mudar assim que o vídeo começar a sair para todos (alguns segundos)";
+        const HINT_2K = "2K (1440p) precisa de uma tela 2K: numa tela ou janela menor, vai no tamanho dela.";
+        const openQuality = openQualityModal;
+
+        const labels: [LocalStream["quality"], string][] = [["720p30", "720p · 30 fps"], ["1080p60", "1080p · 60 fps"], ["1440p30", "2K · 30 fps"], ["1440p60", "2K · 60 fps"]];
+        for (const [quality, text] of labels) {
+            test(`${quality}: a linha diz "Qualidade: ${text}" com Mudar, logo depois de Quem assiste, e os seletores nao ficam na barra`, () => {
+                show({ local: mine({ quality }) });
+                renderBar();
+                assert.equal(qualityRow().textContent, `Qualidade: ${text}Mudar`);
+                assert.equal(qualityRow().querySelector("strong")?.textContent, text);
+                assert.equal(qualityRow().querySelector(".vc-telinha-bar-row-action")?.textContent, "Mudar");
+                assert.equal(qualityRow().previousElementSibling?.className, "vc-telinha-bar-access", "logo depois de Quem assiste");
+                assert.equal(qualityRow().disabled, false);
+                assert.equal(screen.queryAllByRole("group").length, 0, "sem Resolução e FPS soltos na barra");
+                assert.equal(document.querySelector(".vc-telinha-bar-seg"), null);
+                assert.equal(document.querySelector(".vc-telinha-bar-wrap.vc-telinha-bar-info"), null, "sem aviso de tamanho solto");
+            });
+        }
+
+        test("Mudar abre o modal com os dois seletores, com a qualidade do ar marcada", async () => {
             show({ local: mine({ quality: "1440p30" }) });
             renderBar();
-            const row = document.querySelector(".vc-telinha-bar-quality") as HTMLElement;
-            assert.equal(row.previousElementSibling?.className, "vc-telinha-bar-access", "logo depois de Quem assiste");
-            assert.deepEqual(within(row).getAllByRole("group").map(g => g.getAttribute("aria-label")), ["Resolução", "FPS"]);
-            assert.deepEqual([...row.querySelectorAll(".vc-telinha-bar-seg-label")].map(l => l.textContent), ["Resolução", "FPS"]);
+            await openQuality();
+            assert.equal(dialogTitle(), "Qualidade da transmissão");
+            assert.deepEqual(screen.getAllByRole("group").map(g => g.getAttribute("aria-label")), ["Resolução", "FPS"]);
             assert.deepEqual(segButtons("Resolução").map(b => [b.textContent, b.getAttribute("aria-pressed")]), [["720p", "false"], ["1080p", "false"], ["2K", "true"]]);
             assert.deepEqual(segButtons("FPS").map(b => [b.textContent, b.getAttribute("aria-pressed")]), [["30", "true"], ["60", "false"]]);
-            assert.equal(segButtons("Resolução")[2].title, "2K (1440p) precisa de uma tela 2K: numa tela ou janela menor, vai no tamanho dela.");
+            assert.equal(segButtons("Resolução")[2].title, HINT_2K);
             assert.equal(segButtons("Resolução")[1].hasAttribute("title"), false);
             assert.ok(segButtons("FPS")[0].className.includes("vc-telinha-bar-seg-active"));
-            assert.equal(document.querySelector(".vc-telinha-bar-wrap.vc-telinha-bar-info"), null, "sem aviso de tamanho");
+            assert.ok(screen.getByText(HINT_2K), "a nota do 2K aparece no modal");
         });
 
-        test("2K numa tela menor: o aviso de que vai no tamanho dela aparece logo abaixo", () => {
-            show({ local: mine({ quality: "1440p60", sizeNote: "2K escolhido, a tela tem 1080p: enviando 1080p" }) });
-            renderBar();
-            const note = document.querySelector(".vc-telinha-bar-quality")?.nextElementSibling as HTMLElement;
-            assert.equal(note.textContent, "2K escolhido, a tela tem 1080p: enviando 1080p");
-            assert.equal(note.title, "2K escolhido, a tela tem 1080p: enviando 1080p");
-            assert.ok(note.className.includes("vc-telinha-bar-wrap"));
-        });
-
-        test("clicar na qualidade que ja esta no ar nao faz nada", async () => {
+        test("1080p: o modal nao mostra a nota do 2K", async () => {
             show({ local: mine({ quality: "1080p60" }) });
             renderBar();
+            await openQuality();
+            assert.equal(screen.queryByText(HINT_2K), null);
+            assert.equal(document.querySelector(".vc-telinha-quality-hint"), null);
+        });
+
+        test("2K numa tela menor: o aviso de que vai no tamanho dela aparece no modal, e a linha segue curta", async () => {
+            const note = "2K escolhido, a tela tem 1080p: enviando 1080p";
+            show({ local: mine({ quality: "1440p60", sizeNote: note }) });
+            renderBar();
+            assert.equal(qualityRow().textContent, "Qualidade: 2K · 60 fpsMudar");
+            assert.equal(qualityRow().title, note, "a nota tambem fica no tooltip da linha");
+            await openQuality();
+            assert.ok(screen.getByText(note));
+        });
+
+        test("a captura mais larga que 16:9: a nota fala o tamanho da captura", async () => {
+            const note = "2K escolhido, a captura tem 2560x1072: enviando 1072p";
+            show({ local: mine({ quality: "1440p30", sizeNote: note }) });
+            renderBar();
+            await openQuality();
+            assert.ok(screen.getByText(note));
+        });
+
+        test("escolher 720p aplica na hora e fecha o modal; sem o nucleo transmitindo, o erro vai para o log sem aviso de sucesso", async () => {
+            show({ local: mine({ quality: "1080p60" }) });
+            renderBar();
+            await openQuality();
+            fireEvent.click(seg("Resolução", "720p"));
+            assert.equal(modals.list().length, 0, "o modal fechou");
+            assert.equal(qualityRow().disabled, true, "enquanto troca, nao da para mudar de novo");
+            await settle();
+            assert.deepEqual(toasts, []);
+            assert.deepEqual(loggerLines.filter(l => l.level === "error").map(l => [l.args[0], String(l.args[1])]), [["changeStreamQuality falhou", "Error: Você não está transmitindo."]]);
+            assert.equal(qualityRow().disabled, false, "a linha volta");
+        });
+
+        test("escolher 30 fps tambem aplica na hora e fecha o modal", async () => {
+            show({ local: mine({ quality: "1080p60" }) });
+            renderBar();
+            await openQuality();
+            fireEvent.click(seg("FPS", "30"));
+            assert.equal(modals.list().length, 0);
+            await settle();
+            assert.deepEqual(loggerLines.filter(l => l.level === "error").map(l => String(l.args[1])), ["Error: Você não está transmitindo."]);
+        });
+
+        test("clicar na qualidade que ja esta no ar nao faz nada e deixa o modal aberto", async () => {
+            show({ local: mine({ quality: "1080p60" }) });
+            renderBar();
+            await openQuality();
             fireEvent.click(seg("Resolução", "1080p"));
             fireEvent.click(seg("FPS", "60"));
             await settle();
+            assert.equal(modals.list().length, 1);
             assert.deepEqual(toasts, []);
             assert.deepEqual(loggerLines.filter(l => l.level === "error"), []);
         });
 
-        test("trocar sem o nucleo transmitindo: o erro vai para o log, sem aviso de sucesso, e os botoes voltam", async () => {
-            show({ local: mine({ quality: "1080p60" }) });
+        test("o erro da troca aparece na barra (lastError) como sempre, sem desligar o Mudar", () => {
+            show({ local: mine(), lastError: "Não consegui capturar a tela" });
             renderBar();
-            fireEvent.click(seg("FPS", "30"));
-            assert.equal(seg("FPS", "60").disabled, true, "enquanto troca, nao da para clicar de novo");
-            await settle();
-            assert.deepEqual(toasts, []);
-            assert.deepEqual(loggerLines.filter(l => l.level === "error").map(l => [l.args[0], String(l.args[1])]), [["changeStreamQuality falhou", "Error: Você não está transmitindo."]]);
-            assert.equal(seg("FPS", "30").disabled, false);
+            assert.equal(document.querySelector(".vc-telinha-bar-error")?.textContent, "Não consegui capturar a tela");
+            assert.equal(qualityRow().disabled, false);
         });
 
-        test("qualidade bloqueada (envio H.264 da placa comecando, ou travado): botoes desligados, o motivo na dica, clicar nao faz nada", async () => {
-            const lock = "A qualidade pode mudar assim que o vídeo começar a sair para todos (alguns segundos)";
-            show({ local: mine({ quality: "1440p60", qualityLock: lock }) });
+        test("qualidade bloqueada (envio H.264 da placa comecando, ou travado): Mudar desligado, o motivo no tooltip, clicar nao abre nada", async () => {
+            show({ local: mine({ quality: "1440p60", qualityLock: LOCK }) });
             renderBar();
-            for (const b of [...segButtons("Resolução"), ...segButtons("FPS")]) {
-                assert.equal(b.disabled, true, b.textContent!);
-                assert.equal(b.title, lock, "a dica do 2K da lugar ao motivo");
-            }
-            assert.equal((document.querySelector(".vc-telinha-bar-quality") as HTMLElement).title, lock);
-            fireEvent.click(seg("FPS", "30"));
+            assert.equal(qualityRow().disabled, true);
+            assert.equal(qualityRow().title, LOCK);
+            assert.equal(qualityRow().textContent, "Qualidade: 2K · 60 fpsMudar", "o Mudar continua visivel");
+            fireEvent.click(qualityRow());
             await settle();
-            assert.deepEqual(loggerLines.filter(l => l.level === "error"), [], "nem tentou trocar");
+            assert.equal(modals.list().length, 0);
 
-            // liberada: os botoes voltam, com a dica do 2K
+            // liberada: Mudar volta
             show({ local: mine({ quality: "1440p60" }) });
             await settle();
-            assert.equal(seg("FPS", "30").disabled, false);
-            assert.equal(seg("Resolução", "2K").title, "2K (1440p) precisa de uma tela 2K: numa tela ou janela menor, vai no tamanho dela.");
-            assert.equal((document.querySelector(".vc-telinha-bar-quality") as HTMLElement).hasAttribute("title"), false);
+            assert.equal(qualityRow().disabled, false);
+            assert.notEqual(qualityRow().title, LOCK);
+        });
+
+        test("o bloqueio chega com o modal aberto: os botoes desligam, o motivo aparece e clicar nao troca nada", async () => {
+            show({ local: mine({ quality: "1440p60" }) });
+            renderBar();
+            await openQuality();
+            show({ local: mine({ quality: "1440p60", qualityLock: LOCK }) });
+            await settle();
+            for (const b of [...segButtons("Resolução"), ...segButtons("FPS")]) {
+                assert.equal(b.disabled, true, b.textContent!);
+                assert.equal(b.title, LOCK, "a dica do 2K da lugar ao motivo");
+            }
+            assert.ok(screen.getByText(LOCK));
+            fireEvent.click(seg("FPS", "30"));
+            await settle();
+            assert.equal(modals.list().length, 1);
+            assert.deepEqual(loggerLines.filter(l => l.level === "error"), [], "nem tentou trocar");
+        });
+
+        test("a transmissao acabou com o modal aberto: aviso no modal e os botoes desligados", async () => {
+            show({ local: mine() });
+            renderBar();
+            await openQuality();
+            show({ local: null });
+            await settle();
+            assert.ok(screen.getByText("Você não está mais transmitindo."));
+            assert.equal(seg("FPS", "30").disabled, true);
         });
     });
 
@@ -493,6 +586,7 @@ describe("VoiceBar (so com o estado do Telinha)", () => {
         assert.deepEqual(texts(), [
             "Ao vivo · 1 pessoa assistindo",
             "Quem assiste: ✋ com aprovação",
+            "Qualidade: 1080p · 60 fps",
             "beto quer assistir",
             "Duas conexões dizem ser Ana — uma pode ser falsa. Nenhuma recebe sua transmissão.",
             "720p60 · menor: processador",
@@ -579,8 +673,8 @@ describe("VoiceBar com o nucleo de verdade", () => {
         assert.deepEqual([before.quality, before.access, before.viewers], ["1080p60", "password", ["peerA"]]);
         const calls = scene.rtc.mediaDevices.displayMediaCalls.length;
 
-        fireEvent.click(seg("Resolução", "2K"));
-        assert.equal(seg("FPS", "30").disabled, true, "trocando");
+        await pickQuality("Resolução", "2K");
+        assert.equal(qualityRow().disabled, true, "trocando");
         await act(async () => void await until(() => getState().local?.quality === "1440p60"));
         await settle();
         assert.deepEqual(toasts, [{ text: "Telinha: transmitindo em 2K · 60 fps", variant: "success" }]);
@@ -590,22 +684,26 @@ describe("VoiceBar com o nucleo de verdade", () => {
         });
         const after = getState().local!;
         assert.deepEqual([after.source.id, after.access, after.viewers], [before.source.id, "password", ["peerA"]]);
+        assert.equal(qualityRow().textContent, "Qualidade: 2K · 60 fpsMudar");
+        // a tela falsa tem 1920x1080: vai em 1080p, e o modal diz isso
+        await openQualityModal();
         assert.equal(seg("Resolução", "2K").getAttribute("aria-pressed"), "true");
-        // a tela falsa tem 1920x1080: vai em 1080p, e a barra diz isso
         screen.getByText("2K escolhido, a tela tem 1080p: enviando 1080p");
 
         toasts.length = 0;
-        fireEvent.click(seg("FPS", "30"));
+        await pickQuality("FPS", "30");
         await act(async () => void await until(() => getState().local?.quality === "1440p30"));
         await settle();
         assert.deepEqual(toasts, [{ text: "Telinha: transmitindo em 2K · 30 fps", variant: "success" }]);
         assert.deepEqual((scene.rtc.mediaDevices.displayMediaCalls.at(-1)?.video as MediaTrackConstraints).frameRate, { ideal: 30, max: 30 });
 
         toasts.length = 0;
-        fireEvent.click(seg("Resolução", "1080p"));
+        await pickQuality("Resolução", "1080p");
         await act(async () => void await until(() => getState().local?.quality === "1080p30"));
         await settle();
+        await openQualityModal();
         assert.equal(screen.queryByText(/2K escolhido/), null, "sem 2K, sem aviso");
+        fireEvent.click(button("Fechar"));
         assert.deepEqual(getState().local?.viewers, ["peerA"]);
     });
 
@@ -617,7 +715,7 @@ describe("VoiceBar com o nucleo de verdade", () => {
         const fps = before.quality.endsWith("30") ? "60" : "30";
         scene.rtc.mediaDevices.getDisplayMediaImpl = () => Promise.reject(Object.assign(new Error("gone"), { name: "NotFoundError" }));
         try {
-            fireEvent.click(seg("FPS", fps));
+            await pickQuality("FPS", fps);
             await act(async () => void await until(() => getState().lastError != null));
             await settle();
         } finally {
@@ -626,7 +724,7 @@ describe("VoiceBar com o nucleo de verdade", () => {
         assert.deepEqual(toasts, []);
         assert.deepEqual([getState().local?.quality, getState().local?.viewers], [before.quality, before.viewers]);
         screen.getByTitle("Não foi possível capturar essa fonte (a janela foi fechada ou está protegida).");
-        assert.equal(seg("FPS", fps).disabled, false, "da para tentar de novo");
+        assert.equal(qualityRow().disabled, false, "da para tentar de novo");
         act(() => setLastError(null));
     });
 

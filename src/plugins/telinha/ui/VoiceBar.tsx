@@ -10,8 +10,8 @@
 //   [ Transmitir com Telinha ]             idle
 //   ● Ao vivo · 2 assistindo                streaming (click: who is watching → kick / switch source)
 //   🔒 Com senha · Mudar  Copiar senha      "Quem pode assistir" of the live stream (click: change it)
-//   Resolução 720p 1080p 2K  FPS 30 60      quality of the live stream (click: captures the same source again)
-//   2K escolhido, a tela tem 1080p: …       2K chosen on a smaller capture (sent at its size)
+//   Qualidade: 1080p · 60 fps  Mudar        quality of the live stream (click: modal with Resolução and FPS; picking one
+//                                           captures the same source again; the 2K note and lock reason are in the modal)
 //   Ana quer assistir  Permitir  Recusar    request waiting for approval ("Só quem eu aprovar", or unverified)
 //   ⚠ Duas conexões dizem ser Ana…          suspicious identity (click: details)
 //   720p60 · menor: processador             auto quality (current level; reason when lowered, full text in tooltip)
@@ -24,7 +24,7 @@
 import ErrorBoundary from "@components/ErrorBoundary";
 import { changeStreamQuality, clearLastError, stopStreaming } from "@plugins/telinha/actions";
 import { ACCESS_LABEL } from "@plugins/telinha/core/access";
-import { HINT_2K, qualityLabel, qualityOf, splitQuality } from "@plugins/telinha/core/quality/choice";
+import { qualityLabel } from "@plugins/telinha/core/quality/choice";
 import { useTelinhaState } from "@plugins/telinha/store";
 import type { AccessMode, Quality, QualityReason } from "@plugins/telinha/types";
 import { SelectedChannelStore, showToast, Tooltip, useState, useStateFromStores } from "@webpack/common";
@@ -32,10 +32,11 @@ import type { ReactNode } from "react";
 
 import { copyStreamPassword, openAccessModal } from "./AccessPicker";
 import {
-    accessBadge, cl, displayName, findPeer, FPS_OPTIONS, identityAlertBlocksAll, identityAlertText, logger, peerName, RESOLUTION_OPTIONS, runAction, watchersLabel
+    accessBadge, cl, displayName, findPeer, identityAlertBlocksAll, identityAlertText, logger, peerName, runAction, watchersLabel
 } from "./common";
 import { BroadcastIcon, CloseIcon, EyeIcon, StopIcon, WarningIcon } from "./icons";
 import { IdentityBadge, IdentityBanner } from "./IdentityUI";
+import { openQualityModal } from "./QualityPicker";
 import { openSourcePicker } from "./SourcePickerModal";
 import { openStreamersModal } from "./StreamersModal";
 import { approveWithToast, declineWithToast, openViewersModal } from "./ViewersModal";
@@ -56,45 +57,14 @@ const REASON_SHORT: Record<QualityReason, string> = {
     bandwidth: "conexão de quem assiste"
 };
 
-/** "Resolução" or "FPS" in the narrow bar: small buttons side by side, the chosen one highlighted */
-function Segmented<T extends number>({ label, options, value, disabled, titleOf, onPick }: {
-    label: string;
-    options: readonly { value: T; label: string; }[];
-    value: T;
-    disabled: boolean;
-    titleOf?(value: T): string | undefined;
-    onPick(value: T): void;
-}) {
-    return (
-        <div className={cl("bar-seg")} role="group" aria-label={label}>
-            <span className={cl("bar-seg-label")} aria-hidden="true">{label}</span>
-            <div className={cl("bar-seg-buttons")}>
-                {options.map(o => (
-                    <button
-                        key={o.value}
-                        className={cl("bar-seg-btn", o.value === value && "bar-seg-active")}
-                        aria-pressed={o.value === value}
-                        title={titleOf?.(o.value)}
-                        disabled={disabled}
-                        onClick={() => onPick(o.value)}
-                    >
-                        {o.label}
-                    </button>
-                ))}
-            </div>
-        </div>
-    );
-}
-
 /**
- * Resolução and FPS of the live stream. Picking one captures the same source again at the new quality (changeStreamQuality,
- * like "Trocar" in the source picker): viewers keep watching. A failure shows up as the bar's last error. `lock`: why it
- * can't change right now (an H.264 hardware send still starting, or a stuck one): the buttons are off, the reason in
- * their tooltip.
+ * "Qualidade: 1080p · 60 fps  Mudar" of the live stream: Mudar opens the modal with Resolução and FPS. Picking one captures
+ * the same source again at the new quality (changeStreamQuality, like "Trocar" in the source picker): viewers keep
+ * watching. A failure shows up as the bar's last error. `lock`: why it can't change right now (an H.264 hardware send
+ * still starting, or a stuck one): the row is off, the reason in its tooltip.
  */
 function LiveQuality({ quality, sizeNote, lock }: { quality: Quality; sizeNote?: string | null; lock?: string | null; }) {
     const [busy, setBusy] = useState(false);
-    const { resolution, fps } = splitQuality(quality);
 
     const change = (next: Quality) => {
         if (busy || lock || next === quality) return;
@@ -108,31 +78,17 @@ function LiveQuality({ quality, sizeNote, lock }: { quality: Quality; sizeNote?:
     };
 
     return (
-        <>
-            <div className={cl("bar-quality")} title={lock ?? undefined}>
-                <Segmented
-                    label="Resolução"
-                    options={RESOLUTION_OPTIONS}
-                    value={resolution}
-                    disabled={busy || !!lock}
-                    titleOf={r => lock ?? (r === 1440 ? HINT_2K : undefined)}
-                    onPick={r => change(qualityOf(r, fps))}
-                />
-                <Segmented
-                    label="FPS"
-                    options={FPS_OPTIONS}
-                    value={fps}
-                    disabled={busy || !!lock}
-                    titleOf={lock ? () => lock : undefined}
-                    onPick={f => change(qualityOf(resolution, f))}
-                />
-            </div>
-            {sizeNote && (
-                <div className={cl("bar-info", "bar-wrap")} title={sizeNote}>
-                    <span className={cl("bar-row-text")}>{sizeNote}</span>
-                </div>
-            )}
-        </>
+        <button
+            className={cl("bar-row", "bar-quality-row")}
+            title={lock ?? sizeNote ?? "Resolução e FPS da transmissão. Clique para mudar (quem assiste continua assistindo)."}
+            disabled={busy || !!lock}
+            onClick={() => openQualityModal(change)}
+        >
+            <span className={cl("bar-row-text")}>
+                Qualidade: <strong>{qualityLabel(quality)}</strong>
+            </span>
+            <span className={cl("bar-row-action")}>Mudar</span>
+        </button>
     );
 }
 
