@@ -6,11 +6,13 @@
 
 import { definePluginSettings } from "@api/Settings";
 import { migrateAccessSetting } from "@plugins/telinha/core/access";
+import { onGpuCaptureSettingChanged } from "@plugins/telinha/core/captureBoost";
 import { onShareDiagnosticsChanged } from "@plugins/telinha/core/diagShare";
 import { isIdentityConfigured } from "@plugins/telinha/core/identity/config";
 import { onAdmissionSettingChanged, onPasswordChanged } from "@plugins/telinha/core/session";
 import { onApprovalPolicyChanged, onAutoQualitySettingChanged } from "@plugins/telinha/core/streaming";
 import { onJitterCushionChanged } from "@plugins/telinha/core/viewing";
+import { captureBoostStatusElement } from "@plugins/telinha/ui/CaptureBoostStatus";
 import { OptionType } from "@utils/types";
 
 export type CodecSetting = "auto" | "h264" | "vp8" | "vp9" | "av1";
@@ -122,6 +124,19 @@ export const settings = definePluginSettings({
         default: false,
         hidden: () => !isIdentityConfigured(),
         onChange: () => onShareDiagnosticsChanged()
+    },
+    // core/captureBoost.ts: a live com um jogo que usa a placa de video toda (experimental, desligado por padrao)
+    gpuCapture: {
+        type: OptionType.BOOLEAN,
+        displayName: "Captura pela placa de vídeo (experimental; Windows 11 atualizado; reinicie o Discord)",
+        description: "Deixa a live mais fluida quando um jogo usa a placa de vídeo toda: a imagem da tela fica na placa de vídeo, sem passar pelo processador.",
+        default: false,
+        onChange: () => void onGpuCaptureSettingChanged()
+    },
+    // o que as opcoes acima fazem agora (ui/CaptureBoostStatus.tsx); nada fica salvo nesta chave
+    captureBoostStatus: {
+        type: OptionType.COMPONENT,
+        component: () => captureBoostStatusElement()
     }
 });
 

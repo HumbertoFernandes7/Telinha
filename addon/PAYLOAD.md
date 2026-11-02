@@ -114,6 +114,8 @@ must not rename files: `main.js` resolves its siblings by these names.
                        appendDiagLog, core/diagLogMain.ts): the previous session's tail for a friend who asks for the
                        diagnostics; rotates to renderer.log.1 at 100 KiB; both deleted (clearDiagLog) when the
                        option is turned off
+    capture-flags.json <- Chromium features the user turned on in the plugin, for the NEXT Discord start (section 6.1);
+                       written by the plugin's natives (native.ts setGpuCapture), read by main.js; absent = all off
 ```
 
 `<FlavorDir>` is the folder name under `%LOCALAPPDATA%` (`Discord`, `DiscordPTB`, `DiscordCanary`,
@@ -237,7 +239,9 @@ installer's Repair/Install replaced our stub with its own (kind `vencord-stub` a
      dev installer's `status` command checks this per folder: `vencordStubCanonical: true`).
    - atomic write as in 4.6, then re-classify: must be `vencord-stub` with the same patcher.
 3. Delete `%APPDATA%\Telinha\addon\`, `addon.new\`, `addon.old\`, `addon.prev\`, `update\`, `backup\` and `install.json`.
-   Keep `logs\` (small, useful for support) unless the user asked for a full removal.
+   Keep `logs\` (small, useful for support) unless the user asked for a full removal. `capture-flags.json` is kept
+   too: nothing reads it without the loader, and it matches the plugin's options that stay in Vencord's
+   `settings.json` (step 4), so a reinstall comes back with the same choice.
 4. Leave Vencord and `%APPDATA%\Vencord\settings\settings.json` alone (it keeps a harmless `plugins.Telinha` entry).
 
 ---
@@ -246,7 +250,7 @@ installer's Repair/Install replaced our stub with its own (kind `vencord-stub` a
 
 | Situation | Result |
 |---|---|
-| normal | Vencord + Telinha. `main.log`: `boot`, `loaded {"version":…,"commit":…,"rendererHooked":true,"ipcMapHooked":true,"natives":12,…,"errors":0}`, then `CSP: added 8 sources (chained)` and `renderer served {"metaPatched":true,…}` |
+| normal | Vencord + Telinha. `main.log`: `boot`, `loaded {"version":…,"commit":…,"rendererHooked":true,"ipcMapHooked":true,"natives":14,…,"errors":0}`, then `CSP: added 8 sources (chained)` and `renderer served {"metaPatched":true,…}` |
 | `%APPDATA%\Telinha\addon\` missing | stub requires Vencord directly: plain Vencord |
 | `main.js` throws while loading | stub logs `[Telinha] loader failed` to stderr and requires Vencord: plain Vencord |
 | `addon.json` broken / unreadable | logged; no hooks installed; plain Vencord |
@@ -257,7 +261,8 @@ installer's Repair/Install replaced our stub with its own (kind `vencord-stub` a
 | Vencord renamed its IPC channels | dormant fallback preload takes over (logged `preload fallback`) |
 | Vencord's `PluginMeta` literal not found | logged `metaPatched:false`; plugin works, only its settings modal / `/vencord-plugins` may error |
 | `%APPDATA%\Vencord\dist` is a Vencord build that already contains Telinha (our fork) | addon stays passive: the bundled Telinha wins, ours refuses the duplicate (logged) |
-| `--vanilla` command-line flag | handed to Vencord unchanged; no update swap or rollback either |
+| `--vanilla` command-line flag | handed to Vencord unchanged; no update swap or rollback either; `capture-flags.json` is not read |
+| `capture-flags.json` asks for the GPU capture | `WebRtcAllowWgcUsingTexture` added to `enable-features` before ready (Windows 11 24H2+), logged `capture: …` (section 6.1) |
 | `addon.new` holds a newer, verified version | swapped in before anything of ours runs, then the new loader boots (section 8.3) |
 | the version swapped in at the previous start never confirmed a good start | rolled back to `addon.prev` and marked bad (section 8.4) |
 | the swapped-in loader throws while loading | rolled back in that same start; the previous version boots (section 8.4) |
@@ -265,6 +270,37 @@ installer's Repair/Install replaced our stub with its own (kind `vencord-stub` a
 The loader sets `process.env.TELINHA_HELPER_DIR` to its own folder before loading `telinha.main.js`; the plugin's
 native code looks for `telinha-audio.exe` there (and next to its own bundle when the variable is absent, which is
 the fork build's case: next to `patcher.js`).
+
+### 6.1 Capture flags (`capture-flags.json`)
+
+Chromium only takes features from the command line before `app` is ready, so an option that needs one is saved for the
+next Discord start. Today there is one: "Captura pela placa de vídeo" (the plugin's `gpuCapture` setting, experimental,
+off by default) turns on Chromium's `WebRtcAllowWgcUsingTexture`. Chromium's WGC screen capturer then keeps each frame on
+the GPU instead of copying it to the CPU with a blocking `Map`, which waits behind a game that uses the whole GPU (with
+Chromium's 50 % rule on top, the capture fell to ~10 fps). WGC screen capture, and this path, only exist on Windows 11
+24H2 (build 26100) or newer.
+
+- **File**: `%APPDATA%\Telinha\capture-flags.json` = `{ "format": 1, "wgcTexture": true | false }`. The plugin's natives
+  write it (temporary file + rename) when the option changes, and again at plugin start if it disagrees with the setting.
+  Missing, unreadable or anything but `"wgcTexture": true` = off.
+- **Loader** (`main.js` `applyCaptureFlags`, first thing in `prepare()`, so never with `--vanilla`): on build 26100+ it
+  appends `enable-features` = the current value (`app.commandLine.getSwitchValue`) + `WebRtcAllowWgcUsingTexture`, and wraps
+  `app.commandLine.appendSwitch` so that every later `enable-features` value keeps the feature. Discord's bootstrap
+  appends its own `enable-features` without merging, and a later append replaces the value. The wrapper is installed
+  once per process, so a hand-off to another loader version finds it there. At `app.whenReady()` it records the final
+  value.
+- **State** (`globalThis.__TelinhaAddon.capture`, read by the plugin's natives): `{ file, build, wgcTexture, applied,
+  enableFeatures, reason }`, where `wgcTexture` = the file asked for it at this start and `applied` = the feature was in
+  `enable-features` at ready (`null` = not asked for).
+- **`main.log`**: nothing when the file is absent. When the option is on, `capture: GPU capture asked for:
+  WebRtcAllowWgcUsingTexture added to enable-features (Windows build N)` and then `capture: enable-features at app ready:
+  … -> GPU capture applied` (or `NOT applied`). On an older Windows, `capture: GPU capture asked for but not applied
+  (Windows build N: …)`. A broken file logs `capture: capture-flags.json ignored (…)`.
+- Nothing here is a boot problem: a broken file or a failure leaves the option off and never counts against the boot
+  marker (section 8.4).
+
+The plugin shows the result next to the option: on, "restart Discord", or "does nothing on this PC". It also logs the
+capture mode at the start of every stream (`Modo da captura: …`), and "Copiar diagnóstico" has a line for it.
 
 ## 7. Interplay with Vencord and Discord updates
 

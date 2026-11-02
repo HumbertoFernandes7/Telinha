@@ -208,7 +208,9 @@ describe("startStreaming: tela, janela e audio", () => {
         assert.equal(video.contentHint, "motion");
         assert.deepEqual(since(), [
             'Iniciando transmissão: tela "Tela inteira" em 1080p30 sem áudio',
-            "Transmitindo 1920x1080 @ 60 fps · quem pode assistir: Todos da call"
+            "Transmitindo 1920x1080 @ 60 fps · quem pode assistir: Todos da call",
+            // core/captureBoost.ts: o modo da captura, para comparar com e sem a "Captura pela placa de vídeo"
+            "Modo da captura: padrão (cópia pelo processador)"
         ]);
 
         const stopLogs = logMark();
@@ -250,7 +252,8 @@ describe("startStreaming: tela, janela e audio", () => {
         assert.deepEqual(since(), [
             'Iniciando transmissão: janela "Jogo" em 1080p60 com áudio',
             "Áudio: capturando — processo do jogo (pid 1234)",
-            "Transmitindo 1920x1080 @ 60 fps com áudio · quem pode assistir: Todos da call"
+            "Transmitindo 1920x1080 @ 60 fps com áudio · quem pode assistir: Todos da call",
+            "Modo da captura: padrão (cópia pelo processador)"
         ]);
     });
 

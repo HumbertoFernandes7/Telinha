@@ -13,6 +13,7 @@ import definePlugin from "@utils/types";
 import { showToast } from "@webpack/common";
 
 import { startSession, stopSession } from "./actions";
+import { captureBoostDiagnostics, refreshGpuCapture, startCaptureBoost } from "./core/captureBoost";
 import { setDiagnosticsSource } from "./core/diagShare";
 import { localIdentityDiagnostics } from "./core/identity";
 import { peerIdentityDiagnostics } from "./core/session";
@@ -48,8 +49,8 @@ function identityDiagnostics(): string {
  * main.log, asked from the main process), then format. Also what core/diagShare.ts sends to a friend who asked for it.
  */
 const diagnostics = {
-    refresh: () => Promise.all([refreshUpdateStatus(), refreshUpdateLog()]).catch(() => null),
-    format: () => `${formatDiagnostics()}\n${updateDiagnostics()}\n${identityDiagnostics()}\n${stuckEncoderDiagnostics()}\n\n${formatVoiceTagDiagnostics()}`
+    refresh: () => Promise.all([refreshUpdateStatus(), refreshUpdateLog(), refreshGpuCapture()]).catch(() => null),
+    format: () => `${formatDiagnostics()}\n${updateDiagnostics()}\n${identityDiagnostics()}\n${stuckEncoderDiagnostics()}\n${captureBoostDiagnostics()}\n\n${formatVoiceTagDiagnostics()}`
 };
 
 function copyDiagnostics() {
@@ -134,6 +135,8 @@ export default definePlugin({
         startSounds();
         startUpdateNotices();
         startUpdateChecks();
+        // "Captura pela placa de vídeo": o arquivo que o loader le na proxima partida volta a bater com a opcao
+        void startCaptureBoost();
         runAction("startSession", () => startSession(), () => { });
     },
 

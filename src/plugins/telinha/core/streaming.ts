@@ -29,6 +29,7 @@ import {
     type ProofState, verifyPasswordProof, type WatchAccessInput, type WatchDecision
 } from "./access";
 import { startScreenAudioCapture } from "./audio/screenAudio";
+import { noteCaptureStarted } from "./captureBoost";
 import {
     chooseCodec, type CodecDecision, type EncoderReport, getLocalCaps, isSoftwareH264, isTransientSoftwareH264, noteH264Fallback, pickNegotiatedCodec, softwareFallback
 } from "./codec";
@@ -368,6 +369,8 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
         });
 
         log.info(`Transmitindo ${info.width}x${info.height} @ ${info.fps} fps${info.hasAudio ? " com áudio" : ""} · quem pode assistir: ${ACCESS_LABEL[local.access]}`);
+        // o modo da captura (live com jogo pesado, core/captureBoost.ts): para comparar com e sem pelo "fonte N" do envio
+        noteCaptureStarted();
         sendPresence();
         for (const peerId of keepViewers) sendTo(peerId);
         if (accessChanged) resetAccessGuards();

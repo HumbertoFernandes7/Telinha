@@ -24,12 +24,13 @@ import { eventually, useFakeClock } from "@test/fakes/clock";
 import { trystero } from "@test/fakes/trystero";
 import { OTHER_ID, pluginSettings, resetVencordFakes } from "@test/fakes/vencord";
 import { type Call, friendArrives, goLive, joinCall } from "@test/helpers/wpc-session";
+import { OptionType } from "@utils/types";
 
 import { migrateAccessSettings, settings } from "./settings";
 
 const STORED_KEYS = [
     "groupPassword", "rejectOutsiders", "defaultAccess", "requireVerifiedIdentity", "defaultQuality", "autoQuality", "jitterCushion", "shareAudioByDefault",
-    "playSounds", "codec", "autoUpdate", "shareDiagnostics"
+    "playSounds", "codec", "autoUpdate", "shareDiagnostics", "gpuCapture", "captureBoostStatus"
 ];
 
 describe("as opcoes", () => {
@@ -54,12 +55,17 @@ describe("as opcoes", () => {
             playSounds: true,
             codec: "auto",
             autoUpdate: true,
-            shareDiagnostics: false
+            shareDiagnostics: false,
+            gpuCapture: false
         });
     });
 
-    test("toda opcao tem titulo e descricao em portugues na pagina do plugin", () => {
+    test("toda opcao tem titulo e descricao em portugues na pagina do plugin (menos a linha de estado, que e um componente)", () => {
         for (const [key, def] of Object.entries(settings.def)) {
+            if (!("displayName" in def)) {
+                assert.equal(def.type, OptionType.COMPONENT, key);
+                continue;
+            }
             assert.ok(def.displayName && def.displayName.length > 3, `${key}: displayName`);
             assert.ok(def.description && def.description.length > 20, `${key}: description`);
         }

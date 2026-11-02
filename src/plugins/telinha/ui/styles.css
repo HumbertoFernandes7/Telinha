@@ -755,6 +755,15 @@
     gap: 8px;
 }
 
+/* settings page: status of the "live com jogo pesado" options, right under them (ui/CaptureBoostStatus.tsx) */
+.vc-telinha-capture-boost {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    color: var(--text-muted);
+}
+
 .vc-telinha-update-notice-text {
     margin: 0;
 }
