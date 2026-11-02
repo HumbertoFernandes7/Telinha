@@ -489,15 +489,20 @@ function hwOnlyDecision(codec: HwOnlyCodec, auto: CodecDecision, how: string): C
 /**
  * O que o H.265/AV1 precisa deste PC (whyNoHwOnly sem o espectador; null = este PC pode mandar). Nesta ordem: este
  * cliente, (AV1) o recurso do Chromium nesta partida, este PC, a placa (o H.264 dela desligado leva junto: travou, sonda
- * rodando, quedas), a sonda deste PC.
+ * rodando, quedas), a sonda deste PC. AV1: sem a medicao pronta (sendable vazio) ou com o recurso desconhecido (null: build
+ * do fork ou loader antigo), o motivo diz que nao deu para confirmar, nunca "este PC nao codifica" nem "este cliente nao envia".
  */
 export function whyNoHwOnlyHere(codec: HwOnlyCodec, local: LocalCodecCaps): string | null {
     const label = HW_ONLY_LABEL[codec];
+    if (codec === "av1" && local.sendable.size === 0) return "não deu para confirmar o AV1 da placa nesta partida (a medição da placa ainda não terminou)";
     if (!local.sendable.has(codec)) return `este cliente não envia ${label} (o Chromium dele não oferece)`;
     // AV1: sem o WebRtcAV1HWEncode o WebRTC so tem o AV1 por software, e o recurso so liga na abertura do Discord
     if (codec === "av1" && local.av1HwFeature === false) return "o AV1 da placa de vídeo ainda não está ligado nesta partida do Discord (reinicie o Discord)";
     if (!(codec === "av1" ? local.av1HwFmtp : local.h265HwFmtp)) {
-        return codec === "av1" ? "este PC não codifica AV1 por hardware (só placas RTX 40/50, Radeon RX 7000, Intel Arc ou mais novas)" : "este PC não codifica H.265 por hardware";
+        if (codec !== "av1") return "este PC não codifica H.265 por hardware";
+        // so com o recurso ligado a medicao da placa responde de verdade; desconhecido (null) nao diz nada da placa
+        return local.av1HwFeature === true ? "este PC não codifica AV1 por hardware (só placas RTX 40/50, Radeon RX 7000, Intel Arc ou mais novas)"
+            : "não deu para confirmar o AV1 da placa nesta partida (reinicie o Discord)";
     }
     if (!local.h264HwEncode) return `o H.264 da placa está desligado neste PC (travou, sonda rodando ou quedas para software), e o ${label} vai junto`;
     if (!(codec === "av1" ? local.av1ProbeOk : local.h265ProbeOk)) return `a sonda WebCodecs do ${label} não passou neste PC`;

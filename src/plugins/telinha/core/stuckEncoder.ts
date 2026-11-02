@@ -96,13 +96,20 @@ export interface StuckRecord {
 }
 
 /**
+ * O que fica salvo: o da sonda (ProbeVerdict) ou, so no H.265/AV1, "offHw" = o Chromium trocou a placa pelo software num
+ * envio (o AV1 no libaom). "offHw" vale como "travou" (o codec nao e mais usado neste ambiente), mas o botao da placa de
+ * video o esquece (forgetStuckEncoder); o "travou" de verdade fica. Registro antigo (so ok/broken/unknown) continua valendo.
+ */
+export type StoredVerdict = ProbeVerdict | "offHw";
+
+/**
  * Resultado da sonda WebCodecs salvo neste PC (chave privada hwH264Probe): com "ok" ou "travou" ela nao roda de novo
  * neste ambiente. "Inconclusiva" nunca e salva (roda de novo a cada abertura).
  */
 export interface ProbeRecord {
     at: number;
     env: EncoderEnv;
-    verdict: ProbeVerdict;
+    verdict: StoredVerdict;
     detail: string;
 }
 
@@ -343,11 +350,12 @@ function writeRecord(record: StuckRecord | null) {
     save("stuckHwH264", record ? { at: record.at, env: { ...record.env }, source: record.source ?? "stream" } : null, "que a placa de vídeo travou");
 }
 
-const VERDICTS: readonly ProbeVerdict[] = ["ok", "broken", "unknown"];
+const VERDICTS: readonly StoredVerdict[] = ["ok", "broken", "unknown"];
 
 function readProbe(key: "hwH264Probe" | "hwH264HighProbe" | "hwH265Probe" | "hwAv1Probe") {
     const saved = readSaved(key);
-    const verdict = VERDICTS.find(v => v === saved?.raw.verdict);
+    // "offHw" so existe no H.265/AV1 (noteHwOnlyFailed); nas chaves do H.264 um valor assim e lixo
+    const verdict = (key === "hwH265Probe" || key === "hwAv1Probe" ? [...VERDICTS, "offHw" as const] : VERDICTS).find(v => v === saved?.raw.verdict);
     if (!saved || !verdict) return null;
     return { saved, record: { at: saved.at, env: saved.env, verdict, detail: text(saved.raw.detail, 200) ?? "" } };
 }
@@ -432,7 +440,7 @@ function doneIn<R extends ProbeRecord>(saved: R | null, env: EncoderEnv): R | nu
     return saved && saved.verdict !== "unknown" && !envChanges(saved.env, env).length ? saved : null;
 }
 
-const PROBE_LABEL: Record<ProbeVerdict, string> = { ok: "ok", broken: "travou", unknown: "inconclusiva" };
+const PROBE_LABEL: Record<StoredVerdict, string> = { ok: "ok", broken: "travou", unknown: "inconclusiva", offHw: "saiu da placa" };
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
@@ -451,7 +459,7 @@ export function stuckLine(record: StuckRecord): string {
  * O travamento salvo e de outro ambiente (driver, Chromium ou placa mudou): so a sonda DESTE ambiente dizendo "ok" o
  * esquece. Inconclusiva (ou sem sonda) mantem o VP9: um retry as cegas custaria outro travamento.
  */
-function settleChangedEnv(record: StuckRecord, env: EncoderEnv, verdict: ProbeVerdict) {
+function settleChangedEnv(record: StuckRecord, env: EncoderEnv, verdict: StoredVerdict) {
     const changes = envChanges(record.env, env).join("; ");
     if (verdict === "ok") {
         writeRecord(null);
@@ -896,15 +904,16 @@ export function runAv1Probe(env: EncoderEnv, codec: string, delayMs = PROBE_STAR
  * Um envio em H.265 ou AV1 falhou no ar (streaming.ts): travou (containStuck → noteStuckEncoder) ou saiu da placa (o
  * WebRTC trocou sozinho para o H.264 reserva, ou o encoder deixou de ser da placa: no AV1, o libaom por software). A culpa
  * e dele, nunca do H.264: fica salvo "travou" para ele neste ambiente (source "stream") e o automatico deixa de manda-lo
- * agora, sem o registro "H.264 da placa travado". O botao nao esquece; so um ambiente novo testa ele de novo.
+ * agora, sem o registro "H.264 da placa travado". "broken" (travou, o padrao): o botao nao esquece; so um ambiente novo
+ * testa ele de novo. "offHw" (o Chromium trocou a placa pelo software, so o AV1): o mesmo efeito, mas o botao esquece.
  */
-export function noteHwOnlyFailed(codec: HwOnlyCodec, detail: string) {
+export function noteHwOnlyFailed(codec: HwOnlyCodec, detail: string, verdict: "broken" | "offHw" = "broken") {
     const at = Date.now();
     const spec = HW_ONLY[codec];
     const tested = spec.probeCodec(spec.fmtp(getLocalCaps()));
     spec.setOk(false);
-    hwOnlyNotes[codec] = `travou num envio (${detail.slice(0, 200)})`;
-    void environment().then(env => saveHwOnly(codec, { at, env, verdict: "broken", detail: detail.slice(0, 200), codec: tested, source: "stream" }));
+    hwOnlyNotes[codec] = `${verdict === "offHw" ? "saiu da placa" : "travou"} num envio (${detail.slice(0, 200)})`;
+    void environment().then(env => saveHwOnly(codec, { at, env, verdict, detail: detail.slice(0, 200), codec: tested, source: "stream" }));
 }
 
 /** noteHwOnlyFailed do H.265. */
@@ -985,6 +994,7 @@ export function forgetStuckEncoder(): RetryOutcome {
     setH264HighProbeOk(false);
     for (const codec of HW_ONLY_CODECS) {
         const spec = HW_ONLY[codec];
+        // "offHw" (o Chromium caiu para o software) o botao esquece; so o "travou" de verdade fica
         if (hwOnlyProbeRecord(codec)?.verdict !== "broken") {
             save(spec.key, null, `o resultado da sonda do ${spec.label}`);
             hwOnlyNotes[codec] = "não feita (esquecida pelo botão; roda depois da do Baseline)";

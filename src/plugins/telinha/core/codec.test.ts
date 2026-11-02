@@ -239,7 +239,7 @@ describe("chooseCodec", () => {
         assert.deepEqual(chooseCodec(NO_HW, "h264", caps()), { codec: "h264", h264Profile: "42001f", reason: "fixado nas configurações" });
         assert.deepEqual(chooseCodec(NO_HW, "h264", caps({ h264HwEncode: false, h264HwProfile: null })), { codec: "h264", h264Profile: null, reason: "fixado nas configurações" });
         // AV1 fixado sem o AV1 da placa (codec.av1.test.ts): o automatico, nunca o AV1 por software
-        assert.deepEqual(chooseCodec(HW, "av1", caps()), {
+        assert.deepEqual(chooseCodec(HW, "av1", caps({ av1HwFeature: true })), {
             codec: "h264", h264Profile: "42001f",
             reason: "AV1 fixado nas configurações, mas este PC não codifica AV1 por hardware (só placas RTX 40/50, Radeon RX 7000, Intel Arc ou mais novas) → automático: "
                 + "H.264 por hardware nos dois lados (perfil 42001f; High não: este PC não codifica High por hardware)"

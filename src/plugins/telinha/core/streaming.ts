@@ -32,7 +32,7 @@ import { startScreenAudioCapture } from "./audio/screenAudio";
 import { captureEndedText, noteCaptureStarted, noteCaptureStopped, textureCaptureActive } from "./captureBoost";
 import { startCaptureCopy } from "./captureCopy";
 import {
-    chooseCodec, type CodecDecision, type EncoderReport, getLocalCaps, h264ReserveOf, HW_ONLY_LABEL, isOffHardwareHwOnly, isSoftwareH264, isTransientSoftwareH264, noteH264Fallback,
+    AV1_HW_MIN_HEIGHT, chooseCodec, type CodecDecision, type EncoderReport, getLocalCaps, h264ReserveOf, HW_ONLY_LABEL, isOffHardwareHwOnly, isSoftwareH264, isTransientSoftwareH264, noteH264Fallback,
     pickNegotiatedCodec, softwareFallback, whyNoHwOnlyHere
 } from "./codec";
 import { blockOf, captureTrackOf, getPc, type LocalCapture, peerLabel, publish, rt, setLastError } from "./context";
@@ -1520,6 +1520,13 @@ function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: 
     // o encoder no ar e o OpenH264 (software): nao e a placa, e trocar o codec de um encoder de software e seguro (como a
     // queda do checkEncoder). So o da placa, ou um encoder que o Chromium nao informa, fica contido e marca a placa.
     if (hwOnly && (enc.powerEfficient === false || (hwOnly === "av1" && /libaom|svt|rav1e/i.test(enc.implementation ?? "")))) {
+        // AV1 abaixo de 270p (AV1_HW_MIN_HEIGHT): o libaom e de proposito (o mesmo corte do isOffHardwareAv1), nao e a placa travada;
+        // nada fica marcado e nada troca (a janela recomeca)
+        if (hwOnly === "av1" && enc.height && enc.height < AV1_HW_MIN_HEIGHT) {
+            log.info(`${what} (${enc.height}p, abaixo de ${AV1_HW_MIN_HEIGHT}p o AV1 por software é de propósito): não é a placa de vídeo, nada fica marcado`);
+            send.stall = undefined;
+            return;
+        }
         // H.265/AV1 fora da placa (o H.265 nao tem software; o AV1 sim, o libaom): um encoder que nao e o da placa e seguro de trocar
         leaveHwOnly(hwOnly, peerId, local, send, `${why}, fora da placa de vídeo`);
         return;
@@ -1618,7 +1625,8 @@ function checkHwOnly(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc:
     const name = HW_ONLY_LABEL[codec];
     if (hwOnlyOfMime(enc.mimeType) === codec) {
         if ((enc.framesEncoded ?? 0) > 0) send.hwOnlySeen = true;
-        if (isOffHardwareHwOnly(codec, enc)) leaveHwOnly(codec, peerId, local, send, `O ${name} para ${label} não está sendo codificado pela placa de vídeo (${enc.implementation || "sem aceleração"})`);
+        // o Chromium trocou a placa pelo software (AV1: libaom): nao e travada, o botao da placa de video limpa (offHw)
+        if (isOffHardwareHwOnly(codec, enc)) leaveHwOnly(codec, peerId, local, send, `O ${name} para ${label} não está sendo codificado pela placa de vídeo (${enc.implementation || "sem aceleração"})`, true);
         return;
     }
     if ((enc.framesEncoded ?? 0) <= 0) return;
@@ -1653,14 +1661,16 @@ function checkHwOnly(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc:
  * O H.265/AV1 deste envio saiu da placa de video no ar (checkHwOnly, checkStall): culpa dele (noteHwOnlyFailed, nunca o
  * registro do H.264 nem a contagem de quedas dele) e so ESTE espectador passa para a reserva H.264 da decisao (ou, sem
  * ela, o que chooseCodec escolhe sem ele), sem reconectar. O encoder no ar nao e o da placa (no AV1, o libaom), entao
- * trocar e seguro. Uma vez por espectador (send.fellBack). `why`: a frase do problema, sem ponto.
+ * trocar e seguro. Uma vez por espectador (send.fellBack). `why`: a frase do problema, sem ponto. `offHardware`: o Chromium
+ * trocou a placa pelo software (checkHwOnly; so o AV1 tem software): fica salvo "offHw" (o botao da placa limpa), nao "broken".
  */
-function leaveHwOnly(codec: HwOnlyCodec, peerId: PeerId, local: LocalCapture, send: ViewerSend, why: string) {
+function leaveHwOnly(codec: HwOnlyCodec, peerId: PeerId, local: LocalCapture, send: ViewerSend, why: string, offHardware = false) {
     if (send.fellBack) return;
     send.fellBack = true;
     const label = peerLabel(peerId);
     const name = HW_ONLY_LABEL[codec];
-    noteHwOnlyFailed(codec, `${why.slice(0, 120)} (${label})`);
+    // so o AV1 tem software no Chromium: la o "offHw" (sai da placa, o botao limpa); o resto (travou, H.265) fica "broken"
+    noteHwOnlyFailed(codec, `${why.slice(0, 120)} (${label})`, offHardware && codec === "av1" ? "offHw" : "broken");
     const next = h264ReserveOf(send.decision, `a reserva do ${name}, que saiu da placa de vídeo`) ?? chooseWithout(codec, peerId);
     log.warn(`${why}: o ${name} fica desligado neste PC até o driver, o Chromium ou a placa mudarem (o H.264 não leva a culpa); trocando para ${next.codec.toUpperCase()} só para ${label}.`);
     void switchSendCodec(peerId, local, send, next);

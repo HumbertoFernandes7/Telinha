@@ -25,8 +25,8 @@ import { type FakeWorker, healthyProbe, installWorker, stuckProbe, type WorkerEn
 import { chooseCodec, getLocalCaps, setAv1HwFeature, setH264HwStuck } from "./codec";
 import { ENCODER_PROBE_TIMING } from "./encoderProbe";
 import {
-    av1ProbeCodec, av1ProbeRecord, type EncoderEnv, forgetStuckEncoder, h265ProbeRecord, noteAv1Failed, noteStreamStarting, noteStuckEncoder, onCodecSettingChanged,
-    onStreamStopped, PROBE_START, runAv1Probe, settleAv1, startLocalCaps, stuckEncoderDiagnostics, stuckRecord
+    av1ProbeCodec, av1ProbeRecord, type EncoderEnv, forgetStuckEncoder, h265ProbeRecord, noteAv1Failed, noteHwOnlyFailed, noteStreamStarting, noteStuckEncoder, onCodecSettingChanged,
+    onStreamStopped, PROBE_START, probeRecord, runAv1Probe, settleAv1, startLocalCaps, stuckEncoderDiagnostics, stuckRecord
 } from "./stuckEncoder";
 
 const NV_ENV: EncoderEnv = { vendorId: "10de", deviceId: "2786", driver: "32.0.16.2101", chrome: "152.0.7977.167", discord: "1.0.9266" };
@@ -335,5 +335,48 @@ describe("falhas no ar e o botao", () => {
         forgetStuckEncoder();
         assert.equal(av1ProbeRecord(), null, "o ok e esquecido");
         assert.equal(getLocalCaps().av1ProbeOk, false);
+    });
+
+    test("offHw (o Chromium caiu para o libaom num envio): o AV1 sai como no travou, mas o botao esquece e a sonda roda de novo", async () => {
+        workers = installWorker(healthyProbe());
+        setH264HwStuck(false);
+        try {
+            pluginSettings.set("hwAv1Probe", { at: AT, env: NV_ENV, verdict: "ok", detail: "x", codec: CODEC });
+            settleAv1(NV_ENV, 0);
+            assert.equal(chooseCodec(BOTH, "av1").codec, "av1");
+            noteHwOnlyFailed("av1", "o AV1 para X caiu para o libaom", "offHw");
+            assert.equal(chooseCodec(BOTH, "av1").codec, "h264", "o AV1 sai agora");
+            await eventually(() => av1ProbeRecord()?.verdict === "offHw");
+            assert.deepEqual({ ...av1ProbeRecord()!, at: 0 }, { at: 0, env: NV_ENV, verdict: "offHw", detail: "o AV1 para X caiu para o libaom", codec: CODEC, source: "stream" });
+            assert.equal(stuckRecord(), null);
+            // neste ambiente vale sem rodar, como o travou
+            assert.equal(settleAv1(NV_ENV, 0), null);
+            assert.equal(getLocalCaps().av1ProbeOk, false);
+            assert.match(av1Line()!, /sonda WebCodecs AV1: saiu da placa \(feita em /);
+            assert.equal(workers.instances.length, 0);
+            // o botao esquece o offHw e o AV1 volta a poder ser testado (e usado)
+            forgetStuckEncoder();
+            assert.equal(av1ProbeRecord(), null);
+            // a cadeia do botao (Baseline → High → AV1) refez o Baseline: aqui, so o AV1 depois dele
+            pluginSettings.set("hwH264Probe", { at: AT, env: NV_ENV, verdict: "ok", detail: OK_DETAIL });
+            await settleAv1(NV_ENV, 0);
+            assert.equal(workers.instances.length, 1, "a sonda rodou de novo");
+            assert.equal(av1ProbeRecord()?.verdict, "ok");
+            assert.equal(chooseCodec(BOTH, "av1").codec, "av1");
+        } finally {
+            workers.restore();
+        }
+    });
+
+    test("travou de verdade (broken) continua: o botao nao esquece; um offHw salvo numa chave do H.264 e lixo", async () => {
+        noteHwOnlyFailed("av1", "travou de novo");
+        await eventually(() => av1ProbeRecord()?.verdict === "broken");
+        forgetStuckEncoder();
+        assert.equal(av1ProbeRecord()?.verdict, "broken", "o travou do AV1 fica");
+        const baseline = pluginSettings.get("hwH264Probe");
+        pluginSettings.set("hwH264Probe", { at: AT, env: NV_ENV, verdict: "offHw", detail: "x" });
+        assert.equal(probeRecord(), null, "so o H.265/AV1 tem offHw");
+        pluginSettings.set("hwH264Probe", baseline);
+        pluginSettings.set("hwAv1Probe", null);
     });
 });

@@ -135,7 +135,7 @@ test("o libaom no lugar da placa (powerEfficientEncoder false): sai do AV1 na ho
     await turns();
     assert.equal(plan(v.peerId).codec, "h264");
     assert.equal(v.sender.encoding.codec?.mimeType, "video/H264", "trocado com setParameters");
-    assert.equal(av1ProbeRecord()?.verdict, "broken");
+    assert.equal(av1ProbeRecord()?.verdict, "offHw", "software e nao travou: o botao da placa limpa");
     assert.equal(av1ProbeRecord()?.source, "stream");
     assert.equal(stuckRecord(), null, "o H.264 nao fica marcado");
     assert.equal(highProbeRecord()?.verdict, "ok");
@@ -150,7 +150,7 @@ test("o libaom sem o powerEfficientEncoder (so o nome): tambem sai do AV1", asyn
     await seconds(rig, 2);
     await turns();
     assert.equal(plan(v.peerId).codec, "h264");
-    assert.equal(av1ProbeRecord()?.verdict, "broken");
+    assert.equal(av1ProbeRecord()?.verdict, "offHw");
 });
 
 test("o outro lado nao negociou AV1 (H.264 no ar, o AV1 nem na lista negociada): o envio vira a reserva; nada fica marcado", async () => {
@@ -218,6 +218,30 @@ test("AV1 sem reserva (o espectador sem H.264 na placa) fora da placa antes de s
     assert.ok(lines.some(l => l.includes(", fora da placa de vídeo: o AV1 fica desligado neste PC") && l.endsWith(`trocando para VP9 só para ${v.label}.`)), lines.join("\n"));
     assert.equal(plan(v.peerId).codec, "vp9");
     assert.equal(stuckRecord(), null);
+    await turns();
+    assert.equal(av1ProbeRecord()?.verdict, "broken", "parou de enviar (stall): travou de verdade, o botao nao limpa");
+});
+
+test("AV1 por software abaixo de 270p parado (checkStall): o libaom e de proposito, nao e a placa; nada marcado e nada troca", async () => {
+    pluginSettings.set("hwAv1Probe", { at: AT, env: {}, verdict: "ok", detail: OK, codec: "av01.0.05M.08" });
+    const v = await watcher("pequeno", BOTH);
+    assert.equal(plan(v.peerId).codec, "av1");
+    let source = 0;
+    v.sender.stats = () => videoSenderStats({
+        mimeType: "video/AV1", powerEfficientEncoder: false, encoderImplementation: "libaom", framesEncoded: 0, bytesSent: 0, frameWidth: 426, frameHeight: 240,
+        sourceFrames: (source += 60), sourceFps: 60
+    });
+    const since = logMark();
+    await seconds(rig, H264_STALL_MS / 1000 + 2);
+    const lines = since();
+    assert.ok(lines.some(l => l.includes("240p, abaixo de 270p o AV1 por software é de propósito") && l.includes("nada fica marcado")), lines.join("\n"));
+    assert.ok(!lines.some(l => l.includes("a placa de vídeo travou") || l.includes("fora da placa de vídeo")), lines.join("\n"));
+    await turns();
+    assert.equal(plan(v.peerId).codec, "av1", "nada trocou");
+    assert.equal(av1ProbeRecord()?.verdict, "ok", "o AV1 nao leva a culpa");
+    assert.equal(stuckRecord(), null);
+    assert.equal(getLocalCaps().av1ProbeOk, true);
+    assert.equal(rt.lastError, null);
 });
 
 test("um envio em AV1 que trava (nada sai, o encoder da placa): contido; marca o AV1, nunca o H.264; o aviso diz que da proxima vez vai sem o AV1", async () => {
@@ -239,6 +263,7 @@ test("um envio em AV1 que trava (nada sai, o encoder da placa): contido; marca o
     assert.equal(plan(v.peerId).codec, "av1", "contido: nada troca o codec");
     await turns();
     assert.equal(stuckRecord(), null);
+    assert.equal(av1ProbeRecord()?.verdict, "broken");
     assert.equal(av1ProbeRecord()?.detail, "o encoder da placa de vídeo travou numa transmissão em AV1");
 });
 

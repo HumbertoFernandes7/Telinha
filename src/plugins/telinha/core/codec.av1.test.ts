@@ -106,15 +106,33 @@ describe("AV1 fixado: nunca o AV1 por software (o que falta deste PC cai no auto
     });
 
     test("este PC sem AV1 na placa (a RTX 3070), sem a sonda ok, a placa travada, ou um Chromium sem AV1: o automatico", () => {
+        // a medicao respondeu com o recurso ligado: ai sim a placa nao codifica AV1
         assert.equal(whyNoHwOnlyHere("av1", pc({ av1HwFmtp: null })), "este PC não codifica AV1 por hardware (só placas RTX 40/50, Radeon RX 7000, Intel Arc ou mais novas)");
         assert.equal(whyNoHwOnlyHere("av1", pc({ av1ProbeOk: false })), "a sonda WebCodecs do AV1 não passou neste PC");
         assert.equal(whyNoHwOnlyHere("av1", pc({ h264HwEncode: false })),
             "o H.264 da placa está desligado neste PC (travou, sonda rodando ou quedas para software), e o AV1 vai junto");
         assert.equal(whyNoHwOnlyHere("av1", pc({ sendable: new Set(["h264", "vp9"]) })), "este cliente não envia AV1 (o Chromium dele não oferece)");
-        assert.equal(whyNoHwOnlyHere("av1", pc({ sendable: new Set() })), "este cliente não envia AV1 (o Chromium dele não oferece)", "lista desconhecida: nunca AV1");
+        assert.equal(chooseCodec(BOTH, "av1", pc({ sendable: new Set() })).codec, "h264", "lista desconhecida: nunca AV1");
         assert.equal(whyNoHwOnlyHere("av1", pc()), null);
         assert.equal(whyNoHwOnly("av1", BOTH, pc()), null);
         for (const over of [{ av1HwFmtp: null }, { av1ProbeOk: false }, { h264HwEncode: false }]) assert.notEqual(chooseCodec(BOTH, "av1", pc(over)).codec, "av1", JSON.stringify(over));
+    });
+
+    test("sem confirmacao (recurso desconhecido ou medicao nao terminou): o motivo diz que nao deu para confirmar, sem culpar a placa nem o cliente", () => {
+        const unsure = "não deu para confirmar o AV1 da placa nesta partida";
+        // recurso desconhecido (build do fork ou loader antigo) e nenhum AV1 medido na placa: nao e "a placa nao codifica"
+        assert.equal(whyNoHwOnlyHere("av1", pc({ av1HwFeature: null, av1HwFmtp: null })), `${unsure} (reinicie o Discord)`);
+        assert.equal(whyNoHwOnlyHere("av1", pc({ av1HwFeature: undefined, av1HwFmtp: null })), `${unsure} (reinicie o Discord)`);
+        // a medicao da placa ainda nao terminou (sendable vazio): nao e "este cliente nao envia AV1"
+        assert.equal(whyNoHwOnlyHere("av1", pc({ sendable: new Set() })), `${unsure} (a medição da placa ainda não terminou)`);
+        assert.equal(whyNoHwOnlyHere("av1", pc({ sendable: new Set(), av1HwFeature: null, av1HwFmtp: null })), `${unsure} (a medição da placa ainda não terminou)`);
+        // desconhecido mas com AV1 medido na placa: vai (o encodingInfo decide)
+        assert.equal(whyNoHwOnlyHere("av1", pc({ av1HwFeature: null })), null);
+        // o H.265 nao muda
+        assert.equal(whyNoHwOnlyHere("h265", pc({ h265HwFmtp: null, sendable: new Set(["h264", "h265"]) })), "este PC não codifica H.265 por hardware");
+        const d = chooseCodec(BOTH, "av1", pc({ av1HwFeature: null, av1HwFmtp: null }));
+        assert.equal(d.codec, "h264");
+        assert.ok(d.reason.startsWith(`AV1 fixado nas configurações, mas ${unsure} (reinicie o Discord) → automático`), d.reason);
     });
 
     test("medido antes desta versao (sem os campos do AV1): nunca AV1", () => {

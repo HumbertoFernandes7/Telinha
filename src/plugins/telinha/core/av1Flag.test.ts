@@ -85,8 +85,8 @@ describe("o pedido segue o AV1 fixado", () => {
         assert.deepEqual(m.main.writes, []);
         assert.equal(getLocalCaps().av1HwFeature, true);
         assert.equal(av1FlagNeedsRestart(), false);
-        // o lado deste PC (a sonda de codecs nao rodou aqui): o motivo do automatico, nunca "reinicie"
-        assert.match(codecStatusLines()[0], /^AV1: este cliente não envia AV1 \(o Chromium dele não oferece\); vai o do Automático\.$/);
+        // o lado deste PC (a sonda de codecs nao rodou aqui): nao deu para confirmar, sem culpar o cliente nem a placa
+        assert.match(codecStatusLines()[0], /^AV1: não deu para confirmar o AV1 da placa nesta partida \(a medição da placa ainda não terminou\); vai o do Automático\.$/);
     });
 
     test("tirar o AV1: o pedido sai do arquivo; sem nada salvo, nem grava; o automatico nao pede o recurso", async () => {
