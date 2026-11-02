@@ -15,6 +15,7 @@ import { readScreenAudioMain, screenAudioStatusMain, startScreenAudioMain, stopS
 import type { ScreenAudioRead, ScreenAudioStart, ScreenAudioStatus } from "./core/audio/types";
 import { type GpuCaptureStatus, gpuCaptureStatusMain, type GpuPriorityReport, setGpuCaptureMain, setGpuPriorityMain } from "./core/captureBoostMain";
 import { appendDiagLogMain, clearDiagLogMain, readDiagLogMain } from "./core/diagLogMain";
+import { type LiveWeightReport, type LiveWeightStart, readLiveWeightMain, startLiveWeightMain, stopLiveWeightMain } from "./core/liveWeightMain";
 import { getWindowProcessInfo } from "./nativeWindowPid";
 import { RELAY_URLS } from "./protocol";
 
@@ -227,6 +228,7 @@ export function resetDisplayMedia(_: IpcMainInvokeEvent) {
     lastReport = null;
     uninstallHandlers();
     stopScreenAudioMain();
+    stopLiveWeightMain();
 }
 
 // #region ambiente do encoder (core/stuckEncoder.ts)
@@ -323,6 +325,25 @@ export function setGpuCapture(_: IpcMainInvokeEvent, on: boolean): GpuCaptureSta
  */
 export function setGpuPriority(_: IpcMainInvokeEvent, mode: string): Promise<GpuPriorityReport> {
     return setGpuPriorityMain(mode === "high" ? "high" : "restore");
+}
+
+// #endregion
+
+// #region peso da live (core/liveWeight.ts → core/liveWeightMain.ts; so mede, enquanto transmite)
+
+/** Comeca a medir quanto da placa de video e do processador a live e o jogo usam (typeperf.exe do Windows). Nunca lanca. */
+export function startLiveWeight(_: IpcMainInvokeEvent): LiveWeightStart {
+    return startLiveWeightMain();
+}
+
+/** A media desde a leitura anterior (o renderer le a cada ~10 s; sem leitura por 35 s, a medicao para sozinha). */
+export function readLiveWeight(_: IpcMainInvokeEvent): Promise<LiveWeightReport> {
+    return readLiveWeightMain();
+}
+
+/** Para de medir (a transmissao acabou). */
+export function stopLiveWeight(_: IpcMainInvokeEvent): void {
+    stopLiveWeightMain();
 }
 
 // #endregion
