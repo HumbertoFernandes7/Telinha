@@ -111,6 +111,12 @@ const NET_FAR_BELOW_RATIO = 0.7;
 /** encoderStarved: o envio em pelo menos isto do alvo do encoder (targetBitrate) = ele usa toda a banda que tem */
 const TARGET_FULL_RATIO = 0.85;
 /**
+ * encoderStarved: o alvo em pelo menos isto da banda estimada, para o envio contra ele valer. Sem banda de verdade, o alvo
+ * fica em 0,65-0,77 da estimativa (log de 02/11); muito abaixo disso o encoder pede pouco (tela parada: 30 de 169, 0,18),
+ * e ate um jogo pausado mandando quadros repetidos enche um alvo minusculo sem a imagem sofrer.
+ */
+const TARGET_OF_EST_RATIO = 0.5;
+/**
  * encoderStarved, so no H.264 (a escala do qp muda com o codec; VP9 e AV1 vao so pelo alvo): qp medio a partir disto =
  * imagem ja borrada. No log de 02/11, 38-48 no espectador preso em 1080p60 com ~2 Mbps; ~23-30 no de 20 Mbps.
  */
@@ -325,12 +331,14 @@ const dec = (v: number) => v.toFixed(1).replace(".", ",");
 
 /**
  * O encoder esta de fato sem banda (NET_FAR_BELOW_RATIO): a fonte em movimento (>= STATIC_SOURCE_FPS) e ele usando o alvo
- * inteiro (TARGET_FULL_RATIO) ou, no H.264, com o qp alto (STARVED_QP_H264). Sem as medidas, nao: so desce com a imagem
- * sofrendo de verdade.
+ * inteiro (TARGET_FULL_RATIO), com o alvo perto da banda estimada (TARGET_OF_EST_RATIO), ou, no H.264, com o qp alto
+ * (STARVED_QP_H264). Sem as medidas, nao: so desce com a imagem sofrendo de verdade.
  */
 function encoderStarved(m: WindowMetrics): boolean {
     if ((m.sourceFps ?? 0) < STATIC_SOURCE_FPS) return false;
-    if (m.targetKbps != null && m.targetKbps > 0 && m.sentKbps >= m.targetKbps * TARGET_FULL_RATIO) return true;
+    const target = m.targetKbps;
+    if (target != null && target > 0 && m.availableKbps != null && target >= m.availableKbps * TARGET_OF_EST_RATIO
+        && m.sentKbps >= target * TARGET_FULL_RATIO) return true;
     return m.mimeType?.toLowerCase() === "video/h264" && m.qp != null && m.qp >= STARVED_QP_H264;
 }
 

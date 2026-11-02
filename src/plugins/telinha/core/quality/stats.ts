@@ -116,7 +116,7 @@ export interface WindowMetrics {
     mimeType: string | null;
     /** targetBitrate do encoder na leitura mais recente (kbps); null = o Chromium nao expos */
     targetKbps: number | null;
-    /** qp medio dos quadros da janela (ΔqpSum / ΔframesEncoded, como no log); a escala depende do codec */
+    /** qp medio dos quadros da janela (ΔqpSum / ΔframesEncoded, como no log); a escala depende do codec: null se ele mudou */
     qp: number | null;
     /** rede na janela (linkWindow); null = o Chromium nao expos */
     lossPct: number | null;
@@ -305,7 +305,8 @@ export function diffSamples(prev: SenderSample, cur: SenderSample): WindowMetric
         frameHeight: cur.frameHeight,
         mimeType: b.mimeType,
         targetKbps: b.targetKbps,
-        qp: ratio(delta(a.qpSum, b.qpSum), frames),
+        // codec trocado no meio da janela: o qpSum soma escalas diferentes
+        qp: a.mimeType === b.mimeType ? ratio(delta(a.qpSum, b.qpSum), frames) : null,
         lossPct: link.lossPct,
         rttMs: link.rttMs,
         rttFreshMs: link.rttFreshMs,

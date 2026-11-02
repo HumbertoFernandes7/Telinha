@@ -241,10 +241,16 @@ describe("diffSamples", () => {
 
     test("o encoder na janela (para a banda curta): codec, alvo da leitura mais recente e qp medio dos quadros", () => {
         const m = diffSamples(
-            { ...prev, log: noLog({ qpSum: 1000, targetKbps: 900 }) },
+            { ...prev, log: noLog({ mimeType: "video/H264", qpSum: 1000, targetKbps: 900 }) },
             sample({ at: 12_000, framesEncoded: 220, bytesSent: 2_100_000, log: noLog({ mimeType: "video/H264", qpSum: 5200, targetKbps: 1172 }) })
         );
         assert.deepEqual([m?.mimeType, m?.targetKbps, m?.qp], ["video/H264", 1172, 35], "4200 de qp em 120 quadros");
+        // codec trocado no meio da janela (ex.: H.264 → VP9): o qpSum mistura escalas, sem qp
+        const switched = diffSamples(
+            { ...prev, log: noLog({ mimeType: "video/H264", qpSum: 1000 }) },
+            sample({ at: 12_000, framesEncoded: 220, bytesSent: 2_100_000, log: noLog({ mimeType: "video/VP9", qpSum: 9400 }) })
+        );
+        assert.deepEqual([switched?.mimeType, switched?.qp], ["video/VP9", null]);
         // sem os contadores (leitura sem o log, ou o Chromium nao expos), ou nenhum quadro na janela
         const none = diffSamples(prev, sample({ at: 12_000, framesEncoded: 220, bytesSent: 2_100_000 }));
         assert.deepEqual([none?.mimeType, none?.targetKbps, none?.qp], [null, null, null]);

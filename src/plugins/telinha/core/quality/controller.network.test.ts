@@ -361,6 +361,20 @@ describe("rede de um espectador: banda estimada bem abaixo do degrau", () => {
         });
     }
 
+    // jogo pausado: a fonte ainda entrega 60 fps (quadros repetidos) com o estimador la embaixo; o encoder enche um alvo
+    // minusculo (55 de 60 kbps), mas o alvo e 0,36x a estimativa (sem banda de verdade fica em 0,65-0,77) e o qp e baixo
+    test("jogo pausado (fonte 60 fps, alvo 60, enviado 55, 169 estimados, qp 20): o alvo minusculo cheio nao e falta de banda", async t => {
+        const clock = useFakeClock(t);
+        const sim = new EncoderSim({
+            mimeType: "video/H264", implementation: NVENC_IMPLEMENTATION, powerEfficient: true, fps: 60, sourceFps: 60, encodeBusy: 0.2,
+            availableKbps: 169, kbps: 55, link: { ...LINK, targetKbps: 60, qp: 20 }
+        });
+        const h = qualityHarness(clock, { A: sim });
+        await h.join("A");
+        assert.deepEqual(qualityLines(await logsDuring(() => h.runUntil(300_000))), []);
+        assert.equal(h.controller.levelFor("A"), "1080p60");
+    });
+
     // Log de 02/11: tela parada (fonte 1 fps, alvo 30, enviado 0, 169 kbps estimados, qp baixo) descia em 30 s para
     // 1080p30 e depois 720p30; com 2 espectadores, virava "upload" para todos com 0 kbps medidos, e nada subia por 60 s
     for (const viewers of [["A"], ["A", "B"]]) {
