@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { after, before, beforeEach, describe, test } from "node:test";
 
 import { useFakeClock } from "@test/fakes/clock";
-import { audioTrack, type FakeRTCPeerConnection, installWebRtc, videoTrack, type WebRtcEnv } from "@test/fakes/webrtc";
+import { audioTrack, DEFAULT_VIDEO_CODECS, type FakeRTCPeerConnection, installWebRtc, rtpCapabilities, videoTrack, type WebRtcEnv } from "@test/fakes/webrtc";
 import { logged, logMark } from "@test/helpers/wpa-session";
 
 import { containPeerConnection, getPeerConnectionClass, isContained, type SendPlan, setPcHooks } from "./peerConnection";
@@ -129,6 +129,28 @@ describe("TelinhaPeerConnection", () => {
             assert.equal(logged(/preferência de codec H264 \(perfil 4d001f\) primeiro/, mark).length, 1);
         });
 
+        test("H.264 High com reserva: 6400xx na frente, o Baseline da placa logo depois; a reserva muda o plano (reaplica)", async () => {
+            const high = { mimeType: "video/H264", clockRate: 90000, sdpFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640032" };
+            const saved = rtpCapabilities.sender;
+            rtpCapabilities.sender = { ...saved, video: [...DEFAULT_VIDEO_CODECS, high] };
+            try {
+                const { pc, video } = sendingPc();
+                const mark = logMark();
+                plan = { codec: "h264", h264Profile: "640032", h264Backup: "42001f", bitrate: null, label: "alto" };
+                await pc.setLocalDescription();
+                assert.equal(firstPref(video)?.sdpFmtpLine, high.sdpFmtpLine);
+                assert.equal(video.codecPreferences?.[1].sdpFmtpLine, "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f");
+                assert.equal(logged(/^alto: preferência de codec H264 \(perfil 640032\) primeiro/, mark).length, 1);
+
+                // a mesma decisao sem reserva e outro plano: reaplica (o 42e01f volta para a ordem do Chromium)
+                plan = { codec: "h264", h264Profile: "640032", bitrate: null, label: "alto" };
+                await pc.setLocalDescription();
+                assert.equal(logged(/preferência de codec H264 \(perfil 640032\) primeiro/, mark).length, 2);
+            } finally {
+                rtpCapabilities.sender = saved;
+            }
+        });
+
         test("descricao explicita (com sdp) ou rollback: nao mexe; oferta sem sdp: prepara", async () => {
             const { pc, video } = sendingPc();
             plan = { codec: "vp8", bitrate: null, label: "x" };
@@ -157,6 +179,23 @@ describe("TelinhaPeerConnection", () => {
 
     describe("setRemoteDescription: SDP ajustado", () => {
         const remote = (type: RTCSdpType = "offer", sdp: string | undefined = REMOTE_SDP) => ({ type, sdp }) as RTCSessionDescriptionInit;
+
+        test("plano H.264 High com reserva: o 6400xx do outro lado na frente; sem ele, o 42001f (nunca o 42e01f)", async () => {
+            const h264 = (pt: number, profile: string) => [`a=rtpmap:${pt} H264/90000`, `a=fmtp:${pt} level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=${profile}`];
+            const answer = (withHigh: boolean) => [
+                "v=0", "o=- 1 2 IN IP4 127.0.0.1", "s=-", "t=0 0",
+                `m=video 9 UDP/TLS/RTP/SAVPF 109 103${withHigh ? " 119" : ""} 98`, "a=mid:1",
+                ...h264(109, "42e01f"), ...h264(103, "42001f"), ...(withHigh ? h264(119, "640032") : []), "a=rtpmap:98 VP9/90000", ""
+            ].join("\r\n");
+            const { pc } = sendingPc();
+            plan = { codec: "h264", h264Profile: "640032", h264Backup: "42001f", bitrate: null, label: "alto" };
+            const mark = logMark();
+            await pc.setRemoteDescription(remote("answer", answer(true)));
+            assert.match(pc.descriptionCalls.at(-1)!.description!.sdp!, /m=video 9 UDP\/TLS\/RTP\/SAVPF 119 103 109 98\r\n/);
+            await pc.setRemoteDescription(remote("answer", answer(false)));
+            assert.match(pc.descriptionCalls.at(-1)!.description!.sdp!, /m=video 9 UDP\/TLS\/RTP\/SAVPF 103 109 98\r\n/);
+            assert.equal(logged(/^alto: SDP remoto \(answer\) ajustado — mid 1: H264 \(perfil 42001f\) primeiro; perfil H\.264 640032 \(placa de vídeo\) ausente no SDP do outro lado; fica o perfil reserva 42001f$/, mark).length, 1);
+        });
 
         test("ajusta so as m-sections em que enviamos: codec, bitrate e opus estereo; loga uma vez por resumo", async () => {
             const { pc } = sendingPc();

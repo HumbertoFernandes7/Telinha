@@ -44,6 +44,7 @@ import { CaptureMonitor } from "./quality/captureMonitor";
 import { QualityController } from "./quality/controller";
 import { encodingFor, levelText, scaledSize } from "./quality/levels";
 import { isHardwareEncoder } from "./quality/stats";
+import { h264ProfileLevelId, sameH264Profile } from "./sdp";
 import { noteStreamStarting, noteStuckEncoder, STUCK_NOTICE, STUCK_NOTICE_PINNED } from "./stuckEncoder";
 
 export interface QualityProfile {
@@ -222,6 +223,7 @@ export function sendPlanFor(peerId: PeerId | null): SendPlan | null {
     return {
         codec: send?.decision.codec ?? null,
         h264Profile: send?.decision.h264Profile ?? null,
+        ...(send?.decision.h264Backup ? { h264Backup: send.decision.h264Backup } : {}),
         bitrate: { startKbps: START_KBPS, maxKbps: QUALITY[local?.quality ?? "1080p60"].maxKbps },
         label: peerLabel(peerId)
     };
@@ -1538,7 +1540,8 @@ export function tick() {
             if (sends.get(peerId) !== send) return;
             const frames = capturedFrames(local, source);
             noteCapture(send, frames);
-            const codec = out?.codecId ? (report.get(out.codecId) as any)?.mimeType : undefined;
+            const codecStat: any = out?.codecId ? report.get(out.codecId) : undefined;
+            const codec = codecStat?.mimeType;
             if (!codec) return;
             const enc: EncoderReport = {
                 mimeType: codec, implementation: out.encoderImplementation, powerEfficient: out.powerEfficientEncoder, framesEncoded: out.framesEncoded,
@@ -1547,9 +1550,13 @@ export function tick() {
             if (!send.reportedCodec) {
                 send.reportedCodec = codec;
                 const expected = `video/${send.decision.codec}`.toLowerCase();
-                const msg = `Codificando para ${peerLabel(peerId)}: ${codec}${enc.implementation ? ` (${enc.implementation}${enc.powerEfficient ? ", hardware" : ""})` : ""}`;
-                if (codec.toLowerCase() === expected) log.info(msg);
-                else log.warn(`${msg} — esperado ${send.decision.codec.toUpperCase()}`);
+                // H.264: o perfil negociado de fato (o fmtp do codec em uso), para conferir o High no ar
+                const profile = /^video\/h264$/i.test(codec) ? h264ProfileLevelId(String(codecStat?.sdpFmtpLine ?? "")) : null;
+                const wantedProfile = send.decision.codec === "h264" ? send.decision.h264Profile : null;
+                const msg = `Codificando para ${peerLabel(peerId)}: ${codec}${profile ? ` perfil ${profile}` : ""}${enc.implementation ? ` (${enc.implementation}${enc.powerEfficient ? ", hardware" : ""})` : ""}`;
+                if (codec.toLowerCase() !== expected) log.warn(`${msg} — esperado ${send.decision.codec.toUpperCase()}`);
+                else if (profile && wantedProfile && !sameH264Profile(profile, wantedProfile)) log.warn(`${msg} — esperado o perfil ${wantedProfile}`);
+                else log.info(msg);
                 // onde o encoder roda decide a degradationPreference (DEGRADATION_FOR); vale o 1o relato (um OpenH264 de
                 // passagem nao troca nada)
                 if (enc.implementation || typeof enc.powerEfficient === "boolean")

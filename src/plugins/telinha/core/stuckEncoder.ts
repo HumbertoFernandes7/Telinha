@@ -25,10 +25,18 @@
 //   rede de seguranca.
 // Parte do ambiente desconhecida (o native.ts antigo, getGPUInfo falhou) vale como curinga: o PC continua lembrando, e so
 // uma parte conhecida dos dois lados e diferente conta como mudanca (um retry por engano custaria outro travamento).
+//
+// H.264 High (depois da v0.3.1; core/codec.ts): a sonda acima testa o perfil Baseline (42001f). O High (6400xx) passa
+// pelo mesmo encoder da placa com outro perfil, entao tem a SUA sonda (runHighProbe), uma rodada so, e o seu resultado
+// salvo (chave privada hwH264HighProbe), tambem uma vez por ambiente. Ela so roda depois de a do Baseline dizer "ok" neste
+// ambiente, nunca com o H.264 da placa travado ou desligado, e nunca segura o Baseline. Sem o "ok" dela neste ambiente
+// (nao rodou, inconclusiva, travou), nunca High. Travou: o High fica desligado neste ambiente e, com um encoder H.264
+// preso na placa, o automatico vai de VP9 so nesta sessao. Tudo que desliga o H.264 da placa (o travamento lembrado, a
+// sonda do Baseline, as quedas no ar) desliga o High junto.
 
 import { settings } from "@plugins/telinha/settings";
 
-import { describeLocalCaps, getLocalCaps, isH264HwStuck, probeLocalCaps, setH264HwProbing, setH264HwStuck } from "./codec";
+import { describeLocalCaps, getLocalCaps, isH264HwStuck, probeLocalCaps, setH264HighProbeOk, setH264HwProbing, setH264HwStuck } from "./codec";
 import { rt } from "./context";
 import { type ProbeResult, type ProbeVerdict, runEncoderProbe } from "./encoderProbe";
 import { errorText, log } from "./log";
@@ -69,6 +77,12 @@ export interface ProbeRecord {
     detail: string;
 }
 
+/** O resultado da sonda WebCodecs do High (chave privada hwH264HighProbe): o mesmo, com o perfil testado. */
+export interface HighProbeRecord extends ProbeRecord {
+    /** profile-level-id testado (ex.: "640032"); null = desconhecido */
+    profile: string | null;
+}
+
 /**
  * Quando a sonda WebCodecs roda: `delayMs` depois da sonda de codecs (fora da partida do Discord) e, se travar, a 2a
  * rodada de confirmacao `confirmMs` depois. Mutavel pelos testes.
@@ -88,7 +102,7 @@ const ENV_TIMEOUT_MS = 4000;
 /** Fabricantes que o WebGPU (GPUAdapterInfo.vendor) da pelo nome. */
 const VENDOR_IDS: Record<string, string> = { amd: "1002", nvidia: "10de", intel: "8086", qualcomm: "5143", apple: "106b", microsoft: "1414" };
 
-type PrivateStore = { stuckHwH264?: unknown; hwH264Probe?: unknown; };
+type PrivateStore = { stuckHwH264?: unknown; hwH264Probe?: unknown; hwH264HighProbe?: unknown; };
 
 /** As configuracoes do plugin com a chave privada (lido so na hora: settings.ts importa o nucleo). */
 function privateSettings() {
@@ -107,6 +121,8 @@ let started: Promise<void> | null = null;
 let streamStarting = false;
 /** a sonda WebCodecs nesta sessao: o que ela disse, ou por que nao rodou (log e diagnostico) */
 let probeNote = "ainda não";
+/** a sonda WebCodecs do High nesta sessao: o que ela disse, ou por que nao rodou (log e diagnostico) */
+let highNote = "ainda não";
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -254,12 +270,29 @@ function writeRecord(record: StuckRecord | null) {
 
 const VERDICTS: readonly ProbeVerdict[] = ["ok", "broken", "unknown"];
 
-/** O resultado da sonda WebCodecs salvo neste PC (de qualquer ambiente). null = nenhum. */
-export function probeRecord(): ProbeRecord | null {
-    const saved = readSaved("hwH264Probe");
+function readProbe(key: "hwH264Probe" | "hwH264HighProbe") {
+    const saved = readSaved(key);
     const verdict = VERDICTS.find(v => v === saved?.raw.verdict);
     if (!saved || !verdict) return null;
-    return { at: saved.at, env: saved.env, verdict, detail: text(saved.raw.detail, 200) ?? "" };
+    return { saved, record: { at: saved.at, env: saved.env, verdict, detail: text(saved.raw.detail, 200) ?? "" } };
+}
+
+/** O resultado da sonda WebCodecs salvo neste PC (de qualquer ambiente). null = nenhum. */
+export function probeRecord(): ProbeRecord | null {
+    return readProbe("hwH264Probe")?.record ?? null;
+}
+
+/** O resultado da sonda WebCodecs do High salvo neste PC (de qualquer ambiente). null = nenhum. */
+export function highProbeRecord(): HighProbeRecord | null {
+    const read = readProbe("hwH264HighProbe");
+    if (!read) return null;
+    const profile = text(read.saved.raw.profile, 6)?.toLowerCase() ?? null;
+    return { ...read.record, profile: profile && /^[0-9a-f]{6}$/.test(profile) ? profile : null };
+}
+
+/** Um resultado salvo que vale neste ambiente (ok ou travou; "inconclusiva" nunca e salva, mas pode ter sido editada a mao). */
+function doneIn<R extends ProbeRecord>(saved: R | null, env: EncoderEnv): R | null {
+    return saved && saved.verdict !== "unknown" && !envChanges(saved.env, env).length ? saved : null;
 }
 
 const PROBE_LABEL: Record<ProbeVerdict, string> = { ok: "ok", broken: "travou", unknown: "inconclusiva" };
@@ -305,8 +338,9 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
  * comecar antes. Travamento lembrado no mesmo ambiente: H.264 automatico desligado. Ambiente mudou: continua desligado ate
  * a sonda deste ambiente dizer "ok" (settleChangedEnv). Resolve depois das duas (a presenca sai). Se a sonda WebCodecs
  * ainda nao rodou neste ambiente (e a placa codifica H.264), ela roda em segundo plano depois de PROBE_START.delayMs
- * (runStartupProbe). `report` recebe UMA linha das capacidades, com a placa de video, o travamento e a sonda (quando a
- * sonda roda, so no fim dela). Uma vez por sessao do Discord. Nunca rejeita.
+ * (runStartupProbe). Depois do Baseline, o High (settleHigh: o resultado salvo deste ambiente, ou a sonda dele). `report`
+ * recebe UMA linha das capacidades, com a placa de video, o travamento e as sondas (quando uma sonda roda, so no fim
+ * dela). Uma vez por sessao do Discord. Nunca rejeita.
  */
 export function startLocalCaps(report: (line: string) => void): Promise<void> {
     return started ??= (async () => {
@@ -316,18 +350,19 @@ export function startLocalCaps(report: (line: string) => void): Promise<void> {
         const record = stuckRecord();
         const sameEnv = !!record && !envChanges(record.env, env).length;
         // "inconclusiva" nunca e salva, entao `done` e ok ou travou
-        const saved = probeRecord();
-        const done = saved && saved.verdict !== "unknown" && !envChanges(saved.env, env).length ? saved : null;
+        const done = doneIn(probeRecord(), env);
         // a sonda deste ambiente travou mas o registro do travamento sumiu (a gravacao falhou): vale como o registro
         if (record || done?.verdict === "broken") setH264HwStuck(true);
         const caps = await measuring;
         const line = () => {
             const rec = stuckRecord();
             report(`${describeLocalCaps(caps)}; ${describeEnv(env)}; sonda WebCodecs H.264 placa: ${probeNote}`
+                + (caps.h264HighHwProfile ? `; sonda WebCodecs H.264 High: ${highNote}` : "")
                 + (rec && isH264HwStuck() ? `; H.264 automático desligado: a placa de vídeo travou com H.264 neste PC em ${shortDate(rec.at)} (usando VP9)` : ""));
         };
         if (!sameEnv && !done && canProbe() && caps.h264HwEncode && caps.h264HwProfile) {
-            void runStartupProbe(env, caps.h264HwProfile).then(line);
+            // o High logo depois do Baseline (sem esperar de novo), so se ele passar
+            void runStartupProbe(env, caps.h264HwProfile).then(() => settleHigh(env, 0)).then(line);
             return;
         }
         if (record && !sameEnv) settleChangedEnv(record, env, done?.verdict ?? "unknown");
@@ -336,8 +371,42 @@ export function startLocalCaps(report: (line: string) => void): Promise<void> {
             : done ? `${PROBE_LABEL[done.verdict]} (feita em ${shortDate(done.at)} neste ambiente: ${done.detail})`
                 : !caps.h264HwEncode ? "não feita (este PC não codifica H.264 na placa)"
                     : "não feita (sem Worker)";
-        line();
+        // o Baseline ja vale; o High so depois da sonda dele (fora da partida do Discord, como a do Baseline)
+        const high = settleHigh(env, PROBE_START.delayMs);
+        if (high) void high.then(line);
+        else line();
     })();
+}
+
+/** A sonda do Baseline passou neste ambiente (salva). */
+function baselineOkIn(env: EncoderEnv) {
+    return doneIn(probeRecord(), env)?.verdict === "ok";
+}
+
+/**
+ * O High depois que o Baseline se resolveu (inicio da sessao, ou o botao): o resultado salvo deste ambiente vale; sem
+ * ele, a sonda do High roda (runHighProbe, depois de `delayMs`) se este PC codifica High por hardware (encodingInfo), o
+ * H.264 da placa nao esta desligado e a sonda do Baseline deu "ok" neste ambiente. Senao, sem High nesta sessao.
+ * Devolve a promessa da sonda quando ela roda (null = nao roda).
+ */
+export function settleHigh(env: EncoderEnv, delayMs: number): Promise<void> | null {
+    const profile = getLocalCaps().h264HighHwProfile;
+    const done = doneIn(highProbeRecord(), env);
+    const skip = (why: string) => {
+        setH264HighProbeOk(false);
+        highNote = `não feita (${why})`;
+        return null;
+    };
+    if (!profile) return skip("este PC não codifica High na placa");
+    if (done) {
+        setH264HighProbeOk(done.verdict === "ok");
+        highNote = `${PROBE_LABEL[done.verdict]} (feita em ${shortDate(done.at)} neste ambiente: ${done.detail})`;
+        return null;
+    }
+    if (isH264HwStuck()) return skip("o H.264 da placa está desligado neste PC");
+    if (!baselineOkIn(env)) return skip("a sonda do H.264 Baseline não deu ok neste ambiente; sem High nesta sessão");
+    if (!canProbe()) return skip("sem Worker");
+    return runHighProbe(env, profile, delayMs);
 }
 
 /**
@@ -351,10 +420,10 @@ function sessionOnly(note: string, why: string) {
         + "e a sonda roda de novo na próxima vez que o Discord abrir");
 }
 
-/** Uma rodada da sonda, com a linha do log quando o Worker fica preso. */
-async function probeOnce(profile: string): Promise<ProbeResult> {
+/** Uma rodada da sonda, com a linha do log quando o Worker fica preso. `what` = "H.264" (o Baseline) ou "H.264 High". */
+async function probeOnce(profile: string, what = "H.264"): Promise<ProbeResult> {
     const result = await runEncoderProbe(profile);
-    if (result.hung) log.warn(`Sonda WebCodecs do H.264 da placa de vídeo: o encoder ficou preso (${result.detail}); o Worker dela fica como está até o Discord fechar`);
+    if (result.hung) log.warn(`Sonda WebCodecs do ${what} da placa de vídeo: o encoder ficou preso (${result.detail}); o Worker dela fica como está até o Discord fechar`);
     return result;
 }
 
@@ -422,6 +491,56 @@ export async function runStartupProbe(env: EncoderEnv, profile: string, delayMs 
     }
 }
 
+/** a sonda WebCodecs do High esta rodando: nao comeca outra */
+let highProbeRunning = false;
+
+/**
+ * A sonda WebCodecs do High (avc1.6400xx, core/encoderProbe.ts), uma vez por ambiente, depois de a do Baseline dizer
+ * "ok" (settleHigh). Uma rodada so (o custo de um engano e so ficar no Baseline neste ambiente, nunca o VP9 para sempre),
+ * e o Baseline nunca espera por ela: enquanto roda, o automatico manda Baseline. Uma transmissao comecando ou no ar nessa
+ * hora: nao roda (fica para a proxima vez que o Discord abrir).
+ * - ok: fica salvo; o automatico usa High com quem tambem decodifica High por hardware;
+ * - travou: fica salvo (o High desligado neste ambiente: so o Baseline) e, como agora ha um encoder H.264 preso na placa
+ *   de video, o automatico vai em VP9 no resto desta sessao (nenhum travamento salvo: na proxima abertura, Baseline);
+ * - inconclusiva: nada salvo; sem High nesta sessao (o Baseline continua) e ela roda de novo na proxima abertura.
+ */
+export async function runHighProbe(env: EncoderEnv, profile: string, delayMs = PROBE_START.delayMs) {
+    if (highProbeRunning) return;
+    highProbeRunning = true;
+    setH264HighProbeOk(false);
+    try {
+        await sleep(delayMs);
+        if (streamBusy()) {
+            highNote = "não feita (uma transmissão estava começando ou no ar; tenta de novo na próxima vez que o Discord abrir)";
+            return;
+        }
+        if (isH264HwStuck()) {
+            highNote = "não feita (o H.264 da placa está desligado neste PC)";
+            return;
+        }
+        highNote = "rodando";
+        const result = await probeOnce(profile, "H.264 High");
+        highNote = `${PROBE_LABEL[result.verdict]} (${result.detail})`;
+        if (result.verdict !== "unknown") {
+            save("hwH264HighProbe", { at: Date.now(), env: { ...env }, verdict: result.verdict, detail: result.detail, profile }, "o resultado da sonda do H.264 High");
+        }
+        if (result.verdict === "ok") {
+            setH264HighProbeOk(true);
+            log.info(`Sonda WebCodecs do H.264 High (perfil ${profile}) da placa de vídeo: ok (${result.detail}); `
+                + "o automático manda High para quem também decodifica High por hardware");
+        } else if (result.verdict === "broken") {
+            setH264HwStuck(true);
+            log.warn(`A sonda WebCodecs do H.264 High (perfil ${profile}) travou neste PC (${result.detail}): o High fica desligado neste ambiente `
+                + "(só o Baseline) e, com um encoder H.264 preso na placa de vídeo, o automático vai em VP9 nesta sessão");
+        } else {
+            log.info(`Sonda WebCodecs do H.264 High (perfil ${profile}) da placa de vídeo: inconclusiva (${result.detail}); `
+                + "sem High nesta sessão (o Baseline continua), e ela roda de novo na próxima vez que o Discord abrir");
+        }
+    } finally {
+        highProbeRunning = false;
+    }
+}
+
 /** streaming.ts → startStreaming: uma transmissao esta comecando (true) ou acabou de comecar/falhar (false). */
 export function noteStreamStarting(starting: boolean) {
     streamStarting = starting;
@@ -451,12 +570,16 @@ export function stuckInThisSession() {
 export type RetryOutcome = "testing" | "restart" | "now";
 
 /**
- * Botao "Tentar a placa de vídeo de novo": esquece o travamento E o resultado da sonda, para o H.264 da placa so voltar
- * depois de a sonda deste ambiente dizer ok/inconclusiva (nunca as cegas).
+ * Botao "Tentar a placa de vídeo de novo": esquece o travamento E o resultado das sondas (Baseline e High), para o H.264
+ * da placa so voltar depois de a sonda deste ambiente dizer ok/inconclusiva (nunca as cegas). O High so volta depois de
+ * a sonda dele dizer ok, de novo (settleHigh, logo depois da do Baseline).
  */
 export function forgetStuckEncoder(): RetryOutcome {
     writeRecord(null);
     save("hwH264Probe", null, "o resultado da sonda do H.264");
+    save("hwH264HighProbe", null, "o resultado da sonda do H.264 High");
+    setH264HighProbeOk(false);
+    highNote = "não feita (esquecida pelo botão; roda depois da do Baseline)";
     const profile = getLocalCaps().h264HwProfile;
     const probeable = canProbe() && !!profile;
     let outcome: RetryOutcome;
@@ -467,7 +590,12 @@ export function forgetStuckEncoder(): RetryOutcome {
         // a trava da sonda antes de soltar a do travamento: nenhum envio H.264 da placa comeca no meio
         setH264HwProbing(true);
         setH264HwStuck(false);
-        if (!probeRunning) void environment().then(env => runStartupProbe(env, profile, 0));
+        if (!probeRunning) {
+            void environment().then(async env => {
+                await runStartupProbe(env, profile, 0);
+                await settleHigh(env, 0);
+            });
+        }
     } else {
         outcome = "now";
         setH264HwStuck(false);
@@ -480,7 +608,7 @@ export function forgetStuckEncoder(): RetryOutcome {
     return outcome;
 }
 
-/** Linhas do "Copiar diagnóstico": a placa de video, o travamento lembrado e o desta sessao. */
+/** Linhas do "Copiar diagnóstico": a placa de video, o travamento lembrado e o desta sessao, e o High. */
 export function stuckEncoderDiagnostics(): string {
     const record = stuckRecord();
     const env = envNow;
@@ -489,10 +617,16 @@ export function stuckEncoderDiagnostics(): string {
         : "não";
     const contained = containedCount();
     const saved = probeRecord();
+    const savedHigh = highProbeRecord();
+    const caps = getLocalCaps();
+    const highOn = caps.h264HwEncode && !!caps.h264HighHwProfile && caps.h264HighProbeOk;
     return [
         `ambiente do encoder: ${env ? `${describeEnv(env)} (placa via ${envSource})` : "ainda lendo"}`,
         `H.264 da placa travado neste PC: ${remembered}${record?.source === "probe" ? " [visto pela sonda]" : ""}; H.264 automático ${isH264HwStuck() ? "desligado" : "ligado"}`,
         `travou nesta sessão: ${stuckThisSession ? `sim (${contained} ${contained === 1 ? "conexão contida" : "conexões contidas"})` : "não"}`,
-        `sonda WebCodecs H.264 placa: ${probeNote}${saved ? `; salva: ${PROBE_LABEL[saved.verdict]} em ${new Date(saved.at).toISOString()} (${saved.detail})` : ""}`
+        `sonda WebCodecs H.264 placa: ${probeNote}${saved ? `; salva: ${PROBE_LABEL[saved.verdict]} em ${new Date(saved.at).toISOString()} (${saved.detail})` : ""}`,
+        `H.264 High: codifica na placa ${caps.h264HighHwProfile ? `sim (perfil ${caps.h264HighHwProfile})` : "não"}, decodifica na placa ${caps.h264HighHwDecode ? "sim" : "não"}; `
+        + `sonda WebCodecs High: ${highNote}${savedHigh ? `; salva: ${PROBE_LABEL[savedHigh.verdict]} em ${new Date(savedHigh.at).toISOString()} (perfil ${savedHigh.profile ?? "?"}: ${savedHigh.detail})` : ""}; `
+        + `High automático ${highOn ? "ligado (só com quem anuncia High por hardware)" : "desligado"}`
     ].join("\n");
 }
