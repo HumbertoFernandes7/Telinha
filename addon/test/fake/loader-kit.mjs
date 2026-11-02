@@ -136,6 +136,26 @@ function makeWebRequest() {
 }
 
 /**
+ * app.commandLine with Chromium's semantics: switch names lose their leading dashes and are lower-cased, and appending a
+ * switch again REPLACES its value (getSwitchValue answers the last one; "" when absent). `appended` records every call.
+ */
+function makeCommandLine() {
+    const switches = new Map();
+    const appended = [];
+    const key = name => String(name).replace(/^-+/, "").toLowerCase();
+    return {
+        appended,
+        switches,
+        appendSwitch: (name, value) => {
+            appended.push([name, value]);
+            switches.set(key(name), value === undefined ? "" : String(value));
+        },
+        getSwitchValue: name => switches.get(key(name)) ?? "",
+        hasSwitch: name => switches.has(key(name))
+    };
+}
+
+/**
  * The parts of electron's main-process API that the loader and a Vencord look-alike touch.
  *   ipcMain.sendSync(channel, frameUrl, ...args)  -> what ipcRenderer.sendSync does (event.returnValue)
  *   ipcMain.invoke(channel, frameUrl, ...args)    -> what ipcRenderer.invoke does
@@ -172,7 +192,7 @@ export function makeElectron({ ownOn = false, withNet = true } = {}) {
     let rejectReady;
     const readyPromise = new Promise((res, rej) => { resolveReady = res; rejectReady = rej; });
     readyPromise.catch(() => { }); // a test may reject it before anyone listens
-    const app = { whenReady: () => readyPromise, becomeReady: () => resolveReady(), failReady: err => rejectReady(err) };
+    const app = { whenReady: () => readyPromise, becomeReady: () => resolveReady(), failReady: err => rejectReady(err), commandLine: makeCommandLine() };
 
     const webRequest = makeWebRequest();
     const session = { defaultSession: { webRequest } };

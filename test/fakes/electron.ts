@@ -94,7 +94,26 @@ export const app = {
     getGPUInfo(infoType: string): Promise<unknown> {
         return app.getGPUInfoImpl ? app.getGPUInfoImpl(infoType) : Promise.resolve(app.gpuInfo);
     },
-    on() { },
+    /** what getAppMetrics() answers (default: this process as the browser, and a GPU process); replace per test */
+    appMetrics: [{ pid: process.pid, type: "Browser" }, { pid: 51_234, type: "GPU" }] as unknown[],
+    /** replace to make getAppMetrics throw */
+    getAppMetricsImpl: null as (() => unknown[]) | null,
+    getAppMetrics(): any[] {
+        return app.getAppMetricsImpl ? app.getAppMetricsImpl() : app.appMetrics;
+    },
+    /** app.on listeners by event (never removed: like the plugin's natives, they live as long as the process) */
+    listeners: {} as Record<string, ((...args: any[]) => void)[]>,
+    /** replace to make app.on throw */
+    onImpl: null as ((event: string) => void) | null,
+    on(event: string, fn: (...args: any[]) => void) {
+        app.onImpl?.(event);
+        (app.listeners[event] ??= []).push(fn);
+        return app;
+    },
+    /** test helper: what Electron does when the event happens (e.g. "child-process-gone" with { type: "GPU" }) */
+    emit(event: string, ...args: unknown[]) {
+        for (const fn of app.listeners[event] ?? []) fn(...args);
+    },
     relaunch() { },
     exit() { }
 };

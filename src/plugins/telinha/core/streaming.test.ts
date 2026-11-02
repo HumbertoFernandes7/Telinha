@@ -27,6 +27,7 @@ import {
     type StreamingRig, streamsTo, turns, videoSenderOf, windowOptions
 } from "@test/helpers/wpb-streaming";
 
+import { refreshGpuCapture, resetCaptureBoostForTests } from "./captureBoost";
 import { rt } from "./context";
 import { BLACK_WARNING } from "./quality/captureMonitor";
 import {
@@ -208,7 +209,9 @@ describe("startStreaming: tela, janela e audio", () => {
         assert.equal(video.contentHint, "motion");
         assert.deepEqual(since(), [
             'Iniciando transmissão: tela "Tela inteira" em 1080p30 sem áudio',
-            "Transmitindo 1920x1080 @ 60 fps · quem pode assistir: Todos da call"
+            "Transmitindo 1920x1080 @ 60 fps · quem pode assistir: Todos da call",
+            // core/captureBoost.ts: o modo da captura, para comparar com e sem a "Captura pela placa de vídeo"
+            "Modo da captura: padrão (cópia pelo processador) · prioridade na placa de vídeo: normal (opção desligada)"
         ]);
 
         const stopLogs = logMark();
@@ -250,7 +253,8 @@ describe("startStreaming: tela, janela e audio", () => {
         assert.deepEqual(since(), [
             'Iniciando transmissão: janela "Jogo" em 1080p60 com áudio',
             "Áudio: capturando — processo do jogo (pid 1234)",
-            "Transmitindo 1920x1080 @ 60 fps com áudio · quem pode assistir: Todos da call"
+            "Transmitindo 1920x1080 @ 60 fps com áudio · quem pode assistir: Todos da call",
+            "Modo da captura: padrão (cópia pelo processador) · prioridade na placa de vídeo: normal (opção desligada)"
         ]);
     });
 
@@ -352,6 +356,31 @@ describe("startStreaming: tela, janela e audio", () => {
             ]);
         } finally {
             pluginSettings.set("requireVerifiedIdentity", true);
+        }
+    });
+
+    test("a captura termina sozinha com a captura pela placa de video valendo: o log e a mensagem dizem que a placa pode ter reiniciado", async () => {
+        rig.native.restore();
+        rig.native = installNative({
+            gpuCaptureStatus: async () => ({ loader: true, build: 26300, supported: true, saved: true, requested: true, applied: true, loaderNote: null, enableFeatures: null, saveError: null })
+        });
+        try {
+            await refreshGpuCapture();
+            await startStreaming(screenOptions());
+            await turns();
+            const since = logMark();
+            (rt.local!.stream.getVideoTracks()[0] as FakeMediaStreamTrack).end();
+            await turns(1);
+            assert.equal(getState().local, null);
+            assert.equal(getState().lastError, "A transmissão parou: a placa de vídeo provavelmente reiniciou. É só transmitir de novo.");
+            assert.deepEqual(since(), [
+                "A captura terminou sozinha com a captura pela placa de vídeo ligada: provavelmente a placa de vídeo reiniciou ou trocou (o Chromium não volta sozinho nesse caso)",
+                "Transmissão encerrada (a captura terminou)"
+            ]);
+        } finally {
+            rig.native.restore();
+            rig.native = installNative();
+            resetCaptureBoostForTests();
         }
     });
 

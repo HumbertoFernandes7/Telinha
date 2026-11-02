@@ -29,6 +29,7 @@ import {
     type ProofState, verifyPasswordProof, type WatchAccessInput, type WatchDecision
 } from "./access";
 import { startScreenAudioCapture } from "./audio/screenAudio";
+import { captureEndedText, noteCaptureStarted, noteCaptureStopped } from "./captureBoost";
 import {
     chooseCodec, type CodecDecision, type EncoderReport, getLocalCaps, isSoftwareH264, isTransientSoftwareH264, noteH264Fallback, pickNegotiatedCodec, softwareFallback
 } from "./codec";
@@ -362,12 +363,16 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
 
         video.addEventListener("ended", () => {
             if (rt.local !== local) return;
-            log.warn("A captura terminou sozinha (janela fechada ou captura interrompida pelo sistema)");
+            // com a "Captura pela placa de vídeo" valendo, a placa de video que reinicia tambem encerra a captura (core/captureBoost.ts)
+            const gpu = captureEndedText(kind);
+            log.warn(gpu?.log ?? "A captura terminou sozinha (janela fechada ou captura interrompida pelo sistema)");
             stopStreaming("a captura terminou");
-            setLastError("A transmissão parou: a janela foi fechada ou a captura foi interrompida.");
+            setLastError(gpu?.message ?? "A transmissão parou: a janela foi fechada ou a captura foi interrompida.");
         });
 
         log.info(`Transmitindo ${info.width}x${info.height} @ ${info.fps} fps${info.hasAudio ? " com áudio" : ""} · quem pode assistir: ${ACCESS_LABEL[local.access]}`);
+        // o modo da captura (live com jogo pesado, core/captureBoost.ts): para comparar com e sem pelo "fonte N" do envio
+        noteCaptureStarted();
         sendPresence();
         for (const peerId of keepViewers) sendTo(peerId);
         if (accessChanged) resetAccessGuards();
@@ -503,6 +508,8 @@ export function stopStreaming(reason = "parada pelo usuário") {
     const { local } = rt;
     if (!local) return;
     stopCapture(local, reason);
+    // "Prioridade da captura na placa de vídeo": o Discord volta para a classe que tinha (core/captureBoost.ts)
+    noteCaptureStopped();
     endOfStreamGuards();
     sendPresence();
     publish();

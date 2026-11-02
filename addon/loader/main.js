@@ -26,6 +26,8 @@
  *      Vencord's own rewrite (Electron keeps a single listener; Vencord then replaces the method by a noop)
  *   4. Dormant fallback: a BrowserWindow subclass under Vencord's, which swaps in our preload only when
  *      the renderer hook never fired (e.g. a future Vencord renamed the channel)
+ *   5. Chromium features the user turned on in the plugin (capture-flags.json, PAYLOAD.md section 6.1), which only take
+ *      effect when they are on the command line before app ready
  *
  * Any failure in our part is logged and Vencord/Discord still load. If Vencord itself fails before Discord was
  * required, Discord is started vanilla instead of not starting at all. Contract: addon/PAYLOAD.md.
@@ -80,6 +82,8 @@ const state = {
     preloadFallback: false,
     update: null, // what startup() changed in this start: { kind: "swapped" | "rolledBack", from, to }
     bootConfirmed: false,
+    // what capture-flags.json asked for at this start and what was applied (applyCaptureFlags); read by the plugin's natives
+    capture: null,
     errors: []
 };
 
@@ -367,8 +371,109 @@ function installPreloadFallback() {
     require.cache[electronPath].exports = exportsWithOurs;
 }
 
+// ------------------------------------------------------------------------------------------- capture flags (PAYLOAD.md 6.1)
+
+/**
+ * %APPDATA%\Telinha\capture-flags.json, written by the plugin's natives when the user changes "Captura pela placa de vídeo"
+ * (core/captureBoostMain.ts). Read here, once per start: Chromium only takes features from the command line before app
+ * ready, so the option needs a Discord restart. Missing or unreadable = everything off.
+ */
+const CAPTURE_FLAGS_FILE = path.join(__dirname, "..", "capture-flags.json");
+/**
+ * Chromium's WGC screen capturer keeps each frame on the GPU (a shared texture handed to the GPU process) instead of copying
+ * it to the CPU with a blocking Map. With a game using the whole GPU, that Map waits behind the game's frames, and Chromium's
+ * capture loop (it sleeps so it is busy at most 50 % of the time) falls to ~10 fps. Off by default in Chromium 152.
+ */
+const WGC_TEXTURE_FEATURE = "WebRtcAllowWgcUsingTexture";
+/** Windows 11 24H2: Chromium only captures the screen with WGC (and this path only exists) from this build on. */
+const WGC_TEXTURE_MIN_BUILD = 26100;
+
+function windowsBuild() {
+    if (process.platform !== "win32") return 0;
+    return Number(String(require("os").release()).split(".")[2]) || 0;
+}
+
+/** The feature names in an enable-features value: "A,*B<Trial,C:p/v" -> A, B, C. */
+const featureNames = value => String(value ?? "").split(",").map(f => f.trim().replace(/^\*/, "").split(/[<:]/)[0]).filter(Boolean);
+
+/** `value` with `feature` added at the end, unless it is already there. */
+function withFeature(value, feature) {
+    const list = String(value ?? "").split(",").map(f => f.trim()).filter(Boolean);
+    return featureNames(value).includes(feature) ? list.join(",") : [...list, feature].join(",");
+}
+
+/**
+ * A later appendSwitch("enable-features", x) REPLACES the value (Chromium keeps the last one), and Discord's bootstrap sets
+ * its own feature that way without merging: every later value gets ours too. Installed once per process (a hand-off to
+ * another loader version finds the wrapper already there).
+ */
+function keepFeatureOnAppend(commandLine, feature) {
+    const original = commandLine.appendSwitch;
+    if (original.telinhaKeeps === feature) return;
+    const appendSwitch = function appendSwitch(name, value, ...rest) {
+        if (String(name).replace(/^-+/, "").toLowerCase() === "enable-features" && value != null) value = withFeature(value, feature);
+        return original.call(this, name, value, ...rest);
+    };
+    appendSwitch.telinhaKeeps = feature;
+    commandLine.appendSwitch = appendSwitch;
+}
+
+/**
+ * Turns on what capture-flags.json asks for. Never throws, and nothing here is a boot problem (state.errors would make the
+ * updater roll a good version back): a broken file only means the option stays off, and that is logged.
+ */
+function applyCaptureFlags() {
+    const capture = {
+        file: CAPTURE_FLAGS_FILE,
+        build: windowsBuild(),
+        // the file asked for the GPU capture at this start
+        wgcTexture: false,
+        // the feature was in enable-features when the app got ready; null = not asked for (or not ready yet)
+        applied: null,
+        enableFeatures: null,
+        reason: null
+    };
+    state.capture = capture;
+    try {
+        let flags = null;
+        try {
+            flags = JSON.parse(fs.readFileSync(CAPTURE_FLAGS_FILE, "utf8"));
+        } catch (err) {
+            if (err?.code !== "ENOENT") capture.reason = `capture-flags.json ignored (${firstLine(err)})`;
+        }
+        capture.wgcTexture = flags?.wgcTexture === true;
+        if (!capture.wgcTexture) {
+            if (capture.reason) log(`capture: ${capture.reason}`);
+            return;
+        }
+        if (capture.build < WGC_TEXTURE_MIN_BUILD) {
+            capture.applied = false;
+            capture.reason = `Windows build ${capture.build || "?"}: ${WGC_TEXTURE_FEATURE} needs Windows 11 24H2 (build ${WGC_TEXTURE_MIN_BUILD}) or newer`;
+            log(`capture: GPU capture asked for but not applied (${capture.reason})`);
+            return;
+        }
+        const { app } = require("electron");
+        const commandLine = app.commandLine;
+        commandLine.appendSwitch("enable-features", withFeature(commandLine.getSwitchValue("enable-features"), WGC_TEXTURE_FEATURE));
+        keepFeatureOnAppend(commandLine, WGC_TEXTURE_FEATURE);
+        log(`capture: GPU capture asked for: ${WGC_TEXTURE_FEATURE} added to enable-features (Windows build ${capture.build})`);
+        // Electron builds Chromium's feature list from the command line after this script ran, before "ready"
+        app.whenReady().then(() => {
+            capture.enableFeatures = String(commandLine.getSwitchValue("enable-features") ?? "");
+            capture.applied = featureNames(capture.enableFeatures).includes(WGC_TEXTURE_FEATURE);
+            if (!capture.applied) capture.reason = "enable-features was replaced after the loader added the feature";
+            log(`capture: enable-features at app ready: ${capture.enableFeatures || "(empty)"} -> GPU capture ${capture.applied ? "applied" : "NOT applied"}`);
+        }).catch(() => { });
+    } catch (err) {
+        capture.applied = false;
+        capture.reason = `could not turn it on (${firstLine(err)})`;
+        log(`capture: GPU capture not applied: ${capture.reason}`);
+    }
+}
+
 /** Everything that happens before Vencord loads. Never throws. */
 function prepare() {
+    applyCaptureFlags();
     step("version", () => {
         const v = readJson("version.json");
         state.version = v.version ?? null;
