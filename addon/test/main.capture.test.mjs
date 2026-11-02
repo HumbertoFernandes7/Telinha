@@ -5,8 +5,9 @@
  */
 /*
  * Unit tests of addon/loader/main.js, the capture flags (PAYLOAD.md section 6.1): %APPDATA%\Telinha\capture-flags.json
- * asks for Chromium's WGC texture capture (WebRtcAllowWgcUsingTexture), which the loader adds to enable-features before
- * app ready and keeps there when Discord's bootstrap appends its own enable-features later.
+ * asks for Chromium's WGC texture capture (WebRtcAllowWgcUsingTexture) and/or the GPU's AV1 encoder for WebRTC
+ * (WebRtcAV1HWEncode), which the loader adds to enable-features before app ready and keeps there when Discord's bootstrap
+ * appends its own enable-features later.
  *
  *   node --test addon/test/main.capture.test.mjs        (also run by `pnpm test:addon`)
  *
@@ -25,6 +26,7 @@ import { loaderPayload, loaderScratch, makeLoaderTree, STUB_UPDATER, useWorld, v
 // the loader trees stay after the run (coverage of a loader copy is mapped back to addon/loader/ at report time)
 const BASE = loaderScratch("main-capture");
 const FEATURE = "WebRtcAllowWgcUsingTexture";
+const AV1 = "WebRtcAV1HWEncode";
 const tick = () => new Promise(r => setImmediate(r));
 
 /** Windows build `build` (os.release()) on win32, or another platform. */
@@ -69,7 +71,7 @@ describe("capture-flags.json asks for the GPU capture (Windows 11 24H2+)", () =>
         discordBootstrap(electron);
         assert.equal(features(), `${DISCORD_FEATURE},${FEATURE}`, "Discord's later call keeps ours (and replaces the rest, as without us)");
         assert.deepEqual({ ...state.capture, file: state.capture.file.toLowerCase() }, {
-            file: flagsFile.toLowerCase(), build: 26300, wgcTexture: true, applied: null, enableFeatures: null, reason: null
+            file: flagsFile.toLowerCase(), build: 26300, wgcTexture: true, applied: null, enableFeatures: null, reason: null, av1HwEncode: false, av1Applied: null
         });
         assert.match(tree.mainLog(), new RegExp(`capture: GPU capture asked for: ${FEATURE} added to enable-features \\(Windows build 26300\\)`));
 
@@ -96,7 +98,7 @@ describe("capture-flags.json asks for the GPU capture (Windows 11 24H2+)", () =>
     test("a second boot in the same process (hand-off to another loader version) does not stack another wrapper", t => {
         const { commandLine, loader, tree, features } = boot(t);
         const wrapper = commandLine.appendSwitch;
-        assert.equal(wrapper.telinhaKeeps, FEATURE);
+        assert.deepEqual(wrapper.telinhaKeeps, [FEATURE]);
         loader.boot({ vencordPatcher: tree.patcher, vanilla: t.mock.fn() });
         assert.equal(commandLine.appendSwitch, wrapper);
         commandLine.appendSwitch("enable-features", "X");
@@ -139,6 +141,82 @@ describe("capture-flags.json asks for the GPU capture (Windows 11 24H2+)", () =>
         assert.deepEqual(state.errors, []);
         assert.equal(state.vencordLoaded, true);
     });
+});
+
+describe("capture-flags.json asks for the GPU's AV1 encoder (AV1 pinned in the plugin)", () => {
+    test("alone: the feature goes into enable-features, stays after Discord's bootstrap, and app ready says applied", async t => {
+        const { state, features, electron, tree } = boot(t, { flags: { format: 1, wgcTexture: false, av1HwEncode: true } });
+        assert.equal(features(), AV1);
+        discordBootstrap(electron);
+        assert.equal(features(), `${DISCORD_FEATURE},${AV1}`);
+        assert.deepEqual([state.capture.wgcTexture, state.capture.applied, state.capture.av1HwEncode, state.capture.av1Applied], [false, null, true, null]);
+        assert.match(tree.mainLog(), new RegExp(`capture: AV1 hardware encode asked for: ${AV1} added to enable-features`));
+        assert.doesNotMatch(tree.mainLog(), /GPU capture/);
+        await ready(electron);
+        assert.equal(state.capture.av1Applied, true);
+        assert.equal(state.capture.applied, null, "the GPU capture was not asked for");
+        assert.match(tree.mainLog(), new RegExp(`capture: enable-features at app ready: ${DISCORD_FEATURE},${AV1} -> AV1 hardware encode applied$`, "m"));
+        assert.deepEqual(state.errors, []);
+    });
+
+    test("with the GPU capture: both features, one wrapper that keeps both, one line at ready", async t => {
+        const { state, features, electron, commandLine, tree } = boot(t, { flags: { format: 1, wgcTexture: true, av1HwEncode: true } });
+        assert.equal(features(), `${FEATURE},${AV1}`);
+        assert.deepEqual(commandLine.appendSwitch.telinhaKeeps, [FEATURE, AV1]);
+        discordBootstrap(electron);
+        assert.equal(features(), `${DISCORD_FEATURE},${FEATURE},${AV1}`);
+        await ready(electron);
+        assert.deepEqual([state.capture.applied, state.capture.av1Applied], [true, true]);
+        assert.match(tree.mainLog(), /-> GPU capture applied; AV1 hardware encode applied/);
+    });
+
+    test("an older Windows: the GPU capture is not applied, the AV1 feature still is", async t => {
+        const { state, features, electron } = boot(t, { build: 19045, flags: { wgcTexture: true, av1HwEncode: true } });
+        assert.equal(features(), AV1);
+        assert.equal(state.capture.applied, false);
+        assert.match(state.capture.reason, /^Windows build 19045: /);
+        await ready(electron);
+        assert.deepEqual([state.capture.applied, state.capture.av1Applied], [false, true]);
+    });
+
+    test("a hand-off to a loader that asks for more widens the one wrapper (never stacks), and keeps both", t => {
+        const { commandLine, loader, tree, features, flagsFile } = boot(t);
+        const first = commandLine.appendSwitch;
+        assert.deepEqual(first.telinhaKeeps, [FEATURE]);
+        writeFileSync(flagsFile, JSON.stringify({ format: 1, wgcTexture: true, av1HwEncode: true }));
+        loader.boot({ vencordPatcher: tree.patcher, vanilla: t.mock.fn() });
+        const second = commandLine.appendSwitch;
+        assert.notEqual(second, first);
+        assert.deepEqual(second.telinhaKeeps, [FEATURE, AV1]);
+        assert.equal(second.telinhaOriginal, first.telinhaOriginal, "the wider wrapper calls the same original");
+        commandLine.appendSwitch("enable-features", "X");
+        assert.equal(features(), `X,${FEATURE},${AV1}`);
+    });
+
+    test("something replaces enable-features behind the wrapper: AV1 NOT applied, no boot problem", async t => {
+        const { state, electron, commandLine, tree } = boot(t, { flags: { av1HwEncode: true } });
+        commandLine.switches.set("enable-features", "SomethingElse");
+        await ready(electron);
+        assert.equal(state.capture.av1Applied, false);
+        assert.match(tree.mainLog(), /-> AV1 hardware encode NOT applied/);
+        assert.deepEqual(state.errors, []);
+    });
+
+    test("app.commandLine missing: AV1 not applied, logged, no boot problem", t => {
+        const { state, tree } = boot(t, { flags: { av1HwEncode: true }, before: e => delete e.app.commandLine });
+        assert.equal(state.capture.av1Applied, false);
+        assert.equal(state.capture.applied, null);
+        assert.match(tree.mainLog(), /capture: AV1 hardware encode not applied: could not turn it on/);
+        assert.deepEqual(state.errors, []);
+    });
+
+    for (const flags of [{ av1HwEncode: false }, { av1HwEncode: "true" }, { av1HwEncode: 1 }]) {
+        test(`not asked for, or a value that is not true: ${JSON.stringify(flags)}`, t => {
+            const { state, commandLine } = boot(t, { flags });
+            assert.deepEqual(commandLine.appended, []);
+            assert.deepEqual([state.capture.av1HwEncode, state.capture.av1Applied], [false, null]);
+        });
+    }
 });
 
 describe("the GPU capture stays off", () => {
