@@ -13,10 +13,12 @@
 // (core/captureBoostMain.ts) num arquivo que o loader do add-on le antes do app ficar pronto. Windows 11 24H2 ou mais novo.
 //
 // "Prioridade da captura na placa de vídeo" (settings.ts → gpuPriority): enquanto transmite, o processo principal do
-// Discord (a copia da captura) e o da GPU (conversao e codificacao) ficam na classe HIGH da placa de video, para nao
-// esperar atras do jogo. Vale do inicio ao fim de cada transmissao (core/streaming.ts → noteCaptureStarted /
-// noteCaptureStopped); no fim, cada processo volta para a classe que tinha. Sem administrador; se o Windows recusar, so o
-// log e a pagina do plugin dizem ("não foi possível (precisa de administrador)").
+// Discord (a captura e a copia de cada quadro) e o da GPU (conversao e codificacao) sobem para a classe HIGH da placa de
+// video, para nao esperar atras do jogo; quem ja esta em HIGH ou acima (o REALTIME que o Discord da ao processo da GPU)
+// fica como esta: o Telinha nunca abaixa. Vale do inicio ao fim de cada transmissao (core/streaming.ts →
+// noteCaptureStarted / noteCaptureStopped); no fim, so o que subiu volta para a classe que tinha. O log e a pagina do
+// plugin dizem o que aconteceu em cada processo ("NORMAL→HIGH", "já estava REALTIME"). Sem administrador; se o Windows
+// recusar, so o log e a pagina do plugin dizem ("não foi possível (precisa de administrador)").
 //
 // Para comparar com e sem (A/B), cada transmissao comeca com uma linha "Modo da captura: ..." no log (o modo e a
 // prioridade) e a resposta da prioridade logo depois; o "fonte N" das linhas do envio (core/statsLog.ts) e quantos
@@ -24,7 +26,7 @@
 
 import { settings } from "@plugins/telinha/settings";
 
-import type { GpuCaptureStatus, GpuPriorityReport } from "./captureBoostMain";
+import type { GpuCaptureStatus, GpuPriorityReport, GpuPriorityTarget } from "./captureBoostMain";
 import { rt } from "./context";
 import { errorText, log } from "./log";
 import { getNativeOrNull } from "./nativeApi";
@@ -168,12 +170,23 @@ async function askPriority(mode: "high" | "restore"): Promise<GpuPriorityReport 
     }
 }
 
-/** "Discord 1234 NORMAL→HIGH, GPU do Discord 5678 open 0x80070005 Acesso negado." ("" quando o helper nem rodou) */
+const roleText = (t: GpuPriorityTarget) => (t.role === "GPU" ? "GPU do Discord" : "Discord");
+
+/** "NORMAL→HIGH", "já estava REALTIME" (o Telinha nao mexeu: nunca abaixa) ou o erro do helper */
+const targetResult = (t: GpuPriorityTarget) => t.error ?? (t.kept ? `já estava ${t.after}` : `${t.before}→${t.after}`);
+
+/** "Discord 1234 NORMAL→HIGH, GPU do Discord 5678 já estava REALTIME" ("" quando o helper nem rodou) */
 function targetsText(r: GpuPriorityReport): string {
     return r.targets
         .filter(t => t.error || t.after)
-        .map(t => `${t.role === "GPU" ? "GPU do Discord" : "Discord"} ${t.pid} ${t.error ?? `${t.before}→${t.after}`}`)
+        .map(t => `${roleText(t)} ${t.pid} ${targetResult(t)}`)
         .join(", ");
+}
+
+/** Para a pagina do plugin, sem os pids: " — Discord NORMAL→HIGH, GPU do Discord já estava REALTIME" ("" sem resposta de nenhum). */
+function targetsSummary(r: GpuPriorityReport): string {
+    if (!r.targets.some(t => t.after)) return "";
+    return ` — ${r.targets.map(t => `${roleText(t)} ${t.after && !t.error ? targetResult(t) : "não mudou"}`).join(", ")}`;
 }
 
 const withTargets = (r: GpuPriorityReport) => {
@@ -247,15 +260,15 @@ export function onGpuPrioritySettingChanged(): void {
 }
 
 /**
- * Como a opcao esta: vale quando transmitir, alta nesta transmissao, nao foi possivel (precisa de administrador)...
- * null = desligada.
+ * Como a opcao esta: vale quando transmitir, alta nesta transmissao, nao foi possivel (precisa de administrador)..., com o
+ * que a ultima subida fez em cada processo. null = desligada.
  */
 export function gpuPriorityState(on: boolean, native: boolean, active: boolean, last: GpuPriorityReport | null): string | null {
     if (!on) return null;
     if (!native) return "só funciona com o Telinha instalado pelo TelinhaInstaller";
     if (!last) return active ? "pedindo prioridade alta" : "vale quando você transmitir";
-    if (!last.ok) return raiseOutcome(last);
-    return active ? "alta nesta transmissão" : "vale quando você transmitir (na última vez ficou alta)";
+    const state = !last.ok ? raiseOutcome(last) : active ? "alta nesta transmissão" : "vale quando você transmitir (na última vez ficou alta)";
+    return state + targetsSummary(last);
 }
 
 function gpuPriorityDiagnostics(): string {

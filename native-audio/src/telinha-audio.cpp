@@ -21,8 +21,10 @@
 //     telinha-audio.exe --include <pid> [--parent <pid>] [--seconds <n>]   so a arvore <pid> (autoteste)
 //     telinha-audio.exe --probe       sai com 0 se o process loopback funciona nesta maquina
 //     telinha-audio.exe --sessions    lista as sessoes de audio de saida (pid, pai, exe) para diagnostico
-//     telinha-audio.exe --gpu-priority <pid[,pid...]> --class <high|above_normal|normal|below_normal|idle>
-//                                     classe de prioridade na placa de video de processos da arvore de quem chamou
+//     telinha-audio.exe --gpu-priority <pid[,pid...]> --class <high|above_normal|normal|below_normal|idle> [--raise | --if-class <classe>]
+//                                     classe de prioridade na placa de video de processos da arvore de quem chamou;
+//                                     --raise: so sobe (quem ja esta nessa classe ou acima, REALTIME inclusive, fica como esta);
+//                                     --if-class: so muda quem ainda esta naquela classe (a volta: so o que o Telinha mudou)
 //     telinha-audio.exe --version
 //
 // Para de capturar (saida 0) quando o stdin fecha (EOF ou pipe quebrado), o stdout fecha, o processo
@@ -36,6 +38,7 @@
 // --gpu-priority ajusta e sai; uma linha por item no stdout:
 //     hags <on|off|unknown>                                   agendamento da placa por hardware (HAGS), para o log
 //     ok pid=<pid> before=<CLASSE> after=<CLASSE>
+//     keep pid=<pid> class=<CLASSE>                           deixado como estava (--raise / --if-class)
 //     error <gone|tree|open|get|set> 0x<codigo> pid=<pid> <mensagem>   gone = o processo terminou
 //     error api 0x<HRESULT> <mensagem>                        o Windows nao tem a funcao
 //
@@ -68,7 +71,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "telinha-audio 2";
+constexpr const char* kVersion = "telinha-audio 3";
 constexpr UINT32 kRate = 48000;
 constexpr UINT16 kChannels = 2;
 constexpr REFERENCE_TIME kBufferHns = 1000000;   // 100 ms de buffer no WASAPI (a latencia e o periodo, ~10 ms)
@@ -575,6 +578,11 @@ int ListSessions() {
 // administrador, nivel de integridade medio, HAGS ligado): HIGH num outro processo do mesmo usuario funciona com um handle
 // PROCESS_SET_INFORMATION; com so PROCESS_QUERY_LIMITED_INFORMATION ou PROCESS_SET_LIMITED_INFORMATION o Windows responde
 // 0xC0000022 (acesso negado) ate para ler a classe.
+// Nunca abaixa o que ja estava alto: o processo da GPU do Discord pode ja estar em REALTIME (posto pelo proprio Discord;
+// o motor de voz dele importa a D3DKMTSetProcessSchedulingPriorityClass). Medido em 02/11/2026 (RTX 3070, HAGS ligado,
+// Windows 11 build 26300): um --class high por cima baixou o processo da GPU de REALTIME para HIGH e, com um jogo pesado,
+// o NVENC foi de ~7 ms para ~400 ms por quadro. Por isso o Telinha sobe com --raise (quem ja esta em HIGH ou acima fica
+// como esta) e volta com --if-class high (so quem ainda esta na classe que ele pos; se outro mudou depois, fica).
 // So aceita processos da arvore de quem abriu o helper (o Discord): nao serve para mexer em qualquer processo.
 
 // D3DKMT_SCHEDULINGPRIORITYCLASS e as structs abaixo vem do d3dkmthk.h (WDK): declaradas aqui, so o que se usa, para o
@@ -709,6 +717,19 @@ const char* HagsState(HMODULE gdi) {
     return on ? "on" : known ? "off" : "unknown";
 }
 
+/** --raise: so sobe; --if-class: so muda quem ainda esta naquela classe; nenhum dos dois: sempre muda. */
+struct GpuCondition {
+    bool raiseOnly = false;
+    INT ifClass = -1;
+};
+
+/** true = o processo fica como esta: --raise e ele ja esta em `cls` ou acima; --if-class e ele esta em outra classe. */
+bool KeepAsIs(const GpuCondition& when, INT current, INT cls) {
+    if (when.raiseOnly) return current >= cls;
+    if (when.ifClass >= 0) return current != when.ifClass;
+    return false;
+}
+
 const char* NtText(LONG status) {
     switch (static_cast<unsigned long>(status)) {
     case 0xC0000022ul: return "acesso negado";
@@ -718,7 +739,7 @@ const char* NtText(LONG status) {
     }
 }
 
-int RunGpuPriority(const std::vector<DWORD>& pids, INT cls) {
+int RunGpuPriority(const std::vector<DWORD>& pids, INT cls, const GpuCondition& when) {
     const HMODULE gdi = LoadLibraryExW(L"gdi32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     const auto setPriority = gdi ? GdiProc<KmtSetPriorityFn>(gdi, "D3DKMTSetProcessSchedulingPriorityClass") : nullptr;
     const auto getPriority = gdi ? GdiProc<KmtGetPriorityFn>(gdi, "D3DKMTGetProcessSchedulingPriorityClass") : nullptr;
@@ -781,17 +802,20 @@ int RunGpuPriority(const std::vector<DWORD>& pids, INT cls) {
             INT classAfter = -1;
             const char* stage = "get";
             LONG status = getPriority(target, &classBefore);
-            if (status >= 0) {
+            const bool keep = status >= 0 && KeepAsIs(when, classBefore, cls);
+            if (status >= 0 && !keep) {
                 stage = "set";
                 status = setPriority(target, cls);
-            }
-            if (status >= 0) {
-                stage = "get";
-                status = getPriority(target, &classAfter);
+                if (status >= 0) {
+                    stage = "get";
+                    status = getPriority(target, &classAfter);
+                }
             }
             if (status < 0) {
                 targetError(stage, static_cast<unsigned long>(status), pid, NtText(status));
                 failed++;
+            } else if (keep) {
+                Out("keep pid=%lu class=%s", static_cast<unsigned long>(pid), GpuClassName(classBefore).c_str());
             } else {
                 Out("ok pid=%lu before=%s after=%s", static_cast<unsigned long>(pid), GpuClassName(classBefore).c_str(), GpuClassName(classAfter).c_str());
             }
@@ -806,7 +830,7 @@ int RunGpuPriority(const std::vector<DWORD>& pids, INT cls) {
 
 int Usage() {
     Line("error usage 0x80070057 uso: telinha-audio.exe (--exclude <pid> | --include <pid>) [--parent <pid>] [--seconds <n>] | --probe | --sessions"
-         " | --gpu-priority <pid[,pid...]> --class <high|above_normal|normal|below_normal|idle> | --version");
+         " | --gpu-priority <pid[,pid...]> --class <high|above_normal|normal|below_normal|idle> [--raise | --if-class <classe>] | --version");
     return 2;
 }
 
@@ -817,6 +841,7 @@ int wmain(int argc, wchar_t** argv) {
     bool probe = false, sessions = false, haveTarget = false;
     std::vector<DWORD> gpuPids;
     INT gpuClass = -1;
+    GpuCondition gpuWhen;
 
     for (int i = 1; i < argc; i++) {
         const wchar_t* a = argv[i];
@@ -847,6 +872,10 @@ int wmain(int argc, wchar_t** argv) {
             return 2;
         } else if (!wcscmp(a, L"--class") && gpuClass < 0 && ParseGpuClass(v, gpuClass)) {
             i++;
+        } else if (!wcscmp(a, L"--raise") && !gpuWhen.raiseOnly) {
+            gpuWhen.raiseOnly = true;
+        } else if (!wcscmp(a, L"--if-class") && gpuWhen.ifClass < 0 && ParseGpuClass(v, gpuWhen.ifClass)) {
+            i++;
         } else {
             return Usage();
         }
@@ -854,8 +883,11 @@ int wmain(int argc, wchar_t** argv) {
     const bool gpu = !gpuPids.empty();
     if (static_cast<int>(probe) + static_cast<int>(sessions) + static_cast<int>(haveTarget) + static_cast<int>(gpu) != 1) return Usage();
     if (gpu != (gpuClass >= 0) || (gpu && (o.parent || o.seconds > 0))) return Usage();
+    // --raise e --if-class: so com o --gpu-priority, e um ou outro
+    const bool conditional = gpuWhen.raiseOnly || gpuWhen.ifClass >= 0;
+    if (conditional && (!gpu || (gpuWhen.raiseOnly && gpuWhen.ifClass >= 0))) return Usage();
     // so a placa de video: sem audio, sem COM e sem exigir o Windows 10 2004
-    if (gpu) return RunGpuPriority(gpuPids, gpuClass);
+    if (gpu) return RunGpuPriority(gpuPids, gpuClass, gpuWhen);
 
     const DWORD build = OsBuild();
     if (!sessions && build < kMinBuild) {

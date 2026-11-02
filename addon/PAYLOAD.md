@@ -310,11 +310,20 @@ capture mode at the start of every stream (`Modo da captura: …`), and "Copiar 
 
 The other option of the same group, "Prioridade da captura na placa de vídeo" (`gpuPriority`, experimental, off by
 default), needs no restart and no file. While a stream is live, the plugin's natives (`core/captureBoostMain.ts`) run
-`telinha-audio.exe --gpu-priority <Discord main pid>,<GPU process pid> --class high` once. The GPU process pid comes from
-`app.getAppMetrics()`. The helper calls `D3DKMTSetProcessSchedulingPriorityClass`, accepts only processes in its
-caller's own process tree, refuses REALTIME, and exits. When the stream stops, each process goes back to the class it
-had before. A restore that fails for any reason other than "the process is gone" stays pending: the next restore, the
-next stream and the next plugin start retry it, and a repeated failure is logged only once. The helper reports `gone`
+`telinha-audio.exe --gpu-priority <Discord main pid>,<GPU process pid> --class high --raise` once. The GPU process pid
+comes from `app.getAppMetrics()`. These are the two processes that do the capture work: in Chromium 152 a
+`getDisplayMedia` capture runs in the browser process (`InProcessVideoCaptureProvider` → `DesktopCaptureDevice` on its
+`desktopCaptureThread`, where WGC creates its own D3D11 device and copies each frame), and the GPU process converts and
+encodes it. The "Video Capture" utility process only serves cameras (`DEVICE_VIDEO_CAPTURE`), so it is not a target. The
+helper calls `D3DKMTSetProcessSchedulingPriorityClass`, accepts only processes in its caller's own process tree, refuses
+REALTIME, and exits. With `--raise` it never lowers a class: a process already at HIGH or above is left alone and
+reported as `keep pid=<pid> class=<CLASS>`. Discord's GPU process can already be at REALTIME (set by Discord itself).
+Lowering it to HIGH made NVENC go from ~7 ms to ~400 ms per frame under a heavy game (RTX 3070, HAGS on, 02/11/2026).
+When the stream stops, only the processes the plugin raised go back to the class they had before, with `--if-class
+high`: a process whose class someone else changed in the meantime is left alone (`keep`). The log line lists every
+process, with `NORMAL→HIGH` or `já estava REALTIME`. A restore that fails for any reason other than "the process is
+gone" stays pending: the next restore, the next stream and the next plugin start retry it, and a repeated failure is
+logged only once. The helper reports `gone`
 for a process that exited, and `tree` for a pid that now belongs to a process outside the caller's tree. It re-checks
 this with a second snapshot taken while it holds the process handles, so a recycled pid is never touched. If Discord's
 GPU process restarts mid-stream (`app` `child-process-gone`, type `GPU`), its old pid is dropped and the new GPU process
