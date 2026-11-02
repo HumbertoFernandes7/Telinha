@@ -19,6 +19,7 @@ import { after, before, describe, test } from "node:test";
 import { changeStreamQuality } from "@plugins/telinha/actions";
 import { rt } from "@plugins/telinha/core/context";
 import { getState } from "@plugins/telinha/store";
+import { installWebAudio } from "@test/fakes/audio";
 import { pluginSettings } from "@test/fakes/vencord";
 import { captureStream, type FakeMediaStream, type FakeRTCPeerConnection, videoSenderStats } from "@test/fakes/webrtc";
 import { connectViewer, createRig, destroyRig, enterCall, logMark, removalsFrom, screenOptions, seconds, type StreamingRig, turns, videoSenderOf, windowOptions } from "@test/helpers/wpb-streaming";
@@ -200,6 +201,79 @@ describe("trocar a qualidade no ar", () => {
         await seconds(rig, 1);
         rig.room.receive("watch", { op: "stop" }, v.peerId);
         await turns();
+    });
+
+    test("tela inteira com som, cancelada no fim: o ajudante de audio da captura no ar continua (nada novo comecou)", async () => {
+        const audio = installWebAudio();
+        const reads: { id: number; resolve: (r: unknown) => void; }[] = [];
+        let starts = 0;
+        rig.native.telinha.startScreenAudio = async () => ({ ok: true, id: ++starts, sampleRate: 48000, channels: 2 });
+        rig.native.telinha.readScreenAudio = (id: number) => new Promise(resolve => reads.push({ id, resolve }));
+        let release!: () => void;
+        try {
+            await startStreaming(screenOptions({ withAudio: true }));
+            await turns();
+            const before = rt.local!;
+            assert.equal(before.info.hasAudio, true);
+            rig.rtc.mediaDevices.getDisplayMediaImpl = constraints => new Promise(resolve => {
+                release = () => resolve(captureStream({ audio: !!constraints.audio }));
+            });
+            const change = changeStreamQuality("1440p30");
+            await turns();
+            const v = await watcher("comsom", 0);
+            release();
+            await assert.rejects(change, { message: QUALITY_LOCK_STARTING });
+            assert.equal(rt.local, before);
+            assert.equal(starts, 1, "o ajudante da captura nova nem comecou (tomaria o lugar do audio no ar)");
+
+            // o audio no ar continua sendo lido do ajudante: a proxima leitura chega e outra e pedida
+            const pending = reads.length;
+            reads.at(-1)!.resolve({ pcm: null, ended: false });
+            await turns();
+            assert.equal(reads.length, pending + 1);
+            assert.equal(reads.at(-1)!.id, 1);
+            assert.ok(before.stream.getAudioTracks().every(t => t.readyState === "live"));
+            v.out.bytes = SENDING;
+            await seconds(rig, 1);
+            rig.room.receive("watch", { op: "stop" }, v.peerId);
+            await turns();
+        } finally {
+            rig.rtc.mediaDevices.getDisplayMediaImpl = constraints => Promise.resolve(captureStream({ audio: !!constraints.audio }));
+            audio.restore();
+        }
+    });
+
+    test("quem pede para assistir enquanto o audio da tela nova comeca espera e recebe a captura nova (nada desmontado)", async () => {
+        const audio = installWebAudio();
+        let audioStarted!: () => void;
+        rig.native.telinha.startScreenAudio = () => new Promise(resolve => {
+            audioStarted = () => resolve({ ok: true, id: 50, sampleRate: 48000, channels: 2 });
+        });
+        rig.native.telinha.readScreenAudio = () => new Promise(() => { });
+        try {
+            const before = rt.local!;
+            const change = changeStreamQuality("720p30");
+            await turns();
+            seq++;
+            const peerId = "qespera";
+            const pc = await connectViewer(rig, peerId, String(830_000_000_000_000_000n + BigInt(seq)), "espera", { h264HwDecode: true });
+            rig.room.receive("watch", { op: "start" }, peerId);
+            await turns();
+            assert.equal(before.viewers.has(peerId), false, "nao comecou na captura que vai ser desmontada");
+            audioStarted();
+            await change;
+            await turns();
+            assert.notEqual(rt.local, before);
+            assert.ok(rt.local!.viewers.has(peerId), "recebe a captura nova");
+            assert.equal(removalsFrom(rig.room, peerId).length, 0);
+            const v = { peerId, label: "", pc, out: { bytes: SENDING } };
+            report(v);
+            await seconds(rig, 1);
+            rig.room.receive("watch", { op: "stop" }, peerId);
+            await turns();
+        } finally {
+            audio.restore();
+        }
     });
 
     // por ultimo: o envio travado desliga o H.264 automatico nesta sessao

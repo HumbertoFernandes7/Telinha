@@ -200,6 +200,8 @@ const sends = new Map<PeerId, ViewerSend>();
 /** performance.now() do ultimo pedido de codec de cada conexao (onCodecRequest) */
 const codecRequestAt = new Map<PeerId, number>();
 let starting = false;
+/** startStreaming trocando a captura no ar: quem pede para assistir ate a troca acabar (sendTo espera; null = nao) */
+let deferredJoins: Set<PeerId> | null = null;
 let extras: CaptureExtras | null = null;
 let tickCount = 0;
 
@@ -330,6 +332,17 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
             stream.getTracks().forEach(t => t.stop());
             throw new Error("A captura veio sem vídeo.");
         }
+        // de novo, antes do audio da tela (que toma o lugar do audio no ar: screenAudio.ts → superseded): um espectador
+        // pode ter entrado durante o getDisplayMedia (o envio H.264 dele ainda nao mandou nada). Desiste sem mexer na
+        // captura no ar: so a nova para. Daqui ate a troca, quem pede para assistir espera (deferredJoins) e recebe a
+        // captura nova: nada novo comeca no envio que o stopCapture vai desmontar
+        const onAir = rt.local;
+        const late = onAir && recaptureLock(qualityLockOf(onAir), onAir.source.id === source.id);
+        if (late) {
+            stream.getTracks().forEach(t => t.stop());
+            throw new Error(late);
+        }
+        if (onAir) deferredJoins = new Set();
         if (wantScreenAudio) {
             try {
                 const screenAudio = await startScreenAudioCapture({
@@ -367,13 +380,6 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
         const access: AccessChoice = chosenAccess ?? (previous ? { access: previous.access, password: previous.password } : { access: "all", password: null });
         // escolha nova de "Quem pode assistir" ao trocar de fonte: vale como setStreamAccess (antes de stopCapture apagar a senha)
         const accessChanged = !!previous && (access.access !== previous.access || access.password !== previous.password);
-        // de novo: um espectador pode ter entrado durante o getDisplayMedia (o envio H.264 dele ainda nao mandou nada).
-        // Desiste sem mexer na captura no ar: so a nova para
-        const late = previous && recaptureLock(qualityLockOf(previous), previous.source.id === source.id);
-        if (late) {
-            stream.getTracks().forEach(t => t.stop());
-            throw new Error(late);
-        }
         const carried = carryCodecs(keepViewers);
         if (previous) stopCapture(previous, "trocando de fonte");
 
@@ -401,7 +407,9 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
         // o modo da captura (live com jogo pesado, core/captureBoost.ts): para comparar com e sem pelo "fonte N" do envio
         noteCaptureStarted();
         sendPresence();
-        for (const peerId of keepViewers) sendTo(peerId, carried.get(peerId));
+        const waiting = deferredJoins ?? [];
+        deferredJoins = null;
+        for (const peerId of [...keepViewers, ...waiting]) sendTo(peerId, carried.get(peerId));
         if (accessChanged) resetAccessGuards();
         publish();
     } catch (e) {
@@ -412,6 +420,10 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
     } finally {
         starting = false;
         noteStreamStarting(false);
+        // a troca falhou: quem pediu enquanto isso vai para a captura que ficou no ar
+        const waiting = deferredJoins;
+        deferredJoins = null;
+        for (const peerId of waiting ?? []) sendTo(peerId);
     }
 }
 
@@ -1062,6 +1074,11 @@ function sendTo(peerId: PeerId, carried?: CarriedCodec) {
         return;
     }
     if (local.viewers.has(peerId)) return;
+    if (deferredJoins) {
+        // capturando de novo: um envio novo aqui seria desmontado ainda sem mandar video (qualityLockOf); vai para a nova
+        deferredJoins.add(peerId);
+        return;
+    }
     if (contained(peerId)) {
         // a faixa nova renegociaria a conexao do envio travado (e com o plano congelado dela, em H.264 de novo)
         logThrottled(`watch-stuck:${peerId}`, "warn", `${peerLabel(peerId)} pediu para assistir, mas a placa de vídeo travou no envio para ele nesta sessão: `
