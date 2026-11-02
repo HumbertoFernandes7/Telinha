@@ -74,7 +74,8 @@ function helperDir() {
     return fromLoader && isAbsolute(fromLoader) ? fromLoader : __dirname;
 }
 
-function helperPath() {
+/** Caminho do telinha-audio.exe (tambem usado pelo --gpu-priority, core/captureBoostMain.ts). */
+export function helperPath() {
     return helperPathOverride ?? join(helperDir(), SCREEN_AUDIO_HELPER);
 }
 
@@ -97,11 +98,15 @@ function basicCheck(): string | null {
     return null;
 }
 
-function spawnErrorReason(e: NodeJS.ErrnoException) {
-    if (e?.code === "ENOENT") return `o ajudante de áudio (${SCREEN_AUDIO_HELPER}) não foi encontrado (o antivírus pode tê-lo removido)`;
+/**
+ * Por que o telinha-audio.exe nao abriu (o spawn falhou), em pt-BR. `who`: como a mensagem chama o exe (o audio da tela:
+ * "o ajudante de áudio"; a prioridade na placa de video, core/captureBoostMain.ts: "o ajudante do Telinha").
+ */
+export function spawnErrorReason(e: NodeJS.ErrnoException, who = "o ajudante de áudio") {
+    if (e?.code === "ENOENT") return `${who} (${SCREEN_AUDIO_HELPER}) não foi encontrado (o antivírus pode tê-lo removido)`;
     if (e?.code === "EACCES" || e?.code === "EPERM" || e?.code === "UNKNOWN")
-        return `o Windows ou o antivírus bloqueou o ajudante de áudio (${SCREEN_AUDIO_HELPER})`;
-    return `não foi possível abrir o ajudante de áudio: ${e?.code ?? ""} ${e?.message ?? String(e)}`.trim();
+        return `o Windows ou o antivírus bloqueou ${who} (${SCREEN_AUDIO_HELPER})`;
+    return `não foi possível abrir ${who}: ${e?.code ?? ""} ${e?.message ?? String(e)}`.trim();
 }
 
 /** Linha "error <etapa> 0x<hr> <texto>" do helper + codigo de saida -> motivo em pt-BR. */

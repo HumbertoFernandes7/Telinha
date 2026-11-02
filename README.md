@@ -134,6 +134,8 @@ Quem transmite clica em **"Ao vivo · N assistindo"**, na barra do Telinha, e v�
 
 **Jogos:** use o modo **borderless / sem bordas**. Em tela cheia exclusiva a imagem pode aparecer preta.
 
+**Live travando com jogo pesado (experimental):** se a live fica com poucos quadros por segundo enquanto um jogo usa a placa de vídeo toda, ligue nas configurações do Telinha **"Captura pela placa de vídeo"** (Windows 11 24H2 ou mais novo; vale depois de reiniciar o Discord) e **"Prioridade da captura na placa de vídeo"** (vale na próxima transmissão; sem administrador na maioria dos PCs). As duas vêm desligadas, e a linha abaixo delas diz se deu certo. Com a captura pela placa de vídeo ligada, se a placa de vídeo reiniciar (driver, notebook trocando de placa), a transmissão para; é só transmitir de novo.
+
 ## Privacidade
 
 - **Conexão direta significa que quem está na call pode ver o IP das outras pessoas.** Use só com quem você confia.
