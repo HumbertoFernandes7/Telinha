@@ -98,9 +98,9 @@ describe("presenca recebida: caps.hwDecode (protocol.ts passo 11)", () => {
     const base = { v: PROTOCOL_VERSION, discordUserId: "200000000000000002", username: "amigo", streaming: false };
     const capsOf = (caps: unknown) => sanitizePresence({ ...base, caps } as PresenceMessage).caps;
 
-    test("v1 com High: fica; marcas desconhecidas (H.265/AV1 futuros) e lixo saem", () => {
+    test("v1 com High: fica; marcas desconhecidas (codecs futuros) e lixo saem", () => {
         assert.deepEqual(capsOf({ h264HwDecode: true, hwDecode: { v: 1, h264High: true } }), { h264HwDecode: true, hwDecode: { v: 1, h264High: true } });
-        assert.deepEqual(capsOf({ h264HwDecode: true, hwDecode: { v: 1, h264High: true, av1: true, evil: "x" } }), { h264HwDecode: true, hwDecode: { v: 1, h264High: true } });
+        assert.deepEqual(capsOf({ h264HwDecode: true, hwDecode: { v: 1, h264High: true, vvc: true, evil: "x" } }), { h264HwDecode: true, hwDecode: { v: 1, h264High: true } });
     });
 
     test("versao antiga (sem o campo), nada verdadeiro, outra versao ou formato errado: como sem o campo", () => {

@@ -352,7 +352,7 @@ describe("falhas no ar e o botao", () => {
 
     test("noteStuckEncoder de um envio em H.265: VP9 nesta sessao, o H.265 marcado, sem o registro permanente do H.264", async () => {
         pluginSettings.set("hwH265Probe", null);
-        noteStuckEncoder(null, true);
+        noteStuckEncoder(null, "h265");
         assert.equal(getLocalCaps().h264HwEncode, false);
         await eventually(() => h265ProbeRecord()?.verdict === "broken");
         assert.equal(h265ProbeRecord()?.detail, "o encoder da placa de vídeo travou numa transmissão em H.265");

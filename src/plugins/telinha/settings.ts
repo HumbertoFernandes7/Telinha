@@ -6,6 +6,7 @@
 
 import { definePluginSettings } from "@api/Settings";
 import { migrateAccessSetting } from "@plugins/telinha/core/access";
+import { onAv1SettingChanged } from "@plugins/telinha/core/av1Flag";
 import { onGpuCaptureSettingChanged, onGpuPrioritySettingChanged } from "@plugins/telinha/core/captureBoost";
 import { onShareDiagnosticsChanged } from "@plugins/telinha/core/diagShare";
 import { isIdentityConfigured } from "@plugins/telinha/core/identity/config";
@@ -15,6 +16,7 @@ import { onApprovalPolicyChanged, onAutoQualitySettingChanged } from "@plugins/t
 import { onCodecSettingChanged } from "@plugins/telinha/core/stuckEncoder";
 import { onJitterCushionChanged } from "@plugins/telinha/core/viewing";
 import { captureBoostStatusElement } from "@plugins/telinha/ui/CaptureBoostStatus";
+import { codecStatusElement } from "@plugins/telinha/ui/CodecStatus";
 import { OptionType } from "@utils/types";
 
 export type CodecSetting = "auto" | "h264" | "h265" | "vp8" | "vp9" | "av1";
@@ -115,7 +117,9 @@ export const settings = definePluginSettings({
         type: OptionType.SELECT,
         displayName: "Formato de vídeo (codec)",
         description: "Codec de vídeo ao transmitir. Automático: H.264 quando o seu PC codifica e o do amigo decodifica por hardware; senão VP9. "
-            + "H.265 só ajuda com internet boa; com internet fraca pode perder fps. Ele só vai com a placa de vídeo dos dois lados; senão, vai o do automático. "
+            + "H.265 só ajuda com internet boa; com internet fraca pode perder fps. "
+            + "AV1: só com placa RTX 40/50 (ou Radeon RX 7000, Intel Arc) de quem transmite e RTX 30 ou mais nova de quem assiste; depois de escolher, reinicie o Discord. "
+            + "Os dois só vão com a placa de vídeo dos dois lados; senão, vai o do automático. "
             + "Escolhido durante uma transmissão, o teste da placa roda quando ela acabar.",
         options: [
             { label: "Automático (recomendado)", value: "auto", default: true },
@@ -125,8 +129,17 @@ export const settings = definePluginSettings({
             { label: "VP9", value: "vp9" },
             { label: "AV1", value: "av1" }
         ],
-        // fixado em H.265: a sonda dele roda agora (so com ele fixado)
-        onChange: () => void onCodecSettingChanged()
+        // fixado em H.265 ou AV1: a sonda dele roda agora (so com ele fixado); AV1: o pedido do WebRtcAV1HWEncode para a
+        // proxima partida do Discord (core/av1Flag.ts)
+        onChange: () => {
+            void onCodecSettingChanged();
+            void onAv1SettingChanged();
+        }
+    },
+    // o que falta para o AV1 fixado ir (ui/CodecStatus.tsx); nada fica salvo nesta chave
+    codecStatus: {
+        type: OptionType.COMPONENT,
+        component: () => codecStatusElement()
     },
     autoUpdate: {
         type: OptionType.BOOLEAN,

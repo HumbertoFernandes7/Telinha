@@ -92,6 +92,16 @@ test("H.265 chegando e nenhum quadro (o decodificador da placa daqui falhou): pe
         + "decodificador D3D11VideoDecoder); pedindo ao transmissor para mandar VP9"]);
 });
 
+test("AV1 chegando e nenhum quadro (o decodificador da placa daqui falhou): pede VP9 do mesmo jeito, e o aviso diz AV1", async t => {
+    const clock = useFakeClock(t);
+    const lines = logMark();
+    streamArrives({ mimeType: "video/AV1", framesDecoded: 0, framesReceived: 0, bytesReceived: 250_000, decoderImplementation: "D3D11VideoDecoder" });
+    await clock.tickAsync(NO_FRAME_HINT_MS + 150, 150);
+    assert.deepEqual(requests(), [[{ codec: "vp9" }, "peerA"]]);
+    assert.deepEqual(firstAsks(lines()), ["Assistir amigo (peerA): nenhum quadro do vídeo em AV1 decodificado em 10 s (0 quadros recebidos, "
+        + "decodificador D3D11VideoDecoder); pedindo ao transmissor para mandar VP9"]);
+});
+
 test("o 1o quadro encerra os pedidos; um stream novo em H.264 sem quadro (ele trocou de janela) pede de novo", async t => {
     const clock = useFakeClock(t);
     const pc = addStreamer(room, "peerA");

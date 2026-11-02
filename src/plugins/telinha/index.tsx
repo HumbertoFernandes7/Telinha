@@ -13,6 +13,7 @@ import definePlugin from "@utils/types";
 import { showToast } from "@webpack/common";
 
 import { startSession, stopSession } from "./actions";
+import { av1FlagDiagnostics, refreshAv1Flag, startAv1Flag } from "./core/av1Flag";
 import { captureBoostDiagnostics, refreshGpuCapture, startCaptureBoost } from "./core/captureBoost";
 import { setDiagnosticsSource } from "./core/diagShare";
 import { localIdentityDiagnostics } from "./core/identity";
@@ -50,8 +51,9 @@ function identityDiagnostics(): string {
  * main.log, asked from the main process), then format. Also what core/diagShare.ts sends to a friend who asked for it.
  */
 const diagnostics = {
-    refresh: () => Promise.all([refreshUpdateStatus(), refreshUpdateLog(), refreshGpuCapture()]).catch(() => null),
-    format: () => `${formatDiagnostics()}\n${updateDiagnostics()}\n${identityDiagnostics()}\n${stuckEncoderDiagnostics()}\n${captureBoostDiagnostics()}\n${liveWeightDiagnostics()}\n\n${formatVoiceTagDiagnostics()}`
+    refresh: () => Promise.all([refreshUpdateStatus(), refreshUpdateLog(), refreshGpuCapture(), refreshAv1Flag()]).catch(() => null),
+    format: () => `${formatDiagnostics()}\n${updateDiagnostics()}\n${identityDiagnostics()}\n${stuckEncoderDiagnostics()}\n${av1FlagDiagnostics()}\n${captureBoostDiagnostics()}`
+        + `\n${liveWeightDiagnostics()}\n\n${formatVoiceTagDiagnostics()}`
 };
 
 function copyDiagnostics() {
@@ -140,6 +142,8 @@ export default definePlugin({
         startUpdateChecks();
         // "Captura pela placa de vídeo": o arquivo que o loader le na proxima partida volta a bater com a opcao
         void startCaptureBoost();
+        // AV1 fixado: o core/codec.ts fica sabendo se o WebRtcAV1HWEncode ligou nesta partida, e o arquivo volta a bater
+        void startAv1Flag();
         runAction("startSession", () => startSession(), () => { });
     },
 

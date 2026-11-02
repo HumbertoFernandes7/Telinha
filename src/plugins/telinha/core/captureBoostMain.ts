@@ -12,7 +12,8 @@
 // placa de video em vez de copia-lo para o processador com um Map que espera atras do jogo. So vale a partir da partida do
 // Discord: quem liga e o loader do add-on (addon/loader/main.js → applyCaptureFlags), que le o
 // %APPDATA%\Telinha\capture-flags.json antes do app ficar pronto e publica o que fez em globalThis.__TelinhaAddon.capture.
-// Aqui so se grava o arquivo (para a proxima partida) e se le o que o loader fez nesta.
+// Aqui so se grava o arquivo (para a proxima partida) e se le o que o loader fez nesta. O mesmo arquivo leva o AV1 da placa
+// (core/av1FlagMain.ts): cada opcao grava so a sua chave e mantem a da outra (writeCaptureFlags).
 //
 // "Prioridade da captura na placa de vídeo": enquanto transmite, o processo principal do Discord (onde o Chromium captura
 // a tela e copia cada quadro) e o da GPU (onde converte e codifica) sobem para a classe HIGH do agendador da placa de
@@ -72,16 +73,20 @@ export interface GpuCaptureStatus {
     saveError: string | null;
 }
 
-interface LoaderCapture {
+export interface LoaderCapture {
     file: string;
     wgcTexture?: unknown;
     applied?: unknown;
     reason?: unknown;
     enableFeatures?: unknown;
+    /** o arquivo pedia o WebRtcAV1HWEncode nesta partida (loader desta versao em diante) */
+    av1HwEncode?: unknown;
+    /** o WebRtcAV1HWEncode estava no enable-features quando o app ficou pronto; null = nao foi pedido */
+    av1Applied?: unknown;
 }
 
 /** O que o loader desta partida publicou (null: sem loader do add-on, ou um loader antigo). */
-function loaderCapture(): LoaderCapture | null {
+export function loaderCapture(): LoaderCapture | null {
     const capture = (globalThis as { __TelinhaAddon?: { capture?: unknown; }; }).__TelinhaAddon?.capture as LoaderCapture | null | undefined;
     return capture && typeof capture.file === "string" && isAbsolute(capture.file) ? capture : null;
 }
@@ -93,13 +98,41 @@ function windowsBuild(): number {
 
 const text = (v: unknown, max: number) => (typeof v === "string" && v ? v.slice(0, max) : null);
 
-function savedIn(file: string): boolean {
+/** As chaves do capture-flags.json que o Telinha conhece (o resto do arquivo e ignorado e some na proxima gravacao). */
+export interface CaptureFlags {
+    wgcTexture: boolean;
+    av1HwEncode: boolean;
+}
+
+/** O capture-flags.json agora (ausente, ilegivel ou sem `true` = desligado). */
+export function readCaptureFlags(file: string): CaptureFlags {
     try {
-        return JSON.parse(readFileSync(file, "utf8"))?.wgcTexture === true;
+        const raw = JSON.parse(readFileSync(file, "utf8"));
+        return { wgcTexture: raw?.wgcTexture === true, av1HwEncode: raw?.av1HwEncode === true };
     } catch {
-        return false;
+        return { wgcTexture: false, av1HwEncode: false };
     }
 }
+
+/**
+ * Grava `patch` por cima do que o arquivo ja pede (a outra opcao fica como esta), com arquivo temporario + rename: o
+ * loader nunca le um arquivo pela metade. Lanca se nao conseguir (quem chama devolve o erro em pt-BR).
+ */
+export function writeCaptureFlags(file: string, patch: Partial<CaptureFlags>) {
+    const next = { format: 1, ...readCaptureFlags(file), ...patch };
+    const tmp = `${file}.${process.pid}.tmp`;
+    try {
+        writeFileSync(tmp, JSON.stringify({ format: 1, wgcTexture: next.wgcTexture === true, av1HwEncode: next.av1HwEncode === true }) + "\n");
+        renameSync(tmp, file);
+    } catch (e) {
+        try {
+            rmSync(tmp, { force: true });
+        } catch { }
+        throw e;
+    }
+}
+
+const savedIn = (file: string) => readCaptureFlags(file).wgcTexture;
 
 export function gpuCaptureStatusMain(saveError: string | null = null): GpuCaptureStatus {
     const capture = loaderCapture();
@@ -124,15 +157,10 @@ export function gpuCaptureStatusMain(saveError: string | null = null): GpuCaptur
 export function setGpuCaptureMain(on: boolean): GpuCaptureStatus {
     const capture = loaderCapture();
     if (!capture) return gpuCaptureStatusMain();
-    const tmp = `${capture.file}.${process.pid}.tmp`;
     try {
-        writeFileSync(tmp, JSON.stringify({ format: 1, wgcTexture: on === true }) + "\n");
-        renameSync(tmp, capture.file);
+        writeCaptureFlags(capture.file, { wgcTexture: on === true });
         return gpuCaptureStatusMain();
     } catch (e) {
-        try {
-            rmSync(tmp, { force: true });
-        } catch { }
         return gpuCaptureStatusMain(`não consegui salvar a opção (${e instanceof Error ? e.message : String(e)})`.slice(0, 300));
     }
 }

@@ -32,8 +32,8 @@ import { startScreenAudioCapture } from "./audio/screenAudio";
 import { captureEndedText, noteCaptureStarted, noteCaptureStopped, textureCaptureActive } from "./captureBoost";
 import { startCaptureCopy } from "./captureCopy";
 import {
-    chooseCodec, type CodecDecision, type EncoderReport, getLocalCaps, h264ReserveOf, isOffHardwareH265, isSoftwareH264, isTransientSoftwareH264, noteH264Fallback, pickNegotiatedCodec,
-    softwareFallback
+    AV1_HW_MIN_HEIGHT, chooseCodec, type CodecDecision, type EncoderReport, getLocalCaps, h264ReserveOf, HW_ONLY_LABEL, isOffHardwareHwOnly, isSoftwareH264, isTransientSoftwareH264, noteH264Fallback,
+    pickNegotiatedCodec, softwareFallback, whyNoHwOnlyHere
 } from "./codec";
 import { blockOf, captureTrackOf, getPc, type LocalCapture, peerLabel, publish, rt, setLastError } from "./context";
 import { isIdentityConfigured } from "./identity/config";
@@ -48,8 +48,10 @@ import { isQuality, QUALITIES, RESOLUTION_WIDTH, sourceSizeNote } from "./qualit
 import { QualityController } from "./quality/controller";
 import { encodingFor, LEVELS, levelText, scaledSize } from "./quality/levels";
 import { isHardwareEncoder } from "./quality/stats";
-import { h264ProfileLevelId, isH264High, sameH264Profile } from "./sdp";
-import { noteH265Failed, noteHighFailed, noteStreamStarting, noteStuckEncoder, onStreamStopped, STUCK_NOTICE, STUCK_NOTICE_H265, STUCK_NOTICE_HIGH, STUCK_NOTICE_PINNED } from "./stuckEncoder";
+import { h264ProfileLevelId, type HwOnlyCodec, isH264High, isHwOnlyCodec, sameH264Profile } from "./sdp";
+import {
+    noteHighFailed, noteHwOnlyFailed, noteStreamStarting, noteStuckEncoder, onStreamStopped, STUCK_NOTICE, STUCK_NOTICE_AV1, STUCK_NOTICE_H265, STUCK_NOTICE_HIGH, STUCK_NOTICE_PINNED
+} from "./stuckEncoder";
 
 export interface QualityProfile {
     width: number;
@@ -147,8 +149,8 @@ interface ViewerSend {
      * E ele que leva a culpa quando o envio trava ou cai (blameOf), nao o que a decisao pediu
      */
     inUse?: { mime: string; profile: string | null; };
-    /** decisao H.265: as estatisticas ja mostraram o H.265 no ar (checkH265: sair dele depois = o H.265 falhou) */
-    h265Seen?: boolean;
+    /** decisao H.265/AV1: as estatisticas ja mostraram ele no ar (checkHwOnly: sair dele depois = ele falhou) */
+    hwOnlySeen?: boolean;
 }
 
 /** Janela da checagem do H.264 que nao sai (checkStall). Contadores de quadros da captura (capturedFrames). */
@@ -409,6 +411,7 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
             if (rt.local === local) dropCopy(local);
         });
         rt.lastError = null;
+        warnPinnedAv1();
         startExtras(local, video);
 
         video.addEventListener("ended", () => {
@@ -447,6 +450,20 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
         deferredJoins = null;
         for (const peerId of waiting ?? []) sendTo(peerId);
     }
+}
+
+/**
+ * Inicio da transmissao com o AV1 fixado que este PC nao pode mandar agora (codec.ts → whyNoHwOnlyHere: a placa nao
+ * codifica AV1, o WebRtcAV1HWEncode nao ligou nesta partida, a sonda nao passou...): cada espectador vai no automatico
+ * (nunca o AV1 por software), e a barra do Telinha diz por que. Com este PC pronto, nada (cada espectador ainda passa
+ * por chooseCodec, que confere o lado dele).
+ */
+function warnPinnedAv1() {
+    if (settings.store.codec !== "av1") return;
+    const why = whyNoHwOnlyHere("av1", getLocalCaps());
+    if (!why) return;
+    log.warn(`O formato de vídeo está fixado em AV1, mas ${why}: esta transmissão vai no automático (o AV1 nunca vai por software)`);
+    rt.lastError = `O formato de vídeo está fixado em AV1, mas ${why}. A transmissão vai no Automático.`;
 }
 
 /** Qualidade automatica + monitor de imagem preta/congelada para a captura que acabou de comecar. */
@@ -606,7 +623,7 @@ export function stopStreaming(reason = "parada pelo usuário") {
     endOfStreamGuards();
     sendPresence();
     publish();
-    // H.265 fixado com a transmissao no ar: a sonda dele, que esperava, roda agora (stuckEncoder.ts; as mesmas regras)
+    // H.265 ou AV1 fixado com a transmissao no ar: a sonda dele, que esperava, roda agora (stuckEncoder.ts; as mesmas regras)
     void onStreamStopped();
 }
 
@@ -1047,7 +1064,7 @@ function carryCodecs(viewers: readonly PeerId[]): Map<PeerId, CarriedCodec> {
     const carried = new Map<PeerId, CarriedCodec>();
     for (const peerId of viewers) {
         const send = sends.get(peerId);
-        if (!send || send.stuck || send.decision.codec === "h264" || send.decision.codec === "h265" || !(send.fellBack || send.codecRequested)) continue;
+        if (!send || send.stuck || send.decision.codec === "h264" || isHwOnlyCodec(send.decision.codec) || !(send.fellBack || send.codecRequested)) continue;
         carried.set(peerId, { decision: send.decision, fellBack: send.fellBack, codecRequested: send.codecRequested });
     }
     return carried;
@@ -1077,7 +1094,7 @@ function qualityLockOf(local: LocalCapture): string | null {
             stuck = true;
             continue;
         }
-        if (!send || send.sending || send.fellBack || !/^video\/h26[45]$/i.test(send.reportedCodec ?? `video/${send.decision.codec}`)) continue;
+        if (!send || send.sending || send.fellBack || !HW_SEND_MIME.test(send.reportedCodec ?? `video/${send.decision.codec}`)) continue;
         const pinnedUnknown = !send.encoderKind && settings.store.codec === "h264";
         if (pinnedUnknown || encoderKindOf(send) === "hardware") return QUALITY_LOCK_STARTING;
     }
@@ -1213,12 +1230,12 @@ function encoderKindOf(send: ViewerSend | undefined): EncoderKind {
 
 /**
  * O tipo de encoder que uma decisao cria AGORA (H.264 com este PC codificando na placa = placa; H.265 = sempre a placa, o
- * Chromium nao tem H.265 por software; o resto = software).
+ * Chromium nao tem H.265 por software; AV1 = a placa, a decisao so sai com ela confirmada; o resto = software).
  * Guardado no envio (expectedKind) quando ele comeca ou troca de codec: o h264HwEncode mudando depois (a sonda do High
  * segurando o H.264, uma queda de outro envio) nao muda o encoder que ja esta no ar.
  */
 function expectedKindFor(decision: CodecDecision | undefined): EncoderKind {
-    if (decision?.codec === "h265") return "hardware";
+    if (isHwOnlyCodec(decision?.codec)) return "hardware";
     return decision?.codec === "h264" && getLocalCaps().h264HwEncode ? "hardware" : "software";
 }
 
@@ -1445,7 +1462,7 @@ function videoLeaving(encoded: number, sent: SentCounters) {
  * decodifica e o espectador, ele pede VP9 (viewing.ts → askForVp9; aqui, onCodecRequest).
  */
 function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: EncoderReport, frames: number | null, sent: SentCounters) {
-    if (send.stuck || send.fellBack || send.sending || !/^video\/h26[45]$/i.test(enc.mimeType)) return;
+    if (send.stuck || send.fellBack || send.sending || !HW_SEND_MIME.test(enc.mimeType)) return;
     const encoded = enc.framesEncoded ?? 0;
     if (videoLeaving(encoded, sent)) {
         send.sending = true;
@@ -1489,7 +1506,8 @@ function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: 
         local.copy.abandon(`os quadros não saem da cópia (o envio para ${label} ficou ${secs} s sem vídeo com a captura entregando quadros)`);
         return;
     }
-    const name = /h265/i.test(enc.mimeType) ? "H.265" : "H.264";
+    const hwOnly = hwOnlyOfMime(enc.mimeType);
+    const name = hwOnly ? HW_ONLY_LABEL[hwOnly] : "H.264";
     const what = encoded === 0
         ? `O encoder ${name} para ${label} não codificou nenhum quadro em ${secs} s`
         : `O ${name} para ${label} codificou quadros, mas nenhum saiu deste PC em ${secs} s`;
@@ -1501,9 +1519,22 @@ function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: 
     const why = `${what}, com a conexão no ar e a captura entregando quadros (${counts.join(", ")})`;
     // o encoder no ar e o OpenH264 (software): nao e a placa, e trocar o codec de um encoder de software e seguro (como a
     // queda do checkEncoder). So o da placa, ou um encoder que o Chromium nao informa, fica contido e marca a placa.
-    if (name === "H.265" && enc.powerEfficient === false) {
-        // H.265 fora da placa (o Chromium nao tem H.265 por software): um encoder que nao e o da placa e seguro de trocar
-        leaveH265(peerId, local, send, `${why}, fora da placa de vídeo`);
+    if (hwOnly && (enc.powerEfficient === false || (hwOnly === "av1" && /libaom|svt|rav1e/i.test(enc.implementation ?? "")))) {
+        // AV1 abaixo de 270p (AV1_HW_MIN_HEIGHT): o libaom e de proposito (o mesmo corte do isOffHardwareAv1), nao e a placa travada:
+        // nada fica marcado (sem noteHwOnlyFailed). Mas o libaom parado deixa o espectador no preto, e um encoder de software e
+        // seguro de trocar: so este espectador passa para a reserva H.264 (ou o que o automatico escolhe sem o AV1)
+        if (hwOnly === "av1" && enc.height && enc.height < AV1_HW_MIN_HEIGHT) {
+            if (send.fellBack) return;
+            send.fellBack = true;
+            const next = h264ReserveOf(send.decision, "a reserva do AV1, que parou por software abaixo de 270p") ?? chooseWithout("av1", peerId);
+            log.info(`${what} (${enc.height}p, abaixo de ${AV1_HW_MIN_HEIGHT}p o AV1 por software é de propósito): não é a placa de vídeo, nada fica marcado; `
+                + `trocando para ${next.codec.toUpperCase()} só para ${label}`);
+            void switchSendCodec(peerId, local, send, next);
+            return;
+        }
+        // H.265/AV1 fora da placa (o H.265 nao tem software; o AV1 sim, o libaom): um encoder que nao e o da placa e seguro de trocar.
+        // So o AV1 tem software no Chromium: parou por software (o Chromium trocou a placa), entao "offHw" (o botao da placa limpa)
+        leaveHwOnly(hwOnly, peerId, local, send, `${why}, fora da placa de vídeo`, true);
         return;
     }
     if (name === "H.264" && (enc.powerEfficient === false || /openh264/i.test(enc.implementation ?? ""))) {
@@ -1538,31 +1569,33 @@ function containStuck(peerId: PeerId, local: LocalCapture, send: ViewerSend, why
     qualityOf(local)?.removeViewer(peerId);
     const pinned = settings.store.codec === "h264";
     // a culpa e do codec de fato no ar (blameOf). High: o Baseline passou na sonda dele; depois de reiniciar, vai o
-    // Baseline. H.265: nada do H.264 fica marcado; depois de reiniciar, vai o H.264
+    // Baseline. H.265/AV1: nada do H.264 fica marcado; depois de reiniciar, vai o H.264
     const blame = blameOf(send);
     const high = blame.kind === "high" ? blame.profile : null;
-    noteStuckEncoder(high, blame.kind === "h265");
-    const what = blame.kind === "h265" ? "H.265" : `H.264${high ? ` High (perfil ${high})` : ""}`;
+    const hwOnly = blame.kind === "h265" || blame.kind === "av1" ? blame.kind : null;
+    noteStuckEncoder(high, hwOnly);
+    const what = hwOnly ? HW_ONLY_LABEL[hwOnly] : `H.264${high ? ` High (perfil ${high})` : ""}`;
     log.warn(`${why}: a placa de vídeo travou com ${what}. O envio para ${label} fica como está até o Discord reiniciar (trocar o codec, `
         + "parar ou fechar a conexão travaria o Discord inteiro). "
-        + (blame.kind === "h265" ? "O H.265 fica desligado neste PC até o driver, o Chromium ou a placa mudarem (o H.264 não leva a culpa); nesta sessão, o automático vai em VP9."
+        + (hwOnly ? `O ${what} fica desligado neste PC até o driver, o Chromium ou a placa mudarem (o H.264 não leva a culpa); nesta sessão, o automático vai em VP9.`
             : high ? "O High fica desligado neste PC até o driver, o Chromium ou a placa mudarem; nesta sessão, o automático vai em VP9."
                 : "O H.264 automático fica desligado neste PC até o driver, o Chromium ou a placa mudarem."));
-    setLastError(blame.kind === "h265" ? STUCK_NOTICE_H265 : high ? STUCK_NOTICE_HIGH : pinned ? STUCK_NOTICE_PINNED : STUCK_NOTICE);
+    setLastError(hwOnly === "h265" ? STUCK_NOTICE_H265 : hwOnly === "av1" ? STUCK_NOTICE_AV1 : high ? STUCK_NOTICE_HIGH : pinned ? STUCK_NOTICE_PINNED : STUCK_NOTICE);
     reply(peerId, { op: "stuck" });
 }
 
 /**
  * Quem leva a culpa quando este envio trava ou cai: o codec DE FATO no ar (send.inUse, das estatisticas), nao o que a
- * decisao pediu. Uma decisao H.265 negociada em H.264 (o outro lado sem H.265, ou o WebRTC trocou sozinho) que trava
+ * decisao pediu. Uma decisao H.265/AV1 negociada em H.264 (o outro lado sem ele, ou o WebRTC trocou sozinho) que trava
  * culpa o H.264; uma decisao High negociada em Baseline culpa o Baseline. Sem leitura ainda, vale a decisao.
- * - "h265": o H.265 (nunca o registro do H.264);
+ * - "h265" / "av1": ele (nunca o registro do H.264);
  * - "high": o High (6400xx), so quando a placa tem outro perfil por hardware para separar (h264HwProfile nao High);
  * - "h264": o H.264 da placa, como sempre.
  */
-function blameOf(send: ViewerSend): { kind: "h265"; } | { kind: "high"; profile: string; } | { kind: "h264"; } {
+function blameOf(send: ViewerSend): { kind: HwOnlyCodec; } | { kind: "high"; profile: string; } | { kind: "h264"; } {
     const mime = send.inUse?.mime.toLowerCase() ?? `video/${send.decision.codec}`;
-    if (mime === "video/h265") return { kind: "h265" };
+    const hwOnly = hwOnlyOfMime(mime);
+    if (hwOnly) return { kind: hwOnly };
     if (mime !== "video/h264") return { kind: "h264" };
     // perfil negociado (fmtp do codec em uso); sem ele, o que a decisao H.264 pediu (uma H.265 nao pede perfil para isso)
     const profile = send.inUse?.profile ?? (send.decision.codec === "h264" ? send.decision.h264Profile : null);
@@ -1570,45 +1603,58 @@ function blameOf(send: ViewerSend): { kind: "h265"; } | { kind: "high"; profile:
     return { kind: "high", profile: profile! };
 }
 
+/** Os mimeTypes dos encoders da placa que o tick continua conferindo (H.264, H.265, AV1). */
+const HW_SEND_MIME = /^video\/(h26[45]|av1)$/i;
+
+/** "h265"/"av1" para o mimeType de um deles; null para o resto. */
+function hwOnlyOfMime(mime: string): HwOnlyCodec | null {
+    const m = /^video\/(h265|av1)$/i.exec(mime)?.[1]?.toLowerCase();
+    return m === "h265" || m === "av1" ? m : null;
+}
+
 /**
- * Uma decisao H.265 no ar (tick, antes de logar o codec): confere o codec de fato em uso.
- * - H.265 no ar, na placa: anota (send.h265Seen). Fora da placa (powerEfficientEncoder false): o H.265 falhou (leaveH265).
- * - Outro codec no ar depois de o H.265 ter estado no ar, ou com o H.265 na lista negociada (sender.getParameters()
- *   .codecs, lido so com o encoder em uso ja soltando quadros: um encoder saudavel; a PRESENCA, nunca a posicao: o
- *   libwebrtc poe o codec de envio ATUAL na frente, entao depois da troca o 1o ja e o H.264), = o WebRTC trocou sozinho (o
- *   encoder H.265 da placa falhou ao subir, antes do 1o quadro, ou no meio): culpa do H.265 (noteH265Failed), sem marcar o
- *   H.264, e o envio passa a ser tratado como o codec que esta no ar (a reserva H.264, com as checagens dele do zero).
- * - Outro codec no ar sem o H.265 negociado (o outro lado nao aceitou H.265): nada fica marcado; so o envio passa a ser
- *   tratado como o codec que esta no ar.
+ * Uma decisao H.265 ou AV1 no ar (tick, antes de logar o codec): confere o codec de fato em uso.
+ * - Ele no ar, na placa: anota (send.hwOnlySeen). Fora da placa (powerEfficientEncoder false; no AV1, tambem o libaom
+ *   por software: isOffHardwareAv1): ele falhou (leaveHwOnly). Nunca um AV1 por software no envio.
+ * - Outro codec no ar depois de ele ter estado no ar, ou com ele na lista negociada (sender.getParameters().codecs, lido so
+ *   com o encoder em uso ja soltando quadros: um encoder saudavel; a PRESENCA, nunca a posicao: o libwebrtc poe o codec de
+ *   envio ATUAL na frente, entao depois da troca o 1o ja e o H.264), = o WebRTC trocou sozinho (o encoder da placa falhou
+ *   ao subir, antes do 1o quadro, ou no meio): culpa dele (noteHwOnlyFailed), sem marcar o H.264, e o envio passa a ser
+ *   tratado como o codec que esta no ar (a reserva H.264, com as checagens dele do zero).
+ * - Outro codec no ar sem ele negociado (o outro lado nao aceitou): nada fica marcado; so o envio passa a ser tratado como
+ *   o codec que esta no ar.
  */
-function checkH265(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: EncoderReport) {
-    if (send.decision.codec !== "h265" || send.stuck) return;
+function checkHwOnly(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: EncoderReport) {
+    const { codec } = send.decision;
+    if (!isHwOnlyCodec(codec) || send.stuck) return;
     const label = peerLabel(peerId);
-    if (/^video\/h265$/i.test(enc.mimeType)) {
-        if ((enc.framesEncoded ?? 0) > 0) send.h265Seen = true;
-        if (isOffHardwareH265(enc)) leaveH265(peerId, local, send, `O H.265 para ${label} não está sendo codificado pela placa de vídeo (${enc.implementation || "sem aceleração"})`);
+    const name = HW_ONLY_LABEL[codec];
+    if (hwOnlyOfMime(enc.mimeType) === codec) {
+        if ((enc.framesEncoded ?? 0) > 0) send.hwOnlySeen = true;
+        // o Chromium trocou a placa pelo software (AV1: libaom): nao e travada, o botao da placa de video limpa (offHw)
+        if (isOffHardwareHwOnly(codec, enc)) leaveHwOnly(codec, peerId, local, send, `O ${name} para ${label} não está sendo codificado pela placa de vídeo (${enc.implementation || "sem aceleração"})`, true);
         return;
     }
     if ((enc.framesEncoded ?? 0) <= 0) return;
-    let negotiatedH265 = send.h265Seen === true;
-    if (!negotiatedH265) {
+    let negotiated = send.hwOnlySeen === true;
+    if (!negotiated) {
         try {
-            negotiatedH265 = (videoSender(peerId, local)?.getParameters().codecs ?? []).some(c => /^video\/h265$/i.test(c.mimeType));
+            negotiated = (videoSender(peerId, local)?.getParameters().codecs ?? []).some(c => hwOnlyOfMime(c.mimeType) === codec);
         } catch { }
     }
     const inUse = enc.mimeType.replace(/^video\//i, "").toUpperCase();
     const reserve = /^video\/h264$/i.test(enc.mimeType)
-        ? h264ReserveOf(send.decision, `a reserva do H.265 (${send.decision.reason})`) ?? { codec: "h264" as const, h264Profile: getLocalCaps().h264HwProfile, reason: "a reserva do H.265" }
+        ? h264ReserveOf(send.decision, `a reserva do ${name} (${send.decision.reason})`) ?? { codec: "h264" as const, h264Profile: getLocalCaps().h264HwProfile, reason: `a reserva do ${name}` }
         : null;
-    if (negotiatedH265) {
-        noteH265Failed(`o WebRTC trocou o H.265 por ${inUse} numa transmissão (${label})`);
-        log.warn(`O H.265 para ${label} saiu do ar: o WebRTC trocou sozinho para ${inUse} (o encoder H.265 da placa de vídeo falhou). `
-            + "O H.265 fica desligado neste PC até o driver, o Chromium ou a placa mudarem; o H.264 não leva a culpa.");
+    if (negotiated) {
+        noteHwOnlyFailed(codec, `o WebRTC trocou o ${name} por ${inUse} numa transmissão (${label})`);
+        log.warn(`O ${name} para ${label} saiu do ar: o WebRTC trocou sozinho para ${inUse} (o encoder ${name} da placa de vídeo falhou). `
+            + `O ${name} fica desligado neste PC até o driver, o Chromium ou a placa mudarem; o H.264 não leva a culpa.`);
     } else {
-        log.info(`${label} não negociou H.265: o vídeo para ele vai em ${inUse}${reserve ? " (a reserva)" : ""}; nada fica marcado neste PC`);
+        log.info(`${label} não negociou ${name}: o vídeo para ele vai em ${inUse}${reserve ? " (a reserva)" : ""}; nada fica marcado neste PC`);
     }
     // o envio passa a ser o que esta no ar: as checagens do H.264 (checkEncoder, checkStall) recomecam para esse encoder
-    send.decision = reserve ?? { codec: inUse.toLowerCase() as CodecDecision["codec"], reason: `no ar no lugar do H.265 (${send.decision.reason})` };
+    send.decision = reserve ?? { codec: inUse.toLowerCase() as CodecDecision["codec"], reason: `no ar no lugar do ${name} (${send.decision.reason})` };
     send.expectedKind = reserve ? expectedKindFor(reserve) : "software";
     send.reportedCodec = undefined;
     send.encoderKind = undefined;
@@ -1618,21 +1664,29 @@ function checkH265(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: E
 }
 
 /**
- * O H.265 deste envio saiu da placa de video no ar (checkH265, checkStall): culpa do H.265 (noteH265Failed, nunca o
+ * O H.265/AV1 deste envio saiu da placa de video no ar (checkHwOnly, checkStall): culpa dele (noteHwOnlyFailed, nunca o
  * registro do H.264 nem a contagem de quedas dele) e so ESTE espectador passa para a reserva H.264 da decisao (ou, sem
- * ela, o que chooseCodec escolhe sem o H.265), sem reconectar. O encoder no ar nao e o da placa, entao trocar e seguro.
- * Uma vez por espectador (send.fellBack). `why`: a frase do problema, sem ponto.
+ * ela, o que chooseCodec escolhe sem ele), sem reconectar. O encoder no ar nao e o da placa (no AV1, o libaom), entao
+ * trocar e seguro. Uma vez por espectador (send.fellBack). `why`: a frase do problema, sem ponto. `offHardware`: o Chromium
+ * trocou a placa pelo software (checkHwOnly; so o AV1 tem software): fica salvo "offHw" (o botao da placa limpa), nao "broken".
  */
-function leaveH265(peerId: PeerId, local: LocalCapture, send: ViewerSend, why: string) {
+function leaveHwOnly(codec: HwOnlyCodec, peerId: PeerId, local: LocalCapture, send: ViewerSend, why: string, offHardware = false) {
     if (send.fellBack) return;
     send.fellBack = true;
     const label = peerLabel(peerId);
-    noteH265Failed(`${why.slice(0, 120)} (${label})`);
-    const setting = settings.store.codec as CodecSetting;
-    const next = h264ReserveOf(send.decision, "a reserva do H.265, que saiu da placa de vídeo")
-        ?? chooseCodec(rt.peers.get(peerId)?.presence?.caps, setting === "h265" ? "auto" : setting, { ...getLocalCaps(), h265ProbeOk: false });
-    log.warn(`${why}: o H.265 fica desligado neste PC até o driver, o Chromium ou a placa mudarem (o H.264 não leva a culpa); trocando para ${next.codec.toUpperCase()} só para ${label}.`);
+    const name = HW_ONLY_LABEL[codec];
+    // so o AV1 tem software no Chromium: la o "offHw" (sai da placa, o botao limpa); o resto (travou, H.265) fica "broken"
+    noteHwOnlyFailed(codec, `${why.slice(0, 120)} (${label})`, offHardware && codec === "av1" ? "offHw" : "broken");
+    const next = h264ReserveOf(send.decision, `a reserva do ${name}, que saiu da placa de vídeo`) ?? chooseWithout(codec, peerId);
+    log.warn(`${why}: o ${name} fica desligado neste PC até o driver, o Chromium ou a placa mudarem (o H.264 não leva a culpa); trocando para ${next.codec.toUpperCase()} só para ${label}.`);
     void switchSendCodec(peerId, local, send, next);
+}
+
+/** O que chooseCodec escolhe para este espectador sem o H.265/AV1 (fixado nele = o automatico; a sonda dele como nao passou). */
+function chooseWithout(codec: HwOnlyCodec, peerId: PeerId): CodecDecision {
+    const setting = settings.store.codec as CodecSetting;
+    const local = { ...getLocalCaps(), ...(codec === "av1" ? { av1ProbeOk: false } : { h265ProbeOk: false }) };
+    return chooseCodec(rt.peers.get(peerId)?.presence?.caps, setting === codec ? "auto" : setting, local);
 }
 
 /**
@@ -1711,8 +1765,8 @@ export function onCodecRequest(peerId: PeerId, request: CodecRequestMessage) {
         logThrottled(`codec-request-idle:${peerId}`, "info", `${label} pediu ${wanted} (nenhum quadro em H.264 do lado dele), mas não está recebendo a sua transmissão: ignorado`, 60_000);
         return;
     }
-    // ja atendido, ou o envio ja nao e H.264/H.265 (ex.: trocou para VP9 por uma queda do encoder)
-    if (send.codecRequested || (send.decision.codec !== "h264" && send.decision.codec !== "h265")) return;
+    // ja atendido, ou o envio ja nao e H.264/H.265/AV1 (ex.: trocou para VP9 por uma queda do encoder)
+    if (send.codecRequested || (send.decision.codec !== "h264" && !isHwOnlyCodec(send.decision.codec))) return;
     if (send.stuck) {
         logThrottled(`codec-request-stuck:${peerId}`, "info", `Pedido de ${wanted} de ${label} ignorado: a placa de vídeo travou no envio para ele `
             + "e trocar o codec agora travaria o Discord", 60_000);
@@ -1733,19 +1787,19 @@ export function onCodecRequest(peerId: PeerId, request: CodecRequestMessage) {
         return;
     }
     send.codecRequested = true;
-    const h265 = send.decision.codec === "h265";
-    const why = `${label} não decodificou nenhum quadro do vídeo em ${h265 ? "H.265" : "H.264"} e pediu ${wanted}`;
-    const setting = settings.store.codec as CodecSetting;
-    // H.265: o decodificador dele pode nao ser o da placa; vai a reserva H.264 (nada fica marcado neste PC)
-    const next = h265
-        ? chooseCodec(rt.peers.get(peerId)?.presence?.caps, setting === "h265" ? "auto" : setting, { ...getLocalCaps(), h265ProbeOk: false })
-        : chooseCodec(rt.peers.get(peerId)?.presence?.caps, setting, { ...getLocalCaps(), h264HwEncode: false });
+    const hwOnly = isHwOnlyCodec(send.decision.codec) ? send.decision.codec : null;
+    const name = hwOnly ? HW_ONLY_LABEL[hwOnly] : "H.264";
+    const why = `${label} não decodificou nenhum quadro do vídeo em ${name} e pediu ${wanted}`;
+    // H.265/AV1: o decodificador dele pode nao ser o da placa; vai a reserva H.264 (nada fica marcado neste PC)
+    const next = hwOnly
+        ? chooseWithout(hwOnly, peerId)
+        : chooseCodec(rt.peers.get(peerId)?.presence?.caps, settings.store.codec as CodecSetting, { ...getLocalCaps(), h264HwEncode: false });
     if (next.codec === send.decision.codec) {
         log.warn(`${why}: continua em H.264 porque o codec está fixado nas configurações`);
         return;
     }
     send.fellBack = true;
-    log.warn(`${why}: trocando para ${next.codec.toUpperCase()} só para ${label}. Não conta como queda do ${h265 ? "H.265" : "H.264"} deste PC (pode ser o decodificador dele).`);
+    log.warn(`${why}: trocando para ${next.codec.toUpperCase()} só para ${label}. Não conta como queda do ${name} deste PC (pode ser o decodificador dele).`);
     void switchSendCodec(peerId, local, send, next);
 }
 
@@ -1833,7 +1887,7 @@ export function tick() {
         // depois de logar o codec real, so o envio que esta de fato em H.264 continua sendo conferido (o Chromium pode
         // trocar o encoder da placa de video pelo OpenH264 no meio, ex.: quando o WebRTC reduz a resolucao; ver checkEncoder)
         // envio travado (containStuck): nao e mais lido nem conferido
-        if (!send || send.stuck || (send.reportedCodec && (!/^video\/h26[45]$/i.test(send.reportedCodec) || send.fellBack))) continue;
+        if (!send || send.stuck || (send.reportedCodec && (!HW_SEND_MIME.test(send.reportedCodec) || send.fellBack))) continue;
         const sender = videoSender(peerId, local);
         if (!sender) continue;
         sender.getStats().then(report => {
@@ -1857,16 +1911,16 @@ export function tick() {
             // H.264: o perfil negociado de fato (o fmtp do codec em uso), para conferir o High no ar e culpar o certo (blameOf)
             const profile = /^video\/h264$/i.test(codec) ? h264ProfileLevelId(fmtp) : null;
             send.inUse = { mime: codec, profile };
-            // decisao H.265: o codec de fato no ar (o outro lado sem H.265, ou o WebRTC trocou sozinho) vem antes do log
-            checkH265(peerId, local, send, enc);
-            if (send.fellBack && send.decision.codec !== "h265" && /^video\/h265$/i.test(codec)) return;
+            // decisao H.265/AV1: o codec de fato no ar (o outro lado sem ele, o WebRTC trocou sozinho, o libaom) vem antes do log
+            checkHwOnly(peerId, local, send, enc);
+            if (send.fellBack && !isHwOnlyCodec(send.decision.codec) && hwOnlyOfMime(codec)) return;
             if (!send.reportedCodec) {
                 send.reportedCodec = codec;
                 const expected = `video/${send.decision.codec}`.toLowerCase();
                 const wantedProfile = send.decision.codec === "h264" ? send.decision.h264Profile : null;
-                // H.265: o nivel e o perfil negociados (sem os x-google-*)
-                const h265Fmtp = /^video\/h265$/i.test(codec) ? fmtp.split(";").filter(p => /^(level-id|profile-id|tier-flag|tx-mode)=/.test(p)).join(";") : "";
-                const msg = `Codificando para ${peerLabel(peerId)}: ${codec}${profile ? ` perfil ${profile}` : ""}${h265Fmtp ? ` (${h265Fmtp})` : ""}`
+                // H.265/AV1: o nivel e o perfil negociados (sem os x-google-*)
+                const hwOnlyFmtp = hwOnlyOfMime(codec) ? fmtp.split(";").filter(p => /^(level-id|profile-id|tier-flag|tx-mode|level-idx|profile|tier)=/.test(p)).join(";") : "";
+                const msg = `Codificando para ${peerLabel(peerId)}: ${codec}${profile ? ` perfil ${profile}` : ""}${hwOnlyFmtp ? ` (${hwOnlyFmtp})` : ""}`
                     + `${enc.implementation ? ` (${enc.implementation}${enc.powerEfficient ? ", hardware" : ""})` : ""}`;
                 if (codec.toLowerCase() !== expected) log.warn(`${msg} — esperado ${send.decision.codec.toUpperCase()}`);
                 else if (profile && wantedProfile && !sameH264Profile(profile, wantedProfile)) log.warn(`${msg} — esperado o perfil ${wantedProfile}`);
@@ -1878,7 +1932,7 @@ export function tick() {
             }
             // aplicada para outro tipo de encoder: reaplica. No H.264 so com o video ja saindo (checkStall → sending): um
             // setParameters num encoder da placa que ainda nao soltou nada pode ser no travado (core/stuckEncoder.ts)
-            if (send.degradation && send.degradation.kind !== encoderKindOf(send) && (!/^video\/h26[45]$/i.test(codec) || send.sending))
+            if (send.degradation && send.degradation.kind !== encoderKindOf(send) && (!HW_SEND_MIME.test(codec) || send.sending))
                 qualityOf(local)?.reapply(peerId);
             checkEncoder(peerId, local, send, enc);
             checkStall(peerId, local, send, enc, frames, { frames: counter(out.framesSent), bytes: counter(out.bytesSent) });

@@ -105,9 +105,9 @@ describe("gravar a opcao para a proxima partida", () => {
         helperHost(t, { build: 26300 });
         loader();
         assert.equal(setGpuCapture(ipcEvent(), true).saved, true);
-        assert.deepEqual(saved(), { format: 1, wgcTexture: true });
+        assert.deepEqual(saved(), { format: 1, wgcTexture: true, av1HwEncode: false });
         assert.equal(setGpuCaptureMain(false).saved, false);
-        assert.deepEqual(saved(), { format: 1, wgcTexture: false });
+        assert.deepEqual(saved(), { format: 1, wgcTexture: false, av1HwEncode: false });
         assert.deepEqual(readdirSync(dir), ["capture-flags.json"]);
     });
 

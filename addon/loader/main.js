@@ -26,8 +26,8 @@
  *      Vencord's own rewrite (Electron keeps a single listener; Vencord then replaces the method by a noop)
  *   4. Dormant fallback: a BrowserWindow subclass under Vencord's, which swaps in our preload only when
  *      the renderer hook never fired (e.g. a future Vencord renamed the channel)
- *   5. Chromium features the user turned on in the plugin (capture-flags.json, PAYLOAD.md section 6.1), which only take
- *      effect when they are on the command line before app ready
+ *   5. Chromium features the user turned on in the plugin (capture-flags.json, PAYLOAD.md section 6.1: the GPU capture and
+ *      the GPU's AV1 encoder), which only take effect when they are on the command line before app ready
  *
  * Any failure in our part is logged and Vencord/Discord still load. If Vencord itself fails before Discord was
  * required, Discord is started vanilla instead of not starting at all. Contract: addon/PAYLOAD.md.
@@ -375,8 +375,9 @@ function installPreloadFallback() {
 
 /**
  * %APPDATA%\Telinha\capture-flags.json, written by the plugin's natives when the user changes "Captura pela placa de vídeo"
- * (core/captureBoostMain.ts). Read here, once per start: Chromium only takes features from the command line before app
- * ready, so the option needs a Discord restart. Missing or unreadable = everything off.
+ * (core/captureBoostMain.ts) or pins/unpins "AV1" in "Formato de vídeo" (core/av1FlagMain.ts). Read here, once per start:
+ * Chromium only takes features from the command line before app ready, so both need a Discord restart. Missing or
+ * unreadable = everything off.
  */
 const CAPTURE_FLAGS_FILE = path.join(__dirname, "..", "capture-flags.json");
 /**
@@ -387,6 +388,14 @@ const CAPTURE_FLAGS_FILE = path.join(__dirname, "..", "capture-flags.json");
 const WGC_TEXTURE_FEATURE = "WebRtcAllowWgcUsingTexture";
 /** Windows 11 24H2: Chromium only captures the screen with WGC (and this path only exists) from this build on. */
 const WGC_TEXTURE_MIN_BUILD = 26100;
+/**
+ * Chromium's WebRTC only uses the GPU's AV1 encoder (NVENC on RTX 40/50, AMF on Radeon RX 7000+, Intel Arc) with this
+ * feature: off by default on Windows in Chromium 152 (third_party/blink/renderer/platform/peerconnection/
+ * rtc_video_encoder_factory.cc; on by default elsewhere), and without it WebRTC's AV1 is libaom, in software. The plugin
+ * only asks for it while "AV1" is pinned (core/av1Flag.ts): Chromium keeps it off on Windows on purpose, and it only matters
+ * when AV1 is the send codec. No Windows build requirement: the GPU's AV1 encoder MFT decides on its own.
+ */
+const AV1_HW_ENCODE_FEATURE = "WebRtcAV1HWEncode";
 
 function windowsBuild() {
     if (process.platform !== "win32") return 0;
@@ -404,17 +413,22 @@ function withFeature(value, feature) {
 
 /**
  * A later appendSwitch("enable-features", x) REPLACES the value (Chromium keeps the last one), and Discord's bootstrap sets
- * its own feature that way without merging: every later value gets ours too. Installed once per process (a hand-off to
- * another loader version finds the wrapper already there).
+ * its own feature that way without merging: every later value gets ours too. One wrapper per process, with every feature
+ * asked for (`telinhaKeeps`): a hand-off to another loader version finds it there and only widens it if it asks for more.
  */
-function keepFeatureOnAppend(commandLine, feature) {
-    const original = commandLine.appendSwitch;
-    if (original.telinhaKeeps === feature) return;
+function keepFeaturesOnAppend(commandLine, features) {
+    const current = commandLine.appendSwitch;
+    const kept = Array.isArray(current.telinhaKeeps) ? current.telinhaKeeps : [];
+    if (features.every(f => kept.includes(f))) return;
+    // our own wrapper is replaced by a wider one, never stacked
+    const original = Array.isArray(current.telinhaKeeps) && typeof current.telinhaOriginal === "function" ? current.telinhaOriginal : current;
+    const all = [...new Set([...kept, ...features])];
     const appendSwitch = function appendSwitch(name, value, ...rest) {
-        if (String(name).replace(/^-+/, "").toLowerCase() === "enable-features" && value != null) value = withFeature(value, feature);
+        if (String(name).replace(/^-+/, "").toLowerCase() === "enable-features" && value != null) for (const feature of all) value = withFeature(value, feature);
         return original.call(this, name, value, ...rest);
     };
-    appendSwitch.telinhaKeeps = feature;
+    appendSwitch.telinhaKeeps = all;
+    appendSwitch.telinhaOriginal = original;
     commandLine.appendSwitch = appendSwitch;
 }
 
@@ -431,7 +445,10 @@ function applyCaptureFlags() {
         // the feature was in enable-features when the app got ready; null = not asked for (or not ready yet)
         applied: null,
         enableFeatures: null,
-        reason: null
+        reason: null,
+        // the same two for the GPU's AV1 encoder (AV1_HW_ENCODE_FEATURE); the plugin reads av1HwEncode as "this loader knows it"
+        av1HwEncode: false,
+        av1Applied: null
     };
     state.capture = capture;
     try {
@@ -442,32 +459,49 @@ function applyCaptureFlags() {
             if (err?.code !== "ENOENT") capture.reason = `capture-flags.json ignored (${firstLine(err)})`;
         }
         capture.wgcTexture = flags?.wgcTexture === true;
-        if (!capture.wgcTexture) {
-            if (capture.reason) log(`capture: ${capture.reason}`);
-            return;
-        }
-        if (capture.build < WGC_TEXTURE_MIN_BUILD) {
+        capture.av1HwEncode = flags?.av1HwEncode === true;
+        const features = [];
+        if (capture.wgcTexture && capture.build < WGC_TEXTURE_MIN_BUILD) {
             capture.applied = false;
             capture.reason = `Windows build ${capture.build || "?"}: ${WGC_TEXTURE_FEATURE} needs Windows 11 24H2 (build ${WGC_TEXTURE_MIN_BUILD}) or newer`;
             log(`capture: GPU capture asked for but not applied (${capture.reason})`);
+        } else if (capture.wgcTexture) {
+            features.push(WGC_TEXTURE_FEATURE);
+        }
+        if (capture.av1HwEncode) features.push(AV1_HW_ENCODE_FEATURE);
+        if (!features.length) {
+            if (capture.reason && !capture.wgcTexture) log(`capture: ${capture.reason}`);
             return;
         }
         const { app } = require("electron");
         const commandLine = app.commandLine;
-        commandLine.appendSwitch("enable-features", withFeature(commandLine.getSwitchValue("enable-features"), WGC_TEXTURE_FEATURE));
-        keepFeatureOnAppend(commandLine, WGC_TEXTURE_FEATURE);
-        log(`capture: GPU capture asked for: ${WGC_TEXTURE_FEATURE} added to enable-features (Windows build ${capture.build})`);
+        let value = commandLine.getSwitchValue("enable-features");
+        for (const feature of features) value = withFeature(value, feature);
+        commandLine.appendSwitch("enable-features", value);
+        keepFeaturesOnAppend(commandLine, features);
+        if (capture.wgcTexture && features.includes(WGC_TEXTURE_FEATURE)) log(`capture: GPU capture asked for: ${WGC_TEXTURE_FEATURE} added to enable-features (Windows build ${capture.build})`);
+        if (capture.av1HwEncode) log(`capture: AV1 hardware encode asked for: ${AV1_HW_ENCODE_FEATURE} added to enable-features`);
         // Electron builds Chromium's feature list from the command line after this script ran, before "ready"
         app.whenReady().then(() => {
             capture.enableFeatures = String(commandLine.getSwitchValue("enable-features") ?? "");
-            capture.applied = featureNames(capture.enableFeatures).includes(WGC_TEXTURE_FEATURE);
-            if (!capture.applied) capture.reason = "enable-features was replaced after the loader added the feature";
-            log(`capture: enable-features at app ready: ${capture.enableFeatures || "(empty)"} -> GPU capture ${capture.applied ? "applied" : "NOT applied"}`);
+            const names = featureNames(capture.enableFeatures);
+            const outcome = [];
+            if (features.includes(WGC_TEXTURE_FEATURE)) {
+                capture.applied = names.includes(WGC_TEXTURE_FEATURE);
+                if (!capture.applied) capture.reason = "enable-features was replaced after the loader added the feature";
+                outcome.push(`GPU capture ${capture.applied ? "applied" : "NOT applied"}`);
+            }
+            if (capture.av1HwEncode) {
+                capture.av1Applied = names.includes(AV1_HW_ENCODE_FEATURE);
+                outcome.push(`AV1 hardware encode ${capture.av1Applied ? "applied" : "NOT applied"}`);
+            }
+            log(`capture: enable-features at app ready: ${capture.enableFeatures || "(empty)"} -> ${outcome.join("; ")}`);
         }).catch(() => { });
     } catch (err) {
-        capture.applied = false;
+        if (capture.wgcTexture && capture.applied === null) capture.applied = false;
+        if (capture.av1HwEncode) capture.av1Applied = false;
         capture.reason = `could not turn it on (${firstLine(err)})`;
-        log(`capture: GPU capture not applied: ${capture.reason}`);
+        log(`capture: ${capture.wgcTexture ? "GPU capture" : "AV1 hardware encode"} not applied: ${capture.reason}`);
     }
 }
 
