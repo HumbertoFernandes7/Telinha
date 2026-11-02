@@ -94,7 +94,7 @@ test("High so para quem anuncia High na placa; a v0.3.2 e uma versao futura rece
     assert.ok(lines.includes(`${future.label}: não está transmitindo; H.264 por hardware: sim`), "versao futura: o campo e ignorado");
 
     // o "Copiar diagnóstico" mostra o estado do High (e as linhas acima vao nos eventos dele)
-    assert.ok(stuckEncoderDiagnostics().endsWith("High automático ligado (só com quem anuncia High por hardware)"));
+    assert.ok(stuckEncoderDiagnostics().includes("High automático ligado (só com quem anuncia High por hardware)"));
 });
 
 test("Codificando para: o perfil negociado de fato; High pedido e Baseline negociado vira aviso", async () => {

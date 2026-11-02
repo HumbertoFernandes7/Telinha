@@ -90,7 +90,7 @@ describe("as opcoes", () => {
                 assert.deepEqual([QUALITY[quality].height, QUALITY[quality].fps], [resolution, fps]);
             }
         }
-        assert.deepEqual(values("codec"), ["auto", "h264", "vp8", "vp9", "av1"]);
+        assert.deepEqual(values("codec"), ["auto", "h265", "h264", "vp8", "vp9", "av1"]);
     });
 
     test("'Resolução padrão' (720p · 1080p · 2K) e 'FPS padrão' (30 · 60): 1080p a 60 fps; o texto fala da tela 2K e do teto de 20 Mbps", () => {

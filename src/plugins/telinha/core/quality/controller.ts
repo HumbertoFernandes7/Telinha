@@ -120,8 +120,13 @@ const TARGET_FULL_RATIO = 0.85;
  */
 const TARGET_OF_EST_RATIO = 0.5;
 /**
- * encoderStarved, so no H.264 (a escala do qp muda com o codec; VP9 e AV1 vao so pelo alvo): qp medio a partir disto =
- * imagem ja borrada. No log de 02/11, 38-48 no espectador preso em 1080p60 com ~2 Mbps; ~23-30 no de 20 Mbps.
+ * encoderStarved, so no H.264 e no H.265 (a escala do qp muda com o codec; VP9 e AV1 vao so pelo alvo): qp medio a partir
+ * disto = imagem ja borrada. No log de 02/11, 38-48 no espectador preso em 1080p60 com ~2 Mbps; ~23-30 no de 20 Mbps.
+ * H.265 usa a mesma escala 0-51 do H.264 (o passo de quantizacao dobra a cada 6 nos dois) e o mesmo limite: medido no
+ * Chrome 156 (RTX 3070, NVENC, 1080p60, a mesma cena nos dois) o qp medio quase igual na mesma banda (39,8 contra 40,5 a
+ * 12 Mbps; 35,4 contra 35,6 a 20 Mbps), e o controle de taxa do H.265 do Chromium para no qp 42: sem banda ele fica
+ * preso em 42 e passa a descartar quadros (13 fps a 3 Mbps, onde o H.264 ia a 46 fps no qp 51), entao >= 35 continua
+ * querendo dizer "sem banda" e e o sinal que tira o H.265 desse buraco reduzindo a resolucao.
  */
 const STARVED_QP_H264 = 35;
 /** a base sem fila: este percentil dos RTTs medidos nestes ultimos ms */
@@ -342,7 +347,7 @@ function encoderStarved(m: WindowMetrics): boolean {
     const target = m.targetKbps;
     if (target != null && target > 0 && m.availableKbps != null && target >= m.availableKbps * TARGET_OF_EST_RATIO
         && m.sentKbps >= target * TARGET_FULL_RATIO) return true;
-    return m.mimeType?.toLowerCase() === "video/h264" && m.qp != null && m.qp >= STARVED_QP_H264;
+    return /^video\/h26[45]$/i.test(m.mimeType ?? "") && m.qp != null && m.qp >= STARVED_QP_H264;
 }
 
 /**

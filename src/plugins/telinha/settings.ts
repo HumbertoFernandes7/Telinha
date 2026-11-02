@@ -16,7 +16,7 @@ import { onJitterCushionChanged } from "@plugins/telinha/core/viewing";
 import { captureBoostStatusElement } from "@plugins/telinha/ui/CaptureBoostStatus";
 import { OptionType } from "@utils/types";
 
-export type CodecSetting = "auto" | "h264" | "vp8" | "vp9" | "av1";
+export type CodecSetting = "auto" | "h264" | "h265" | "vp8" | "vp9" | "av1";
 
 // As chaves (groupPassword, rejectOutsiders...) sao o nome salvo nas configuracoes: nao renomear.
 // O titulo mostrado na pagina do plugin vem de displayName (sem ele, o Vencord usa a chave em ingles).
@@ -113,9 +113,11 @@ export const settings = definePluginSettings({
     codec: {
         type: OptionType.SELECT,
         displayName: "Formato de vídeo (codec)",
-        description: "Codec de vídeo ao transmitir. Automático: H.264 quando o seu PC codifica e o do amigo decodifica por hardware; senão VP9.",
+        description: "Codec de vídeo ao transmitir. Automático: H.265 ou H.264 quando o seu PC codifica e o do amigo decodifica por hardware; senão VP9. "
+            + "H.265 só vai com a placa de vídeo dos dois lados e o teste dela ok neste PC; senão, vai o que o automático escolher.",
         options: [
             { label: "Automático (recomendado)", value: "auto", default: true },
+            { label: "H.265", value: "h265" },
             { label: "H.264", value: "h264" },
             { label: "VP8", value: "vp8" },
             { label: "VP9", value: "vp9" },
