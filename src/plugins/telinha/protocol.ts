@@ -113,6 +113,17 @@
 //    Tambem e a resposta a um "start" ou a um pedido de codec enquanto isso durar. O espectador para de esperar e mostra
 //    "A placa de vídeo de X travou; ele precisa reiniciar o Discord." em vez do aviso generico de 45 s.
 //    Compatibilidade: versoes antigas ignoram o op desconhecido (parseWatchReply devolve null) e caem no aviso de 45 s.
+// 11. Decodificacao por hardware por perfil (depois da v0.3.2, adicionado sem mudar PROTOCOL_VERSION): a presenca pode
+//    trazer `caps.hwDecode`, um objeto VERSIONADO: { v: HW_DECODE_CAPS_VERSION, h264High?: true }.
+//    - h264High: este PC decodifica H.264 High (6400xx) na placa de video (mediaCapabilities.decodingInfo do perfil
+//      High do receiver, powerEfficient). O transmissor so manda High (core/codec.ts → chooseCodec) quando o
+//      espectador anuncia isto E o transmissor codifica High na placa com a sonda WebCodecs do High "ok" neste ambiente;
+//      senao, o mesmo H.264 Baseline (42001f) de antes.
+//    - so sai quando ha pelo menos uma marca verdadeira (sem nada a anunciar = a presenca de antes);
+//    - `v` diferente de HW_DECODE_CAPS_VERSION (uma versao futura que mude o sentido das marcas) = o campo inteiro e
+//      ignorado; marca desconhecida (H.265, AV1 nas proximas versoes, sem mudar `v`) e descartada.
+//    Compatibilidade: a v0.3.2 e anteriores (e o amigo virtual) descartam o campo no sanitizePresence: como espectadoras
+//    nunca anunciam High e recebem o Baseline de sempre; como transmissoras ignoram o campo de quem assiste.
 // ============================================================================
 
 /** Versao do protocolo; vai no handshake (`v`) e na presenca (`v`). */
@@ -163,7 +174,8 @@ export const STREAM_KIND_SCREEN = "telinha-screen";
  * (false em erro). A mesma configuracao com encodingInfo diz se o envio em H.264 e por hardware.
  * Desde a v0.2.1 o contentType vai com o perfil: "video/H264;" + sdpFmtpLine de uma variante packetization-mode=1
  * (core/codec.ts). O "video/h264" puro abaixo o Chromium le como 42e01f, perfil que a placa de video pode nao codificar.
- * So muda a sonda local: o campo da presenca continua o mesmo booleano.
+ * So muda a sonda local: o campo da presenca continua o mesmo booleano. O High (6400xx) e uma consulta a parte, com o
+ * fmtp High do receiver, e vai em caps.hwDecode.h264High (passo 11).
  */
 export const H264_PROBE = {
     type: "webrtc",
@@ -207,6 +219,24 @@ export type PresenceStream = {
     access?: StreamAccess;
 };
 
+/** Versao de `caps.hwDecode` (passo 11). Muda so se o sentido de uma marca mudar; marca nova nao muda a versao. */
+export const HW_DECODE_CAPS_VERSION = 1;
+
+/** Decodificacao por hardware por perfil (passo 11). Ausente = nada alem de h264HwDecode (ou versao antiga). */
+export type HwDecodeCaps = {
+    v: number;
+    /** decodifica H.264 High (6400xx) na placa de video */
+    h264High?: boolean;
+};
+
+export type PresenceCaps = {
+    h264HwDecode: boolean;
+    /** "Compartilhar diagnóstico" ligado (passo 9); ausente = desligado ou versao antiga */
+    diag?: boolean;
+    /** perfis que decodifica na placa de video (passo 11); ausente = so o Baseline de h264HwDecode, ou versao antiga */
+    hwDecode?: HwDecodeCaps;
+};
+
 /** Presenca: enviada a cada peer novo ao entrar e a todos em qualquer mudanca. */
 export type PresenceMessage = {
     v: number;
@@ -214,9 +244,19 @@ export type PresenceMessage = {
     username: string;
     streaming: boolean;
     stream?: PresenceStream;
-    /** diag: "Compartilhar diagnóstico" ligado (passo 9); ausente = desligado ou versao antiga */
-    caps: { h264HwDecode: boolean; diag?: boolean; };
+    caps: PresenceCaps;
 };
+
+/** O `caps.hwDecode` que anunciamos (passo 11): null quando nao ha nada a anunciar (a presenca fica a de antes). */
+export function buildHwDecodeCaps(h264High: boolean): HwDecodeCaps | null {
+    return h264High ? { v: HW_DECODE_CAPS_VERSION, h264High: true } : null;
+}
+
+/** `caps.hwDecode` recebido, so com as marcas conhecidas e verdadeiras; versao diferente ou nada verdadeiro = null. */
+export function parseHwDecodeCaps(data: unknown): HwDecodeCaps | null {
+    if (!isObject(data) || data.v !== HW_DECODE_CAPS_VERSION) return null;
+    return buildHwDecodeCaps(data.h264High === true);
+}
 
 /**
  * Pedido do espectador para o transmissor: comecar/parar de mandar o stream so para ele. `proof` responde a um
@@ -348,6 +388,7 @@ export function isPresenceMessage(data: unknown): data is PresenceMessage {
 /** Copia so os campos conhecidos, com limites de tamanho (o peer remoto nao e confiavel). */
 export function sanitizePresence(data: PresenceMessage): PresenceMessage {
     const caps: Record<string, unknown> = isObject(data.caps) ? data.caps : {};
+    const hwDecode = parseHwDecodeCaps(caps.hwDecode);
     const stream = data.streaming && isPresenceStream(data.stream)
         ? {
             kind: data.stream.kind,
@@ -366,7 +407,7 @@ export function sanitizePresence(data: PresenceMessage): PresenceMessage {
         username: data.username.slice(0, MAX_NAME),
         streaming: data.streaming,
         ...(stream ? { stream } : {}),
-        caps: { h264HwDecode: caps.h264HwDecode === true, ...(caps.diag === true ? { diag: true } : {}) }
+        caps: { h264HwDecode: caps.h264HwDecode === true, ...(caps.diag === true ? { diag: true } : {}), ...(hwDecode ? { hwDecode } : {}) }
     };
 }
 

@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { CODEC_RTP_NAME, h264ProfileLevelId, h264Rank, isPacketizationMode1, mungeRemoteSdp, type RemoteSdpPlan } from "./sdp";
+import { CODEC_RTP_NAME, h264ProfileLevelId, h264Rank, isH264High, isPacketizationMode1, mungeRemoteSdp, type RemoteSdpPlan, sameH264Profile } from "./sdp";
 
 const HEAD = ["v=0", "o=- 1 2 IN IP4 127.0.0.1", "s=-", "t=0 0", "a=group:BUNDLE 0 1 2"];
 
@@ -243,5 +243,132 @@ describe("mungeRemoteSdp: opus estereo", () => {
         assert.deepEqual(mungeRemoteSdp(sdp, plan()).changes, []);
         const pcmu = ["m=audio 9 UDP/TLS/RTP/SAVPF 0", "a=mid:0", "a=rtpmap:0 PCMU/8000"];
         assert.deepEqual(mungeRemoteSdp(sdpOf([pcmu]), plan()).changes, []);
+    });
+});
+
+describe("H.264 High: perfil, nivel e reserva", () => {
+    test("isH264High: so 6400 + nivel (o Chromium nunca oferece 640c); sameH264Profile ignora o nivel", () => {
+        for (const p of ["640032", "64001f", "640034", "64002A"]) assert.equal(isH264High(p), true, p);
+        for (const p of ["640c1f", "4d0032", "42001f", "42e01f", "6400", "6400321", "", null, undefined]) assert.equal(isH264High(p), false, String(p));
+        assert.equal(sameH264Profile("640032", "64001F"), true);
+        assert.equal(sameH264Profile("640032", "640c32"), false, "Constrained High e outro perfil");
+        assert.equal(sameH264Profile("42001f", null), false);
+        assert.equal(sameH264Profile(undefined, "42001f"), false);
+    });
+
+    test("rank com reserva: 0 = High, 1 = o Baseline da placa, 2 = outro mode 1, 3 = o resto", () => {
+        const fmtp = (mode: number, profile: string) => `level-asymmetry-allowed=1;packetization-mode=${mode};profile-level-id=${profile}`;
+        assert.equal(h264Rank(fmtp(1, "64001f"), "640032", "42001f"), 0, "outro nivel do High");
+        assert.equal(h264Rank(fmtp(1, "42001f"), "640032", "42001f"), 1);
+        assert.equal(h264Rank(fmtp(1, "42e01f"), "640032", "42001f"), 2);
+        assert.equal(h264Rank(fmtp(1, "640c1f"), "640032", "42001f"), 2, "640c1f nao e High");
+        assert.equal(h264Rank(fmtp(0, "640032"), "640032", "42001f"), 3);
+        assert.equal(h264Rank(fmtp(0, "42001f"), "640032", null), 2, "sem reserva: os valores de antes");
+    });
+});
+
+describe("mungeRemoteSdp: H.264 High no SDP do Chromium 152", () => {
+    type H264Line = [pt: number, rtx: number, mode: 0 | 1, profile: string];
+    /** As variantes H.264 que o Chromium 152 lista com a placa de video (o 6400xx so com o High por hardware), com o rtx de cada uma. */
+    const CHROMIUM_H264: H264Line[] = [
+        [103, 104, 1, "42001f"], [107, 108, 0, "42001f"], [109, 114, 1, "42e01f"], [115, 116, 0, "42e01f"],
+        [117, 118, 1, "4d001f"], [39, 40, 0, "4d001f"], [119, 120, 1, "640032"], [49, 50, 0, "640032"]
+    ];
+    const fb = (pt: number) => ["goog-remb", "transport-cc", "ccm fir", "nack", "nack pli"].map(f => `a=rtcp-fb:${pt} ${f}`);
+
+    /**
+     * m-section de video de uma resposta do Chromium 152 (Discord, Electron 44) de quem so recebe: as variantes H.264 de
+     * `h264`, na ordem dada, entre VP8 e AV1/VP9, com rtx, red e ulpfec, extmaps e as linhas de ICE/DTLS.
+     */
+    function chromium152Video(h264: H264Line[] = CHROMIUM_H264, mid = "1") {
+        const pts = [96, 97, ...h264.flatMap(([pt, rtx]) => [pt, rtx]), 45, 46, 98, 99, 100, 101, 123, 124, 125];
+        return [
+            `m=video 9 UDP/TLS/RTP/SAVPF ${pts.join(" ")}`,
+            "c=IN IP4 0.0.0.0",
+            "a=rtcp:9 IN IP4 0.0.0.0",
+            "a=ice-ufrag:Hd8x",
+            "a=ice-pwd:qYb0WvG1aR9m3jJ2XoVwZt7p",
+            "a=ice-options:trickle",
+            "a=fingerprint:sha-256 4A:1D:93:0C:7E:21:B8:55:9F:02:6A:C4:3E:88:17:D0:5B:E9:41:7C:20:AF:66:13:CE:58:09:B2:74:3D:E1:90",
+            "a=setup:active",
+            `a=mid:${mid}`,
+            "a=extmap:14 urn:ietf:params:rtp-hdrext:toffset",
+            "a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
+            "a=extmap:13 urn:3gpp:video-orientation",
+            "a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01",
+            "a=extmap:5 http://www.webrtc.org/experiments/rtp-hdrext/playout-delay",
+            "a=recvonly",
+            "a=rtcp-mux",
+            "a=rtcp-rsize",
+            "a=rtpmap:96 VP8/90000", ...fb(96),
+            "a=rtpmap:97 rtx/90000", "a=fmtp:97 apt=96",
+            ...h264.flatMap(([pt, rtx, mode, profile]) => [
+                `a=rtpmap:${pt} H264/90000`, ...fb(pt), `a=fmtp:${pt} level-asymmetry-allowed=1;packetization-mode=${mode};profile-level-id=${profile}`,
+                `a=rtpmap:${rtx} rtx/90000`, `a=fmtp:${rtx} apt=${pt}`
+            ]),
+            "a=rtpmap:45 AV1/90000", ...fb(45), "a=fmtp:45 level-idx=5;profile=0;tier=0",
+            "a=rtpmap:46 rtx/90000", "a=fmtp:46 apt=45",
+            "a=rtpmap:98 VP9/90000", ...fb(98), "a=fmtp:98 profile-id=0",
+            "a=rtpmap:99 rtx/90000", "a=fmtp:99 apt=98",
+            "a=rtpmap:100 VP9/90000", ...fb(100), "a=fmtp:100 profile-id=2",
+            "a=rtpmap:101 rtx/90000", "a=fmtp:101 apt=100",
+            "a=rtpmap:123 red/90000",
+            "a=rtpmap:124 rtx/90000", "a=fmtp:124 apt=123",
+            "a=rtpmap:125 ulpfec/90000"
+        ];
+    }
+
+    const HIGH = { codec: "h264" as const, h264Profile: "640032", h264Backup: "42001f", audioMids: new Set<string>() };
+    /** Os payloads de video que nao sao H.264, na ordem do Chromium. */
+    const REST = (h264: H264Line[] = CHROMIUM_H264) => ["96", "97", ...h264.map(([, rtx]) => String(rtx)), "45", "46", "98", "99", "100", "101", "123", "124", "125"];
+
+    test("decisao High (640032, reserva 42001f): 6400xx, 42001f, os outros mode 1, os mode 0, e o resto na ordem do Chromium", () => {
+        const sdp = sdpOf([audioSection(), chromium152Video(), DATA]);
+        const res = mungeRemoteSdp(sdp, plan(HIGH));
+        assert.deepEqual(res.changes, ["mid 1: H264 (perfil 640032) primeiro"]);
+        assert.deepEqual(res.notes, []);
+        assert.deepEqual(payloads(res.sdp, "1"), ["119", "103", "109", "117", "107", "115", "39", "49", ...REST()]);
+        assert.equal(res.sdp.replace(/^m=video.*$/m, ""), sdp.replace(/^m=video.*$/m, ""), "so a linha m= muda");
+        assert.deepEqual(mungeRemoteSdp(res.sdp, plan(HIGH)), { sdp: res.sdp, changes: [], notes: [] }, "de novo: intacto");
+    });
+
+    test("decisao Baseline com o High na lista (o espectador nao anunciou High): exatamente a ordem de antes", () => {
+        const res = mungeRemoteSdp(sdpOf([chromium152Video()]), plan({ codec: "h264", h264Profile: "42001f", audioMids: new Set() }));
+        assert.deepEqual(res.notes, []);
+        assert.deepEqual(payloads(res.sdp, "1").slice(0, 8), ["103", "109", "117", "119", "107", "115", "39", "49"], "o 6400xx nao sobe");
+        assert.deepEqual(res.changes, ["mid 1: H264 (perfil 42001f) primeiro"]);
+    });
+
+    test("o outro lado sem 6400xx e com 42e01f primeiro: fica o reserva 42001f (placa de video), nunca o 42e01f (OpenH264)", () => {
+        const noHigh: H264Line[] = [[109, 114, 1, "42e01f"], [115, 116, 0, "42e01f"], [103, 104, 1, "42001f"], [107, 108, 0, "42001f"], [117, 118, 1, "4d001f"], [39, 40, 0, "4d001f"]];
+        const res = mungeRemoteSdp(sdpOf([chromium152Video(noHigh)]), plan(HIGH));
+        assert.deepEqual(payloads(res.sdp, "1").slice(0, 6), ["103", "109", "117", "115", "107", "39"]);
+        assert.deepEqual(res.changes, ["mid 1: H264 (perfil 42001f) primeiro"]);
+        assert.deepEqual(res.notes, ["perfil H.264 640032 (placa de vídeo) ausente no SDP do outro lado; fica o perfil reserva 42001f"]);
+        // sem reserva (nunca acontece com High, mas a regra de antes vale): outra variante mode 1, na ordem do outro lado
+        const bare = mungeRemoteSdp(sdpOf([chromium152Video(noHigh)]), plan({ ...HIGH, h264Backup: null }));
+        assert.deepEqual(bare.notes, ["perfil H.264 640032 (placa de vídeo) ausente no SDP do outro lado; fica outra variante H.264"]);
+        assert.equal(payloads(bare.sdp, "1")[0], "109");
+    });
+
+    test("High em outro nivel (64001f) vale; 640c1f (Constrained High) nunca conta como High", () => {
+        const levels: H264Line[] = [[103, 104, 1, "42001f"], [109, 114, 1, "42e01f"], [121, 122, 1, "640c1f"], [117, 118, 1, "4d001f"], [119, 120, 1, "64001f"]];
+        const res = mungeRemoteSdp(sdpOf([chromium152Video(levels)]), plan(HIGH));
+        assert.deepEqual(payloads(res.sdp, "1").slice(0, 5), ["119", "103", "109", "121", "117"]);
+        assert.deepEqual(res.changes, ["mid 1: H264 (perfil 640032) primeiro"]);
+
+        const constrainedOnly: H264Line[] = [[121, 122, 1, "640c1f"], [109, 114, 1, "42e01f"], [103, 104, 1, "42001f"]];
+        const c = mungeRemoteSdp(sdpOf([chromium152Video(constrainedOnly)]), plan(HIGH));
+        assert.deepEqual(payloads(c.sdp, "1").slice(0, 3), ["103", "121", "109"]);
+        assert.deepEqual(c.notes, ["perfil H.264 640032 (placa de vídeo) ausente no SDP do outro lado; fica o perfil reserva 42001f"]);
+    });
+
+    test("High com a banda: as duas mudancas; reserva igual ao High e ignorada", () => {
+        const res = mungeRemoteSdp(sdpOf([chromium152Video()]), plan({ ...HIGH, bitrate: { startKbps: 4000, maxKbps: 20_000 } }));
+        assert.equal(res.changes[0], "mid 1: H264 (perfil 640032) primeiro");
+        assert.match(res.changes[1], /^mid 1: x-google-start-bitrate=4000;x-google-max-bitrate=20000 em VP8\/H264\/AV1\/VP9$/);
+        assert.ok(res.sdp.includes("a=fmtp:119 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640032;x-google-start-bitrate=4000;x-google-max-bitrate=20000"));
+        const same = mungeRemoteSdp(sdpOf([chromium152Video()]), plan({ ...HIGH, h264Backup: "640034" }));
+        assert.deepEqual(payloads(same.sdp, "1").slice(0, 4), ["119", "103", "109", "117"], "sem reserva de verdade: High e depois os mode 1 na ordem");
     });
 });

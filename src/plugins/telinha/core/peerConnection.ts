@@ -54,6 +54,8 @@ export interface SendPlan {
     codec: VideoCodecName | null;
     /** H.264: perfil por hardware que vai na frente das outras variantes (CodecDecision.h264Profile) */
     h264Profile?: string | null;
+    /** H.264 High: o Baseline da placa logo depois do High (CodecDecision.h264Backup) */
+    h264Backup?: string | null;
     bitrate: { startKbps: number; maxKbps: number; } | null;
     /** nome do peer para os logs */
     label: string;
@@ -115,11 +117,11 @@ function sendingTransceivers(pc: RTCPeerConnection, kind: "audio" | "video") {
 function prepareLocalDescription(pc: RTCPeerConnection) {
     const plan = hooks?.planFor(pc);
     if (!plan?.codec) return;
-    const key = `${plan.codec}:${plan.h264Profile ?? ""}`;
+    const key = `${plan.codec}:${plan.h264Profile ?? ""}:${plan.h264Backup ?? ""}`;
     for (const t of sendingTransceivers(pc, "video")) {
         if (appliedPrefs.get(t) === key) continue;
         appliedPrefs.set(t, key);
-        log.info(`${plan.label}: preferência de codec ${applyCodecPreferences(t, plan.codec, plan.h264Profile)}`);
+        log.info(`${plan.label}: preferência de codec ${applyCodecPreferences(t, plan.codec, plan.h264Profile, plan.h264Backup)}`);
     }
 }
 
@@ -134,7 +136,7 @@ function mungeRemoteDescription(pc: RTCPeerConnection, description: RTCSessionDe
     // a banda vai em toda m-section de video, enviando ou nao (sdp.ts → RemoteSdpPlan.bitrate)
     if (!videoMids.size && !audioMids.size && !plan.bitrate) return description;
 
-    const result = mungeRemoteSdp(description.sdp, { videoMids, audioMids, codec: plan.codec, h264Profile: plan.h264Profile, bitrate: plan.bitrate });
+    const result = mungeRemoteSdp(description.sdp, { videoMids, audioMids, codec: plan.codec, h264Profile: plan.h264Profile, h264Backup: plan.h264Backup, bitrate: plan.bitrate });
     const summary = [...result.changes, ...result.notes].join("; ");
     if (summary && loggedMunge.get(pc) !== summary) {
         loggedMunge.set(pc, summary);

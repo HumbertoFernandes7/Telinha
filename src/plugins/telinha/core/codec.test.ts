@@ -15,7 +15,7 @@ import { describe, test } from "node:test";
 import {
     applyCodecPreferences, chooseCodec, type CodecDecision, describeLocalCaps, type EncoderReport, getLocalCaps, h264Candidates, h264HwAcceptsSize,
     isSoftwareH264, isTransientSoftwareH264, type LocalCodecCaps, measureLocalCaps, noteH264Fallback, pickNegotiatedCodec, probeLocalCaps,
-    softwareFallback, sortCodecs
+    setH264HighProbeOk, softwareFallback, sortCodecs, whyNoHigh
 } from "./codec";
 import { h264ProfileLevelId, h264Rank, mungeRemoteSdp } from "./sdp";
 
@@ -83,7 +83,10 @@ const FAST = { callMs: 40, totalMs: 1000 };
 const encodeCalls = (calls: ProbeCall[]) => calls.filter(c => c.kind === "encodingInfo");
 
 function caps(over: Partial<LocalCodecCaps> = {}): LocalCodecCaps {
-    return { h264HwDecode: true, h264HwEncode: true, h264HwProfile: "42001f", sendable: new Set(["h264", "vp8", "vp9", "av1"]), ...over };
+    return {
+        h264HwDecode: true, h264HwEncode: true, h264HwProfile: "42001f", h264HighHwDecode: false, h264HighHwProfile: null, h264HighProbeOk: false,
+        sendable: new Set(["h264", "vp8", "vp9", "av1"]), ...over
+    };
 }
 
 describe("sonda de H.264 por hardware, por perfil", () => {
@@ -95,8 +98,11 @@ describe("sonda de H.264 por hardware, por perfil", () => {
         assert.equal(local.h264HwProfile, "42001f");
         assert.equal(local.h264HwDecode, true);
         assert.deepEqual([...local.sendable].sort(), ["av1", "h264", "vp8", "vp9"]);
+        assert.equal(local.h264HighHwProfile, "640032", "o High (no nivel que o Chromium lista) tambem por hardware");
+        assert.equal(local.h264HighHwDecode, true);
+        assert.equal(local.h264HighProbeOk, false, "a medicao nunca diz que a sonda do High passou");
         const enc = encodeCalls(calls);
-        assert.equal(enc.length, 1);
+        assert.deepEqual(enc.map(c => c.profile), ["42001f", "640032"], "a lista para no 42001f; o High e uma consulta a parte, em paralelo");
         assert.deepEqual(enc[0].config, {
             type: "webrtc",
             video: { contentType: "video/H264;level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f", width: 1920, height: 1080, bitrate: 8e6, framerate: 60 }
@@ -116,8 +122,10 @@ describe("sonda de H.264 por hardware, por perfil", () => {
         const calls = setMediaCapabilities({ encode: ["640032"], decode: [] });
         const local = await measureLocalCaps(FAST);
         assert.equal(local.h264HwProfile, "640032");
+        assert.equal(local.h264HighHwProfile, "640032");
         assert.equal(local.h264HwDecode, false);
-        assert.deepEqual(encodeCalls(calls).map(c => c.profile), ["42001f", "42e01f", "4d001f", "640032"]);
+        // a lista inteira em ordem (42001f, 42e01f, 4d001f, 640032) e, em paralelo, a consulta so do High (a 2a)
+        assert.deepEqual(encodeCalls(calls).map(c => c.profile), ["42001f", "640032", "42e01f", "4d001f", "640032"]);
         for (const c of calls) assert.match(c.config.video.contentType, /packetization-mode=1/);
     });
 
@@ -128,8 +136,9 @@ describe("sonda de H.264 por hardware, por perfil", () => {
         assert.equal(local.h264HwEncode, false);
         assert.equal(local.h264HwProfile, null);
         assert.equal(local.h264HwDecode, true);
-        assert.equal(encodeCalls(calls).length, 4);
-        assert.match(describeLocalCaps(local), /codifica: não; envia: /);
+        assert.equal(encodeCalls(calls).length, 5, "os 4 perfis e a consulta do High");
+        assert.equal(local.h264HighHwProfile, null);
+        assert.match(describeLocalCaps(local), /codifica: não; envia: .*; H\.264 High por hardware — decodifica: não, codifica: não$/);
     });
 
     test("consulta que nao responde conta como nao (timeout por consulta) e a sonda segue", async () => {
@@ -150,7 +159,8 @@ describe("sonda de H.264 por hardware, por perfil", () => {
         assert.equal(local.h264HwEncode, false);
         assert.equal(local.h264HwDecode, false);
         assert.ok(elapsed < 500, `demorou ${elapsed} ms`);
-        assert.ok(encodeCalls(calls).length <= 2, "parou antes de consultar todos os perfis");
+        assert.ok(encodeCalls(calls).length <= 3, "parou antes de consultar todos os perfis (2 da lista + a do High, em paralelo)");
+        assert.equal(local.h264HighHwProfile, null);
     });
 
     test("consulta que lanca conta como nao", async () => {
@@ -163,7 +173,9 @@ describe("sonda de H.264 por hardware, por perfil", () => {
     test("sem mediaCapabilities ou sem RTCRtpSender: tudo nao", async () => {
         setCaps(CHROMIUM_CAPS);
         setMediaCapabilities(null);
-        assert.deepEqual({ ...(await measureLocalCaps(FAST)), sendable: null }, { h264HwDecode: false, h264HwEncode: false, h264HwProfile: null, sendable: null });
+        assert.deepEqual({ ...(await measureLocalCaps(FAST)), sendable: null }, {
+            h264HwDecode: false, h264HwEncode: false, h264HwProfile: null, h264HighHwDecode: false, h264HighHwProfile: null, h264HighProbeOk: false, sendable: null
+        });
         setCaps(null);
         setMediaCapabilities(RTX_3070);
         const local = await measureLocalCaps(FAST);
@@ -188,7 +200,11 @@ describe("sonda de H.264 por hardware, por perfil", () => {
     test("linha de log com o perfil", () => {
         assert.equal(
             describeLocalCaps(caps({ sendable: new Set(["h264", "vp9"]) })),
-            "Capacidades locais: H.264 por hardware — decodifica: sim, codifica: sim (perfil 42001f); envia: h264, vp9"
+            "Capacidades locais: H.264 por hardware — decodifica: sim, codifica: sim (perfil 42001f); envia: h264, vp9; H.264 High por hardware — decodifica: não, codifica: não"
+        );
+        assert.equal(
+            describeLocalCaps(caps({ sendable: new Set(["h264"]), h264HighHwDecode: true, h264HighHwProfile: "640032" })),
+            "Capacidades locais: H.264 por hardware — decodifica: sim, codifica: sim (perfil 42001f); envia: h264; H.264 High por hardware — decodifica: sim, codifica: sim (perfil 640032)"
         );
     });
 });
@@ -201,7 +217,8 @@ describe("chooseCodec", () => {
         const both = chooseCodec(HW, "auto", caps());
         assert.equal(both.codec, "h264");
         assert.equal(both.h264Profile, "42001f");
-        assert.match(both.reason, /hardware nos dois lados \(perfil 42001f\)/);
+        assert.equal(both.reason, "automático: H.264 por hardware nos dois lados (perfil 42001f; High não: este PC não codifica High por hardware)");
+        assert.equal("h264Backup" in both, false, "Baseline: sem reserva (a mesma decisao de antes)");
 
         assert.deepEqual(chooseCodec(NO_HW, "auto", caps()), { codec: "vp9", reason: "automático: o espectador não decodifica H.264 por hardware → VP9" });
         assert.equal(chooseCodec(undefined, "auto", caps()).codec, "vp9");
@@ -428,10 +445,14 @@ describe("checagem do encoder no ar", () => {
         const first = probeLocalCaps(line => lines.push(line));
         assert.equal(probeLocalCaps(line => lines.push(line)), first, "memorizado");
         await first;
-        assert.deepEqual(lines, ["Capacidades locais: H.264 por hardware — decodifica: sim, codifica: sim (perfil 42001f); envia: h264, vp8, av1, vp9"]);
+        assert.deepEqual(lines, [
+            "Capacidades locais: H.264 por hardware — decodifica: sim, codifica: sim (perfil 42001f); envia: h264, vp8, av1, vp9; "
+            + "H.264 High por hardware — decodifica: sim, codifica: sim (perfil 640032)"
+        ]);
 
-        const viewer = { h264HwDecode: true };
-        const hwH264 = { codec: "h264", h264Profile: "42001f", reason: "automático: H.264 por hardware nos dois lados (perfil 42001f)" };
+        // a placa codifica High, mas sem a sonda do High (core/stuckEncoder.ts) nunca vai High
+        const viewer = { h264HwDecode: true, hwDecode: { v: 1, h264High: true } };
+        const hwH264 = { codec: "h264", h264Profile: "42001f", reason: "automático: H.264 por hardware nos dois lados (perfil 42001f; High não: a sonda WebCodecs do High não passou neste PC)" };
         assert.deepEqual(chooseCodec(viewer, "auto"), hwH264);
 
         // 1a queda (espectador A): so A vai para VP9; quem entra depois (B) ainda recebe H.264 pela placa
@@ -465,7 +486,9 @@ describe("casos de borda das capacidades e da ordem", () => {
         g.RTCRtpReceiver = { getCapabilities: () => null };
         setMediaCapabilities(RTX_3070);
         const local = await measureLocalCaps(FAST);
-        assert.deepEqual({ ...local, sendable: [...local.sendable] }, { h264HwDecode: false, h264HwEncode: false, h264HwProfile: null, sendable: [] });
+        assert.deepEqual({ ...local, sendable: [...local.sendable] }, {
+            h264HwDecode: false, h264HwEncode: false, h264HwProfile: null, h264HighHwDecode: false, h264HighHwProfile: null, h264HighProbeOk: false, sendable: []
+        });
     });
 
     test("uma entrada estragada na lista do sender nao derruba a sonda (fica o que ja foi lido)", async () => {
@@ -479,9 +502,9 @@ describe("casos de borda das capacidades e da ordem", () => {
     test("linha de log sem perfil e sem lista de envio; motivo automatico sem perfil", () => {
         assert.equal(
             describeLocalCaps(caps({ h264HwDecode: false, h264HwProfile: null, sendable: new Set() })),
-            "Capacidades locais: H.264 por hardware — decodifica: não, codifica: sim; envia: ?"
+            "Capacidades locais: H.264 por hardware — decodifica: não, codifica: sim; envia: ?; H.264 High por hardware — decodifica: não, codifica: não"
         );
-        assert.equal(chooseCodec({ h264HwDecode: true }, "auto", caps({ h264HwProfile: null })).reason, "automático: H.264 por hardware nos dois lados");
+        assert.equal(chooseCodec({ h264HwDecode: true }, "auto", caps({ h264HwProfile: null })).reason, "automático: H.264 por hardware nos dois lados (High não: este PC não codifica High por hardware)");
     });
 
     test("ordem: variantes sem fmtp, e codecs sem preferencia de perfil (VP8/AV1) ficam na ordem original", () => {
@@ -517,5 +540,136 @@ describe("casos de borda das capacidades e da ordem", () => {
     test("pickNegotiatedCodec: leva channels quando existe e omite o fmtp ausente", () => {
         const negotiated = [{ payloadType: 96, mimeType: "video/VP8", clockRate: 90000, channels: 1 }] as RTCRtpCodecParameters[];
         assert.deepEqual(pickNegotiatedCodec(negotiated, { codec: "vp8", reason: "" }), { mimeType: "video/VP8", clockRate: 90000, channels: 1 });
+    });
+});
+
+describe("H.264 High (6400xx) so quando os dois lados tem High na placa", () => {
+    /** Este PC: Baseline 42001f e High 640032 na placa, sonda do High ok neste ambiente. */
+    const HIGH_PC = caps({ h264HighHwDecode: true, h264HighHwProfile: "640032", h264HighProbeOk: true });
+    /** Espectador desta versao com High na placa (presenca caps.hwDecode, protocol.ts passo 11). */
+    const HIGH_VIEWER = { h264HwDecode: true, hwDecode: { v: 1, h264High: true } };
+    /** Espectador na v0.3.2 ou antes: so o booleano de sempre. */
+    const OLD_VIEWER = { h264HwDecode: true };
+    const HIGH_REASON = "automático: H.264 High por hardware nos dois lados (perfil 640032: este PC codifica High na placa, com a sonda do High ok, "
+        + "e o espectador decodifica High na placa; reserva 42001f)";
+    const baseline = (why: string): CodecDecision => ({ codec: "h264", h264Profile: "42001f", reason: `automático: H.264 por hardware nos dois lados (perfil 42001f; High não: ${why})` });
+
+    test("matriz do automatico", () => {
+        // os dois lados com High: High, com o Baseline da placa como reserva
+        assert.deepEqual(chooseCodec(HIGH_VIEWER, "auto", HIGH_PC), { codec: "h264", h264Profile: "640032", h264Backup: "42001f", reason: HIGH_REASON });
+        // so este PC tem High: o espectador nao anuncia (versao antiga, ou sem High na placa)
+        const noViewer = baseline("o espectador não anuncia High por hardware (não tem, ou é uma versão antiga do Telinha)");
+        assert.deepEqual(chooseCodec(OLD_VIEWER, "auto", HIGH_PC), noViewer, "v0.3.2 ou antes: o Baseline de sempre");
+        assert.deepEqual(chooseCodec({ h264HwDecode: true, hwDecode: { v: 1 } }, "auto", HIGH_PC), noViewer, "versao nova sem High na placa");
+        assert.deepEqual(chooseCodec({ h264HwDecode: true, hwDecode: { v: 1, h264High: false } }, "auto", HIGH_PC), noViewer);
+        // so o espectador tem High: este PC nao codifica High na placa
+        assert.deepEqual(chooseCodec(HIGH_VIEWER, "auto", caps()), baseline("este PC não codifica High por hardware"));
+        // a sonda do High nao passou (nao rodou, inconclusiva ou travou)
+        assert.deepEqual(chooseCodec(HIGH_VIEWER, "auto", { ...HIGH_PC, h264HighProbeOk: false }), baseline("a sonda WebCodecs do High não passou neste PC"));
+        // o espectador anuncia High mas nao o Baseline: nada de H.264 (como antes)
+        assert.deepEqual(chooseCodec({ h264HwDecode: false, hwDecode: { v: 1, h264High: true } }, "auto", HIGH_PC), {
+            codec: "vp9", reason: "automático: o espectador não decodifica H.264 por hardware → VP9"
+        });
+        assert.equal(chooseCodec(undefined, "auto", HIGH_PC).codec, "vp9", "sem presenca: como antes");
+    });
+
+    test("a placa travada (o registro por PC), a sonda do Baseline rodando ou a 2a queda: nem High nem Baseline, VP9", () => {
+        // setH264HwStuck / setH264HwProbing / noteH264Fallback desligam h264HwEncode; o High vai junto
+        const off = { ...HIGH_PC, h264HwEncode: false };
+        assert.deepEqual(chooseCodec(HIGH_VIEWER, "auto", off), { codec: "vp9", reason: "automático: este PC não codifica H.264 por hardware → VP9" });
+        assert.deepEqual(chooseCodec(HIGH_VIEWER, "auto", { ...off, sendable: new Set(["h264", "vp8"]) }).codec, "vp8");
+    });
+
+    test("codec fixado nas configuracoes: o mesmo de antes (H.264 fixado = Baseline, sem reserva; VP9/AV1 fixados)", () => {
+        assert.deepEqual(chooseCodec(HIGH_VIEWER, "h264", HIGH_PC), { codec: "h264", h264Profile: "42001f", reason: "fixado nas configurações" });
+        assert.deepEqual(chooseCodec(HIGH_VIEWER, "vp9", HIGH_PC), { codec: "vp9", reason: "fixado nas configurações" });
+        assert.deepEqual(chooseCodec(HIGH_VIEWER, "av1", HIGH_PC), { codec: "av1", reason: "fixado nas configurações" });
+        assert.deepEqual(chooseCodec(HIGH_VIEWER, "vp8", HIGH_PC), { codec: "vp8", reason: "fixado nas configurações" });
+    });
+
+    test("placa que so codifica High (o 1o perfil por hardware ja e 640032): High sem reserva; queda no ar vai para VP9", () => {
+        const onlyHigh = caps({ h264HwProfile: "640032", h264HighHwProfile: "640032", h264HighProbeOk: true });
+        assert.deepEqual(chooseCodec(HIGH_VIEWER, "auto", onlyHigh), {
+            codec: "h264", h264Profile: "640032",
+            reason: "automático: H.264 High por hardware nos dois lados (perfil 640032: este PC codifica High na placa, com a sonda do High ok, e o espectador decodifica High na placa)"
+        });
+        // espectador sem High: vai o unico perfil da placa (o High, como antes desta versao), e o log diz isso
+        assert.deepEqual(chooseCodec(OLD_VIEWER, "auto", onlyHigh), {
+            codec: "h264", h264Profile: "640032",
+            reason: "automático: H.264 por hardware nos dois lados (perfil 640032: o único que a placa codifica por hardware, então vai High mesmo assim, "
+                + "como antes; o espectador não anuncia High por hardware (não tem, ou é uma versão antiga do Telinha))"
+        });
+        const OPENH264: EncoderReport = { mimeType: "video/H264", implementation: "OpenH264", powerEfficient: false, framesEncoded: 30 };
+        assert.equal(softwareFallback(OPENH264, false, HIGH_VIEWER, "auto", HIGH_PC)?.codec, "vp9", "queda de um envio High: VP9 para ele, como no Baseline");
+    });
+
+    test("whyNoHigh: nesta ordem (este PC, a sonda, o espectador); null = vai High", () => {
+        assert.equal(whyNoHigh(HIGH_VIEWER, HIGH_PC), null);
+        assert.equal(whyNoHigh(undefined, caps()), "este PC não codifica High por hardware");
+        assert.equal(whyNoHigh(undefined, { ...HIGH_PC, h264HighProbeOk: false }), "a sonda WebCodecs do High não passou neste PC");
+        assert.match(whyNoHigh(undefined, HIGH_PC)!, /^o espectador não anuncia High/);
+    });
+
+    test("sonda por capacidades: 6400xx no nivel que o Chromium lista; 640c (Constrained High) nunca e High; sem 6400xx, nenhuma consulta", async () => {
+        setCaps([h264(1, "42001f"), h264(1, "640c1f"), h264(1, "640034"), h264(0, "640034")]);
+        let calls = setMediaCapabilities({ encode: ["42001f", "640c1f", "640034"], decode: ["42001f", "640c1f", "640034"] });
+        let local = await measureLocalCaps(FAST);
+        assert.equal(local.h264HighHwProfile, "640034", "o nivel que o Chromium oferece");
+        assert.equal(local.h264HighHwDecode, true);
+        assert.ok(!calls.some(c => c.profile === "640c1f" && c.kind === "decodingInfo"), "o 640c1f nunca e consultado como High");
+
+        // o receiver nao tem High por hardware (so por software): decodifica High nao
+        calls = setMediaCapabilities({ encode: ["42001f", "640034"], decode: ["42001f"] });
+        local = await measureLocalCaps(FAST);
+        assert.equal(local.h264HighHwDecode, false);
+        assert.equal(local.h264HighHwProfile, "640034");
+
+        // so 640c1f na lista (sem 6400xx): High nao, e nenhuma consulta a mais
+        setCaps([h264(1, "42001f"), h264(1, "640c1f")]);
+        calls = setMediaCapabilities({ encode: ["42001f", "640c1f"], decode: ["42001f", "640c1f"] });
+        local = await measureLocalCaps(FAST);
+        assert.equal(local.h264HighHwProfile, null);
+        assert.equal(local.h264HighHwDecode, false);
+        assert.deepEqual(calls.map(c => `${c.kind}:${c.profile}`), ["decodingInfo:42001f", "encodingInfo:42001f"]);
+    });
+
+    test("setH264HighProbeOk: so a sonda liga o High na sessao (e desliga)", () => {
+        setH264HighProbeOk(true);
+        assert.equal(getLocalCaps().h264HighProbeOk, true);
+        const same = getLocalCaps();
+        setH264HighProbeOk(true);
+        assert.equal(getLocalCaps(), same, "sem mudanca: o mesmo objeto");
+        setH264HighProbeOk(false);
+        assert.equal(getLocalCaps().h264HighProbeOk, false);
+    });
+
+    test("ordem das variantes com High: 6400xx, depois o Baseline da placa, depois os outros packetization-mode=1", () => {
+        const fmtps = (list: Codec[]) => list.map(c => h264ProfileLevelId(c.sdpFmtpLine ?? "") ?? c.mimeType.slice(6)).join(" ");
+        const { sorted, matched } = sortCodecs(CHROMIUM_CAPS, "h264", "640032", "42001f");
+        assert.equal(matched, 8);
+        assert.equal(fmtps(sorted.slice(0, 8)), "640032 42001f 42e01f 4d001f 42001f 42e01f 4d001f 640032");
+        assert.match(sorted[0].sdpFmtpLine!, /packetization-mode=1/);
+        assert.match(sorted[1].sdpFmtpLine!, /packetization-mode=1;profile-level-id=42001f/);
+        // reserva igual ao perfil: ignorada (a ordem de sempre)
+        assert.deepEqual(sortCodecs(CHROMIUM_CAPS, "h264", "640032", "640034").sorted, sortCodecs(CHROMIUM_CAPS, "h264", "640032").sorted);
+
+        // ja negociado (troca no ar): High se houver, senao o Baseline da placa, nunca o 42e01f
+        const high: CodecDecision = { codec: "h264", h264Profile: "640032", h264Backup: "42001f", reason: "" };
+        const negotiated = (list: Codec[]) => list.map((c, i) => ({ ...c, payloadType: 100 + i }) as RTCRtpCodecParameters);
+        assert.equal(h264ProfileLevelId(pickNegotiatedCodec(negotiated(CHROMIUM_CAPS), high)!.sdpFmtpLine!), "640032");
+        assert.equal(pickNegotiatedCodec(negotiated([h264(1, "42e01f"), h264(1, "42001f")]), high)?.sdpFmtpLine, "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f");
+    });
+
+    test("applyCodecPreferences com High: o High primeiro; sem High nas capacidades, o Baseline da placa (dito no log)", () => {
+        let applied: Codec[] = [];
+        const ok = { setCodecPreferences: (list: Codec[]) => { applied = list; } } as unknown as RTCRtpTransceiver;
+        setCaps(CHROMIUM_CAPS);
+        assert.equal(applyCodecPreferences(ok, "h264", "640032", "42001f"), "H264 (perfil 640032) primeiro (8 variante(s), capacidades do sender)");
+        assert.equal(h264ProfileLevelId(applied[0].sdpFmtpLine!), "640032");
+        setCaps([h264(1, "42e01f"), h264(1, "42001f"), plain("VP9")]);
+        assert.equal(applyCodecPreferences(ok, "h264", "640032", "42001f"), "H264 (perfil 42001f, sem o 640032) primeiro (2 variante(s), capacidades do sender)");
+        assert.equal(h264ProfileLevelId(applied[0].sdpFmtpLine!), "42001f");
+        setCaps([h264(1, "42e01f"), plain("VP9")]);
+        assert.equal(applyCodecPreferences(ok, "h264", "640032", "42001f"), "H264 primeiro (1 variante(s), capacidades do sender)");
     });
 });
