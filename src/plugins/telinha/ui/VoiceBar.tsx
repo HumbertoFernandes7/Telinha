@@ -199,13 +199,13 @@ function VoiceBarInner() {
                 );
             })}
 
-            {local?.autoQuality && (
+            {local?.autoQuality && (local.autoQuality.reason || local.autoQuality.current !== local.quality) && (
                 <div
-                    className={cl("bar-info", local.autoQuality.reason && "bar-info-lowered")}
-                    title={local.autoQuality.reasonText ?? "Qualidade automática: no máximo escolhido"}
+                    className={cl("bar-info", "bar-info-lowered")}
+                    title={local.autoQuality.reasonText ?? "Qualidade automática: abaixo do escolhido"}
                 >
                     <span className={cl("bar-row-text")}>
-                        {local.autoQuality.current}
+                        Agora: {qualityLabel(local.autoQuality.current)}
                         {local.autoQuality.reason && ` · menor: ${REASON_SHORT[local.autoQuality.reason]}`}
                     </span>
                 </div>

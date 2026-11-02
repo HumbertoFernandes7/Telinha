@@ -420,14 +420,15 @@ function onFirstFrame(v: ViewerEntry, s: InboundSample) {
  * (v.codecAskSlot, zerado em attachStream): quando o transmissor troca de janela, o envio novo volta para H.264 e pode
  * precisar de outro pedido. Quem decide e o transmissor (so troca um envio em H.264, com o codec dele no automatico e a
  * captura no ar, uma vez por envio); versoes sem a acao a ignoram. O aviso de 45 s e a espera continuam como estao. O
- * transmissor tambem confere sozinho se o H.264 sai (streaming.ts → checkStall).
+ * transmissor tambem confere sozinho se o H.264 sai (streaming.ts → checkStall). H.265 (depois da v0.3.3) tambem pede:
+ * o transmissor troca para a reserva H.264 dele (o decodificador H.265 da placa daqui pode ter falhado).
  */
 function askForVp9(v: ViewerEntry, s: InboundSample, streamAt: number) {
     const elapsed = performance.now() - streamAt;
     // 1 aos 10 s, 2 aos 20 s...: uma leitura atrasada nunca manda dois pedidos seguidos
     const slot = Math.floor(elapsed / NO_FRAME_HINT_MS);
     const last = v.codecAskSlot ?? 0;
-    if (v.streamerStuck || slot <= last || (s.codec && !/^video\/h264$/i.test(s.codec))) return;
+    if (v.streamerStuck || slot <= last || (s.codec && !/^video\/h26[45]$/i.test(s.codec))) return;
     const action = rt.codecAction;
     if (!action) return;
     v.codecAskSlot = slot;
@@ -438,7 +439,7 @@ function askForVp9(v: ViewerEntry, s: InboundSample, streamAt: number) {
         const received = s.log.framesReceived != null ? `${s.log.framesReceived} quadros recebidos` : `${Math.round(s.bytes / 1000)} kB recebidos`;
         const detail = `${received}${s.decoder ? `, decodificador ${s.decoder}` : ""}`;
         const what = s.codec
-            ? `nenhum quadro do vídeo em H.264 decodificado em ${secs} s (${detail})`
+            ? `nenhum quadro do vídeo em ${/h265/i.test(s.codec) ? "H.265" : "H.264"} decodificado em ${secs} s (${detail})`
             : `nenhum quadro de vídeo decodificado em ${secs} s e nenhum pacote de vídeo identificado (codec desconhecido, ${detail})`;
         log.warn(`Assistir ${peerLabel(v.peerId)}: ${what}; pedindo ao transmissor para mandar VP9`);
     }

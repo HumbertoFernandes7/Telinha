@@ -58,5 +58,5 @@ test("o Baseline trava (confirmado): o PC fica marcado, a sonda do High nunca ro
     const viewer = { h264HwDecode: true, hwDecode: { v: 1, h264High: true } };
     assert.deepEqual(chooseCodec(viewer, "auto"), { codec: "vp9", reason: "automático: este PC não codifica H.264 por hardware → VP9" });
     assert.ok(lines[0].includes("; sonda WebCodecs H.264 High: não feita (o H.264 da placa está desligado neste PC); H.264 automático desligado: "), lines[0]);
-    assert.ok(stuckEncoderDiagnostics().endsWith("sonda WebCodecs High: não feita (o H.264 da placa está desligado neste PC); High automático desligado"));
+    assert.ok(stuckEncoderDiagnostics().includes("sonda WebCodecs High: não feita (o H.264 da placa está desligado neste PC); High automático desligado\n"));
 });

@@ -114,7 +114,7 @@
 //    "A placa de vídeo de X travou; ele precisa reiniciar o Discord." em vez do aviso generico de 45 s.
 //    Compatibilidade: versoes antigas ignoram o op desconhecido (parseWatchReply devolve null) e caem no aviso de 45 s.
 // 11. Decodificacao por hardware por perfil (depois da v0.3.2, adicionado sem mudar PROTOCOL_VERSION): a presenca pode
-//    trazer `caps.hwDecode`, um objeto VERSIONADO: { v: HW_DECODE_CAPS_VERSION, h264High?: true }.
+//    trazer `caps.hwDecode`, um objeto VERSIONADO: { v: HW_DECODE_CAPS_VERSION, h264High?: true, h265?: true }.
 //    - h264High: este PC decodifica H.264 High (6400xx) na placa de video (mediaCapabilities.decodingInfo do perfil
 //      High do receiver, powerEfficient). O transmissor so manda High (core/codec.ts → chooseCodec) quando o
 //      espectador anuncia isto E o transmissor codifica High na placa com a sonda WebCodecs do High "ok" neste ambiente;
@@ -124,6 +124,14 @@
 //      ignorado; marca desconhecida (H.265, AV1 nas proximas versoes, sem mudar `v`) e descartada.
 //    Compatibilidade: a v0.3.2 e anteriores (e o amigo virtual) descartam o campo no sanitizePresence: como espectadoras
 //    nunca anunciam High e recebem o Baseline de sempre; como transmissoras ignoram o campo de quem assiste.
+//    - h265 (depois da v0.3.3, a mesma `v`): este PC decodifica H.265 Main na placa de video (mediaCapabilities
+//      .decodingInfo "video/H265;<fmtp Main do receiver>", powerEfficient). O Chromium nao tem decodificador H.265 por
+//      software, entao sem isto o transmissor NUNCA manda H.265 (core/codec.ts → chooseCodec: H.265 so com ele fixado
+//      no formato de video, a placa dos dois lados e a sonda WebCodecs do H.265 "ok" no transmissor; o automatico nunca
+//      o escolhe; senao, o H.264 de antes).
+//      Compatibilidade: a v0.3.3 le { v: 1, h264High: true, h265: true } como { v: 1, h264High: true } (o parse dela
+//      reconstroi o campo so com o h264High), e { v: 1, h265: true } como sem o campo: nunca manda H.265 e o High
+//      continua valendo. Como espectadora, a v0.3.3 nunca anuncia h265 e recebe o H.264 de sempre.
 // ============================================================================
 
 /** Versao do protocolo; vai no handshake (`v`) e na presenca (`v`). */
@@ -227,6 +235,8 @@ export type HwDecodeCaps = {
     v: number;
     /** decodifica H.264 High (6400xx) na placa de video */
     h264High?: boolean;
+    /** decodifica H.265 Main na placa de video (depois da v0.3.3; o Chromium nao tem decodificador H.265 por software) */
+    h265?: boolean;
 };
 
 export type PresenceCaps = {
@@ -248,14 +258,15 @@ export type PresenceMessage = {
 };
 
 /** O `caps.hwDecode` que anunciamos (passo 11): null quando nao ha nada a anunciar (a presenca fica a de antes). */
-export function buildHwDecodeCaps(h264High: boolean): HwDecodeCaps | null {
-    return h264High ? { v: HW_DECODE_CAPS_VERSION, h264High: true } : null;
+export function buildHwDecodeCaps(h264High: boolean, h265 = false): HwDecodeCaps | null {
+    if (!h264High && !h265) return null;
+    return { v: HW_DECODE_CAPS_VERSION, ...(h264High ? { h264High: true } : {}), ...(h265 ? { h265: true } : {}) };
 }
 
 /** `caps.hwDecode` recebido, so com as marcas conhecidas e verdadeiras; versao diferente ou nada verdadeiro = null. */
 export function parseHwDecodeCaps(data: unknown): HwDecodeCaps | null {
     if (!isObject(data) || data.v !== HW_DECODE_CAPS_VERSION) return null;
-    return buildHwDecodeCaps(data.h264High === true);
+    return buildHwDecodeCaps(data.h264High === true, data.h265 === true);
 }
 
 /**

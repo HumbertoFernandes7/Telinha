@@ -12,11 +12,12 @@ import { isIdentityConfigured } from "@plugins/telinha/core/identity/config";
 import { migrateQualitySetting } from "@plugins/telinha/core/quality/choice";
 import { onAdmissionSettingChanged, onPasswordChanged } from "@plugins/telinha/core/session";
 import { onApprovalPolicyChanged, onAutoQualitySettingChanged } from "@plugins/telinha/core/streaming";
+import { onCodecSettingChanged } from "@plugins/telinha/core/stuckEncoder";
 import { onJitterCushionChanged } from "@plugins/telinha/core/viewing";
 import { captureBoostStatusElement } from "@plugins/telinha/ui/CaptureBoostStatus";
 import { OptionType } from "@utils/types";
 
-export type CodecSetting = "auto" | "h264" | "vp8" | "vp9" | "av1";
+export type CodecSetting = "auto" | "h264" | "h265" | "vp8" | "vp9" | "av1";
 
 // As chaves (groupPassword, rejectOutsiders...) sao o nome salvo nas configuracoes: nao renomear.
 // O titulo mostrado na pagina do plugin vem de displayName (sem ele, o Vencord usa a chave em ingles).
@@ -113,14 +114,19 @@ export const settings = definePluginSettings({
     codec: {
         type: OptionType.SELECT,
         displayName: "Formato de vídeo (codec)",
-        description: "Codec de vídeo ao transmitir. Automático: H.264 quando o seu PC codifica e o do amigo decodifica por hardware; senão VP9.",
+        description: "Codec de vídeo ao transmitir. Automático: H.264 quando o seu PC codifica e o do amigo decodifica por hardware; senão VP9. "
+            + "H.265 só ajuda com internet boa; com internet fraca pode perder fps. Ele só vai com a placa de vídeo dos dois lados; senão, vai o do automático. "
+            + "Escolhido durante uma transmissão, o teste da placa roda quando ela acabar.",
         options: [
             { label: "Automático (recomendado)", value: "auto", default: true },
+            { label: "H.265", value: "h265" },
             { label: "H.264", value: "h264" },
             { label: "VP8", value: "vp8" },
             { label: "VP9", value: "vp9" },
             { label: "AV1", value: "av1" }
-        ]
+        ],
+        // fixado em H.265: a sonda dele roda agora (so com ele fixado)
+        onChange: () => void onCodecSettingChanged()
     },
     autoUpdate: {
         type: OptionType.BOOLEAN,

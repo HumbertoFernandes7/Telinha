@@ -345,6 +345,9 @@ describe("rede de um espectador: banda estimada bem abaixo do degrau", () => {
         ["H.264 com qp 38 e o envio em metade do alvo", { mimeType: "video/H264", qp: 38 }, true],
         ["VP9 com qp 120 (outra escala) e o envio em metade do alvo", { mimeType: "video/VP9", qp: 120 }, false],
         ["H.264 com qp 30 e o envio em metade do alvo", { mimeType: "video/H264", qp: 30 }, false],
+        // H.265: a mesma escala 0-51 e o mesmo limite (o controle de taxa do Chromium para no 42 sem banda)
+        ["H.265 com qp 42 (o teto do H.265) e o envio em metade do alvo", { mimeType: "video/H265", qp: 42 }, true],
+        ["H.265 com qp 30 e o envio em metade do alvo", { mimeType: "video/H265", qp: 30 }, false],
         ["H.264 com qp 38 e a fonte a 10 fps", { mimeType: "video/H264", qp: 38, sourceFps: 10 }, false]
     ] as const) {
         test(`banda bem abaixo do degrau (2000 de 4500), ${what}: ${down ? "desce" : "nao desce"}`, async t => {

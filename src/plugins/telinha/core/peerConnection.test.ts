@@ -129,6 +129,24 @@ describe("TelinhaPeerConnection", () => {
             assert.equal(logged(/preferência de codec H264 \(perfil 4d001f\) primeiro/, mark).length, 1);
         });
 
+        test("H.265 com o H.264 reserva: H.265 Main na frente, o High e o Baseline da placa logo depois", async () => {
+            const high = { mimeType: "video/H264", clockRate: 90000, sdpFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640032" };
+            const h265 = { mimeType: "video/H265", clockRate: 90000, sdpFmtpLine: "level-id=123;profile-id=1;tier-flag=0;tx-mode=SRST" };
+            const saved = rtpCapabilities.sender;
+            rtpCapabilities.sender = { ...saved, video: [...DEFAULT_VIDEO_CODECS, high, h265] };
+            try {
+                const { pc, video } = sendingPc();
+                const mark = logMark();
+                plan = { codec: "h265", h264Profile: "640032", h264Backup: "42001f", bitrate: null, label: "hevc" };
+                await pc.setLocalDescription();
+                assert.deepEqual(video.codecPreferences?.slice(0, 3).map(c => c.sdpFmtpLine), [h265.sdpFmtpLine, high.sdpFmtpLine,
+                    "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f"]);
+                assert.equal(logged(/^hevc: preferência de codec H265 primeiro \(1 variante\(s\), capacidades do sender; reserva H\.264 perfil 640032\/42001f logo depois\)$/, mark).length, 1);
+            } finally {
+                rtpCapabilities.sender = saved;
+            }
+        });
+
         test("H.264 High com reserva: 6400xx na frente, o Baseline da placa logo depois; a reserva muda o plano (reaplica)", async () => {
             const high = { mimeType: "video/H264", clockRate: 90000, sdpFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640032" };
             const saved = rtpCapabilities.sender;
