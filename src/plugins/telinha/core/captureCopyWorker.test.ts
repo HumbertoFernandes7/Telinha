@@ -300,6 +300,63 @@ describe("Worker da cópia na hora", () => {
         assert.equal((await r.stats()).written, 0);
     });
 
+    test("mede a escrita no gerador: soma, quantas, máximo e quantas passaram de 16,7 ms", async () => {
+        let t = 0;
+        const r = rig({ perf: { now: () => t } });
+        r.autoAck = false;
+        await started(r);
+        let s = await r.stats();
+        assert.deepEqual([s.writeMs, s.writeN, s.writeMax, s.writeSlow], [0, 0, 0, 0]);
+        r.push(captured(1000));
+        await flush();
+        t = 20;
+        r.ack();
+        await flush();
+        r.push(captured(2000));
+        await flush();
+        t = 25;
+        r.ack();
+        await flush();
+        r.push(captured(3000));
+        await flush();
+        t = 25 + 16;
+        r.ack();
+        await flush();
+        s = await r.stats();
+        assert.equal(s.written, 3);
+        assert.equal(s.writeN, 3);
+        assert.equal(s.writeMs, 20 + 5 + 16);
+        assert.equal(s.writeMax, 20);
+        assert.equal(s.writeSlow, 1, "só a de 20 ms passou de 16,7 (16 ms não conta)");
+    });
+
+    test("a escrita recusada também conta o tempo, fecha a cópia e libera o próximo quadro", async () => {
+        let t = 0;
+        const r = rig({ perf: { now: () => t } });
+        await started(r);
+        const rejects: ((e: Error) => void)[] = [];
+        const w = (r as any).writable.getWriter;
+        (r as any).writable.getWriter = () => ({ ...w(), write: (f: Frame) => { r.written.push(f); return new Promise<void>((_, rej) => rejects.push(rej)); } });
+        r.send({ op: "run", readable: (r as any).readable, writable: (r as any).writable });
+        await flush();
+        r.push(captured(1000));
+        await flush();
+        t = 30;
+        rejects.shift()!(new Error("errored"));
+        await flush();
+        assert.equal(r.written.length, 1);
+        assert.ok(r.written[0].closed, "a cópia recusada foi fechada");
+        r.push(captured(2000));
+        await flush();
+        assert.equal(r.written.length, 2, "o próximo quadro foi escrito: a escrita não ficou presa");
+        const s = await r.stats();
+        assert.equal(s.written, 0);
+        assert.equal(s.writeN, 1);
+        assert.equal(s.writeMs, 30);
+        assert.equal(s.writeMax, 30);
+        assert.equal(s.writeSlow, 1);
+    });
+
     test("WebGPU perde a placa com cópias na fila: o canvas 2D não herda a fila (nenhum quadro descartado por ela)", async () => {
         const { navigatorGpu, gpu } = fakeGpu();
         const r = rig({ gpu: navigatorGpu });

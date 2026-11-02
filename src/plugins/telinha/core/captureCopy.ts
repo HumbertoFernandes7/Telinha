@@ -65,6 +65,11 @@ export interface CaptureCopyStats {
     gpuN: number;
     gpuMax: number;
     gpuLate: number;
+    /** ms que a escrita no gerador levou ate terminar (aceita ou recusada): soma, quantas, maximo, quantas passaram de 16,7 ms */
+    writeMs?: number;
+    writeN?: number;
+    writeMax?: number;
+    writeSlow?: number;
     width: number;
     height: number;
     method: CopyMethod | "passthrough" | null;
@@ -223,6 +228,8 @@ export function copyStatsLine(prev: CaptureCopyStats | null, cur: CaptureCopySta
     const gpu = avg(d("gpuMs"), d("gpuN"));
     const parts = [`${frames} quadros em ${Math.round(seconds)} s`, `${ms1(avg(d("copyMs"), copied))} ms/quadro no Worker`];
     if (gpu != null) parts.push(`placa termina a cópia em ${ms1(gpu)} ms (máx. ${ms1(cur.gpuMax)}${d("gpuLate") ? `, ${d("gpuLate")} acima de 33 ms` : ""})`);
+    const write = avg(d("writeMs"), d("writeN"));
+    if (d("writeN") > 0) parts.push(`escrita no gerador ${ms1(write)} ms (máx. ${ms1(cur.writeMax ?? 0)}${d("writeSlow") > 0 ? `, ${d("writeSlow")} acima de 16,7 ms` : ""})`);
     const dropped = d("dropped");
     parts.push(dropped ? `${dropped} descartados pela fila (placa ${d("dropGpu")}, envio ${d("dropWrite")})` : "nenhum descartado");
     if (d("passed")) parts.push(`${d("passed")} sem cópia`);

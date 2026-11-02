@@ -395,6 +395,20 @@ describe("cópia na hora: linha de custo", () => {
             "Cópia na hora (desligada, direto): 5 quadros em 1 s · ? ms/quadro no Worker · nenhum descartado · 5 sem cópia");
     });
 
+    test("escrita no gerador: o trecho só aparece quando writeN cresceu na janela; média da janela, máximo acumulado", () => {
+        const base = zeroStats("canvas2d");
+        // sem escritas novas: nada (mesmo com o acumulado de antes)
+        const before = { ...base, frames: 60, copied: 60, copyMs: 6, writeMs: 100, writeN: 50, writeMax: 40, writeSlow: 5 };
+        assert.equal(copyStatsLine(before, { ...before, frames: 120, copied: 120, copyMs: 12 }, 1),
+            "Cópia na hora (canvas 2D): 60 quadros em 1 s · 0,10 ms/quadro no Worker · nenhum descartado");
+        // com escritas novas e nenhuma lenta: sem o ", Z acima…"
+        assert.equal(copyStatsLine(base, { ...base, frames: 60, copied: 60, copyMs: 6, writeMs: 120, writeN: 60, writeMax: 4 }, 1),
+            "Cópia na hora (canvas 2D): 60 quadros em 1 s · 0,10 ms/quadro no Worker · escrita no gerador 2,00 ms (máx. 4,00) · nenhum descartado");
+        // com lentas na janela: a média e as lentas são da janela, o máximo é o acumulado
+        assert.equal(copyStatsLine(before, { ...before, frames: 120, copied: 120, copyMs: 12, writeMs: 100 + 1800, writeN: 50 + 60, writeMax: 55, writeSlow: 5 + 31 }, 2),
+            "Cópia na hora (canvas 2D): 60 quadros em 2 s · 0,10 ms/quadro no Worker · escrita no gerador 30 ms (máx. 55, 31 acima de 16,7 ms) · nenhum descartado");
+    });
+
     test("diagnóstico: nada antes da primeira transmissão", () => {
         assert.equal(captureCopyDiagnostics(), null);
     });

@@ -28,7 +28,7 @@ var SLOW_MS = 2.5, SLOW_SAMPLE = 120, slowChecked = false, allowed = [];
 var method = null, device = null, canvas = null, gctx = null, c2d = null, pipeline = null, sampler = null, layout = null;
 var reader = null, writer = null, stopped = false, passthrough = false, fails = 0, inflight = 0;
 var last = null, lastAt = 0;
-var st = { frames: 0, copied: 0, passed: 0, written: 0, dropped: 0, dropGpu: 0, dropWrite: 0, refreshed: 0, copyMs: 0, copyMax: 0, gpuMs: 0, gpuN: 0, gpuMax: 0, gpuLate: 0, width: 0, height: 0 };
+var st = { frames: 0, copied: 0, passed: 0, written: 0, dropped: 0, dropGpu: 0, dropWrite: 0, refreshed: 0, copyMs: 0, copyMax: 0, gpuMs: 0, gpuN: 0, gpuMax: 0, gpuLate: 0, writeMs: 0, writeN: 0, writeMax: 0, writeSlow: 0, width: 0, height: 0 };
 var warned = {};
 function post(type, data) { var m = data || {}; m.type = type; self.postMessage(m); }
 function describe(e) { return e && e.name ? e.name + ": " + e.message : String(e); }
@@ -122,7 +122,14 @@ function emit(out) {
   if (writing) { if (waiting) { waiting.close(); st.dropped++; st.dropWrite++; } waiting = out; return; }
   writing = true;
   // written: o gerador aceitou o quadro (o main confere que a copia anda: captureCopy.ts → o vigia do fluxo)
-  writer.write(out).then(function () { st.written++; next(); }, function () { out.close(); next(); });
+  var w0 = performance.now();
+  writer.write(out).then(function () { wrote(w0); st.written++; next(); }, function () { wrote(w0); out.close(); next(); });
+}
+// quanto a escrita no gerador levou (aceita ou recusada): soma, quantas, maximo, quantas passaram de um quadro a 60 fps
+function wrote(t0) {
+  var ms = performance.now() - t0;
+  st.writeMs += ms; st.writeN++; if (ms > st.writeMax) st.writeMax = ms;
+  if (ms > 16.7) st.writeSlow++;
 }
 function next() {
   writing = false;
