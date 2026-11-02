@@ -31,6 +31,7 @@
 //
 // Nada roda no carregamento do modulo.
 
+import { getWindowProcessInfo } from "@plugins/telinha/nativeWindowPid";
 import { type ChildProcessByStdio, spawn } from "child_process";
 import { app } from "electron";
 import { availableParallelism, cpus } from "os";
@@ -53,7 +54,7 @@ export const IDLE_STOP_MS = 35_000;
 const MAX_SAMPLES = 24;
 /** o cabecalho tem ~700 colunas (~100 KB); acima disto a linha e descartada */
 const MAX_LINE_CHARS = 4 * 1024 * 1024;
-/** abaixo disto de 3D, nenhum processo de fora do Discord conta como jogo */
+/** sem janela capturada: abaixo disto de 3D, nenhum processo de fora do Discord e citado */
 export const GAME_MIN_3D = 1;
 const NAME_TIMEOUT_MS = 4000;
 const KILL_GRACE_MS = 1000;
@@ -75,8 +76,12 @@ export interface LiveWeightReport {
     discordCpu: number | null;
     /** memoria dedicada da placa usada pelo Discord, em MB; null = sem o contador */
     discordGpuMemoryMb: number | null;
-    /** o processo de fora do Discord que mais usou o 3D da placa (o jogo); null = nenhum acima de GAME_MIN_3D */
-    game: { pid: number; name: string | null; load3D: number; } | null;
+    /**
+     * "window": o jogo, o processo dono da janela capturada (o 3D dele, mesmo 0); "top": sem janela (tela inteira) ou sem
+     * o processo dela nas colunas, o processo de fora do Discord que mais usou o 3D (pode nao ser um jogo). null = nenhum
+     * acima de GAME_MIN_3D.
+     */
+    game: { pid: number; name: string | null; load3D: number; source: "window" | "top"; } | null;
     /** a placa toda, por tipo de motor; null sem amostras */
     total: EngineLoad | null;
     /** execucoes do typeperf desde o comeco desta medicao (diagnostico) */
@@ -115,6 +120,10 @@ let cpuBase = new Map<number, number>();
 /** pid → nome do executavel (null = nao achou); esquecido a cada medicao nova (os pids voltam a ser usados) */
 const names = new Map<number, string | null>();
 let typeperfOverride: string | null = null;
+/** o processo dono da janela capturada (null: tela inteira, ainda procurando ou nao achou) */
+let captured: { pid: number; name: string; } | null = null;
+/** cada fonte nova invalida a busca anterior */
+let sourceSeq = 0;
 
 /** So para testes: outro executavel no lugar do typeperf.exe do Windows. */
 export function setTypeperfPathForTests(path: string | null) {
@@ -205,8 +214,9 @@ function cpuPercent(m: ReturnType<typeof discordMetrics>, elapsedMs: number): nu
 function processName(pid: number): Promise<string | null> {
     if (names.has(pid)) return Promise.resolve(names.get(pid) as string | null);
     return new Promise(resolve => {
-        const done = (name: string | null) => {
-            names.set(pid, name);
+        /** `cache` false: o tasklist falhou ou nao respondeu (tenta de novo na proxima leitura) */
+        const done = (name: string | null, cache = true) => {
+            if (cache) names.set(pid, name);
             resolve(name);
         };
         let child: ChildProcessByStdio<null, Readable, Readable>;
@@ -215,23 +225,23 @@ function processName(pid: number): Promise<string | null> {
                 windowsHide: true, shell: false, stdio: ["ignore", "pipe", "pipe"]
             });
         } catch {
-            done(null);
+            done(null, false);
             return;
         }
         let out = "";
         let settled = false;
-        const finish = (name: string | null) => {
+        const finish = (name: string | null, cache = true) => {
             if (settled) return;
             settled = true;
             clearTimeout(timer);
-            done(name);
+            done(name, cache);
         };
         const timer = setTimeout(() => {
             killQuietly(child);
-            finish(null);
+            finish(null, false);
         }, NAME_TIMEOUT_MS);
         timer.unref?.();
-        child.on("error", () => finish(null));
+        child.on("error", () => finish(null, false));
         child.stdout.on("error", () => { });
         child.stderr.on("error", () => { });
         child.stderr.resume();
@@ -315,13 +325,17 @@ function spawnRun() {
         failure = why ?? note(r) ?? "o typeperf.exe não mediu nada";
         wanted = false;
     };
+    let error: string | null = null;
     child.on("error", e => {
-        end(spawnReason(e));
-        stopRun(r);
+        error ??= spawnReason(e);
+        // o processo ja terminou (nao abriu): decide agora. Senao (um kill que falhou...), mata e espera o "close": uma
+        // execucao nova so depois de esta acabar de verdade, nunca dois typeperf ao mesmo tempo
+        if (child.exitCode !== null || child.signalCode !== null) end(error);
+        else stopRun(r);
     });
     child.on("close", code => {
         const text = note(r);
-        end(code === 0 || code === null ? null : text ? `${text} (código ${code})` : `o typeperf.exe saiu com o código ${code}`);
+        end(error ?? (code === 0 || code === null ? null : text ? `${text} (código ${code})` : `o typeperf.exe saiu com o código ${code}`));
     });
 }
 
@@ -331,13 +345,31 @@ function stopIdleTimer() {
 }
 
 /**
- * Comeca a medir (a transmissao comecou). Ja medindo: continua (trocar de fonte nao recomeca). Nunca lanca. ok false =
- * sem numeros nesta transmissao, com o motivo.
+ * A fonte capturada (`window:<HWND>:<n>` / `screen:...`): numa janela, o processo dono dela e o jogo (nativeWindowPid,
+ * PowerShell, uma vez por fonte, em paralelo). Na tela inteira nao ha jogo conhecido.
  */
-export function startLiveWeightMain(): LiveWeightStart {
+function setSource(sourceId: unknown) {
+    const seq = ++sourceSeq;
+    captured = null;
+    if (typeof sourceId !== "string" || !sourceId.startsWith("window:")) return;
+    void getWindowProcessInfo(sourceId).then(info => {
+        if (seq !== sourceSeq || !info) return;
+        // o nativeWindowPid da o nome sem o .exe
+        captured = { pid: info.pid, name: `${info.processName}.exe` };
+    });
+}
+
+/**
+ * Comeca a medir (a transmissao comecou), com a fonte capturada. Ja medindo (trocou de fonte): continua a mesma execucao,
+ * so com a fonte nova. Nunca lanca. ok false = sem numeros nesta transmissao, com o motivo.
+ */
+export function startLiveWeightMain(sourceId?: unknown): LiveWeightStart {
     if (process.platform !== "win32") return { ok: false, reason: "só funciona no Windows" };
     lastReadAt = Date.now();
-    if (wanted && run) return { ok: true, reason: null };
+    if (wanted && run) {
+        setSource(sourceId);
+        return { ok: true, reason: null };
+    }
     stopLiveWeightMain();
     installExitHook();
     wanted = true;
@@ -348,6 +380,7 @@ export function startLiveWeightMain(): LiveWeightStart {
     windowStart = Date.now();
     lastEarlyRefresh = Date.now();
     cpuPercent(discordMetrics(), 0);
+    setSource(sourceId);
     spawnRun();
     if (!wanted) return { ok: false, reason: failure };
     idleTimer = setInterval(() => {
@@ -381,13 +414,20 @@ export async function readLiveWeightMain(): Promise<LiveWeightReport> {
     samples = [];
     const w = aggregate(taken, metrics.pids);
     const r = run;
-    // o processo da GPU do Discord (ou o jogo) nasceu depois desta execucao do typeperf: recomeca para ele entrar
-    if (r?.columns && r.gotData && now - lastEarlyRefresh >= EARLY_REFRESH_MS) {
-        const missingGpu = metrics.gpuPid != null && !enginePids(r.columns).has(metrics.gpuPid);
-        if (missingGpu || (w.samples && w.top3D < GAME_MIN_3D)) refreshRun(r);
+    // a janela capturada e de um processo de fora do Discord (a do proprio Discord nao e jogo)
+    const owner = captured && !metrics.pids.has(captured.pid) ? captured : null;
+    const columnPids = r?.columns ? enginePids(r.columns) : null;
+    // o processo da GPU do Discord ou o jogo (o dono da janela capturada) nasceu depois desta execucao do typeperf:
+    // recomeca para ele entrar (no maximo um a cada EARLY_REFRESH_MS)
+    if (r && columnPids && r.gotData && now - lastEarlyRefresh >= EARLY_REFRESH_MS) {
+        const missingGpu = metrics.gpuPid != null && !columnPids.has(metrics.gpuPid);
+        const missingGame = owner != null && !columnPids.has(owner.pid);
+        if (missingGpu || missingGame) refreshRun(r);
     }
     if (!w.samples) return { ...base, discordCpu };
-    const game = w.topPid != null && w.top3D >= GAME_MIN_3D ? { pid: w.topPid, name: await processName(w.topPid), load3D: w.top3D } : null;
+    let game: LiveWeightReport["game"] = null;
+    if (owner && columnPids?.has(owner.pid)) game = { pid: owner.pid, name: owner.name, load3D: w.pid3D.get(owner.pid) ?? 0, source: "window" };
+    else if (w.topPid != null && w.top3D >= GAME_MIN_3D) game = { pid: w.topPid, name: await processName(w.topPid), load3D: w.top3D, source: "top" };
     return {
         ...base,
         samples: w.samples,
@@ -428,4 +468,6 @@ export function resetLiveWeightForTests() {
     cpuBase = new Map();
     names.clear();
     lastEarlyRefresh = -Infinity;
+    captured = null;
+    sourceSeq++;
 }

@@ -53,12 +53,19 @@ let lastLogged: { at: number; values: number[]; game: string | null; } | null = 
 let failureLogged: string | null = null;
 let failure: string | null = null;
 let runs = 0;
+/** a fonte capturada desta transmissao (o main acha o jogo pela janela) */
+let source: string | null = null;
 
 const pctText = (v: number) => `${Math.round(v)}%`;
 
+/**
+ * O jogo e o dono da janela capturada ("window"). Na tela inteira (ou sem achar o processo da janela) o Telinha nao sabe
+ * qual e o jogo: cita o processo de fora do Discord com mais 3D, sem chamar de jogo ("top").
+ */
 function gameText(game: LiveWeightReport["game"]): string {
-    if (!game) return "nenhum jogo usando a placa";
-    return `jogo ${game.name ?? `processo ${game.pid}`} 3D ${pctText(game.load3D)}`;
+    if (!game) return "nada usando a placa fora do Discord";
+    const name = game.name ?? `processo ${game.pid}`;
+    return game.source === "window" ? `jogo ${name} 3D ${pctText(game.load3D)}` : `maior 3D fora do Discord: ${name} 3D ${pctText(game.load3D)}`;
 }
 
 /** A linha do log de uma leitura com amostras; null sem amostras. */
@@ -101,11 +108,18 @@ function isReport(v: unknown): v is LiveWeightReport {
     return !!v && typeof v === "object" && typeof (v as LiveWeightReport).state === "string" && typeof (v as LiveWeightReport).samples === "number";
 }
 
-/** Uma transmissao comecou (core/streaming.ts): o main comeca a medir. Trocar de fonte no ar continua a mesma medicao. Nunca lanca. */
-export async function startLiveWeight(): Promise<void> {
+/**
+ * Uma transmissao comecou (core/streaming.ts), com a fonte capturada: o main comeca a medir. Trocar de fonte no ar continua
+ * a mesma medicao, so com a fonte nova (o jogo e o dono da janela). Nunca lanca.
+ */
+export async function startLiveWeight(sourceId: string | null = source): Promise<void> {
     const native = getNativeOrNull();
     if (typeof native?.startLiveWeight !== "function") return;
-    if (active) return;
+    source = sourceId;
+    if (active) {
+        Promise.resolve(native.startLiveWeight(sourceId)).catch(() => { });
+        return;
+    }
     active = true;
     failure = null;
     latest = null;
@@ -113,7 +127,7 @@ export async function startLiveWeight(): Promise<void> {
     lastLogged = null;
     lastReadAt = performance.now();
     try {
-        const res = await native.startLiveWeight();
+        const res = await native.startLiveWeight(sourceId);
         if (!active) return;
         if (!res?.ok) noteFailure(res?.reason ?? "o processo main não respondeu");
     } catch (e) {
@@ -151,7 +165,7 @@ async function read(): Promise<void> {
         latest = w;
         latestLine = line;
         latestWall = Date.now();
-        const game = r.game?.name ?? (r.game ? String(r.game.pid) : null);
+        const game = r.game ? `${r.game.source} ${r.game.name ?? r.game.pid}` : null;
         if (shouldLog(w, game)) {
             lastLogged = { at: w.at, values: shownValues(w), game };
             log.info(line);
@@ -163,10 +177,13 @@ async function read(): Promise<void> {
     }
 }
 
-/** A transmissao acabou (core/streaming.ts → stopStreaming): o main para de medir. Nunca lanca. */
+/**
+ * A transmissao acabou (core/streaming.ts → stopStreaming): o main para de medir. Pede SEMPRE, mesmo sem medicao ativa aqui
+ * (uma leitura que falhou desliga o lado do renderer, mas o typeperf pode seguir no main). Nunca lanca.
+ */
 export function stopLiveWeight(): void {
-    if (!active) return;
     active = false;
+    source = null;
     const native = getNativeOrNull();
     if (typeof native?.stopLiveWeight !== "function") return;
     native.stopLiveWeight().catch(() => { });
@@ -202,4 +219,5 @@ export function resetLiveWeightRendererForTests() {
     failureLogged = null;
     failure = null;
     runs = 0;
+    source = null;
 }

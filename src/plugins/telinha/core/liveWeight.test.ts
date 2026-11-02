@@ -29,7 +29,7 @@ function report(patch: Partial<LiveWeightReport> = {}): LiveWeightReport {
         state: "measuring", reason: null, samples: 2, windowMs: 10_000,
         discord: { "3D": 4.2, VideoEncode: 12.4, VideoDecode: 0, Copy: 2 },
         discordCpu: 6.4, discordGpuMemoryMb: 420.4,
-        game: { pid: 27_368, name: "Jogo.exe", load3D: 91 },
+        game: { pid: 27_368, name: "Jogo.exe", load3D: 91, source: "window" },
         total: { "3D": 97, VideoEncode: 12.4, VideoDecode: 0, Copy: 3 },
         runs: 1,
         ...patch
@@ -72,7 +72,7 @@ async function seconds(clock: ReturnType<typeof useFakeClock>, n: number) {
 async function started(t: TestContext, reads?: Parameters<typeof main>[0]) {
     const clock = useFakeClock(t);
     main(reads);
-    await startLiveWeight();
+    await startLiveWeight("window:1234:0");
     return clock;
 }
 
@@ -103,8 +103,11 @@ describe("a linha do log", () => {
         assert.equal(formatLiveWeightLine(report({ discord: { "3D": 4, VideoEncode: 12, VideoDecode: 7.6, Copy: 2 } })),
             LINE.replace("codificar 12% · copiar", "codificar 12% · decodificar 8% · copiar"));
         assert.equal(formatLiveWeightLine(report({ discordCpu: null })), LINE.replace(" · processador 6%", ""));
-        assert.equal(formatLiveWeightLine(report({ game: { pid: 1234, name: null, load3D: 50 } })), LINE.replace("jogo Jogo.exe 3D 91%", "jogo processo 1234 3D 50%"));
-        assert.equal(formatLiveWeightLine(report({ game: null })), LINE.replace("jogo Jogo.exe 3D 91%", "nenhum jogo usando a placa"));
+        assert.equal(formatLiveWeightLine(report({ game: { pid: 1234, name: null, load3D: 50, source: "window" } })), LINE.replace("jogo Jogo.exe 3D 91%", "jogo processo 1234 3D 50%"));
+        assert.equal(formatLiveWeightLine(report({ game: null })), LINE.replace("jogo Jogo.exe 3D 91%", "nada usando a placa fora do Discord"));
+        // tela inteira (ou a janela sem o processo nas colunas): o Telinha nao sabe qual e o jogo, nao chama de jogo
+        assert.equal(formatLiveWeightLine(report({ game: { pid: 4321, name: "msedge.exe", load3D: 18, source: "top" } })),
+            LINE.replace("jogo Jogo.exe 3D 91%", "maior 3D fora do Discord: msedge.exe 3D 18%"));
         assert.equal(formatLiveWeightLine(report({ discord: null })), null);
         assert.equal(formatLiveWeightLine(report({ total: null })), null);
     });
@@ -112,7 +115,7 @@ describe("a linha do log", () => {
     test(`sem mudanca de ${LOG_CHANGE_POINTS} pontos, a linha so volta depois de LOG_REPEAT_MS; com mudanca ou outro jogo, na hora`, async t => {
         const small = report({ discord: { "3D": 6, VideoEncode: 15, VideoDecode: 0, Copy: 2 } });
         const big = report({ discord: { "3D": 6, VideoEncode: 18, VideoDecode: 0, Copy: 2 } });
-        const otherGame = report({ ...big, game: { pid: 99, name: null, load3D: 91 } });
+        const otherGame = report({ ...big, game: { pid: 99, name: null, load3D: 91, source: "window" } });
         const clock = await started(t, [report(), small, big, otherGame, otherGame]);
         await seconds(clock, 10);
         await seconds(clock, 10);
@@ -174,7 +177,7 @@ describe("falha mansa: uma linha so, a transmissao segue", () => {
         await startLiveWeight();
         assert.deepEqual(messages(), ["Peso da live: sem números nesta transmissão (o typeperf.exe do Windows não foi encontrado); a transmissão continua normal"]);
         assert.equal(getEventLog().at(-1)?.level, "warn");
-        assert.equal(callsOf("stopLiveWeight"), 0, "nao medindo: nada a parar");
+        assert.equal(callsOf("stopLiveWeight"), 1, "o stop vai sempre (o main pode ter um typeperf mesmo sem medicao aqui)");
         assert.match(liveWeightDiagnostics(), /^peso da live: sem números \(o typeperf\.exe do Windows não foi encontrado\); nenhuma leitura ainda$/);
         liveWeightTick();
         assert.equal(callsOf("readLiveWeight"), 0);
@@ -262,7 +265,7 @@ describe("falha mansa: uma linha so, a transmissao segue", () => {
 });
 
 describe("parar, a qualidade automatica e o diagnostico", () => {
-    test("parar avisa o main (uma vez) e currentLiveWeight volta a null; o stop que rejeita nao escapa", async t => {
+    test("parar avisa o main (sempre) e currentLiveWeight volta a null; o stop que rejeita nao escapa", async t => {
         const clock = await started(t);
         await seconds(clock, 10);
         const w = currentLiveWeight()!;
@@ -276,14 +279,36 @@ describe("parar, a qualidade automatica e o diagnostico", () => {
         stopLiveWeight();
         stopLiveWeight();
         await flushPromises();
-        assert.equal(callsOf("stopLiveWeight"), 1);
+        assert.equal(callsOf("stopLiveWeight"), 2);
         assert.equal(currentLiveWeight(), null);
     });
 
-    test("trocar de fonte no ar (startLiveWeight de novo): continua a mesma medicao", async t => {
-        await started(t);
+    test("a leitura falhou (o renderer parou de medir): parar a transmissao ainda manda o stop ao main", async t => {
+        const clock = await started(t, [async () => {
+            throw new Error("IPC caiu");
+        }]);
+        await seconds(clock, 10);
+        assert.match(messages().at(-1)!, /a leitura falhou/);
+        assert.equal(currentLiveWeight(), null);
+        stopLiveWeight();
+        assert.equal(callsOf("stopLiveWeight"), 1);
+    });
+
+    test("a fonte vai para o main (o jogo e o dono da janela); trocar de fonte no ar so manda a nova; a medicao que recomeca usa a mesma", async t => {
+        const clock = await started(t, [report(), report({ state: "off", samples: 0 }), report()]);
+        assert.deepEqual(env!.calls.filter(c => c.name === "startLiveWeight").map(c => c.args), [["window:1234:0"]]);
+        await startLiveWeight("screen:0:0");
+        assert.deepEqual(env!.calls.filter(c => c.name === "startLiveWeight").map(c => c.args), [["window:1234:0"], ["screen:0:0"]]);
+        await seconds(clock, 20);
+        assert.deepEqual(env!.calls.filter(c => c.name === "startLiveWeight").at(-1)?.args, ["screen:0:0"], "o main parou sozinho: recomeca com a fonte atual");
+        // a troca que falha no IPC nao escapa
+        env!.telinha.startLiveWeight = () => Promise.reject(new Error("x"));
+        await startLiveWeight("window:9:0");
+        await flushPromises();
+        stopLiveWeight();
+        env!.telinha.startLiveWeight = async () => ({ ok: true, reason: null });
         await startLiveWeight();
-        assert.equal(callsOf("startLiveWeight"), 1);
+        assert.deepEqual(env!.calls.at(-1)?.args, [null], "sem fonte depois de parar");
     });
 
     test("o diagnostico: medindo, a ultima leitura em UTC, a memoria da placa e o decodificar zerado", async t => {
@@ -307,7 +332,7 @@ describe("parar, a qualidade automatica e o diagnostico", () => {
 
     test("sem a medicao na parte nativa (versao antiga, build do fork): nada acontece, e o diagnostico diz", async () => {
         env = installNative();
-        await startLiveWeight();
+        await startLiveWeight("screen:0:0");
         liveWeightTick();
         stopLiveWeight();
         assert.equal(env.calls.length, 0);

@@ -83,10 +83,23 @@ afterEach(() => {
 
 const isTypeperf = (p: FakeChildProcess) => /typeperf\.exe$/i.test(p.command);
 const isTasklist = (p: FakeChildProcess) => /tasklist\.exe$/i.test(p.command);
+const isPowerShell = (p: FakeChildProcess) => /powershell/i.test(p.command);
 
-/** typeperf que espera ser dirigido; tasklist que responde com `names` (pid → nome; sem nome: a mensagem de "nenhuma tarefa"). */
-function host(t: TestContext, names: Record<number, string> = { [GAME]: "Jogo.exe", [DWM]: "dwm.exe" }): SpawnEnv & { typeperf(): FakeChildProcess[]; tasklist(): FakeChildProcess[]; } {
+/**
+ * typeperf que espera ser dirigido; tasklist que responde com `names` (pid → nome; sem nome: a mensagem de "nenhuma
+ * tarefa"); o PowerShell do nativeWindowPid (o dono da janela capturada) responde `window` (pid e nome sem .exe; null = nao
+ * achou).
+ */
+function host(t: TestContext, names: Record<number, string> = { [GAME]: "Jogo.exe", [DWM]: "dwm.exe" }, window: { pid: number; name: string; } | null = { pid: GAME, name: "Jogo" }):
+SpawnEnv & { typeperf(): FakeChildProcess[]; tasklist(): FakeChildProcess[]; powershell(): FakeChildProcess[]; } {
     const env = mockSpawn(t, p => {
+        if (isPowerShell(p)) {
+            setImmediate(async () => {
+                if (window) await feed(p, `TELINHA|${window.pid}|0|${window.name}\r\n`);
+                p.exit(0);
+            });
+            return;
+        }
         if (!isTasklist(p)) return;
         const pid = Number(/PID eq (\d+)/.exec(p.args[1])?.[1]);
         setImmediate(async () => {
@@ -96,7 +109,7 @@ function host(t: TestContext, names: Record<number, string> = { [GAME]: "Jogo.ex
             p.exit(0);
         });
     });
-    return { ...env, typeperf: () => env.spawned.filter(isTypeperf), tasklist: () => env.spawned.filter(isTasklist) };
+    return { ...env, typeperf: () => env.spawned.filter(isTypeperf), tasklist: () => env.spawned.filter(isTasklist), powershell: () => env.spawned.filter(isPowerShell) };
 }
 
 describe("o typeperf", () => {
@@ -157,7 +170,7 @@ describe("a leitura (media desde a leitura anterior)", () => {
         assert.equal(r.runs, 1);
         // 3D: (1+3) e (3+3) → 5; codificar: 12 e 14 → 13; copiar: 3 e 1 → 2
         assert.deepEqual(r.discord, { "3D": 5, VideoEncode: 13, VideoDecode: 0, Copy: 2 });
-        assert.deepEqual(r.game, { pid: GAME, name: "Jogo.exe", load3D: 91 });
+        assert.deepEqual(r.game, { pid: GAME, name: "Jogo.exe", load3D: 91, source: "top" }, "tela inteira: o maior 3D de fora, sem saber se e jogo");
         // placa toda, 3D: 1+3+90+5 = 99 e 3+3+92+3 = 101 → 100
         // copiar: 1+2+1 = 4 e 1+0+1 = 2 → 3
         assert.deepEqual(r.total, { "3D": 99.5, VideoEncode: 13, VideoDecode: 0, Copy: 3 });
@@ -187,7 +200,7 @@ describe("a leitura (media desde a leitura anterior)", () => {
         assert.equal(GAME_MIN_3D, 1);
         assert.equal((await readLiveWeightMain()).game, null);
         await feed(p, PLAYING);
-        assert.deepEqual((await readLiveWeightMain()).game, { pid: GAME, name: null, load3D: 90 });
+        assert.deepEqual((await readLiveWeightMain()).game, { pid: GAME, name: null, load3D: 90, source: "top" });
     });
 
     test("o tasklist que nao abre, que da erro ou que nao responde: sem nome (e o tempo do tasklist e limitado)", async t => {
@@ -207,12 +220,22 @@ describe("a leitura (media desde a leitura anterior)", () => {
         clock.tick(4000);
         assert.ok(tl.killed, "o tasklist que nao responde e encerrado");
         assert.equal((await pending).game?.name, null);
+        // o tempo esgotado nao fica guardado: a proxima leitura pergunta de novo
+        await feed(p, PLAYING);
+        const again = readLiveWeightMain();
+        await flushPromises();
+        assert.equal(env.spawned.filter(isTasklist).length, 2, "perguntou de novo");
+        clock.tick(4000);
+        await again;
         // erro ao abrir
         const failing = mockSpawn(t, q => {
             if (isTasklist(q)) setImmediate(() => q.fail(Object.assign(new Error("spawn"), { code: "ENOENT" })));
         });
         await feed(p, sample([[1, 2, 1, 100], [3, 10, 2, 300], [0, 0, 0, 0], [50, 0, 0, 0]]));
-        assert.deepEqual((await readLiveWeightMain()).game, { pid: DWM, name: null, load3D: 50 });
+        assert.deepEqual((await readLiveWeightMain()).game, { pid: DWM, name: null, load3D: 50, source: "top" });
+        await feed(p, sample([[1, 2, 1, 100], [3, 10, 2, 300], [0, 0, 0, 0], [50, 0, 0, 0]]));
+        await readLiveWeightMain();
+        assert.equal(failing.spawned.filter(isTasklist).length, 2, "o erro tambem nao fica guardado");
         failing.restore();
     });
 
@@ -397,6 +420,8 @@ describe("ciclo de vida", () => {
             const env = mockSpawn(undefined, p => setImmediate(() => p.fail(Object.assign(new Error("boom"), code ? { code } : {}))));
             try {
                 assert.equal(startLiveWeightMain().ok, true);
+                // o erro com o processo vivo: mata e espera o close
+                await flushPromises();
                 await flushPromises();
                 const r = await readLiveWeightMain();
                 assert.equal(r.state, "unavailable");
@@ -451,9 +476,9 @@ describe("ciclo de vida", () => {
         assert.doesNotThrow(() => exitHooks[0]());
     });
 
-    test("o processo da GPU do Discord que nasceu depois da execucao, ou nenhum jogo: recomeca (no maximo um a cada EARLY_REFRESH_MS)", async t => {
+    test("o processo da GPU do Discord, ou o dono da janela capturada, que nasceu depois da execucao: recomeca (no maximo um a cada EARLY_REFRESH_MS)", async t => {
         const clock = useFakeClock(t);
-        const env = host(t);
+        const env = host(t, undefined, { pid: 61_000, name: "JogoNovo" });
         // o renderer le a cada 10 s (sem ler, a medicao para em IDLE_STOP_MS)
         const advance = async (ms: number) => {
             for (let left = ms; left > 0; left -= 10_000) {
@@ -461,7 +486,7 @@ describe("ciclo de vida", () => {
                 await readLiveWeightMain();
             }
         };
-        startLiveWeightMain();
+        startLiveWeightMain("screen:0:0");
         const [p] = env.typeperf();
         // o cabecalho nao tem o processo da GPU do Discord (ele reiniciou)
         await feed(p, header([process.pid, GAME]));
@@ -470,28 +495,147 @@ describe("ciclo de vida", () => {
         await advance(EARLY_REFRESH_MS - 10_000);
         assert.ok(!p.killed, "antes de EARLY_REFRESH_MS, nao");
         clock.tick(10_000);
-        await feed(p, sample([[1, 2, 1, 100], [90, 0, 1, 2000]]));
         await readLiveWeightMain();
         assert.ok(p.killed, "recomeca para o processo novo entrar");
         await flushPromises();
         assert.equal(env.typeperf().length, 2);
+
+        // tela inteira e nenhum jogo (o maior 3D de fora esta baixo): nao recomeca por isso
         const q = env.typeperf()[1];
         await feed(q, header());
-        await feed(q, sample([[1, 2, 1, 100], [3, 10, 2, 300], [0, 0, 0, 0], [0, 0, 0, 0]]));
-        await readLiveWeightMain();
-        assert.ok(!q.killed, "logo depois de recomecar, nao");
-        await advance(EARLY_REFRESH_MS - 10_000);
-        clock.tick(10_000);
-        await feed(q, sample([[1, 2, 1, 100], [3, 10, 2, 300], [0, 0, 0, 0], [0, 0, 0, 0]]));
-        await readLiveWeightMain();
-        assert.ok(q.killed, "sem jogo: recomeca para ver um jogo aberto depois");
-        // com o jogo, fica
-        await flushPromises();
-        const r3 = env.typeperf()[2];
-        await feed(r3, header());
         await advance(EARLY_REFRESH_MS);
-        await feed(r3, PLAYING);
+        await feed(q, sample([[1, 2, 1, 100], [3, 10, 2, 300], [0, 0, 0, 0], [0, 0, 0, 0]]));
         await readLiveWeightMain();
-        assert.ok(!r3.killed);
+        assert.ok(!q.killed, "sem janela capturada, nao ha jogo para esperar");
+
+        // capturando a janela de um jogo aberto depois (61000 nao esta nas colunas): recomeca
+        startLiveWeightMain("window:777:0");
+        await flushPromises();
+        await flushPromises();
+        assert.equal(env.powershell().length, 1, "o dono da janela, uma vez por fonte");
+        assert.equal(env.typeperf().length, 2, "trocar de fonte nao recomeca a execucao");
+        await feed(q, PLAYING);
+        const r = await readLiveWeightMain();
+        assert.equal(r.game?.source, "top", "o dono da janela ainda nao esta nas colunas: o maior 3D de fora");
+        assert.ok(q.killed, "recomeca para o jogo entrar");
+        await flushPromises();
+        const q3 = env.typeperf()[2];
+        await feed(q3, header([process.pid, DISCORD_GPU, 61_000, DWM]));
+        await feed(q3, sample([[1, 2, 1, 100], [3, 10, 2, 300], [95, 0, 1, 3000], [5, 0, 0, 50]]));
+        assert.deepEqual((await readLiveWeightMain()).game, { pid: 61_000, name: "JogoNovo.exe", load3D: 95, source: "window" });
+        await advance(EARLY_REFRESH_MS);
+        assert.ok(!q3.killed, "com o jogo nas colunas, fica");
+    });
+});
+
+describe("o jogo pela janela capturada", () => {
+    test("o dono da janela e o jogo: o 3D dele (mesmo baixo, mesmo com outro maior), o nome sem o tasklist", async t => {
+        const env = host(t);
+        startLiveWeightMain("window:1234:0");
+        await flushPromises();
+        await flushPromises();
+        const [ps] = env.powershell();
+        assert.ok(ps, "procurou o dono da janela");
+        const [p] = env.typeperf();
+        await feed(p, header());
+        // o jogo (dono da janela) a 4% e o dwm a 30%: o jogo e o dono da janela
+        await feed(p, sample([[1, 2, 1, 100], [3, 10, 2, 300], [4, 0, 1, 2000], [30, 0, 0, 50]]));
+        assert.deepEqual((await readLiveWeightMain()).game, { pid: GAME, name: "Jogo.exe", load3D: 4, source: "window" });
+        assert.equal(env.tasklist().length, 0);
+        // o dono da janela nas colunas, mas sem valor de 3D na janela (vazio): 0
+        await feed(p, sample([[1, 2, 1, 100], [3, 10, 2, 300], [4, 0, 1, 2000], [30, 0, 0, 50]]).replace(/^("[^"]*",(?:"[^"]*",){8})"4\.000000"/, '$1" "'));
+        assert.deepEqual((await readLiveWeightMain()).game, { pid: GAME, name: "Jogo.exe", load3D: 0, source: "window" });
+    });
+
+    test("sem achar o dono da janela, ou a janela e do proprio Discord: o maior 3D de fora, sem chamar de jogo", async t => {
+        const env = host(t, undefined, null);
+        startLiveWeightMain("window:1234:0");
+        await flushPromises();
+        await flushPromises();
+        const [p] = env.typeperf();
+        await feed(p, header());
+        await feed(p, PLAYING);
+        assert.equal((await readLiveWeightMain()).game?.source, "top");
+        stopLiveWeightMain();
+        const discordWindow = host(t, undefined, { pid: DISCORD_GPU, name: "Discord" });
+        startLiveWeightMain("window:42:0");
+        await flushPromises();
+        await flushPromises();
+        const q = discordWindow.typeperf()[0];
+        await feed(q, header());
+        await feed(q, PLAYING);
+        assert.deepEqual((await readLiveWeightMain()).game, { pid: GAME, name: "Jogo.exe", load3D: 90, source: "top" });
+    });
+
+    test("a busca da janela anterior que chega depois de trocar de fonte: ignorada", async t => {
+        let answer: () => void = () => { };
+        const env = mockSpawn(t, p => {
+            if (!isPowerShell(p)) return;
+            answer = () => {
+                p.writeStdout(`TELINHA|${GAME}|0|Jogo.exe\r\n`);
+                p.exit(0);
+            };
+        });
+        startLiveWeightMain("window:1:0");
+        startLiveWeightMain("screen:0:0");
+        answer();
+        await flushPromises();
+        await flushPromises();
+        const p = env.spawned.find(isTypeperf)!;
+        await feed(p, header());
+        await feed(p, PLAYING);
+        const r = await readLiveWeightMain();
+        assert.equal(r.game?.source, "top", "a tela inteira nao tem jogo conhecido");
+    });
+});
+
+describe("um typeperf por vez", () => {
+    test("um erro com o typeperf ainda vivo (o kill que falhou): espera o close antes de comecar outro", async t => {
+        const env = host(t);
+        startLiveWeightMain();
+        const [p] = env.typeperf();
+        await feed(p, header());
+        await feed(p, PLAYING);
+        p.exitOnKill = false;
+        p.fail(Object.assign(new Error("kill falhou"), { code: "EPERM" }));
+        await flushPromises();
+        assert.ok(p.killed, "tentou encerrar");
+        assert.equal(env.typeperf().length, 1, "o antigo ainda vivo: nenhum outro");
+        p.exit(1);
+        await flushPromises();
+        assert.equal(env.typeperf().length, 2, "so depois do close, o proximo (a execucao anterior mediu)");
+        assert.equal(liveWeightRunPidForTests(), env.typeperf()[1].pid);
+    });
+
+    test("o spawn que falha de verdade (o Node ja marcou a saida antes do error): decide na hora, sem kill", async t => {
+        const env = host(t);
+        startLiveWeightMain();
+        const [p] = env.typeperf();
+        p.exitCode = -4058;
+        p.fail(Object.assign(new Error("spawn typeperf.exe ENOENT"), { code: "ENOENT" }));
+        // e o Node manda o close depois: nada mais acontece
+        p.emit("close", -4058, null);
+        await flushPromises();
+        assert.equal(env.typeperf().length, 1);
+        const r = await readLiveWeightMain();
+        assert.equal(r.state, "unavailable");
+        assert.equal(r.reason, "o typeperf.exe do Windows não foi encontrado");
+        assert.ok(!p.killed);
+    });
+
+    test("o erro de quem nunca mediu, com o processo ainda vivo: o motivo do erro quando ele fecha", async t => {
+        const env = host(t);
+        startLiveWeightMain();
+        const [p] = env.typeperf();
+        p.exitOnKill = false;
+        p.fail(Object.assign(new Error("x"), { code: "EACCES" }));
+        await flushPromises();
+        assert.equal((await readLiveWeightMain()).state, "measuring", "ainda esperando o close");
+        p.exit(1);
+        await flushPromises();
+        const r = await readLiveWeightMain();
+        assert.equal(r.state, "unavailable");
+        assert.match(r.reason!, /bloqueou o typeperf/);
+        assert.equal(env.typeperf().length, 1);
     });
 });

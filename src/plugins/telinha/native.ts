@@ -331,9 +331,12 @@ export function setGpuPriority(_: IpcMainInvokeEvent, mode: string): Promise<Gpu
 
 // #region peso da live (core/liveWeight.ts → core/liveWeightMain.ts; so mede, enquanto transmite)
 
-/** Comeca a medir quanto da placa de video e do processador a live e o jogo usam (typeperf.exe do Windows). Nunca lanca. */
-export function startLiveWeight(_: IpcMainInvokeEvent): LiveWeightStart {
-    return startLiveWeightMain();
+/**
+ * Comeca a medir quanto da placa de video e do processador a live e o jogo usam (typeperf.exe do Windows). `sourceId`: a
+ * fonte capturada (numa janela, o dono dela e o jogo). Ja medindo (trocou de fonte): so troca a fonte. Nunca lanca.
+ */
+export function startLiveWeight(_: IpcMainInvokeEvent, sourceId?: string | null): LiveWeightStart {
+    return startLiveWeightMain(sourceId);
 }
 
 /** A media desde a leitura anterior (o renderer le a cada ~10 s; sem leitura por 35 s, a medicao para sozinha). */

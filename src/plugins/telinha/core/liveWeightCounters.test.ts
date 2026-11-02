@@ -187,6 +187,7 @@ describe("a soma como o Gerenciador de Tarefas", () => {
         const w = aggregate(samples, DISCORD);
         assert.equal(w.topPid, GAME);
         assert.equal(w.top3D, 91);
+        assert.deepEqual([...w.pid3D], [[GAME, 91], [DWM, 7]], "o 3D medio de cada processo de fora (o pid 0 nunca)");
         const onlyDwm = aggregate(samples, new Set([...DISCORD, GAME]));
         assert.equal(onlyDwm.topPid, DWM, "sem o jogo, o dwm (o 3D do proprio Windows) aparece");
         assert.equal(onlyDwm.top3D, 7);
@@ -196,7 +197,7 @@ describe("a soma como o Gerenciador de Tarefas", () => {
         const w = aggregate([], DISCORD);
         assert.deepEqual(w, {
             samples: 0, discord: { "3D": 0, VideoEncode: 0, VideoDecode: 0, Copy: 0 }, total: { "3D": 0, VideoEncode: 0, VideoDecode: 0, Copy: 0 },
-            discordMemory: null, topPid: null, top3D: 0
+            discordMemory: null, topPid: null, top3D: 0, pid3D: new Map()
         });
         const columns = parseHeader(csvLine(["(PDH-CSV 4.0)", engine(DISCORD_GPU, 2, "VideoDecode"), memory(GAME)]));
         const s = parseDataLine(csvLine(["11/02/2026 14:06:07.656", "7.000000", "1"]), columns)!;

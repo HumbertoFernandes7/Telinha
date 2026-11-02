@@ -408,7 +408,7 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
         // o modo da captura (live com jogo pesado, core/captureBoost.ts): para comparar com e sem pelo "fonte N" do envio
         noteCaptureStarted();
         // o peso da live (placa de video e processador do Discord e do jogo, core/liveWeight.ts): so mede
-        void startLiveWeight();
+        void startLiveWeight(local.source.id);
         sendPresence();
         const waiting = deferredJoins ?? [];
         deferredJoins = null;

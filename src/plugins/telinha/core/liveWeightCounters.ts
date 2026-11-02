@@ -56,6 +56,8 @@ export interface WeightWindow {
     topPid: number | null;
     /** o 3D desse processo (0..100) */
     top3D: number;
+    /** o 3D medio de cada processo de fora do Discord (o motor 3D mais ocupado dele) */
+    pid3D: Map<number, number>;
 }
 
 const INSTANCE_RE = /\(pid_(\d+)_luid_(0x[0-9a-f]+_0x[0-9a-f]+)_phys_(\d+)(?:_eng_(\d+)_engtype_([^)]*))?\)/i;
@@ -213,9 +215,10 @@ export function aggregate(samples: readonly CounterSample[], discordPids: Readon
     let top3D = 0;
     for (const [pid, sum] of pid3D) {
         const avg = sum / n;
+        pid3D.set(pid, avg);
         if (avg > top3D) [topPid, top3D] = [pid, avg];
     }
-    return { samples: n, discord, total, discordMemory: memoryCount ? memorySum / memoryCount : null, topPid, top3D };
+    return { samples: n, discord, total, discordMemory: memoryCount ? memorySum / memoryCount : null, topPid, top3D, pid3D };
 }
 
 /** Os pids presentes nas colunas de engine (para saber se um processo novo ainda nao entrou nesta execucao do typeperf). */
