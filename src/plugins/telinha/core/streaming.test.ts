@@ -108,8 +108,10 @@ describe("startStreaming: validacao e erros de captura", () => {
         });
         const first = startStreaming(screenOptions());
         await assert.rejects(startStreaming(screenOptions()), { message: "A transmissão já está sendo iniciada." });
+        assert.equal(rt.lastError, "A transmissão já está sendo iniciada.", "o motivo tambem aparece na barra (lastError)");
         release(true);
         await first;
+        assert.equal(rt.lastError, null, "a partida que seguiu limpa o aviso");
         assert.equal(getStreamAccess(), "all");
         assert.equal(rig.rtc.mediaDevices.displayMediaCalls.length, 1);
     });
@@ -539,19 +541,22 @@ describe("pedidos para assistir e o envio para cada espectador", () => {
 
     test("2K numa tela 2K: vai inteiro; a presenca leva so o tamanho e o fps (uma versao antiga ve uma transmissao como outra)", async () => {
         rig.rtc.mediaDevices.getDisplayMediaImpl = () => Promise.resolve(captureStream({ video: { width: 2560, height: 1440, frameRate: 30 } }));
-        const pc = await connectViewer(rig, "peerE", ID.e, "edu");
-        const since = logMark();
-        await startStreaming(screenOptions({ quality: "1440p30" }));
-        rig.room.receive("watch", { op: "start" }, "peerE");
-        await turns();
-        assert.deepEqual(videoSenderOf(pc)!.encoding, { active: true, maxBitrate: 20_000_000, maxFramerate: 30, scaleResolutionDownBy: 1, priority: "high", networkPriority: "high" });
-        assert.ok(since().includes("Envio para edu (peerE): 1440p 30 fps, até 20000 kbps, encoder por software: equilibra resolução e fps (num soluço os dois cedem um pouco)"));
-        assert.equal(since().some(l => l.startsWith("2K escolhido")), false, "a tela comporta o 2K: sem aviso");
-        const presence = lastPresenceTo("peerE");
-        assert.deepEqual(presence.stream, { kind: "screen", title: "Tela inteira", hasAudio: false, width: 2560, height: 1440, fps: 30, access: "all" });
-        assert.equal(JSON.stringify(presence).includes("1440p"), false, "nenhum nome de qualidade vai para os outros");
-        assert.equal(getState().local?.sizeNote, undefined);
-        rig.rtc.mediaDevices.getDisplayMediaImpl = constraints => Promise.resolve(captureStream({ audio: !!constraints.audio }));
+        try {
+            const pc = await connectViewer(rig, "peerE", ID.e, "edu");
+            const since = logMark();
+            await startStreaming(screenOptions({ quality: "1440p30" }));
+            rig.room.receive("watch", { op: "start" }, "peerE");
+            await turns();
+            assert.deepEqual(videoSenderOf(pc)!.encoding, { active: true, maxBitrate: 20_000_000, maxFramerate: 30, scaleResolutionDownBy: 1, priority: "high", networkPriority: "high" });
+            assert.ok(since().includes("Envio para edu (peerE): 2K 30 fps, até 20000 kbps, encoder por software: equilibra resolução e fps (num soluço os dois cedem um pouco)"));
+            assert.equal(since().some(l => l.startsWith("2K escolhido")), false, "a tela comporta o 2K: sem aviso");
+            const presence = lastPresenceTo("peerE");
+            assert.deepEqual(presence.stream, { kind: "screen", title: "Tela inteira", hasAudio: false, width: 2560, height: 1440, fps: 30, access: "all" });
+            assert.equal(JSON.stringify(presence).includes("1440p"), false, "nenhum nome de qualidade vai para os outros");
+            assert.equal(getState().local?.sizeNote, undefined);
+        } finally {
+            rig.rtc.mediaDevices.getDisplayMediaImpl = constraints => Promise.resolve(captureStream({ audio: !!constraints.audio }));
+        }
     });
 
     test("sendPlanFor: a banda (inicio fixo, teto da qualidade) para qualquer peer; o codec so para quem assiste", async () => {

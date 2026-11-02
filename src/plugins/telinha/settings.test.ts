@@ -101,6 +101,7 @@ describe("as opcoes", () => {
         ]);
         assert.match(resolution.description, /2K precisa de uma tela 2K: numa tela ou janela menor, vai no tamanho dela/);
         assert.match(resolution.description, /até 20 Mbps/);
+        assert.match(resolution.description, /720p a 30 fps: até 6 Mbps/, "o teto menor de cada combinação pequena");
         assert.match(resolution.description, /durante ela, na barra do Telinha/);
 
         const fps = settings.def.defaultFps;

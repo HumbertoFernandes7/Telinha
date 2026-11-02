@@ -14,7 +14,7 @@
 
 import type { FrameRate, Quality, Resolution } from "@plugins/telinha/types";
 
-import { fitToSource } from "./levels";
+import { fitToSource, SOURCE_SLACK } from "./levels";
 
 export const RESOLUTIONS: readonly Resolution[] = [720, 1080, 1440];
 export const FRAME_RATES: readonly FrameRate[] = [30, 60];
@@ -95,9 +95,16 @@ export function migrateQualitySetting(stored: StoredQualitySettings | null | und
 /**
  * 2K escolhido numa captura de 1080p ou menos (levels.fitToSource: nao amplia, vai no tamanho dela), para o log e a
  * barra: "2K escolhido, a tela tem 1080p: enviando 1080p". null = a captura comporta a resolucao escolhida.
+ * Numa tela mais larga que 16:9 (3440x1440) a captura sai limitada pela LARGURA (2560x1072): ali a tela tem 1440p, entao o
+ * texto diz o tamanho da captura ("a captura tem 2560x1072: enviando 1072p"), com `sourceWidth` (0 = nao sabe).
  */
-export function sourceSizeNote(quality: Quality, kind: "screen" | "window", sourceHeight: number): string | null {
+export function sourceSizeNote(quality: Quality, kind: "screen" | "window", sourceHeight: number, sourceWidth = 0): string | null {
     if (fitToSource(quality, sourceHeight) === quality) return null;
     const size = `${Math.round(sourceHeight)}p`;
-    return `${RESOLUTION_LABEL[splitQuality(quality).resolution]} escolhido, a ${kind === "screen" ? "tela" : "janela"} tem ${size}: enviando ${size}`;
+    const label = RESOLUTION_LABEL[splitQuality(quality).resolution];
+    const chosenWidth = RESOLUTION_WIDTH[splitQuality(quality).resolution];
+    if (sourceWidth > 0 && sourceWidth >= chosenWidth / SOURCE_SLACK) {
+        return `${label} escolhido, a captura tem ${Math.round(sourceWidth)}x${Math.round(sourceHeight)}: enviando ${size}`;
+    }
+    return `${label} escolhido, a ${kind === "screen" ? "tela" : "janela"} tem ${size}: enviando ${size}`;
 }

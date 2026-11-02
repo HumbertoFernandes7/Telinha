@@ -63,7 +63,7 @@ export const settings = definePluginSettings({
     defaultResolution: {
         type: OptionType.SELECT,
         displayName: "Resolução padrão",
-        description: "A resolução que já vem marcada ao transmitir (dá para trocar a cada transmissão e também durante ela, na barra do Telinha). 2K precisa de uma tela 2K: numa tela ou janela menor, vai no tamanho dela. Em qualquer resolução, até 20 Mbps por pessoa assistindo.",
+        description: "A resolução que já vem marcada ao transmitir (dá para trocar a cada transmissão e também durante ela, na barra do Telinha). 2K precisa de uma tela 2K: numa tela ou janela menor, vai no tamanho dela. Por pessoa assistindo, até 20 Mbps (720p a 30 fps: até 6 Mbps; 720p a 60 fps e 1080p a 30 fps: até 12 Mbps).",
         options: [
             { label: "720p", value: 720 },
             { label: "1080p", value: 1080, default: true },

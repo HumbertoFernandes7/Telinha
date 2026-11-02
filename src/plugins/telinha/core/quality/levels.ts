@@ -206,6 +206,8 @@ export function pixelRate(level: QualityLevel, captureWidth: number, captureHeig
     return (captureWidth / s) * (captureHeight / s) * maxFramerate;
 }
 
+/** O degrau como a interface o chama: "720p 30 fps", "1080p 60 fps", "2K 60 fps" (o 1440p so nos identificadores). */
 export function levelText(level: QualityLevel): string {
-    return `${LEVELS[level].height}p ${LEVELS[level].fps} fps`;
+    const { height, fps } = LEVELS[level];
+    return `${height >= 1440 ? "2K" : `${height}p`} ${fps} fps`;
 }

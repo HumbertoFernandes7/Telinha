@@ -94,6 +94,17 @@ describe("aviso de 2K numa captura menor", () => {
         assert.equal(sourceSizeNote("1440p60", "window", 719.6), "2K escolhido, a janela tem 720p: enviando 720p");
     });
 
+    test("tela mais larga que 16:9 (3440x1440): a captura sai limitada pela largura, e o texto diz o tamanho dela (nao 'a tela tem 1072p')", () => {
+        assert.equal(sourceSizeNote("1440p60", "screen", 1072, 2560), "2K escolhido, a captura tem 2560x1072: enviando 1072p");
+        assert.equal(sourceSizeNote("1440p30", "window", 1080, 2560), "2K escolhido, a captura tem 2560x1080: enviando 1080p");
+        // o caso real de antes: uma tela de 1080p (largura 1920, abaixo da do 2K) ou largura desconhecida
+        assert.equal(sourceSizeNote("1440p60", "screen", 1080, 1920), "2K escolhido, a tela tem 1080p: enviando 1080p");
+        assert.equal(sourceSizeNote("1440p60", "window", 1040, 1904), "2K escolhido, a janela tem 1040p: enviando 1040p");
+        assert.equal(sourceSizeNote("1440p60", "screen", 1080, 0), "2K escolhido, a tela tem 1080p: enviando 1080p");
+        // uma captura que comporta o 2K continua sem aviso, qualquer que seja a largura
+        assert.equal(sourceSizeNote("1440p60", "screen", 1440, 2560), null);
+    });
+
     test("sem aviso: a captura comporta o 2K (ou fica entre 1080p e 1440p), outra resolucao, ou tamanho desconhecido", () => {
         assert.equal(sourceSizeNote("1440p60", "screen", 1440), null);
         assert.equal(sourceSizeNote("1440p60", "window", 1200), null, "entre 1080p e 1440p: vai em 1200p, mais que o 1080p");

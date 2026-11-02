@@ -249,7 +249,7 @@ describe("degraus da qualidade automatica", () => {
         // pior primeiro (menor taxa de pixels): 2K a 30 fps fica entre o 1080p30 e o 1080p60
         const all: QualityLevel[] = ["1440p60", "1080p60", "1440p30", "720p60", "720p30", "1080p30"];
         assert.deepEqual(all.sort((a, b) => rank(a) - rank(b)), ["720p30", "720p60", "1080p30", "1440p30", "1080p60", "1440p60"]);
-        assert.deepEqual((["1440p60", "1440p30"] as const).map(levelText), ["1440p 60 fps", "1440p 30 fps"]);
+        assert.deepEqual((["1440p60", "1440p30"] as const).map(levelText), ["2K 60 fps", "2K 30 fps"]);
     });
 });
 

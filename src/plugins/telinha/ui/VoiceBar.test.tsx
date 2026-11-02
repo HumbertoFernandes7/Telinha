@@ -610,11 +610,14 @@ describe("VoiceBar com o nucleo de verdade", () => {
     });
 
     test("a captura nova falha (janela fechada): a transmissao continua como estava e o motivo aparece na barra", async () => {
+        if (!getState().local) await act(async () => scene.goLive({ access: "approval" })); // sozinho (sem os testes de antes): comeca a sua
         renderBar();
         const before = getState().local!;
+        // o outro fps: o que ja esta valendo nao captura de novo (o teste vale sozinho e em qualquer ordem)
+        const fps = before.quality.endsWith("30") ? "60" : "30";
         scene.rtc.mediaDevices.getDisplayMediaImpl = () => Promise.reject(Object.assign(new Error("gone"), { name: "NotFoundError" }));
         try {
-            fireEvent.click(seg("FPS", "60"));
+            fireEvent.click(seg("FPS", fps));
             await act(async () => void await until(() => getState().lastError != null));
             await settle();
         } finally {
@@ -623,7 +626,7 @@ describe("VoiceBar com o nucleo de verdade", () => {
         assert.deepEqual(toasts, []);
         assert.deepEqual([getState().local?.quality, getState().local?.viewers], [before.quality, before.viewers]);
         screen.getByTitle("Não foi possível capturar essa fonte (a janela foi fechada ou está protegida).");
-        assert.equal(seg("FPS", "60").disabled, false, "da para tentar de novo");
+        assert.equal(seg("FPS", fps).disabled, false, "da para tentar de novo");
         act(() => setLastError(null));
     });
 

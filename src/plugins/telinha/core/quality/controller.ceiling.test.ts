@@ -71,13 +71,13 @@ describe("cada qualidade escolhida como teto, numa captura 2560x1440", () => {
         }
     }
 
-    test("2K a 60 fps no teto: a decisao e o motivo falam em 1440p", async t => {
+    test("2K a 60 fps no teto: a decisao e o motivo falam em 2K", async t => {
         const clock = useFakeClock(t);
         const h = qualityHarness(clock, { A: new EncoderSim(SLOW) }, { ceiling: "1440p60", captureSize: () => SIZE_1440 });
         await h.join("A");
         const lines = await logsDuring(() => h.runUntil(8000));
         assert.deepEqual(qualityLines(lines), [
-            "Qualidade automática: 1440p 60 fps → 1080p 60 fps para o espectador (CPU: A codificado a 20 de 60 fps); nova subida só após 10 s estável"
+            "Qualidade automática: 2K 60 fps → 1080p 60 fps para o espectador (CPU: A codificado a 20 de 60 fps); nova subida só após 10 s estável"
         ]);
         assert.equal(h.controller.state?.reasonText, "1080p 60 fps — o processador está sobrecarregado");
     });
@@ -141,7 +141,7 @@ describe("2K com a janela mudando de tamanho no meio", () => {
             h.controller.captureResized();
             await Promise.resolve();
         });
-        assert.deepEqual(fitLines(grew), ["2K escolhido, a captura agora tem 1440p: teto de volta em 1440p 60 fps"]);
+        assert.deepEqual(fitLines(grew), ["2K escolhido, a captura agora tem 1440p: teto de volta em 2K 60 fps"]);
         assert.equal(h.lastApplied("A"), "1440p60");
         assert.deepEqual(h.controller.state, { current: "1440p60", reason: null, reasonText: null, viewers: { A: { level: "1440p60", reason: null } } });
         assert.ok(h.changes > changes, "o estado novo foi publicado");
@@ -154,6 +154,22 @@ describe("2K com a janela mudando de tamanho no meio", () => {
 
         // sem mudar de novo, nenhuma linha a mais
         assert.deepEqual(fitLines(await logsDuring(() => h.runUntil(30_000))), []);
+
+        // oscilando na borda de 1080p (janela sendo redimensionada): a mesma direcao so loga de novo apos 30 s (cada direcao tem o seu limite)
+        size = SIZE_1440;
+        assert.deepEqual(fitLines(await logsDuring(async () => {
+            h.controller.captureResized();
+            await Promise.resolve();
+        })), [], "o 'cresce' de 20 s atras ainda esta dentro dos 30 s");
+        assert.equal(h.lastApplied("A"), "1440p60", "o teto muda mesmo sem a linha no log");
+        size = SIZE_1080;
+        assert.deepEqual(fitLines(await logsDuring(() => h.runUntil(32_000))), [], "o 'encolhe' tambem");
+        assert.equal(h.lastApplied("A"), "1080p60");
+        await h.runUntil(41_000);
+        size = SIZE_1440;
+        const later = fitLines(await logsDuring(() => h.runUntil(43_000)));
+        assert.equal(later.length, 1);
+        assert.match(later[0], /^2K escolhido, a captura agora tem 1440p: teto de volta em 2K 60 fps \(\+\d+ repetições omitidas\)$/);
     });
 
     test("quem ja estava abaixo do teto fica onde esta (com o motivo) e depois sobe ate o 2K", async t => {

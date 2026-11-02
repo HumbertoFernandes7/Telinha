@@ -299,7 +299,8 @@ function buildSnapshot(): TelinhaState {
 
     const { local } = rt;
     // 2K numa captura de 1080p ou menos: a altura de agora (a janela pode mudar de tamanho no meio; sem leitura, a do inicio)
-    const sizeNote = local && sourceSizeNote(local.quality, local.info.kind, local.stream.getVideoTracks()[0]?.getSettings().height ?? local.info.height);
+    const track = local?.stream.getVideoTracks()[0]?.getSettings();
+    const sizeNote = local && sourceSizeNote(local.quality, local.info.kind, track?.height ?? local.info.height, track?.width ?? local.info.width);
     return {
         inRoom: !!rt.room,
         channelId: rt.channelId,

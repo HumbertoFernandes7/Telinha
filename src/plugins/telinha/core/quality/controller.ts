@@ -703,9 +703,11 @@ export class QualityController {
             for (const v of this.viewers.values()) if (v.bwLevel === from && !v.bwHeld) v.bwLevel = top;
         }
         const height = Math.round(this.deps.captureSize().height);
-        log.info(LEVELS[top].height < LEVELS[from].height
+        // uma janela redimensionada na borda de 1080p cruza o limite varias vezes: no maximo 1 linha a cada 30 s por direcao
+        const down = LEVELS[top].height < LEVELS[from].height;
+        logThrottled(down ? "capture-fit-down" : "capture-fit-up", "info", down
             ? `2K escolhido, a captura agora tem ${height}p: enviando ${height}p (teto ${levelText(top)})`
-            : `2K escolhido, a captura agora tem ${height}p: teto de volta em ${levelText(top)}`);
+            : `2K escolhido, a captura agora tem ${height}p: teto de volta em ${levelText(top)}`, 30_000);
         this.emit();
     }
 

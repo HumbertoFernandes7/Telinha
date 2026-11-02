@@ -170,7 +170,7 @@ describe("snapshot (publish)", () => {
         assert.equal("sizeNote" in getState().local!, false);
 
         // sem a leitura do tamanho, vale o do inicio
-        stream.getVideoTracks()[0].setSettings({ height: undefined });
+        stream.getVideoTracks()[0].setSettings({ width: undefined, height: undefined });
         publish();
         await flush();
         assert.equal(getState().local?.sizeNote, "2K escolhido, a janela tem 1080p: enviando 1080p");

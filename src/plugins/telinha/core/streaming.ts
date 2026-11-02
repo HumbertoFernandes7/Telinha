@@ -271,7 +271,12 @@ function validateOptions(opts: StreamOptions) {
 }
 
 export async function startStreaming(opts: StreamOptions): Promise<void> {
-    if (starting) throw new Error("A transmissão já está sendo iniciada.");
+    if (starting) {
+        // vai para lastError como as outras recusas (a barra e o seletor de fonte mostram o motivo); a partida em curso o limpa ao terminar
+        const msg = "A transmissão já está sendo iniciada.";
+        setLastError(msg);
+        throw new Error(msg);
+    }
     if (!rt.room) {
         const msg = "Entre em um canal de voz para transmitir.";
         setLastError(msg);
@@ -381,7 +386,7 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
 
         log.info(`Transmitindo ${info.width}x${info.height} @ ${info.fps} fps${info.hasAudio ? " com áudio" : ""} · quem pode assistir: ${ACCESS_LABEL[local.access]}`);
         // 2K numa tela/janela de 1080p ou menos: vai no tamanho dela (sem ampliar), uma linha so
-        const sizeNote = sourceSizeNote(local.quality, kind, info.height);
+        const sizeNote = sourceSizeNote(local.quality, kind, info.height, info.width);
         if (sizeNote) log.info(sizeNote);
         // o modo da captura (live com jogo pesado, core/captureBoost.ts): para comparar com e sem pelo "fonte N" do envio
         noteCaptureStarted();
@@ -455,6 +460,8 @@ function checkCaptureSize(ex: CaptureExtras) {
     if (now.width === before.width && now.height === before.height) return;
     ex.size = now;
     ex.resizedAt = performance.now();
+    // o aviso "2K escolhido, a janela tem 1080p" da barra so e refeito ao publicar: se o tamanho novo muda o texto, publica
+    if (sourceSizeNote(local.quality, local.info.kind, before.height, before.width) !== sourceSizeNote(local.quality, local.info.kind, now.height, now.width)) publish();
     const changed = [...local.viewers].some(peerId => {
         const level = quality.levelFor(peerId);
         return encodingFor(level, before.width, before.height).scaleResolutionDownBy !== encodingFor(level, now.width, now.height).scaleResolutionDownBy;
