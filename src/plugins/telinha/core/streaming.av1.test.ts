@@ -219,10 +219,10 @@ test("AV1 sem reserva (o espectador sem H.264 na placa) fora da placa antes de s
     assert.equal(plan(v.peerId).codec, "vp9");
     assert.equal(stuckRecord(), null);
     await turns();
-    assert.equal(av1ProbeRecord()?.verdict, "broken", "parou de enviar (stall): travou de verdade, o botao nao limpa");
+    assert.equal(av1ProbeRecord()?.verdict, "offHw", "libaom parado (stall): e software, nao travou a placa; o botao limpa");
 });
 
-test("AV1 por software abaixo de 270p parado (checkStall): o libaom e de proposito, nao e a placa; nada marcado e nada troca", async () => {
+test("AV1 por software abaixo de 270p parado (checkStall): o libaom e de proposito, nao e a placa; nada marcado, mas so este espectador vai para o H.264", async () => {
     pluginSettings.set("hwAv1Probe", { at: AT, env: {}, verdict: "ok", detail: OK, codec: "av01.0.05M.08" });
     const v = await watcher("pequeno", BOTH);
     assert.equal(plan(v.peerId).codec, "av1");
@@ -236,8 +236,9 @@ test("AV1 por software abaixo de 270p parado (checkStall): o libaom e de proposi
     const lines = since();
     assert.ok(lines.some(l => l.includes("240p, abaixo de 270p o AV1 por software é de propósito") && l.includes("nada fica marcado")), lines.join("\n"));
     assert.ok(!lines.some(l => l.includes("a placa de vídeo travou") || l.includes("fora da placa de vídeo")), lines.join("\n"));
+    assert.ok(lines.some(l => l.endsWith(`trocando para H264 só para ${v.label}`)), lines.join("\n"));
     await turns();
-    assert.equal(plan(v.peerId).codec, "av1", "nada trocou");
+    assert.equal(plan(v.peerId).codec, "h264", "o libaom parado deixaria o espectador no preto: vai a reserva H.264");
     assert.equal(av1ProbeRecord()?.verdict, "ok", "o AV1 nao leva a culpa");
     assert.equal(stuckRecord(), null);
     assert.equal(getLocalCaps().av1ProbeOk, true);

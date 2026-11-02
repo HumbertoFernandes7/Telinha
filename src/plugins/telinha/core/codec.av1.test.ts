@@ -121,8 +121,8 @@ describe("AV1 fixado: nunca o AV1 por software (o que falta deste PC cai no auto
     test("sem confirmacao (recurso desconhecido ou medicao nao terminou): o motivo diz que nao deu para confirmar, sem culpar a placa nem o cliente", () => {
         const unsure = "não deu para confirmar o AV1 da placa nesta partida";
         // recurso desconhecido (build do fork ou loader antigo) e nenhum AV1 medido na placa: nao e "a placa nao codifica"
-        assert.equal(whyNoHwOnlyHere("av1", pc({ av1HwFeature: null, av1HwFmtp: null })), `${unsure} (reinicie o Discord)`);
-        assert.equal(whyNoHwOnlyHere("av1", pc({ av1HwFeature: undefined, av1HwFmtp: null })), `${unsure} (reinicie o Discord)`);
+        assert.equal(whyNoHwOnlyHere("av1", pc({ av1HwFeature: null, av1HwFmtp: null })), `${unsure} (este Discord não tem a opção do AV1 pela placa)`);
+        assert.equal(whyNoHwOnlyHere("av1", pc({ av1HwFeature: undefined, av1HwFmtp: null })), `${unsure} (este Discord não tem a opção do AV1 pela placa)`);
         // a medicao da placa ainda nao terminou (sendable vazio): nao e "este cliente nao envia AV1"
         assert.equal(whyNoHwOnlyHere("av1", pc({ sendable: new Set() })), `${unsure} (a medição da placa ainda não terminou)`);
         assert.equal(whyNoHwOnlyHere("av1", pc({ sendable: new Set(), av1HwFeature: null, av1HwFmtp: null })), `${unsure} (a medição da placa ainda não terminou)`);
@@ -132,7 +132,7 @@ describe("AV1 fixado: nunca o AV1 por software (o que falta deste PC cai no auto
         assert.equal(whyNoHwOnlyHere("h265", pc({ h265HwFmtp: null, sendable: new Set(["h264", "h265"]) })), "este PC não codifica H.265 por hardware");
         const d = chooseCodec(BOTH, "av1", pc({ av1HwFeature: null, av1HwFmtp: null }));
         assert.equal(d.codec, "h264");
-        assert.ok(d.reason.startsWith(`AV1 fixado nas configurações, mas ${unsure} (reinicie o Discord) → automático`), d.reason);
+        assert.ok(d.reason.startsWith(`AV1 fixado nas configurações, mas ${unsure} (este Discord não tem a opção do AV1 pela placa) → automático`), d.reason);
     });
 
     test("medido antes desta versao (sem os campos do AV1): nunca AV1", () => {

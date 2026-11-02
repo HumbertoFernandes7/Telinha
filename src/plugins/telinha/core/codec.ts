@@ -502,7 +502,7 @@ export function whyNoHwOnlyHere(codec: HwOnlyCodec, local: LocalCodecCaps): stri
         if (codec !== "av1") return "este PC não codifica H.265 por hardware";
         // so com o recurso ligado a medicao da placa responde de verdade; desconhecido (null) nao diz nada da placa
         return local.av1HwFeature === true ? "este PC não codifica AV1 por hardware (só placas RTX 40/50, Radeon RX 7000, Intel Arc ou mais novas)"
-            : "não deu para confirmar o AV1 da placa nesta partida (reinicie o Discord)";
+            : "não deu para confirmar o AV1 da placa nesta partida (este Discord não tem a opção do AV1 pela placa)";
     }
     if (!local.h264HwEncode) return `o H.264 da placa está desligado neste PC (travou, sonda rodando ou quedas para software), e o ${label} vai junto`;
     if (!(codec === "av1" ? local.av1ProbeOk : local.h265ProbeOk)) return `a sonda WebCodecs do ${label} não passou neste PC`;

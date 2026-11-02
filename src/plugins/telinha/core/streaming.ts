@@ -1520,15 +1520,21 @@ function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: 
     // o encoder no ar e o OpenH264 (software): nao e a placa, e trocar o codec de um encoder de software e seguro (como a
     // queda do checkEncoder). So o da placa, ou um encoder que o Chromium nao informa, fica contido e marca a placa.
     if (hwOnly && (enc.powerEfficient === false || (hwOnly === "av1" && /libaom|svt|rav1e/i.test(enc.implementation ?? "")))) {
-        // AV1 abaixo de 270p (AV1_HW_MIN_HEIGHT): o libaom e de proposito (o mesmo corte do isOffHardwareAv1), nao e a placa travada;
-        // nada fica marcado e nada troca (a janela recomeca)
+        // AV1 abaixo de 270p (AV1_HW_MIN_HEIGHT): o libaom e de proposito (o mesmo corte do isOffHardwareAv1), nao e a placa travada:
+        // nada fica marcado (sem noteHwOnlyFailed). Mas o libaom parado deixa o espectador no preto, e um encoder de software e
+        // seguro de trocar: so este espectador passa para a reserva H.264 (ou o que o automatico escolhe sem o AV1)
         if (hwOnly === "av1" && enc.height && enc.height < AV1_HW_MIN_HEIGHT) {
-            log.info(`${what} (${enc.height}p, abaixo de ${AV1_HW_MIN_HEIGHT}p o AV1 por software é de propósito): não é a placa de vídeo, nada fica marcado`);
-            send.stall = undefined;
+            if (send.fellBack) return;
+            send.fellBack = true;
+            const next = h264ReserveOf(send.decision, "a reserva do AV1, que parou por software abaixo de 270p") ?? chooseWithout("av1", peerId);
+            log.info(`${what} (${enc.height}p, abaixo de ${AV1_HW_MIN_HEIGHT}p o AV1 por software é de propósito): não é a placa de vídeo, nada fica marcado; `
+                + `trocando para ${next.codec.toUpperCase()} só para ${label}`);
+            void switchSendCodec(peerId, local, send, next);
             return;
         }
-        // H.265/AV1 fora da placa (o H.265 nao tem software; o AV1 sim, o libaom): um encoder que nao e o da placa e seguro de trocar
-        leaveHwOnly(hwOnly, peerId, local, send, `${why}, fora da placa de vídeo`);
+        // H.265/AV1 fora da placa (o H.265 nao tem software; o AV1 sim, o libaom): um encoder que nao e o da placa e seguro de trocar.
+        // So o AV1 tem software no Chromium: parou por software (o Chromium trocou a placa), entao "offHw" (o botao da placa limpa)
+        leaveHwOnly(hwOnly, peerId, local, send, `${why}, fora da placa de vídeo`, true);
         return;
     }
     if (name === "H.264" && (enc.powerEfficient === false || /openh264/i.test(enc.implementation ?? ""))) {
