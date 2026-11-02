@@ -35,6 +35,9 @@ import type { Readable } from "stream";
 
 import { helperPath, SCREEN_AUDIO_HELPER, spawnErrorReason } from "./audio/screenAudioMain";
 
+/** como as mensagens chamam o telinha-audio.exe neste modo (o de audio o chama de "o ajudante de áudio") */
+const HELPER_NAME = "o ajudante do Telinha";
+
 /** Windows 11 24H2: o Chromium so captura a tela pelo WGC (e so ha esse caminho) a partir deste build. */
 export const GPU_CAPTURE_MIN_BUILD = 26100;
 
@@ -138,25 +141,29 @@ export interface GpuPriorityTarget {
     /** classe antes e depois (IDLE, BELOW_NORMAL, NORMAL, ABOVE_NORMAL, HIGH); null = nao mexeu */
     before: string | null;
     after: string | null;
-    /** a linha de erro do helper ("open 0x80070005 Acesso negado."), ou o que faltou */
+    /** a linha de erro do helper ("open 0x80070005 Acesso negado.", "gone ..." = o processo terminou), ou o que faltou */
     error: string | null;
 }
 
 export interface GpuPriorityReport {
     mode: GpuPriorityMode;
-    /** todos os processos ficaram como pedido (sem nada a voltar tambem conta) */
+    /** todos os processos ficaram como pedido (sem nada a voltar, ou o processo que ja terminou, tambem contam) */
     ok: boolean;
     /** quantos ficaram como pedido */
     done: number;
     targets: GpuPriorityTarget[];
     /** agendamento da placa por hardware (HAGS), segundo o helper; null = desconhecido */
     hags: "on" | "off" | null;
-    /** o Windows recusou por acesso/privilegio: so com administrador (o Telinha nunca pede) */
-    adminNeeded: boolean;
-    /** por que nada foi feito, em pt-BR (Windows, ajudante ausente/bloqueado/antigo...) */
+    /** o Windows recusou por acesso/privilegio (talvez precise de administrador; o Telinha nunca pede) */
+    refused: boolean;
+    /** por que nada foi feito, em pt-BR (Windows, ajudante ausente/bloqueado/antigo, nao respondeu a tempo...) */
     reason: string | null;
-    /** processos que seguem em HIGH por causa do Telinha (o "restore" volta estes) */
+    /** processos que seguem em HIGH por causa do Telinha (o proximo "restore" ou "high" tenta voltar estes) */
     raised: number;
+    /** uma volta que falhou de novo do mesmo jeito: ja foi dita uma vez, nao precisa de outra linha no log */
+    quiet: boolean;
+    /** o que o main fez sozinho desde o ultimo relatorio (o processo da GPU reiniciou...), para o log */
+    notes: string[];
 }
 
 type Role = GpuPriorityTarget["role"];
@@ -164,12 +171,25 @@ type Role = GpuPriorityTarget["role"];
 interface HelperAnswer {
     lines: string[];
     code: number | null;
-    /** o helper nem rodou ou nao respondeu */
+    /** o helper nem rodou ou nao respondeu a tempo */
     reason: string | null;
 }
 
-const PRIORITY_TIMEOUT_MS = 5000;
+/** Um processo que o Telinha subiu para HIGH e ainda nao voltou. */
+interface Raised {
+    /** a classe de antes, para onde ele volta */
+    before: string;
+    role: Role;
+    /** a ultima volta falhou (e ja foi dita no log) */
+    failed: boolean;
+}
+
+/** so ajusta e sai; fora do caminho da captura, entao pode esperar bem (antivirus examinando o exe na 1a vez) */
+const PRIORITY_TIMEOUT_MS = 12_000;
 const OUTPUT_MAX_CHARS = 8 * 1024;
+/** o processo da GPU que caiu: o Chromium abre outro; espera ele aparecer no app.getAppMetrics() */
+const GPU_RESTART_DELAY_MS = 2000;
+const GPU_RESTART_TRIES = 3;
 const HIGH = "HIGH";
 /** as classes abaixo de HIGH: so estas sao lembradas para voltar (um processo ja em HIGH fica como estava) */
 const BELOW_HIGH = new Set(["IDLE", "BELOW_NORMAL", "NORMAL", "ABOVE_NORMAL"]);
@@ -177,13 +197,27 @@ const HAGS_RE = /^hags (on|off|unknown)$/;
 const OK_RE = /^ok pid=(\d+) before=(\S+) after=(\S+)$/;
 const TARGET_ERROR_RE = /^error (\w+) (0x[0-9A-Fa-f]{8}) pid=(\d+)\s*(.*)$/;
 const GENERAL_ERROR_RE = /^error (\S+) (0x[0-9A-Fa-f]{8})/;
-/** OpenProcess negado, STATUS_ACCESS_DENIED, STATUS_PRIVILEGE_NOT_HELD: o Windows quer administrador */
-const ADMIN_ERROR_RE = /^(?:open|get|set) 0x(?:80070005|C0000022|C0000061)\b/i;
+/** OpenProcess negado, STATUS_ACCESS_DENIED, STATUS_PRIVILEGE_NOT_HELD: o Windows recusou (talvez precise de administrador) */
+const REFUSED_ERROR_RE = /^(?:open|get|set) 0x(?:80070005|C0000022|C0000061)\b/i;
+/** o processo terminou ("gone"), ou o pid ja e de outro processo, fora da arvore do Discord ("tree"): nada a voltar */
+const GONE_ERROR_RE = /^(?:gone|tree) /;
 
-/** pid → a classe que o processo tinha antes do HIGH, e qual processo e */
-const raised = new Map<number, { before: string; role: Role; }>();
-/** um pedido por vez ao helper: "high" e "restore" nunca se cruzam */
+/** pid → o que o Telinha subiu para HIGH e ainda nao voltou */
+const raised = new Map<number, Raised>();
+/** a transmissao pediu HIGH e ainda nao pediu a volta (o processo da GPU que reinicia sobe de novo) */
+let active = false;
+/** o que o main fez sozinho, entregue no proximo relatorio (GpuPriorityReport.notes) */
+const notes: string[] = [];
+/** um pedido por vez ao helper: "high", "restore" e a GPU que reiniciou nunca se cruzam */
 let queue: Promise<unknown> = Promise.resolve();
+let watchingGpu = false;
+
+/** Na fila, depois do que ja estava nela. `job` nunca rejeita (o helper que falha vira um relatorio), entao a fila nunca trava. */
+function enqueue<T>(job: () => Promise<T>): Promise<T> {
+    const next = queue.then(job);
+    queue = next;
+    return next;
+}
 
 /** O processo principal do Discord (este) e o da GPU (app.getAppMetrics). */
 function discordTargets(): { pid: number; role: Role; }[] {
@@ -201,14 +235,19 @@ function helperProblem(): string | null {
     return null;
 }
 
-/** Roda `telinha-audio.exe --gpu-priority <pids> --class <cls>` e junta as linhas (stdout e stderr). Nunca rejeita. */
+const toLines = (output: string) => output.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+
+/**
+ * Roda `telinha-audio.exe --gpu-priority <pids> --class <cls>` e junta as linhas (stdout e stderr). Sem resposta a tempo,
+ * mata o helper e fica com o que ele ja tinha dito (um "ok pid=" ja escrito valeu). Nunca rejeita.
+ */
 function runHelper(pids: number[], cls: string): Promise<HelperAnswer> {
     return new Promise(resolve => {
         let child: ChildProcessByStdio<null, Readable, Readable>;
         try {
             child = spawn(helperPath(), ["--gpu-priority", pids.join(","), "--class", cls], { windowsHide: true, shell: false, stdio: ["ignore", "pipe", "pipe"] });
         } catch (e) {
-            resolve({ lines: [], code: null, reason: spawnErrorReason(e as NodeJS.ErrnoException) });
+            resolve({ lines: [], code: null, reason: spawnErrorReason(e as NodeJS.ErrnoException, HELPER_NAME) });
             return;
         }
         let output = "";
@@ -223,33 +262,37 @@ function runHelper(pids: number[], cls: string): Promise<HelperAnswer> {
             try {
                 child.kill();
             } catch { }
-            done({ lines: [], code: null, reason: "o ajudante do Telinha não respondeu" });
+            done({ lines: toLines(output), code: null, reason: "o ajudante do Telinha não respondeu a tempo" });
         }, PRIORITY_TIMEOUT_MS);
         const collect = (b: Buffer) => {
             if (output.length < OUTPUT_MAX_CHARS) output += b.toString("utf8");
         };
         // sem estes handlers um erro num pipe viraria excecao nao tratada no processo main do Discord
         const ignore = () => { };
-        child.on("error", e => done({ lines: [], code: null, reason: spawnErrorReason(e) }));
+        child.on("error", e => done({ lines: [], code: null, reason: spawnErrorReason(e, HELPER_NAME) }));
         child.stdout.on("error", ignore);
         child.stderr.on("error", ignore);
         child.stdout.on("data", collect);
         child.stderr.on("data", collect);
-        child.on("close", code => done({ lines: output.split(/\r?\n/).map(l => l.trim()).filter(Boolean), code, reason: null }));
+        child.on("close", code => done({ lines: toLines(output), code, reason: null }));
     });
 }
 
-function summarize(mode: GpuPriorityMode, targets: GpuPriorityTarget[], hags: GpuPriorityReport["hags"], reason: string | null): GpuPriorityReport {
-    const done = targets.filter(t => !t.error && t.after && (mode !== "high" || t.after === HIGH)).length;
+const isGone = (t: GpuPriorityTarget) => !!t.error && GONE_ERROR_RE.test(t.error);
+
+function summarize(mode: GpuPriorityMode, targets: GpuPriorityTarget[], hags: GpuPriorityReport["hags"], reason: string | null, quiet = false): GpuPriorityReport {
+    // na volta, o processo que ja terminou nao tem o que voltar: conta como feito
+    const done = targets.filter(t => (!t.error && t.after && (mode !== "high" || t.after === HIGH)) || (mode === "restore" && isGone(t))).length;
     return {
-        mode, ok: !reason && done === targets.length, done, targets, hags, reason,
-        adminNeeded: targets.some(t => !!t.error && ADMIN_ERROR_RE.test(t.error)),
-        raised: raised.size
+        mode, ok: !reason && done === targets.length, done, targets, hags, reason, quiet,
+        refused: targets.some(t => !!t.error && REFUSED_ERROR_RE.test(t.error)),
+        raised: raised.size,
+        notes: []
     };
 }
 
 /** As linhas do helper → o que aconteceu com cada processo. */
-function readAnswer(mode: GpuPriorityMode, wanted: { pid: number; role: Role; }[], answer: HelperAnswer): GpuPriorityReport {
+function readAnswer(wanted: { pid: number; role: Role; }[], answer: HelperAnswer) {
     const targets = wanted.map((t): GpuPriorityTarget => ({ ...t, before: null, after: null, error: null }));
     const byPid = new Map(targets.map(t => [t.pid, t]));
     let hags: GpuPriorityReport["hags"] = null;
@@ -273,53 +316,124 @@ function readAnswer(mode: GpuPriorityMode, wanted: { pid: number; role: Role; }[
     }
     if (!reason && answer.code !== 0 && answer.code !== 6) reason = `o ajudante do Telinha fechou com o código ${answer.code}`;
     if (!reason) for (const t of targets) if (!t.after && !t.error) t.error = "sem resposta do ajudante";
-    return summarize(mode, targets, hags, reason);
+    return { targets, hags, reason };
 }
 
-async function raise(): Promise<GpuPriorityReport> {
-    const wanted = discordTargets();
-    const problem = helperProblem();
-    const answer = problem ? { lines: [], code: null, reason: problem } : await runHelper(wanted.map(t => t.pid), "high");
-    const report = readAnswer("high", wanted, answer);
-    for (const t of report.targets)
-        if (t.after === HIGH && t.before && BELOW_HIGH.has(t.before) && !raised.has(t.pid)) raised.set(t.pid, { before: t.before, role: t.role });
-    report.raised = raised.size;
-    return report;
-}
-
-async function restore(): Promise<GpuPriorityReport> {
-    // esquecidos mesmo se a volta falhar: o processo pode ter fechado (a GPU reinicia sozinha), e nada mais ha a fazer
+/**
+ * Volta estes processos para a classe de antes (um helper por classe). Sai de `raised` o que voltou e o que ja terminou;
+ * o resto (antivirus atrasando, sem resposta a tempo, acesso negado de passagem) fica para a proxima tentativa: o proximo
+ * "restore", o proximo "high" ou o inicio do plugin. quiet = nada mudou e as falhas ja tinham sido ditas.
+ */
+async function restoreEntries(entries: [number, Raised][]) {
     const groups = new Map<string, { pid: number; role: Role; }[]>();
-    for (const [pid, { before, role }] of raised) groups.set(before, [...(groups.get(before) ?? []), { pid, role }]);
-    raised.clear();
+    for (const [pid, { before, role }] of entries) groups.set(before, [...(groups.get(before) ?? []), { pid, role }]);
     const problem = groups.size ? helperProblem() : null;
     const targets: GpuPriorityTarget[] = [];
     let hags: GpuPriorityReport["hags"] = null;
     let reason: string | null = null;
+    let news = false;
     for (const [before, wanted] of groups) {
         const answer = problem ? { lines: [], code: null, reason: problem } : await runHelper(wanted.map(t => t.pid), before.toLowerCase());
-        const report = readAnswer("restore", wanted, answer);
-        targets.push(...report.targets);
-        hags ??= report.hags;
-        reason ??= report.reason;
+        const read = readAnswer(wanted, answer);
+        for (const t of read.targets) {
+            // sem entrada: o processo da GPU caiu enquanto o helper rodava (onChildProcessGone ja o tirou)
+            const entry = raised.get(t.pid);
+            if (!entry || (t.after && !t.error) || isGone(t)) {
+                raised.delete(t.pid);
+                news = true;
+            } else {
+                news ||= !entry.failed;
+                entry.failed = true;
+            }
+        }
+        targets.push(...read.targets);
+        hags ??= read.hags;
+        reason ??= read.reason;
     }
-    return summarize("restore", targets, hags, reason);
+    return { targets, hags, reason, quiet: !news };
+}
+
+async function raise(): Promise<GpuPriorityReport> {
+    active = true;
+    watchGpuProcess();
+    const wanted = discordTargets();
+    // o que nao voltou de antes e nao e um destes (um processo da GPU antigo): tenta voltar, em silencio
+    const stale = [...raised].filter(([pid]) => !wanted.some(t => t.pid === pid));
+    if (stale.length) await restoreEntries(stale);
+    const problem = helperProblem();
+    const answer = problem ? { lines: [], code: null, reason: problem } : await runHelper(wanted.map(t => t.pid), "high");
+    const read = readAnswer(wanted, answer);
+    for (const t of read.targets) {
+        if (t.after !== HIGH) continue;
+        const entry = raised.get(t.pid);
+        // ja lembrado (a volta falhou antes, ou trocou de fonte): continua voltando para a classe de antes de tudo
+        if (entry) entry.failed = false;
+        else if (t.before && BELOW_HIGH.has(t.before)) raised.set(t.pid, { before: t.before, role: t.role, failed: false });
+    }
+    return summarize("high", read.targets, read.hags, read.reason);
+}
+
+async function restore(): Promise<GpuPriorityReport> {
+    active = false;
+    const read = await restoreEntries([...raised]);
+    return summarize("restore", read.targets, read.hags, read.reason, read.quiet);
+}
+
+/**
+ * O processo da GPU do Discord caiu no meio de uma transmissao (driver reiniciou, TDR, troca de placa num notebook): o pid
+ * antigo sai de `raised` e o novo processo da GPU sobe para HIGH assim que aparece. Fica numa nota do proximo relatorio.
+ */
+function onChildProcessGone(_event: unknown, details: { type?: string; } | undefined) {
+    if (details?.type !== "GPU" || !active) return;
+    const old = [...raised].filter(([, entry]) => entry.role === "GPU").map(([pid]) => pid);
+    for (const pid of old) raised.delete(pid);
+    const at = new Date().toISOString().slice(11, 19);
+    let tries = 0;
+    const attempt = () => {
+        const timer = setTimeout(() => void enqueue(async () => {
+            if (!active) return;
+            const gpu = discordTargets().find(t => t.role === "GPU" && !old.includes(t.pid));
+            if (!gpu) {
+                if (++tries < GPU_RESTART_TRIES) attempt();
+                else notes.push(`o processo da GPU do Discord reiniciou às ${at} UTC e o novo não apareceu: alta só no principal`);
+                return;
+            }
+            const report = await raise();
+            const now = report.targets.find(t => t.pid === gpu.pid);
+            notes.push(`o processo da GPU do Discord reiniciou às ${at} UTC (${old.join(", ") || "?"} → ${gpu.pid}): ${now?.after === HIGH ? "alta de novo" : `não subiu de novo (${now?.error ?? report.reason})`}`);
+        }), GPU_RESTART_DELAY_MS);
+        timer.unref?.();
+    };
+    attempt();
+}
+
+function watchGpuProcess() {
+    if (watchingGpu) return;
+    watchingGpu = true;
+    try {
+        app.on("child-process-gone", onChildProcessGone);
+    } catch { }
 }
 
 /**
  * "high": o Discord (principal + GPU) em HIGH na placa de video; "restore": volta o que o "high" mudou (sem nada a voltar,
- * nao roda o helper). Um pedido por vez. Nunca rejeita.
+ * nao roda o helper; o que falhou antes e tentado de novo). Um pedido por vez. Nunca rejeita.
  */
 export function setGpuPriorityMain(mode: GpuPriorityMode): Promise<GpuPriorityReport> {
-    // raise/restore nunca rejeitam (o helper que falha vira um relatorio), entao a fila nunca trava
-    const next = queue.then(() => (mode === "high" ? raise() : restore()));
-    queue = next;
-    return next;
+    return enqueue(async () => {
+        const report = await (mode === "high" ? raise() : restore());
+        // so aqui: o "high" que o main faz sozinho (a GPU que reiniciou) nao consome as notas
+        report.notes = notes.splice(0);
+        return report;
+    });
 }
 
-/** So para testes: esquece o que foi subido. */
+/** So para testes: esquece o que foi subido, e o ouvinte do processo da GPU e instalado de novo no proximo "high". */
 export function resetGpuPriorityForTests() {
     raised.clear();
+    notes.length = 0;
+    active = false;
+    watchingGpu = false;
     queue = Promise.resolve();
 }
 

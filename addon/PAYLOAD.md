@@ -298,6 +298,12 @@ Chromium's 50 % rule on top, the capture fell to ~10 fps). WGC screen capture, a
   (Windows build N: …)`. A broken file logs `capture: capture-flags.json ignored (…)`.
 - Nothing here is a boot problem: a broken file or a failure leaves the option off and never counts against the boot
   marker (section 8.4).
+- **Known cost:** with the texture path, Chromium 152 has no fallback when delivering a texture fails (GPU process
+  restart or TDR, adapter change on a hybrid laptop). `desktop_capture_device.cc` calls
+  `OnError(kDesktopCaptureDeviceGpuAdapterChanged)`, the track ends, and the stream stops. The plugin says so in the
+  option's description. When the track ends while the option is applied, it logs `A captura terminou sozinha com a
+  captura pela placa de vídeo ligada: …` and asks the user to stream again. It does not restart the capture by itself,
+  because `getDisplayMedia` needs a fresh click.
 
 The plugin shows the result next to the option: on, "restart Discord", or "does nothing on this PC". It also logs the
 capture mode at the start of every stream (`Modo da captura: …`), and "Copiar diagnóstico" has a line for it.
@@ -307,9 +313,16 @@ default), needs no restart and no file. While a stream is live, the plugin's nat
 `telinha-audio.exe --gpu-priority <Discord main pid>,<GPU process pid> --class high` once. The GPU process pid comes from
 `app.getAppMetrics()`. The helper calls `D3DKMTSetProcessSchedulingPriorityClass`, accepts only processes in its
 caller's own process tree, refuses REALTIME, and exits. When the stream stops, each process goes back to the class it
-had before. Without admin rights Windows accepts HIGH for another process of the same user (checked on Windows 11 build
-26300, medium integrity, HAGS on, with a `PROCESS_SET_INFORMATION` handle). If it refuses, the plugin only logs it and
-shows "não foi possível (precisa de administrador)". It never asks for elevation.
+had before. A restore that fails for any reason other than "the process is gone" stays pending: the next restore, the
+next stream and the next plugin start retry it, and a repeated failure is logged only once. The helper reports `gone`
+for a process that exited, and `tree` for a pid that now belongs to a process outside the caller's tree. It re-checks
+this with a second snapshot taken while it holds the process handles, so a recycled pid is never touched. If Discord's
+GPU process restarts mid-stream (`app` `child-process-gone`, type `GPU`), its old pid is dropped and the new GPU process
+is raised as soon as `getAppMetrics()` shows it. The renderer gets a note about it with the next report.
+Without admin rights this works on most PCs. It was checked on Windows 11 build 26300 (medium integrity, HAGS on, a
+`PROCESS_SET_INFORMATION` handle) against a normal child process of the same user, not against Discord's sandboxed GPU
+process, and the line under the option says whether it worked. If Windows refuses, the plugin only logs it and shows
+"não foi possível: o Windows recusou (talvez precise de administrador)". It never asks for elevation.
 
 ## 7. Interplay with Vencord and Discord updates
 

@@ -29,7 +29,7 @@ import {
     type ProofState, verifyPasswordProof, type WatchAccessInput, type WatchDecision
 } from "./access";
 import { startScreenAudioCapture } from "./audio/screenAudio";
-import { noteCaptureStarted, noteCaptureStopped } from "./captureBoost";
+import { captureEndedText, noteCaptureStarted, noteCaptureStopped } from "./captureBoost";
 import {
     chooseCodec, type CodecDecision, type EncoderReport, getLocalCaps, isSoftwareH264, isTransientSoftwareH264, noteH264Fallback, pickNegotiatedCodec, softwareFallback
 } from "./codec";
@@ -363,9 +363,11 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
 
         video.addEventListener("ended", () => {
             if (rt.local !== local) return;
-            log.warn("A captura terminou sozinha (janela fechada ou captura interrompida pelo sistema)");
+            // com a "Captura pela placa de vídeo" valendo, a placa de video que reinicia tambem encerra a captura (core/captureBoost.ts)
+            const gpu = captureEndedText(kind);
+            log.warn(gpu?.log ?? "A captura terminou sozinha (janela fechada ou captura interrompida pelo sistema)");
             stopStreaming("a captura terminou");
-            setLastError("A transmissão parou: a janela foi fechada ou a captura foi interrompida.");
+            setLastError(gpu?.message ?? "A transmissão parou: a janela foi fechada ou a captura foi interrompida.");
         });
 
         log.info(`Transmitindo ${info.width}x${info.height} @ ${info.fps} fps${info.hasAudio ? " com áudio" : ""} · quem pode assistir: ${ACCESS_LABEL[local.access]}`);

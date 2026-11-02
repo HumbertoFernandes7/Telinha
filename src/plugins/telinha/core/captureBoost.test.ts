@@ -19,7 +19,7 @@ import { installNative, type NativeEnv } from "@test/fakes/native";
 import { pluginSettings, resetVencordFakes } from "@test/fakes/vencord";
 
 import {
-    captureBoostDiagnostics, captureBoostLines, captureBoostNeedsRestart, gpuCaptureNeedsRestart, gpuCaptureState, gpuPriorityState, noteCaptureStarted,
+    captureBoostDiagnostics, captureBoostLines, captureBoostNeedsRestart, captureEndedText, gpuCaptureNeedsRestart, gpuCaptureState, gpuPriorityState, noteCaptureStarted,
     noteCaptureStopped, onGpuCaptureSettingChanged, onGpuPrioritySettingChanged, refreshGpuCapture, resetCaptureBoostForTests, startCaptureBoost,
     subscribeCaptureBoost
 } from "./captureBoost";
@@ -258,7 +258,7 @@ describe("prioridade da captura na placa de video", () => {
         { pid: 1234, role: "Discord", before, after, error }, { pid: 5678, role: "GPU", before, after, error }
     ];
     const report = (patch: Partial<GpuPriorityReport> = {}): GpuPriorityReport => ({
-        mode: "high", ok: true, done: 2, hags: "on", reason: null, adminNeeded: false, raised: 2, targets: both("NORMAL", "HIGH"), ...patch
+        mode: "high", ok: true, done: 2, hags: "on", reason: null, refused: false, raised: 2, quiet: false, notes: [], targets: both("NORMAL", "HIGH"), ...patch
     });
     const restored = (patch: Partial<GpuPriorityReport> = {}) => report({ mode: "restore", raised: 0, targets: both("HIGH", "NORMAL"), ...patch });
     const flush = () => new Promise(resolve => setImmediate(resolve));
@@ -304,15 +304,15 @@ describe("prioridade da captura na placa de video", () => {
         assert.deepEqual(priorityCalls(), ["high", "restore"]);
     });
 
-    test("o Windows recusa sem administrador: a transmissao segue; aviso no log e 'não foi possível (precisa de administrador)'", async () => {
+    test("o Windows recusa: a transmissao segue; aviso no log e 'não foi possível: o Windows recusou (talvez precise de administrador)'", async () => {
         pluginSettings.load({ gpuPriority: true });
-        nativeWith(report({ ok: false, done: 0, adminNeeded: true, raised: 0, hags: "off", targets: both(null, null, "open 0x80070005 Acesso negado.") }), restored({ targets: [] }));
+        nativeWith(report({ ok: false, done: 0, refused: true, raised: 0, hags: "off", targets: both(null, null, "open 0x80070005 Acesso negado.") }), restored({ targets: [] }));
         noteCaptureStarted();
         await flush();
         const last = getEventLog().at(-1)!;
         assert.equal(last.level, "warn");
-        assert.equal(last.msg, `${P}: não foi possível (precisa de administrador) — Discord 1234 open 0x80070005 Acesso negado., GPU do Discord 5678 open 0x80070005 Acesso negado.; HAGS desligado`);
-        assert.deepEqual(captureBoostLines(), [`${P}: não foi possível (precisa de administrador).`]);
+        assert.equal(last.msg, `${P}: não foi possível: o Windows recusou (talvez precise de administrador) — Discord 1234 open 0x80070005 Acesso negado., GPU do Discord 5678 open 0x80070005 Acesso negado.; HAGS desligado`);
+        assert.deepEqual(captureBoostLines(), [`${P}: não foi possível: o Windows recusou (talvez precise de administrador).`]);
         noteCaptureStopped();
         await flush();
         assert.equal(getEventLog().at(-1)!.msg, last.msg, "nada voltou: sem linha nova");
@@ -320,13 +320,13 @@ describe("prioridade da captura na placa de video", () => {
 
     test("so parte subiu, um motivo geral, ou um erro que nao e de administrador", async () => {
         pluginSettings.load({ gpuPriority: true });
-        const partial = report({ ok: false, done: 1, adminNeeded: true, raised: 1, hags: null });
+        const partial = report({ ok: false, done: 1, refused: true, raised: 1, hags: null });
         partial.targets[1] = { ...partial.targets[1], before: null, after: null, error: "open 0x80070005 Acesso negado." };
         const cases: [GpuPriorityReport, string, string][] = [
-            [partial, "alta em 1 de 2 processos do Discord (no resto precisa de administrador)", " — Discord 1234 NORMAL→HIGH, GPU do Discord 5678 open 0x80070005 Acesso negado.; HAGS desconhecido"],
-            [report({ ok: false, done: 1, adminNeeded: false, targets: [partial.targets[0], { ...partial.targets[1], error: "sem resposta do ajudante" }] }), "alta em 1 de 2 processos do Discord", " — Discord 1234 NORMAL→HIGH, GPU do Discord 5678 sem resposta do ajudante; HAGS ligado"],
-            [report({ ok: false, done: 0, reason: "o ajudante do Telinha (telinha-audio.exe) não foi instalado", targets: both(null, null) }), "não foi possível (o ajudante do Telinha (telinha-audio.exe) não foi instalado)", "; HAGS ligado"],
-            [report({ ok: false, done: 0, targets: both(null, null, "tree 0x80070005") }), "não foi possível (detalhes em \"Copiar diagnóstico\")", " — Discord 1234 tree 0x80070005, GPU do Discord 5678 tree 0x80070005; HAGS ligado"]
+            [partial, "alta em 1 de 2 processos do Discord; no resto, o Windows recusou (talvez precise de administrador)", " — Discord 1234 NORMAL→HIGH, GPU do Discord 5678 open 0x80070005 Acesso negado.; HAGS desconhecido"],
+            [report({ ok: false, done: 1, refused: false, targets: [partial.targets[0], { ...partial.targets[1], error: "sem resposta do ajudante" }] }), "alta em 1 de 2 processos do Discord", " — Discord 1234 NORMAL→HIGH, GPU do Discord 5678 sem resposta do ajudante; HAGS ligado"],
+            [report({ ok: false, done: 0, reason: "o ajudante do Telinha (telinha-audio.exe) não foi instalado", targets: both(null, null) }), "não foi possível: o ajudante do Telinha (telinha-audio.exe) não foi instalado", "; HAGS ligado"],
+            [report({ ok: false, done: 0, targets: both(null, null, "tree 0x80070005") }), "não foi possível: detalhes em \"Copiar diagnóstico\"", " — Discord 1234 tree 0x80070005, GPU do Discord 5678 tree 0x80070005; HAGS ligado"]
         ];
         for (const [high, outcome, rest] of cases) {
             resetCaptureBoostForTests();
@@ -347,7 +347,8 @@ describe("prioridade da captura na placa de video", () => {
         noteCaptureStopped();
         await flush();
         assert.equal(getEventLog().at(-1)!.level, "warn");
-        assert.equal(messages().at(-1), `${P}: não voltou tudo ao normal (transmissão encerrada): o ajudante do Telinha (telinha-audio.exe) não foi instalado; HAGS ligado`);
+        assert.equal(messages().at(-1), `${P}: não voltou tudo ao normal (transmissão encerrada; o ajudante do Telinha (telinha-audio.exe) não foi instalado); `
+            + "tento de novo na próxima transmissão ou ao reabrir o Discord; HAGS ligado");
 
         resetCaptureBoostForTests();
         env!.restore();
@@ -356,7 +357,8 @@ describe("prioridade da captura na placa de video", () => {
         await flush();
         noteCaptureStopped();
         await flush();
-        assert.equal(messages().at(-1), `${P}: não voltou tudo ao normal (transmissão encerrada) — Discord 1234 HIGH→NORMAL, GPU do Discord 5678 open 0x80070057 O parâmetro está incorreto.; HAGS ligado`);
+        assert.equal(messages().at(-1), `${P}: não voltou tudo ao normal (transmissão encerrada); tento de novo na próxima transmissão ou ao reabrir o Discord `
+            + "— Discord 1234 HIGH→NORMAL, GPU do Discord 5678 open 0x80070057 O parâmetro está incorreto.; HAGS ligado");
     });
 
     test("o pedido que falha no IPC ou volta lixo: aviso no log, a transmissao segue, e parar ainda tenta voltar", async () => {
@@ -420,11 +422,54 @@ describe("prioridade da captura na placa de video", () => {
     test("inicio do plugin: o que ficou em HIGH de antes de recarregar volta ao normal; sem nada, nenhum log", async () => {
         nativeWith(report(), restored());
         await startCaptureBoost();
-        assert.equal(messages().at(-1), `${P}: de volta ao normal (o Discord recarregou no meio de uma transmissão) — Discord 1234 HIGH→NORMAL, GPU do Discord 5678 HIGH→NORMAL; HAGS ligado`);
+        assert.equal(messages().at(-1), `${P}: de volta ao normal (início do Telinha) — Discord 1234 HIGH→NORMAL, GPU do Discord 5678 HIGH→NORMAL; HAGS ligado`);
         env!.restore();
         const before = messages().length;
         nativeWith(report(), restored({ targets: [] }));
         await startCaptureBoost();
         assert.equal(messages().length, before);
+    });
+
+    test("as notas do main (o processo da GPU reiniciou) vao para o log; a volta que falha de novo do mesmo jeito (quiet) nao", async () => {
+        pluginSettings.load({ gpuPriority: true });
+        const note = "o processo da GPU do Discord reiniciou às 21:03:04 UTC (5678 → 9999): alta de novo";
+        nativeWith(report(), restored({ ok: false, done: 0, refused: true, quiet: true, notes: [note], targets: both(null, null, "open 0x80070005 Acesso negado.") }));
+        noteCaptureStarted();
+        await flush();
+        const before = messages().length;
+        noteCaptureStopped();
+        await flush();
+        assert.deepEqual(messages().slice(before), [`${P}: ${note}`], "a nota sim; a falha repetida nao");
+    });
+
+    test("a volta recusada pelo Windows diz que tenta de novo", async () => {
+        pluginSettings.load({ gpuPriority: true });
+        nativeWith(report(), restored({ ok: false, done: 0, refused: true, targets: both(null, null, "open 0x80070005 Acesso negado.") }));
+        noteCaptureStarted();
+        await flush();
+        noteCaptureStopped();
+        await flush();
+        assert.match(messages().at(-1)!, /^Prioridade da captura na placa de vídeo: não voltou tudo ao normal \(transmissão encerrada; o Windows recusou \(talvez precise de administrador\)\); tento de novo/);
+    });
+});
+
+describe("a captura que termina sozinha com a captura pela placa de video ligada", () => {
+    test("so com a opcao valendo nesta partida; tela e janela dizem coisas diferentes", async () => {
+        assert.equal(captureEndedText("screen"), null, "sem estado lido");
+        for (const patch of [{ loader: false, requested: true, applied: true }, { requested: false }, { requested: true, applied: false }]) {
+            resetCaptureBoostForTests();
+            env?.restore();
+            ({ env } = mainWith(patch));
+            await refreshGpuCapture();
+            assert.equal(captureEndedText("window"), null, JSON.stringify(patch));
+        }
+        env!.restore();
+        ({ env } = mainWith({ requested: true, applied: true }));
+        await refreshGpuCapture();
+        assert.deepEqual(captureEndedText("screen"), {
+            log: "A captura terminou sozinha com a captura pela placa de vídeo ligada: provavelmente a placa de vídeo reiniciou ou trocou (o Chromium não volta sozinho nesse caso)",
+            message: "A transmissão parou: a placa de vídeo provavelmente reiniciou. É só transmitir de novo."
+        });
+        assert.equal(captureEndedText("window")!.message, "A transmissão parou: a janela foi fechada ou a placa de vídeo reiniciou. É só transmitir de novo.");
     });
 });

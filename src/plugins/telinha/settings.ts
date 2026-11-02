@@ -129,7 +129,7 @@ export const settings = definePluginSettings({
     gpuCapture: {
         type: OptionType.BOOLEAN,
         displayName: "Captura pela placa de vídeo (experimental; Windows 11 atualizado; reinicie o Discord)",
-        description: "Deixa a live mais fluida quando um jogo usa a placa de vídeo toda: a imagem da tela fica na placa de vídeo, sem passar pelo processador.",
+        description: "Deixa a live mais fluida quando um jogo usa a placa de vídeo toda: a imagem da tela fica na placa de vídeo, sem passar pelo processador. Se a placa de vídeo reiniciar, a transmissão para; é só transmitir de novo.",
         default: false,
         onChange: () => void onGpuCaptureSettingChanged()
     },

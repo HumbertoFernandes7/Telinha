@@ -36,7 +36,7 @@
 // --gpu-priority ajusta e sai; uma linha por item no stdout:
 //     hags <on|off|unknown>                                   agendamento da placa por hardware (HAGS), para o log
 //     ok pid=<pid> before=<CLASSE> after=<CLASSE>
-//     error <tree|open|get|set> 0x<codigo> pid=<pid> <mensagem>
+//     error <gone|tree|open|get|set> 0x<codigo> pid=<pid> <mensagem>   gone = o processo terminou
 //     error api 0x<HRESULT> <mensagem>                        o Windows nao tem a funcao
 //
 // Codigos de saida: 0 ok, 1 erro durante a captura, 2 argumentos, 3 Windows antigo, 4 ativacao, 5 inicializacao,
@@ -729,43 +729,74 @@ int RunGpuPriority(const std::vector<DWORD>& pids, INT cls) {
     }
     Out("hags %s", HagsState(gdi));
 
-    const auto procs = SnapshotProcesses();
-    const ProcInfo* self = FindProc(procs, GetCurrentProcessId());
+    const unsigned long goneCode = static_cast<unsigned long>(HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER));
+    const unsigned long treeCode = static_cast<unsigned long>(E_ACCESSDENIED);
+    const auto targetError = [](const char* stage, unsigned long code, DWORD pid, const char* text) {
+        Out("error %s 0x%08lX pid=%lu %s", stage, code, static_cast<unsigned long>(pid), text);
+    };
+
+    // 1) so os da arvore de quem chamou; "gone" = o processo ja terminou (nada a fazer nele)
+    const auto procsAtStart = SnapshotProcesses();
+    const ProcInfo* self = FindProc(procsAtStart, GetCurrentProcessId());
     const DWORD root = self ? self->ppid : 0;
     int failed = 0;
+    std::vector<std::pair<DWORD, HANDLE>> opened;
     for (const DWORD pid : pids) {
-        const unsigned long shownPid = static_cast<unsigned long>(pid);
-        if (!root || !InTree(procs, root, pid)) {
-            Out("error tree 0x%08lX pid=%lu fora da arvore de processos de quem chamou", static_cast<unsigned long>(E_ACCESSDENIED), shownPid);
+        if (!FindProc(procsAtStart, pid)) {
+            targetError("gone", goneCode, pid, "o processo terminou");
+            failed++;
+            continue;
+        }
+        if (!root || !InTree(procsAtStart, root, pid)) {
+            targetError("tree", treeCode, pid, "fora da arvore de processos de quem chamou");
             failed++;
             continue;
         }
         const HANDLE target = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
         if (!target) {
-            const HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
-            Out("error open 0x%08lX pid=%lu %s", static_cast<unsigned long>(hr), shownPid, HrText(hr).c_str());
+            const DWORD err = GetLastError();
+            const HRESULT hr = HRESULT_FROM_WIN32(err);
+            // ERROR_INVALID_PARAMETER: o pid nao existe mais (terminou entre o snapshot e o OpenProcess)
+            if (err == ERROR_INVALID_PARAMETER) targetError("gone", goneCode, pid, "o processo terminou");
+            else targetError("open", static_cast<unsigned long>(hr), pid, HrText(hr).c_str());
             failed++;
             continue;
         }
-        INT before = -1;
-        INT after = -1;
-        const char* stage = "get";
-        LONG status = getPriority(target, &before);
-        if (status >= 0) {
-            stage = "set";
-            status = setPriority(target, cls);
-        }
-        if (status >= 0) {
-            stage = "get";
-            status = getPriority(target, &after);
+        opened.push_back({ pid, target });
+    }
+
+    // 2) pid reaproveitado: entre o 1o snapshot e o OpenProcess o processo pode ter terminado e o pid ter passado para
+    // outro. Com os handles abertos o pid nao muda mais de dono: um snapshot agora diz de quem ele e de verdade.
+    const auto procsOpened = opened.empty() ? std::vector<std::pair<DWORD, ProcInfo>>() : SnapshotProcesses();
+    for (const auto& [pid, target] : opened) {
+        DWORD exitCode = 0;
+        if ((GetExitCodeProcess(target, &exitCode) && exitCode != STILL_ACTIVE) || !FindProc(procsOpened, pid)) {
+            targetError("gone", goneCode, pid, "o processo terminou");
+            failed++;
+        } else if (!InTree(procsOpened, root, pid)) {
+            targetError("tree", treeCode, pid, "o pid passou para um processo fora da arvore de quem chamou");
+            failed++;
+        } else {
+            INT classBefore = -1;
+            INT classAfter = -1;
+            const char* stage = "get";
+            LONG status = getPriority(target, &classBefore);
+            if (status >= 0) {
+                stage = "set";
+                status = setPriority(target, cls);
+            }
+            if (status >= 0) {
+                stage = "get";
+                status = getPriority(target, &classAfter);
+            }
+            if (status < 0) {
+                targetError(stage, static_cast<unsigned long>(status), pid, NtText(status));
+                failed++;
+            } else {
+                Out("ok pid=%lu before=%s after=%s", static_cast<unsigned long>(pid), GpuClassName(classBefore).c_str(), GpuClassName(classAfter).c_str());
+            }
         }
         CloseHandle(target);
-        if (status < 0) {
-            Out("error %s 0x%08lX pid=%lu %s", stage, static_cast<unsigned long>(status), shownPid, NtText(status));
-            failed++;
-            continue;
-        }
-        Out("ok pid=%lu before=%s after=%s", shownPid, GpuClassName(before).c_str(), GpuClassName(after).c_str());
     }
     FreeLibrary(gdi);
     return failed ? kGpuExitFailed : 0;

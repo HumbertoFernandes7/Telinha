@@ -98,6 +98,14 @@ console.log("H4 refusals: outside the caller's tree, REALTIME, bad arguments");
     check("a process outside the caller's tree (this node's parent) is refused before it is opened", r.code === 6 && r.out.length === 2 && HAGS_RE.test(r.out[0])
         && r.out[1].startsWith(`error tree 0x80070005 pid=${outside} `), r);
 
+    // a child that already exited: "gone" (or "tree", if Windows already gave its pid to some other process)
+    const dead = spawn(process.execPath, ["-e", ""], { stdio: "ignore", windowsHide: true });
+    await new Promise(resolve => dead.once("exit", resolve));
+    const g = run("--gpu-priority", String(dead.pid), "--class", "normal");
+    console.log(`        (an exited child: exit ${g.code}, ${JSON.stringify(g.out)})`);
+    check("a process that already exited is reported as gone (nothing to restore in it)", g.code === 6 && g.out.length === 2
+        && (g.out[1].startsWith(`error gone 0x80070057 pid=${dead.pid} `) || g.out[1].startsWith(`error tree 0x80070005 pid=${dead.pid} `)), g);
+
     const rt = run("--gpu-priority", String(process.pid), "--class", "realtime");
     check("--class realtime is refused (exit 2, nothing changed)", rt.code === 2 && rt.out.length === 0 && /realtime nao e permitido/.test(rt.err), rt);
     const rtUpper = run("--gpu-priority", String(process.pid), "--class", "REALTIME");

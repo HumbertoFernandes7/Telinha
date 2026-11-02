@@ -27,6 +27,7 @@ import {
     type StreamingRig, streamsTo, turns, videoSenderOf, windowOptions
 } from "@test/helpers/wpb-streaming";
 
+import { refreshGpuCapture, resetCaptureBoostForTests } from "./captureBoost";
 import { rt } from "./context";
 import { BLACK_WARNING } from "./quality/captureMonitor";
 import {
@@ -355,6 +356,31 @@ describe("startStreaming: tela, janela e audio", () => {
             ]);
         } finally {
             pluginSettings.set("requireVerifiedIdentity", true);
+        }
+    });
+
+    test("a captura termina sozinha com a captura pela placa de video valendo: o log e a mensagem dizem que a placa pode ter reiniciado", async () => {
+        rig.native.restore();
+        rig.native = installNative({
+            gpuCaptureStatus: async () => ({ loader: true, build: 26300, supported: true, saved: true, requested: true, applied: true, loaderNote: null, enableFeatures: null, saveError: null })
+        });
+        try {
+            await refreshGpuCapture();
+            await startStreaming(screenOptions());
+            await turns();
+            const since = logMark();
+            (rt.local!.stream.getVideoTracks()[0] as FakeMediaStreamTrack).end();
+            await turns(1);
+            assert.equal(getState().local, null);
+            assert.equal(getState().lastError, "A transmissão parou: a placa de vídeo provavelmente reiniciou. É só transmitir de novo.");
+            assert.deepEqual(since(), [
+                "A captura terminou sozinha com a captura pela placa de vídeo ligada: provavelmente a placa de vídeo reiniciou ou trocou (o Chromium não volta sozinho nesse caso)",
+                "Transmissão encerrada (a captura terminou)"
+            ]);
+        } finally {
+            rig.native.restore();
+            rig.native = installNative();
+            resetCaptureBoostForTests();
         }
     });
 

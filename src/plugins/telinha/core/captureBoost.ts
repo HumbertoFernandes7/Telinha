@@ -146,16 +146,22 @@ const gpuPriorityOn = () => settings.store.gpuPriority === true;
 const hasPriorityNative = () => typeof getNativeOrNull()?.setGpuPriority === "function";
 
 function isPriorityReport(v: unknown): v is GpuPriorityReport {
-    return !!v && typeof v === "object" && Array.isArray((v as GpuPriorityReport).targets) && typeof (v as GpuPriorityReport).ok === "boolean";
+    const r = v as GpuPriorityReport;
+    return !!v && typeof v === "object" && Array.isArray(r.targets) && typeof r.ok === "boolean" && Array.isArray(r.notes);
 }
 
-/** Pede ao main ("high" ou "restore"). null: sem a funcao na parte nativa, ou o pedido falhou (fica no log). */
+/**
+ * Pede ao main ("high" ou "restore") e loga as notas que vieram junto (o processo da GPU reiniciou...). null: sem a funcao
+ * na parte nativa, ou o pedido falhou (fica no log).
+ */
 async function askPriority(mode: "high" | "restore"): Promise<GpuPriorityReport | null> {
     const native = getNativeOrNull();
     if (typeof native?.setGpuPriority !== "function") return null;
     try {
         const report = await native.setGpuPriority(mode);
-        return isPriorityReport(report) ? report : null;
+        if (!isPriorityReport(report)) return null;
+        for (const note of report.notes) log.info(`${GPU_PRIORITY}: ${note}`);
+        return report;
     } catch (e) {
         log.warn(`${GPU_PRIORITY}: o pedido falhou (${errorText(e)})`);
         return null;
@@ -178,12 +184,15 @@ const withTargets = (r: GpuPriorityReport) => {
 const HAGS_TEXT: Record<string, string> = { on: "HAGS ligado", off: "HAGS desligado" };
 const hagsText = (r: GpuPriorityReport) => HAGS_TEXT[r.hags ?? ""] ?? "HAGS desconhecido";
 
-/** O resultado de um "high", curto: "alta", "não foi possível (precisa de administrador)"... */
+/** Sem administrador funciona na maioria dos PCs; quando o Windows recusa, pode ser isso (nunca e certeza). */
+const REFUSED = "o Windows recusou (talvez precise de administrador)";
+
+/** O resultado de um "high", curto: "alta", "não foi possível: o Windows recusou (talvez precise de administrador)"... */
 function raiseOutcome(r: GpuPriorityReport): string {
     if (r.ok) return "alta";
-    if (r.reason) return `não foi possível (${r.reason})`;
-    if (r.done) return `alta em ${r.done} de ${r.targets.length} processos do Discord${r.adminNeeded ? " (no resto precisa de administrador)" : ""}`;
-    return r.adminNeeded ? "não foi possível (precisa de administrador)" : "não foi possível (detalhes em \"Copiar diagnóstico\")";
+    const why = r.reason ?? (r.refused ? REFUSED : null);
+    if (r.done) return `alta em ${r.done} de ${r.targets.length} processos do Discord${why ? `; no resto, ${why}` : ""}`;
+    return `não foi possível: ${why ?? "detalhes em \"Copiar diagnóstico\""}`;
 }
 
 /** Uma linha do log: info quando deu certo, aviso quando nao (nunca mais que isso: a falha e silenciosa). */
@@ -193,9 +202,15 @@ function logPriority(r: GpuPriorityReport, text: string) {
     else log.warn(line);
 }
 
-/** A volta ao normal: o que voltou, ou por que nao deu (o processo fechou, o ajudante sumiu...). */
-function logRestore(r: GpuPriorityReport, why: string) {
-    logPriority(r, r.ok ? `de volta ao normal (${why})` : `não voltou tudo ao normal (${why})${r.reason ? `: ${r.reason}` : ""}`);
+/**
+ * A volta ao normal: o que voltou, ou que nao deu e sera tentado de novo (o main guarda o que falhou). Uma falha repetida
+ * do mesmo jeito (quiet) nao ganha outra linha.
+ */
+function logRestore(r: GpuPriorityReport | null, why: string) {
+    if (!r?.targets.length || r.quiet) return;
+    const why2 = r.reason ?? (r.refused ? REFUSED : null);
+    logPriority(r, r.ok ? `de volta ao normal (${why})`
+        : `não voltou tudo ao normal (${why}${why2 ? `; ${why2}` : ""}); tento de novo na próxima transmissão ou ao reabrir o Discord`);
 }
 
 async function raisePriority(): Promise<void> {
@@ -212,8 +227,7 @@ async function restorePriority(why: string): Promise<void> {
     if (!priorityActive) return;
     priorityActive = false;
     changed();
-    const report = await askPriority("restore");
-    if (report?.targets.length) logRestore(report, why);
+    logRestore(await askPriority("restore"), why);
 }
 
 /** O que a prioridade faz nesta transmissao, para a linha "Modo da captura". */
@@ -265,9 +279,29 @@ export async function startCaptureBoost(): Promise<void> {
     const on = gpuCaptureOn();
     if (st?.loader && st.saved !== on) await saveGpuCapture(on);
     if (on || st?.requested) log.info(`Modo da captura nesta partida do Discord: ${captureModeText(gpuCapture)}`);
-    // o renderer recarregou no meio de uma transmissao: o main ainda tem o Discord em HIGH (sem nada a voltar, nao faz nada)
-    const leftover = await askPriority("restore");
-    if (leftover?.targets.length) logRestore(leftover, "o Discord recarregou no meio de uma transmissão");
+    // o renderer recarregou no meio de uma transmissao, ou uma volta falhou antes: o main ainda tem o Discord em HIGH e tenta
+    // de novo (sem nada a voltar, nao faz nada)
+    logRestore(await askPriority("restore"), "início do Telinha");
+}
+
+/**
+ * A captura terminou sozinha (core/streaming.ts, evento "ended" da faixa) com a captura pela placa de video valendo nesta
+ * partida: o Chromium encerra a captura quando a placa de video reinicia ou troca (processo da GPU reiniciado, TDR, troca
+ * de placa num notebook), sem voltar para a copia pelo processador. null = a opcao nao vale nesta partida (a mensagem de
+ * sempre). Recomecar sozinho nao da: o getDisplayMedia precisa de um clique novo.
+ */
+export function captureEndedText(kind: "screen" | "window"): { log: string; message: string; } | null {
+    const st = gpuCapture;
+    if (!st?.loader || !st.requested || st.applied === false) return null;
+    return kind === "screen"
+        ? {
+            log: "A captura terminou sozinha com a captura pela placa de vídeo ligada: provavelmente a placa de vídeo reiniciou ou trocou (o Chromium não volta sozinho nesse caso)",
+            message: "A transmissão parou: a placa de vídeo provavelmente reiniciou. É só transmitir de novo."
+        }
+        : {
+            log: "A captura terminou sozinha com a captura pela placa de vídeo ligada: a janela foi fechada, ou a placa de vídeo reiniciou ou trocou (o Chromium não volta sozinho nesse caso)",
+            message: "A transmissão parou: a janela foi fechada ou a placa de vídeo reiniciou. É só transmitir de novo."
+        };
 }
 
 /**
