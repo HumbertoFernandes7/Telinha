@@ -369,10 +369,26 @@ describe("qualidade automatica: limite da placa de video com a captura pela plac
         const lines = await logsDuring(() => h.runUntil(8000));
         assert.deepEqual(qualityLines(lines), [
             "Qualidade automática: 1080p 30 fps → 720p 30 fps para os 2 espectadores (placa de vídeo: mediana de 29.8 ms por quadro em 2 encoders da placa, "
-            + "o limite é 27.1 ms; codificando 81% dos quadros esperados); nova subida só após 10 s estável"
+            + "o limite é 27.1 ms; codificando 81% dos quadros esperados); nova subida só após 60 s estável"
         ]);
         assert.equal(h.controller.state?.reason, "gpu");
     });
+
+    // so o controle de taxa do WebRTC descartando quadros (a rede de quem assiste no limite), com a placa acima do limite:
+    // nao e a placa ficando para tras. Com a rede folgada, os mesmos 50 de 60 fps sao a placa, e desce
+    for (const [what, rates, down] of [
+        ["rede cheia (4600 estimados, o degrau pede 4500, enviando 4400)", { availableKbps: 4600, kbps: 4400 }, false],
+        ["limitado por banda pelo WebRTC", { limitation: "bandwidth" }, false],
+        ["rede folgada", {}, true]
+    ] as const) {
+        test(`ligada, 1 espectador codificando 50 de 60 fps com 29,8 ms por quadro, ${what}: ${down ? "desce" : "nao desce"}`, async t => {
+            const h = qualityHarness(useFakeClock(t), { A: nvenc(50, { sourceFps: 60, ...rates }) }, { gpuCapture: () => true });
+            await h.join("A", true);
+            const lines = await logsDuring(() => h.runUntil(60_000));
+            assert.equal(h.controller.levelFor("A"), down ? "720p30" : "1080p60");
+            assert.equal(qualityLines(lines).some(l => l.includes("(placa de vídeo:")), down);
+        });
+    }
 
     // fonte a 60 fps num degrau de 30: o esperado e o fps do degrau (30 de 30 acompanha; contra os 60 da fonte seria 50%)
     for (const [fps, level] of [[30, "1080p30"], [26, "720p30"]] as const) {
@@ -403,11 +419,12 @@ describe("qualidade automatica: limite da placa de video com a captura pela plac
 
     /**
      * Encoders NVENC que seguem o degrau que o controller aplica: codificam min(fps do degrau, fonte) x `keep` quadros por
-     * segundo, a `ms` por quadro (o mesmo em todos: e a espera atras do jogo, nao o tamanho do quadro).
+     * segundo (`keep` pode depender do degrau: a placa lotada so no de cima), a `ms` por quadro (o mesmo em todos: e a
+     * espera atras do jogo, nao o tamanho do quadro).
      */
     class TextureGpu {
         ms: number;
-        keep = 1;
+        keep: number | ((level: QualityLevel) => number) = 1;
         private readonly peers = new Map<string, { sim: EncoderSim; level: QualityLevel; }>();
 
         constructor(readonly h: QualityHarness, readonly sourceFps: number, ms: number) {
@@ -435,7 +452,7 @@ describe("qualidade automatica: limite da placa de video com a captura pela plac
 
         private update() {
             for (const { sim, level } of this.peers.values()) {
-                const fps = Math.min(LEVELS[level].fps, this.sourceFps) * this.keep;
+                const fps = Math.min(LEVELS[level].fps, this.sourceFps) * (typeof this.keep === "number" ? this.keep : this.keep(level));
                 sim.set({ fps, encodeBusy: this.ms * fps / 1000, height: LEVELS[level].height, width: LEVELS[level].height * 16 / 9 });
             }
         }
@@ -482,15 +499,29 @@ describe("qualidade automatica: limite da placa de video com a captura pela plac
         gpu.set(87, 0.7);
         await h.runUntil(60_000);
         assert.equal(h.controller.levelFor("A"), "720p30");
-        // a previsao com 30 ms passa de longe do limite da subida (60% do intervalo); acompanhando a fonte, nao segura
+        // a previsao com 30 ms passa de longe do limite da subida (60% do intervalo); acompanhando a fonte, nao segura. A
+        // espera depois de descer pela placa com a captura pela placa e de 1 min (GPU_TEXTURE_HOLD)
         gpu.set(30, 1);
-        const up = await logsDuring(() => h.runUntil(120_000));
+        const up = await logsDuring(() => h.runUntil(200_000));
         assert.deepEqual(transitions(up), [
-            "Qualidade automática: 720p 30 fps → 720p 60 fps para os 2 espectadores (placa de vídeo: estável há 10 s, os encoders da placa acompanham a fonte)",
-            "Qualidade automática: 720p 60 fps → 1080p 60 fps para os 2 espectadores (placa de vídeo: estável há 10 s, os encoders da placa acompanham a fonte)"
+            "Qualidade automática: 720p 30 fps → 720p 60 fps para os 2 espectadores (placa de vídeo: estável há 60 s, os encoders da placa acompanham a fonte)",
+            "Qualidade automática: 720p 60 fps → 1080p 60 fps para os 2 espectadores (placa de vídeo: estável há 60 s, os encoders da placa acompanham a fonte)"
         ]);
-        assert.deepEqual(transitions(await logsDuring(() => h.runUntil(720_000))), [], "sem oscilar");
+        assert.deepEqual(transitions(await logsDuring(() => h.runUntil(800_000))), [], "sem oscilar");
         assert.equal(h.controller.levelFor("A"), "1080p60");
+    });
+
+    // A placa lotada de verdade so no 1080p60 (os encoders ficam para tras nele e acompanham no 720p60), com a captura pela
+    // placa: o tempo por quadro nao diz se o de cima cabe, so tentando. A espera depois de descer comeca em 1 min e dobra a
+    // cada subida desfeita; com a de sempre (10 s, ate 2 min), os espectadores travavam a cada ~2 min
+    test("ligada, a placa lotada so no 1080p60: cada tentativa de subir que falha dobra a espera (1, 2, 4, 8 min, ate 10)", async t => {
+        const { h, gpu } = await steve(t, true);
+        gpu.set(30, level => (level === "1080p60" ? 0.8 : 1));
+        const lines = await logsDuring(() => h.runUntil(1_000_000));
+        const downs = transitions(lines).filter(l => l.includes("1080p 60 fps → 720p 60 fps"));
+        assert.deepEqual(downs.map(l => / só após (\d+) s/.exec(l)?.[1]), ["60", "120", "240", "480", "600"]);
+        assert.equal(transitions(lines).filter(l => l.includes("720p 60 fps → 1080p 60 fps")).length, 4, "4 tentativas em ~16 min (com a espera de sempre, 10 s dobrando ate 2 min e voltando depois de 2 min: 15)");
+        assert.equal(h.controller.levelFor("A"), "720p60");
     });
 
     for (const gpuCapture of [true, false]) {
@@ -506,8 +537,13 @@ describe("qualidade automatica: limite da placa de video com a captura pela plac
             ]);
             assert.equal(h.controller.levelFor("B"), gpuCapture ? "1080p60" : "720p60");
             if (gpuCapture) {
-                // os dois codificando a fonte inteira: a regra periodica tambem nao desce
+                // o jogo pesa mais (30 ms por quadro, acima do limite de 13,3) com os dois codificando a fonte inteira: fica;
+                // ficando para tras (80%), desce
+                gpu.set(30);
                 assert.deepEqual(transitions(await logsDuring(() => h.runUntil(120_000))), []);
+                gpu.set(30, 0.8);
+                await h.runUntil(124_000);
+                assert.equal(h.controller.levelFor("B"), "720p60");
             }
         });
     }
