@@ -374,7 +374,7 @@ function saveHigh(record: HighProbeRecord) {
 }
 
 /** O resultado da sonda WebCodecs do H.265 ou do AV1 salvo neste PC (de qualquer ambiente). null = nenhum. */
-export function hwOnlyProbeRecord(codec: HwOnlyCodec): HwOnlyProbeRecord | null {
+function hwOnlyProbeRecord(codec: HwOnlyCodec): HwOnlyProbeRecord | null {
     const spec = HW_ONLY[codec];
     const read = readProbe(spec.key);
     if (!read) return null;
@@ -505,7 +505,7 @@ export function startLocalCaps(report: (line: string) => void): Promise<void> {
         const caps = await measuring;
         const line = () => {
             const rec = stuckRecord();
-            report(`${describeLocalCaps(caps)}; ${describeEnv(env)}; sonda WebCodecs H.264 placa: ${probeNote}`
+            report(`${describeLocalCaps({ ...caps, av1HwFeature: getLocalCaps().av1HwFeature })}; ${describeEnv(env)}; sonda WebCodecs H.264 placa: ${probeNote}`
                 + (caps.h264HighHwProfile ? `; sonda WebCodecs H.264 High: ${highNote}` : "")
                 + (caps.h265HwFmtp ? `; sonda WebCodecs H.265: ${hwOnlyNotes.h265}` : "")
                 + (caps.av1HwFmtp || wanted("av1") ? `; sonda WebCodecs AV1: ${hwOnlyNotes.av1}` : "")
@@ -577,7 +577,7 @@ export function settleUpgrades(env: EncoderEnv, delayMs: number): Promise<void> 
  * (encodingInfo), o H.264 da placa nao esta desligado e a sonda do Baseline deu "ok" neste ambiente. AV1: tambem so com
  * o WebRtcAV1HWEncode ligado nesta partida do Discord. Senao, sem ele nesta sessao.
  */
-export function settleHwOnly(codec: HwOnlyCodec, env: EncoderEnv, delayMs: number): Promise<void> | null {
+function settleHwOnly(codec: HwOnlyCodec, env: EncoderEnv, delayMs: number): Promise<void> | null {
     const spec = HW_ONLY[codec];
     const caps = getLocalCaps();
     const fmtp = spec.fmtp(caps);
@@ -819,7 +819,7 @@ const hwOnlyRunning: Record<HwOnlyCodec, boolean> = { h265: false, av1: false };
  * - Ok: fica salvo; com ele fixado, vai ele para quem tambem o decodifica por hardware.
  * - Inconclusiva sem nada preso: nada salvo; sem ele nesta sessao (o H.264 continua) e ela roda de novo na proxima abertura.
  */
-export async function runHwOnlyProbe(codec: HwOnlyCodec, env: EncoderEnv, tested: string, delayMs = PROBE_START.delayMs) {
+async function runHwOnlyProbe(codec: HwOnlyCodec, env: EncoderEnv, tested: string, delayMs = PROBE_START.delayMs) {
     if (hwOnlyRunning[codec]) return;
     const { label, setOk } = HW_ONLY[codec];
     const note = (text: string) => { hwOnlyNotes[codec] = text; };
