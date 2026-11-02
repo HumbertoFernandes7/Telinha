@@ -444,7 +444,7 @@ function onPresence(data: PresenceMessage, { peerId }: { peerId: string; }) {
     entry.presence = presence;
     if (entry.admitted) {
         if (!prev) {
-            log.info(`${peerLabel(peerId)}: ${presence.streaming ? `transmitindo ${presence.stream ? `${presence.stream.kind === "screen" ? "tela" : "janela"} ${presence.stream.width}x${presence.stream.height}@${presence.stream.fps}` : ""}` : "não está transmitindo"}; H.264 por hardware: ${presence.caps.h264HwDecode ? "sim" : "não"}${presence.caps.hwDecode?.h264High ? "; High por hardware: sim" : ""}${presence.caps.hwDecode?.h265 ? "; H.265 por hardware: sim" : ""}`);
+            log.info(`${peerLabel(peerId)}: ${presence.streaming ? `transmitindo ${presence.stream ? `${presence.stream.kind === "screen" ? "tela" : "janela"} ${presence.stream.width}x${presence.stream.height}@${presence.stream.fps}` : ""}` : "não está transmitindo"}; H.264 por hardware: ${presence.caps.h264HwDecode ? "sim" : "não"}${presence.caps.hwDecode?.h264High ? "; High por hardware: sim" : ""}${presence.caps.hwDecode?.h265 ? "; H.265 por hardware: sim" : ""}${presence.caps.hwDecode?.av1 ? "; AV1 por hardware: sim" : ""}`);
         } else if (prev.streaming !== presence.streaming) {
             log.info(`${peerLabel(peerId)} ${presence.streaming ? "começou" : "parou"} de transmitir`);
         }

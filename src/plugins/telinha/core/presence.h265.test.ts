@@ -37,7 +37,7 @@ describe("caps.hwDecode.h265", () => {
     });
 
     test("o que aceitamos: h265 so `true` e na mesma `v`; lixo e marcas desconhecidas saem", () => {
-        assert.deepEqual(parseHwDecodeCaps({ v: 1, h264High: true, h265: true, av1: true, x: "y" }), { v: 1, h264High: true, h265: true });
+        assert.deepEqual(parseHwDecodeCaps({ v: 1, h264High: true, h265: true, vvc: true, x: "y" }), { v: 1, h264High: true, h265: true });
         assert.deepEqual(parseHwDecodeCaps({ v: 1, h265: true }), { v: 1, h265: true });
         for (const bad of [{ v: 1, h265: "true" }, { v: 1, h265: 1 }, { v: 2, h265: true }, { h265: true }]) assert.equal(parseHwDecodeCaps(bad), null, JSON.stringify(bad));
         const base = { v: PROTOCOL_VERSION, discordUserId: "200000000000000002", username: "amigo", streaming: false };

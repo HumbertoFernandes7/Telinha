@@ -33,11 +33,29 @@
 // ela so roda com o H.265 fixado) E o espectador anuncia que decodifica na placa (caps.hwDecode.h265, protocol.ts passo
 // 11); senao, o que o automatico escolheria. Com H.265, o H.264 que o automatico escolheria vai logo depois na negociacao
 // (h264Profile/h264Backup da decisao): se o outro lado nao negociar H.265, fica a placa em H.264.
+//
+// AV1 (Main, depois da v0.3.3): o mesmo desenho do H.265 (so MANUAL, "AV1" no formato de video; as mesmas redes de
+// seguranca e a mesma reserva H.264), com duas diferencas. (1) O Chromium TEM AV1 por software (libaom), pesado demais para
+// 1080p60 com um jogo: o AV1 so vai com o encoder da placa confirmado (encodingInfo "video/AV1;<fmtp Main do sender>"
+// powerEfficient, av1HwFmtp, e a sonda WebCodecs do AV1 "ok"), e um AV1 no ar fora da placa sai dele na hora
+// (isOffHardwareAv1; streaming.ts → leaveHwOnly). Nunca um AV1 por software no envio. (2) No Windows, o WebRTC do Chromium
+// 152 so usa o encoder AV1 da placa com o recurso WebRtcAV1HWEncode (desligado por padrao no Windows, ligado nos outros
+// sistemas; third_party/blink/renderer/platform/peerconnection/rtc_video_encoder_factory.cc): o loader do add-on o liga
+// quando o Discord abre com o AV1 fixado (core/av1Flag.ts, addon/PAYLOAD.md 6.1). Sem ele, o encodingInfo diz
+// powerEfficient false (o mesmo RTCVideoEncoderFactory) e o AV1 fixado cai no automatico, com o motivo
+// (av1HwFeature false: "reinicie o Discord"). So a placa de quem transmite codifica: RTX 40/50, Radeon RX 7000, Intel Arc
+// e mais novas. Quem assiste decodifica AV1 na placa a partir da RTX 30 (caps.hwDecode.av1).
+//
+// Para o AV1 (ou o H.265) entrar no automatico um dia, a troca e uma so: AUTO_HW_ONLY abaixo. A sonda (core/stuckEncoder.ts
+// → hwOnlyWanted) e o recurso do loader (core/av1Flag.ts → av1FlagWanted) seguem a mesma lista.
 
 import { H264_PROBE, HW_DECODE_CAPS_VERSION, type HwDecodeCaps } from "@plugins/telinha/protocol";
 import type { CodecSetting } from "@plugins/telinha/settings";
 
-import { CODEC_RTP_NAME, h264ProfileLevelId, h264Rank, h265Rank, isH264High, isH265Main, isPacketizationMode1, sameH264Profile, type VideoCodecName } from "./sdp";
+import {
+    CODEC_RTP_NAME, h264ProfileLevelId, h264Rank, type HwOnlyCodec, hwOnlyRank, isAv1Main, isH264High, isH265Main, isHwOnlyCodec, isPacketizationMode1, sameH264Profile,
+    type VideoCodecName
+} from "./sdp";
 
 type Codec = RTCRtpCodec;
 
@@ -63,6 +81,17 @@ export interface LocalCodecCaps {
     h265HwFmtp?: string | null;
     /** a sonda WebCodecs do H.265 passou neste ambiente (core/stuckEncoder.ts); sem ela, nunca H.265 */
     h265ProbeOk?: boolean;
+    /** decodifica AV1 Main por hardware; vai na presenca como caps.hwDecode.av1 (ausente = medido antes desta versao) */
+    av1HwDecode?: boolean;
+    /** fmtp do AV1 Main do sender que este PC codifica por hardware (ex.: "level-idx=5;profile=0;tier=0"); null = nenhum */
+    av1HwFmtp?: string | null;
+    /** a sonda WebCodecs do AV1 passou neste ambiente (core/stuckEncoder.ts); sem ela, nunca AV1 */
+    av1ProbeOk?: boolean;
+    /**
+     * o recurso WebRtcAV1HWEncode do Chromium nesta partida do Discord (core/av1Flag.ts, pelo loader do add-on): true = ligado;
+     * false = desligado (sem ele o WebRTC so tem o AV1 por software); null/ausente = desconhecido (o encodingInfo decide)
+     */
+    av1HwFeature?: boolean | null;
     /** codecs de video que este cliente sabe enviar (vazio = desconhecido) */
     sendable: Set<VideoCodecName>;
 }
@@ -91,13 +120,30 @@ export interface ProbeTiming {
     totalMs: number;
 }
 
+/**
+ * Os codecs so da placa que o AUTOMATICO tenta antes do H.264 (na ordem), com as mesmas redes de seguranca do fixado.
+ * Vazio: o H.265 (02/11: com internet fraca o H.265 da placa perde fps) e o AV1 (ninguem testou o AV1 da placa ainda) sao
+ * so manuais. Promover o AV1 = ["av1"] aqui: a sonda dele (core/stuckEncoder.ts → hwOnlyWanted) e o WebRtcAV1HWEncode
+ * do loader (core/av1Flag.ts → av1FlagWanted) passam a valer sem ele fixado.
+ */
+export const AUTO_HW_ONLY: readonly HwOnlyCodec[] = [];
+
+/**
+ * O H.265/AV1 vale com este formato de video: fixado nele, ou ele no automatico (AUTO_HW_ONLY). A sonda dele
+ * (core/stuckEncoder.ts) e o WebRtcAV1HWEncode do loader (core/av1Flag.ts) seguem isto.
+ */
+export function hwOnlyWanted(codec: HwOnlyCodec, setting: CodecSetting | null | undefined): boolean {
+    return setting === codec || ((setting ?? "auto") === "auto" && AUTO_HW_ONLY.includes(codec));
+}
+
 /** Menos que isto de prazo nao vale outra consulta. */
 const MIN_CALL_MS = 10;
 export const PROBE_TIMING: ProbeTiming = { callMs: 3000, totalMs: 6000 };
 
 let localCaps: LocalCodecCaps = {
     h264HwDecode: false, h264HwEncode: false, h264HwProfile: null, h264HighHwDecode: false, h264HighHwProfile: null, h264HighProbeOk: false,
-    h265HwDecode: false, h265HwFmtp: null, h265ProbeOk: false, sendable: new Set()
+    h265HwDecode: false, h265HwFmtp: null, h265ProbeOk: false, av1HwDecode: false, av1HwFmtp: null, av1ProbeOk: false, av1HwFeature: null,
+    sendable: new Set()
 };
 let probing: Promise<LocalCodecCaps> | null = null;
 /** o que a sonda mediu (null = ainda nao mediu): o H.264 automatico volta para isto quando deixa de estar travado */
@@ -110,6 +156,10 @@ let h264HwProbing = false;
 let h264HighProbeOk = false;
 /** a sonda WebCodecs do H.265 passou neste ambiente (core/stuckEncoder.ts → setH265ProbeOk) */
 let h265ProbeOk = false;
+/** a sonda WebCodecs do AV1 passou neste ambiente (core/stuckEncoder.ts → setAv1ProbeOk) */
+let av1ProbeOk = false;
+/** o WebRtcAV1HWEncode nesta partida do Discord (core/av1Flag.ts → setAv1HwFeature); null = desconhecido */
+let av1HwFeature: boolean | null = null;
 
 export function getLocalCaps(): LocalCodecCaps {
     return localCaps;
@@ -157,10 +207,20 @@ export function h265Candidates(codecs: readonly Codec[]): string[] {
     return out;
 }
 
+/** fmtp das variantes AV1 Main (sdp.ts → isAv1Main), na ordem do Chromium, sem repetir. */
+export function av1Candidates(codecs: readonly Codec[]): string[] {
+    const out: string[] = [];
+    for (const c of codecs) {
+        const fmtp = c.sdpFmtpLine ?? "";
+        if (/^video\/av1$/i.test(c.mimeType) && isAv1Main(fmtp) && !out.includes(fmtp)) out.push(fmtp);
+    }
+    return out;
+}
+
 /**
  * Primeiro fmtp de `fmtps` (na ordem) que o mediaCapabilities diz ser eficiente (hardware), ou null. Uma consulta por
- * vez ("video/H264;<fmtp>" ou "video/H265;<fmtp>", 1080p60, 8 Mbps), cada uma com ate timing.callMs, e todas juntas com
- * ate timing.totalMs. Erro ou estouro = nao.
+ * vez ("video/H264;<fmtp>", "video/H265;<fmtp>" ou "video/AV1;<fmtp>", 1080p60, 8 Mbps), cada uma com ate timing.callMs,
+ * e todas juntas com ate timing.totalMs. Erro ou estouro = nao.
  */
 async function firstPowerEfficient(kind: "decodingInfo" | "encodingInfo", fmtps: readonly string[], timing: ProbeTiming, mime = "H264"): Promise<string | null> {
     const mc = (globalThis.navigator as any)?.mediaCapabilities;
@@ -199,34 +259,40 @@ const highOnly = (fmtps: readonly string[]) => fmtps.filter(f => isH264High(h264
  * lista primeiro, em geral 42001f, o mesmo que uma placa NVIDIA codifica). High: as mesmas consultas so nas variantes
  * 6400xx (no nivel que o Chromium lista), em paralelo; sem 6400xx na lista, nenhuma consulta e High nao. H.265: as mesmas
  * consultas ("video/H265;<fmtp>") so nas variantes Main; sem H.265 na lista (Chromium sem o recurso, como o Edge 156),
- * nenhuma consulta e H.265 nao.
+ * nenhuma consulta e H.265 nao. AV1: o mesmo ("video/AV1;<fmtp>", so as variantes Main). O AV1 sempre esta na lista (o
+ * libaom por software): sem o WebRtcAV1HWEncode, ou sem AV1 na placa, o encodingInfo diz powerEfficient false (medido no
+ * Edge 156, RTX 3070: false com e sem o recurso; o decodingInfo diz true).
  */
 export async function measureLocalCaps(timing: ProbeTiming = PROBE_TIMING): Promise<LocalCodecCaps> {
     const senderCodecs = videoCodecs("sender");
     const receiverCodecs = videoCodecs("receiver");
     const senderH264 = h264Candidates(senderCodecs);
     const receiverH264 = h264Candidates(receiverCodecs);
-    const [decodeFmtp, encodeFmtp, highDecodeFmtp, highEncodeFmtp, h265DecodeFmtp, h265EncodeFmtp] = await Promise.all([
+    const [decodeFmtp, encodeFmtp, highDecodeFmtp, highEncodeFmtp, h265DecodeFmtp, h265EncodeFmtp, av1DecodeFmtp, av1EncodeFmtp] = await Promise.all([
         firstPowerEfficient("decodingInfo", receiverH264.slice(0, 1), timing),
         firstPowerEfficient("encodingInfo", senderH264, timing),
         firstPowerEfficient("decodingInfo", highOnly(receiverH264).slice(0, 1), timing),
         firstPowerEfficient("encodingInfo", highOnly(senderH264), timing),
         firstPowerEfficient("decodingInfo", h265Candidates(receiverCodecs).slice(0, 1), timing, "H265"),
-        firstPowerEfficient("encodingInfo", h265Candidates(senderCodecs), timing, "H265")
+        firstPowerEfficient("encodingInfo", h265Candidates(senderCodecs), timing, "H265"),
+        firstPowerEfficient("decodingInfo", av1Candidates(receiverCodecs).slice(0, 1), timing, "AV1"),
+        firstPowerEfficient("encodingInfo", av1Candidates(senderCodecs), timing, "AV1")
     ]);
     const h264HwProfile = encodeFmtp ? h264ProfileLevelId(encodeFmtp) : null;
     return {
         h264HwDecode: decodeFmtp !== null, h264HwEncode: h264HwProfile !== null, h264HwProfile,
         h264HighHwDecode: highDecodeFmtp !== null, h264HighHwProfile: highEncodeFmtp ? h264ProfileLevelId(highEncodeFmtp) : null, h264HighProbeOk: false,
         h265HwDecode: h265DecodeFmtp !== null, h265HwFmtp: h265EncodeFmtp, h265ProbeOk: false,
+        av1HwDecode: av1DecodeFmtp !== null, av1HwFmtp: av1EncodeFmtp, av1ProbeOk: false,
         sendable: sendableCodecs(senderCodecs)
     };
 }
 
 /**
  * Linha do log de inicio (ex.: "... codifica: sim (perfil 42001f); envia: h264, vp8, vp9, av1; H.264 High por hardware —
- * decodifica: sim, codifica: sim (perfil 640032); H.265 por hardware — decodifica: sim, codifica: sim (level-id=123;...)").
- * O "codifica" do High e do H.265 e o do encodingInfo; as sondas deles vem depois.
+ * decodifica: sim, codifica: sim (perfil 640032); H.265 por hardware — decodifica: sim, codifica: sim (level-id=123;...);
+ * AV1 por hardware — decodifica: sim, codifica: não; WebRtcAV1HWEncode desligado nesta partida").
+ * O "codifica" do High, do H.265 e do AV1 e o do encodingInfo; as sondas deles vem depois.
  */
 export function describeLocalCaps(caps: LocalCodecCaps): string {
     const encode = caps.h264HwEncode ? `sim${caps.h264HwProfile ? ` (perfil ${caps.h264HwProfile})` : ""}` : "não";
@@ -234,15 +300,20 @@ export function describeLocalCaps(caps: LocalCodecCaps): string {
     // H.265 so quando este Chromium o oferece ou mede (sem ele, a linha de antes)
     const h265 = caps.h265HwDecode || caps.h265HwFmtp || caps.sendable.has("h265")
         ? `; H.265 por hardware — decodifica: ${caps.h265HwDecode ? "sim" : "não"}, codifica: ${caps.h265HwFmtp ? `sim (${caps.h265HwFmtp})` : "não"}` : "";
-    return `Capacidades locais: H.264 por hardware — decodifica: ${caps.h264HwDecode ? "sim" : "não"}, codifica: ${encode}; envia: ${[...caps.sendable].join(", ") || "?"}; ${high}${h265}`;
+    // AV1 so quando a placa o decodifica ou codifica, ou o loader disse do WebRtcAV1HWEncode (o AV1 sempre esta no "envia":
+    // o libaom; sem nada disso, a linha de antes)
+    const feature = caps.av1HwFeature === true ? "; WebRtcAV1HWEncode ligado nesta partida" : caps.av1HwFeature === false ? "; WebRtcAV1HWEncode desligado nesta partida" : "";
+    const av1 = caps.av1HwDecode || caps.av1HwFmtp || caps.av1HwFeature != null
+        ? `; AV1 por hardware — decodifica: ${caps.av1HwDecode ? "sim" : "não"}, codifica: ${caps.av1HwFmtp ? `sim (${caps.av1HwFmtp})` : "não"}${feature}` : "";
+    return `Capacidades locais: H.264 por hardware — decodifica: ${caps.h264HwDecode ? "sim" : "não"}, codifica: ${encode}; envia: ${[...caps.sendable].join(", ") || "?"}; ${high}${h265}${av1}`;
 }
 
 /** Mede uma vez por sessao do Discord. `report` recebe a linha de log da medicao (so na primeira chamada). */
 export function probeLocalCaps(report?: (line: string) => void): Promise<LocalCodecCaps> {
     return probing ??= measureLocalCaps().then(caps => {
         measured = caps;
-        localCaps = { ...caps, h264HwEncode: caps.h264HwEncode && !h264HwStuck && !h264HwProbing, h264HighProbeOk, h265ProbeOk };
-        report?.(describeLocalCaps(caps));
+        localCaps = { ...caps, h264HwEncode: caps.h264HwEncode && !h264HwStuck && !h264HwProbing, h264HighProbeOk, h265ProbeOk, av1ProbeOk, av1HwFeature };
+        report?.(describeLocalCaps({ ...caps, av1HwFeature }));
         return caps;
     });
 }
@@ -263,6 +334,25 @@ export function setH264HighProbeOk(ok: boolean) {
 export function setH265ProbeOk(ok: boolean) {
     h265ProbeOk = ok;
     if (localCaps.h265ProbeOk !== ok) localCaps = { ...localCaps, h265ProbeOk: ok };
+}
+
+/**
+ * A sonda WebCodecs do AV1 neste ambiente (core/stuckEncoder.ts): true = passou; false = nao rodou, inconclusiva, travou,
+ * ou um envio em AV1 falhou ou saiu da placa no ar nesta sessao. Sem ela, nem o AV1 fixado vai.
+ */
+export function setAv1ProbeOk(ok: boolean) {
+    av1ProbeOk = ok;
+    if (localCaps.av1ProbeOk !== ok) localCaps = { ...localCaps, av1ProbeOk: ok };
+}
+
+/**
+ * O WebRtcAV1HWEncode do Chromium nesta partida do Discord (core/av1Flag.ts, o que o loader do add-on fez): true = ligado,
+ * false = desligado (o AV1 fixado cai no automatico, com "reinicie o Discord"), null = desconhecido (sem o loader: build do
+ * fork, ou um loader antigo; o encodingInfo decide sozinho).
+ */
+export function setAv1HwFeature(on: boolean | null) {
+    av1HwFeature = on;
+    if (localCaps.av1HwFeature !== on) localCaps = { ...localCaps, av1HwFeature: on };
 }
 
 /** h264HwEncode de novo a partir do que a sonda mediu, das travas (placa travada, sonda WebCodecs rodando) e das quedas. */
@@ -338,7 +428,8 @@ export function noteH264Fallback(): H264FallbackTally {
  * H.265 (whyNoH265): so MANUAL (decisao do dono, 02/11: com internet fraca o H.265 da placa perde fps; o automatico nunca o
  * escolhe). Fixado em H.265: vai so com as redes de seguranca (a placa dos dois lados, a sonda do H.265 ok, o H.264 da placa
  * ligado), com o H.264 que o automatico escolheria como reserva na negociacao; sem elas, o que o automatico escolheria, e o
- * motivo diz isso.
+ * motivo diz isso. AV1 (whyNoHwOnly): o mesmo do H.265, so com o AV1 fixado; sem as redes de seguranca, o que o
+ * automatico escolheria (nunca o AV1 por software). AUTO_HW_ONLY (vazio) e a lista dos que o automatico tentaria antes.
  */
 export function chooseCodec(viewerCaps: ViewerCodecCaps | undefined, setting: CodecSetting, local: LocalCodecCaps = localCaps): CodecDecision {
     const canSend = (c: VideoCodecName) => local.sendable.size === 0 || local.sendable.has(c);
@@ -347,20 +438,12 @@ export function chooseCodec(viewerCaps: ViewerCodecCaps | undefined, setting: Co
         : { codec: "vp8", reason: `${why}; VP9 indisponível → VP8` };
     const h264 = (reason: string): CodecDecision => ({ codec: "h264", h264Profile: local.h264HwProfile, reason });
 
-    if (setting === "h265") {
+    if (isHwOnlyCodec(setting)) {
         // o que o automatico escolheria: a reserva H.264 (so a da placa) ou, sem as redes de seguranca, o codec que vai
-        const auto = chooseCodec(viewerCaps, "auto", local);
-        const noH265 = whyNoH265(viewerCaps, local);
-        if (noH265) return { ...auto, reason: `H.265 fixado nas configurações, mas ${noH265} → ${auto.reason}` };
-        if (auto.codec !== "h264") {
-            // o espectador sem H.264 na placa ainda decodifica H.265 na placa: H.265 sem reserva H.264
-            return { codec: "h265", reason: "fixado nas configurações (H.265 por hardware nos dois lados, com a sonda do H.265 ok; sem reserva H.264 na placa para este espectador)" };
-        }
-        return {
-            codec: "h265", h264Profile: auto.h264Profile, ...(auto.h264Backup ? { h264Backup: auto.h264Backup } : {}),
-            reason: "fixado nas configurações (H.265 por hardware nos dois lados: este PC codifica H.265 na placa, com a sonda do H.265 ok, e o espectador "
-                + `decodifica H.265 na placa; reserva H.264 perfil ${auto.h264Profile ?? "?"}${auto.h264Backup ? `/${auto.h264Backup}` : ""})`
-        };
+        const auto = chooseBaseAuto(viewerCaps, local);
+        const no = whyNoHwOnly(setting, viewerCaps, local);
+        if (no) return { ...auto, reason: `${HW_ONLY_LABEL[setting]} fixado nas configurações, mas ${no} → ${auto.reason}` };
+        return hwOnlyDecision(setting, auto, "fixado nas configurações");
     }
 
     if (setting && setting !== "auto") {
@@ -368,25 +451,79 @@ export function chooseCodec(viewerCaps: ViewerCodecCaps | undefined, setting: Co
         return fallback(`${setting.toUpperCase()} (configurações) indisponível neste cliente`);
     }
 
-    const viewerHw = viewerCaps?.h264HwDecode === true;
-    // o automatico nunca escolhe H.265 (so fixado): H.264 High → Baseline → VP9, como na v0.3.3
-    if (viewerHw && local.h264HwEncode && canSend("h264")) return chooseH264Hw(viewerCaps, local);
+    const auto = chooseBaseAuto(viewerCaps, local);
+    // o automatico nunca escolhe H.265 nem AV1 (so fixados) enquanto AUTO_HW_ONLY estiver vazio
+    for (const codec of AUTO_HW_ONLY) if (!whyNoHwOnly(codec, viewerCaps, local)) return hwOnlyDecision(codec, auto, "automático");
+    return auto;
+}
 
-    return fallback(`automático: ${!viewerHw ? "o espectador não decodifica H.264 por hardware" : "este PC não codifica H.264 por hardware"}`);
+/** O automatico sem os codecs so da placa: H.264 High → Baseline → VP9, como na v0.3.3. */
+function chooseBaseAuto(viewerCaps: ViewerCodecCaps | undefined, local: LocalCodecCaps): CodecDecision {
+    const canSend = (c: VideoCodecName) => local.sendable.size === 0 || local.sendable.has(c);
+    const viewerHw = viewerCaps?.h264HwDecode === true;
+    if (viewerHw && local.h264HwEncode && canSend("h264")) return chooseH264Hw(viewerCaps, local);
+    const why = `automático: ${!viewerHw ? "o espectador não decodifica H.264 por hardware" : "este PC não codifica H.264 por hardware"}`;
+    return canSend("vp9") ? { codec: "vp9", reason: `${why} → VP9` } : { codec: "vp8", reason: `${why}; VP9 indisponível → VP8` };
+}
+
+/** "H.265" / "AV1", para os textos. */
+export const HW_ONLY_LABEL: Record<HwOnlyCodec, string> = { h265: "H.265", av1: "AV1" };
+
+/**
+ * A decisao H.265/AV1 com as redes de seguranca ja conferidas: `auto` (o que o automatico escolheria) vira a reserva H.264
+ * na negociacao quando e o H.264 da placa; senao, sem reserva H.264 (o espectador sem H.264 na placa ainda decodifica o
+ * codec na placa). `how`: "fixado nas configurações" ou "automático".
+ */
+function hwOnlyDecision(codec: HwOnlyCodec, auto: CodecDecision, how: string): CodecDecision {
+    const label = HW_ONLY_LABEL[codec];
+    if (auto.codec !== "h264") {
+        return { codec, reason: `${how} (${label} por hardware nos dois lados, com a sonda do ${label} ok; sem reserva H.264 na placa para este espectador)` };
+    }
+    return {
+        codec, h264Profile: auto.h264Profile, ...(auto.h264Backup ? { h264Backup: auto.h264Backup } : {}),
+        reason: `${how} (${label} por hardware nos dois lados: este PC codifica ${label} na placa, com a sonda do ${label} ok, e o espectador `
+            + `decodifica ${label} na placa; reserva H.264 perfil ${auto.h264Profile ?? "?"}${auto.h264Backup ? `/${auto.h264Backup}` : ""})`
+    };
 }
 
 /**
- * Por que o H.265 nao vai para este espectador (null = vai). Nesta ordem: este cliente, este PC, a placa (o H.264 dela
- * desligado leva o H.265 junto: travou, sonda rodando, quedas), a sonda deste PC, o espectador.
+ * O que o H.265/AV1 precisa deste PC (whyNoHwOnly sem o espectador; null = este PC pode mandar). Nesta ordem: este
+ * cliente, (AV1) o recurso do Chromium nesta partida, este PC, a placa (o H.264 dela desligado leva junto: travou, sonda
+ * rodando, quedas), a sonda deste PC. AV1: sem a medicao pronta (sendable vazio) ou com o recurso desconhecido (null: build
+ * do fork ou loader antigo), o motivo diz que nao deu para confirmar, nunca "este PC nao codifica" nem "este cliente nao envia".
  */
-export function whyNoH265(viewerCaps: ViewerCodecCaps | undefined, local: LocalCodecCaps): string | null {
-    if (!local.sendable.has("h265")) return "este cliente não envia H.265 (o Chromium dele não oferece)";
-    if (!local.h265HwFmtp) return "este PC não codifica H.265 por hardware";
-    if (!local.h264HwEncode) return "o H.264 da placa está desligado neste PC (travou, sonda rodando ou quedas para software), e o H.265 vai junto";
-    if (!local.h265ProbeOk) return "a sonda WebCodecs do H.265 não passou neste PC";
-    // a versao do campo tambem aqui (o sanitizePresence ja descarta outra `v`): um H.265 sem decodificador e tela preta
-    if (viewerCaps?.hwDecode?.v !== HW_DECODE_CAPS_VERSION || viewerCaps.hwDecode.h265 !== true) return "o espectador não anuncia H.265 por hardware (não tem, ou é uma versão antiga do Telinha)";
+export function whyNoHwOnlyHere(codec: HwOnlyCodec, local: LocalCodecCaps): string | null {
+    const label = HW_ONLY_LABEL[codec];
+    if (codec === "av1" && local.sendable.size === 0) return "não deu para confirmar o AV1 da placa nesta partida (a medição da placa ainda não terminou)";
+    if (!local.sendable.has(codec)) return `este cliente não envia ${label} (o Chromium dele não oferece)`;
+    // AV1: sem o WebRtcAV1HWEncode o WebRTC so tem o AV1 por software, e o recurso so liga na abertura do Discord
+    if (codec === "av1" && local.av1HwFeature === false) return "o AV1 da placa de vídeo ainda não está ligado nesta partida do Discord (reinicie o Discord)";
+    if (!(codec === "av1" ? local.av1HwFmtp : local.h265HwFmtp)) {
+        if (codec !== "av1") return "este PC não codifica H.265 por hardware";
+        // so com o recurso ligado a medicao da placa responde de verdade; desconhecido (null) nao diz nada da placa
+        return local.av1HwFeature === true ? "este PC não codifica AV1 por hardware (só placas RTX 40/50, Radeon RX 7000, Intel Arc ou mais novas)"
+            : "não deu para confirmar o AV1 da placa nesta partida (este Discord não tem a opção do AV1 pela placa)";
+    }
+    if (!local.h264HwEncode) return `o H.264 da placa está desligado neste PC (travou, sonda rodando ou quedas para software), e o ${label} vai junto`;
+    if (!(codec === "av1" ? local.av1ProbeOk : local.h265ProbeOk)) return `a sonda WebCodecs do ${label} não passou neste PC`;
     return null;
+}
+
+/** Por que o H.265/AV1 nao vai para este espectador (null = vai): whyNoHwOnlyHere, depois o espectador. */
+export function whyNoHwOnly(codec: HwOnlyCodec, viewerCaps: ViewerCodecCaps | undefined, local: LocalCodecCaps): string | null {
+    const here = whyNoHwOnlyHere(codec, local);
+    if (here) return here;
+    // a versao do campo tambem aqui (o sanitizePresence ja descarta outra `v`): sem o decodificador da placa, tela preta
+    // (H.265) ou o decodificador por software de quem assiste (AV1)
+    if (viewerCaps?.hwDecode?.v !== HW_DECODE_CAPS_VERSION || viewerCaps.hwDecode[codec] !== true) {
+        return `o espectador não anuncia ${HW_ONLY_LABEL[codec]} por hardware (não tem, ou é uma versão antiga do Telinha)`;
+    }
+    return null;
+}
+
+/** Por que o H.265 nao vai para este espectador (null = vai): whyNoHwOnly do H.265. */
+export function whyNoH265(viewerCaps: ViewerCodecCaps | undefined, local: LocalCodecCaps): string | null {
+    return whyNoHwOnly("h265", viewerCaps, local);
 }
 
 /** O H.264 da placa no automatico, com os dois lados em H.264 por hardware: High (whyNoHigh) ou o Baseline de antes. */
@@ -409,9 +546,9 @@ function chooseH264Hw(viewerCaps: ViewerCodecCaps | undefined, local: LocalCodec
     return h264(`automático: H.264 por hardware nos dois lados (${local.h264HwProfile ? `perfil ${local.h264HwProfile}; ` : ""}High não: ${noHigh})`);
 }
 
-/** A decisao H.264 que um envio em H.265 usa no lugar dele (a reserva da negociacao: h264Profile/h264Backup). */
+/** A decisao H.264 que um envio em H.265/AV1 usa no lugar dele (a reserva da negociacao: h264Profile/h264Backup). */
 export function h264ReserveOf(decision: CodecDecision, reason: string): CodecDecision | null {
-    if (decision.codec !== "h265" || !decision.h264Profile) return null;
+    if (!isHwOnlyCodec(decision.codec) || !decision.h264Profile) return null;
     return { codec: "h264", h264Profile: decision.h264Profile, ...(decision.h264Backup ? { h264Backup: decision.h264Backup } : {}), reason };
 }
 
@@ -426,15 +563,16 @@ export function whyNoHigh(viewerCaps: ViewerCodecCaps | undefined, local: LocalC
 /**
  * Variantes do codec escolhido primeiro; o resto fica como alternativa (ordem original nos empates). H.264: o perfil por
  * hardware (h264Profile), depois o reserva (h264Backup, o Baseline da placa quando vai High), depois os outros
- * packetization-mode=1, depois o resto (sdp.ts → h264Rank). VP9: perfil 0 na frente. H.265: Main na frente e, com
- * `h264Profile` (o H.264 reserva), as variantes H.264 nessa ordem logo depois; `matched` conta so as H.265.
+ * packetization-mode=1, depois o resto (sdp.ts → h264Rank). VP9: perfil 0 na frente. H.265 e AV1: Main na frente e, com
+ * `h264Profile` (o H.264 reserva), as variantes H.264 nessa ordem logo depois; `matched` conta so as H.265/AV1.
  */
 export function sortCodecs<C extends Codec>(codecs: readonly C[], codec: VideoCodecName, h264Profile?: string | null, h264Backup?: string | null): { sorted: C[]; matched: number; } {
-    if (codec === "h265") {
-        const h265 = codecs.filter(c => /^video\/h265$/i.test(c.mimeType)).sort((a, b) => h265Rank(a.sdpFmtpLine ?? "") - h265Rank(b.sdpFmtpLine ?? ""));
+    if (isHwOnlyCodec(codec)) {
+        const mime = `video/${CODEC_RTP_NAME[codec]}`.toLowerCase();
+        const hw = codecs.filter(c => c.mimeType.toLowerCase() === mime).sort((a, b) => hwOnlyRank(codec, a.sdpFmtpLine ?? "") - hwOnlyRank(codec, b.sdpFmtpLine ?? ""));
         const reserve = h264Profile ? sortCodecs(codecs, "h264", h264Profile, h264Backup) : null;
-        const front = [...h265, ...(reserve ? reserve.sorted.slice(0, reserve.matched) : [])];
-        return { sorted: [...front, ...codecs.filter(c => !front.includes(c))], matched: h265.length };
+        const front = [...hw, ...(reserve ? reserve.sorted.slice(0, reserve.matched) : [])];
+        return { sorted: [...front, ...codecs.filter(c => !front.includes(c))], matched: hw.length };
     }
     const wanted = `video/${CODEC_RTP_NAME[codec]}`.toLowerCase();
     const isWanted = (c: C) => c.mimeType.toLowerCase() === wanted;
@@ -474,9 +612,9 @@ export function applyCodecPreferences(transceiver: RTCRtpTransceiver, codec: Vid
             transceiver.setCodecPreferences(sorted);
             const first = h264ProfileLevelId(sorted[0].sdpFmtpLine ?? "");
             const firstOk = codec === "h264" && isPacketizationMode1(sorted[0].sdpFmtpLine ?? "");
-            if (codec === "h265") {
+            if (isHwOnlyCodec(codec)) {
                 const reserve = h264Profile ? `reserva H.264 perfil ${h264Profile}${h264Backup ? `/${h264Backup}` : ""} logo depois` : "sem reserva H.264";
-                return `H265 primeiro (${matched} variante(s), capacidades do ${name}; ${reserve})`;
+                return `${CODEC_RTP_NAME[codec]} primeiro (${matched} variante(s), capacidades do ${name}; ${reserve})`;
             }
             const profile = firstOk && sameH264Profile(first, h264Profile) ? ` (perfil ${h264Profile})`
                 : firstOk && h264Profile && sameH264Profile(first, h264Backup) ? ` (perfil ${h264Backup}, sem o ${h264Profile})` : "";
@@ -563,6 +701,31 @@ export function isTransientSoftwareH264(r: EncoderReport): boolean {
  */
 export function isOffHardwareH265(r: EncoderReport): boolean {
     return /^video\/h265$/i.test(r.mimeType) && (r.framesEncoded ?? 0) > 0 && r.powerEfficient === false;
+}
+
+/**
+ * Menor altura que o Chromium codifica AV1 na placa de video (RTCVideoEncoder::UseSoftwareForLowResolution: 270 no AV1,
+ * 360 nos outros). Abaixo disso o WebRTC usa o libaom DE PROPOSITO, num quadro pequeno e barato: nao e a placa falhando.
+ */
+export const AV1_HW_MIN_HEIGHT = 270;
+
+/**
+ * O AV1 deste envio saiu da placa: o encoder em uso ja produziu quadros e diz powerEfficientEncoder false, ou (sem esse
+ * campo) se chama libaom/SVT/rav1e. Diferente do H.265, o Chromium TEM AV1 por software: quando o encoder da placa falha
+ * (ao subir ou no meio), o VideoEncoderSoftwareFallbackWrapper do WebRTC passa para o libaom SEM trocar de codec, pesado
+ * demais para 1080p60 com um jogo. Quem chama sai do AV1 (streaming.ts → checkHwOnly → leaveHwOnly). Um quadro abaixo de
+ * 270p (AV1_HW_MIN_HEIGHT) e o software de proposito e nao conta. Sem evidencia: false.
+ */
+export function isOffHardwareAv1(r: EncoderReport): boolean {
+    if (!/^video\/av1$/i.test(r.mimeType) || (r.framesEncoded ?? 0) <= 0) return false;
+    if (r.height && r.height < AV1_HW_MIN_HEIGHT) return false;
+    if (typeof r.powerEfficient === "boolean") return !r.powerEfficient;
+    return /libaom|svt|rav1e/i.test(r.implementation ?? "");
+}
+
+/** O H.265 ou o AV1 deste envio saiu da placa (isOffHardwareH265 / isOffHardwareAv1). */
+export function isOffHardwareHwOnly(codec: HwOnlyCodec, r: EncoderReport): boolean {
+    return codec === "av1" ? isOffHardwareAv1(r) : isOffHardwareH265(r);
 }
 
 /**

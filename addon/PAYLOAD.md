@@ -274,28 +274,35 @@ the fork build's case: next to `patcher.js`).
 ### 6.1 Capture flags (`capture-flags.json`)
 
 Chromium only takes features from the command line before `app` is ready, so an option that needs one is saved for the
-next Discord start. Today there is one: "Captura pela placa de vídeo" (the plugin's `gpuCapture` setting, experimental,
-off by default) turns on Chromium's `WebRtcAllowWgcUsingTexture`. Chromium's WGC screen capturer then keeps each frame on
+next Discord start. Today there are two. "Captura pela placa de vídeo" (the plugin's `gpuCapture` setting, experimental,
+off by default) turns on Chromium's `WebRtcAllowWgcUsingTexture`, and "AV1" pinned in "Formato de vídeo" (the `codec`
+setting) turns on `WebRtcAV1HWEncode` (below). Chromium's WGC screen capturer then keeps each frame on
 the GPU instead of copying it to the CPU with a blocking `Map`, which waits behind a game that uses the whole GPU (with
 Chromium's 50 % rule on top, the capture fell to ~10 fps). WGC screen capture, and this path, only exist on Windows 11
 24H2 (build 26100) or newer.
 
-- **File**: `%APPDATA%\Telinha\capture-flags.json` = `{ "format": 1, "wgcTexture": true | false }`. The plugin's natives
-  write it (temporary file + rename) when the option changes, and again at plugin start if it disagrees with the setting.
-  Missing, unreadable or anything but `"wgcTexture": true` = off.
-- **Loader** (`main.js` `applyCaptureFlags`, first thing in `prepare()`, so never with `--vanilla`): on build 26100+ it
-  appends `enable-features` = the current value (`app.commandLine.getSwitchValue`) + `WebRtcAllowWgcUsingTexture`, and wraps
-  `app.commandLine.appendSwitch` so that every later `enable-features` value keeps the feature. Discord's bootstrap
-  appends its own `enable-features` without merging, and a later append replaces the value. The wrapper is installed
-  once per process, so a hand-off to another loader version finds it there. At `app.whenReady()` it records the final
-  value.
+- **File**: `%APPDATA%\Telinha\capture-flags.json` = `{ "format": 1, "wgcTexture": true | false, "av1HwEncode": true |
+  false }`. The plugin's natives write it (temporary file + rename) when either option changes, and again at plugin start
+  if it disagrees with the settings. Each option writes its own key and keeps the other one as it is (a file from before
+  `av1HwEncode` reads as AV1 off). Missing, unreadable or anything but `true` = off.
+- **Loader** (`main.js` `applyCaptureFlags`, first thing in `prepare()`, so never with `--vanilla`): it appends
+  `enable-features` = the current value (`app.commandLine.getSwitchValue`) + the features asked for
+  (`WebRtcAllowWgcUsingTexture` only on build 26100+; `WebRtcAV1HWEncode` on any build), and wraps
+  `app.commandLine.appendSwitch` so that every later `enable-features` value keeps them. Discord's bootstrap appends its
+  own `enable-features` without merging, and a later append replaces the value. There is one wrapper per process, with
+  every feature it keeps in `telinhaKeeps`: a hand-off to another loader version finds it there, and one that asks for more
+  replaces it with a wider one (never a second wrapper on top). At `app.whenReady()` it records the final value.
 - **State** (`globalThis.__TelinhaAddon.capture`, read by the plugin's natives): `{ file, build, wgcTexture, applied,
-  enableFeatures, reason }`, where `wgcTexture` = the file asked for it at this start and `applied` = the feature was in
-  `enable-features` at ready (`null` = not asked for).
-- **`main.log`**: nothing when the file is absent. When the option is on, `capture: GPU capture asked for:
-  WebRtcAllowWgcUsingTexture added to enable-features (Windows build N)` and then `capture: enable-features at app ready:
-  … -> GPU capture applied` (or `NOT applied`). On an older Windows, `capture: GPU capture asked for but not applied
-  (Windows build N: …)`. A broken file logs `capture: capture-flags.json ignored (…)`.
+  enableFeatures, reason, av1HwEncode, av1Applied }`, where `wgcTexture` / `av1HwEncode` = the file asked for it at this
+  start and `applied` / `av1Applied` = the feature was in `enable-features` at ready (`null` = not asked for). The plugin
+  takes a boolean `av1HwEncode` as "this loader knows the AV1 key"; an older loader has no such field, and the plugin then
+  treats the AV1 feature as unknown.
+- **`main.log`**: nothing when the file is absent. When the GPU capture is on, `capture: GPU capture asked for:
+  WebRtcAllowWgcUsingTexture added to enable-features (Windows build N)`; when AV1 is pinned, `capture: AV1 hardware
+  encode asked for: WebRtcAV1HWEncode added to enable-features`. Then one `capture: enable-features at app ready: … ->
+  GPU capture applied; AV1 hardware encode applied` line, with only the parts that were asked for (or `NOT applied`). On an
+  older Windows, `capture: GPU capture asked for but not applied (Windows build N: …)`. A broken file logs `capture:
+  capture-flags.json ignored (…)`.
 - Nothing here is a boot problem: a broken file or a failure leaves the option off and never counts against the boot
   marker (section 8.4).
 - **Known cost:** with the texture path, Chromium 152 has no fallback when delivering a texture fails (GPU process
@@ -307,6 +314,24 @@ Chromium's 50 % rule on top, the capture fell to ~10 fps). WGC screen capture, a
 
 The plugin shows the result next to the option: on, "restart Discord", or "does nothing on this PC". It also logs the
 capture mode at the start of every stream (`Modo da captura: …`), and "Copiar diagnóstico" has a line for it.
+
+**`WebRtcAV1HWEncode` (the GPU's AV1 encoder).** Chromium 152's WebRTC only uses the GPU's AV1 encoder with this feature.
+It is off by default on Windows and on elsewhere (`media/webrtc/webrtc_features.cc`). While it is off,
+`RTCVideoEncoderFactory` drops the AV1 hardware profiles (`rtc_video_encoder_factory.cc`), so WebRTC's AV1 is libaom, in
+software: far too heavy for 1080p60 next to a game. Telinha never sends that. The same factory answers
+`mediaCapabilities.encodingInfo`, so with the feature off the plugin's probe sees `powerEfficient: false` for AV1 and the
+pinned AV1 falls back to "Automático" with a reason. Decoding needs nothing: `WebRtcHwAv1Decoding` is on by default.
+
+- **Only while "AV1" is pinned**, not always on. Chromium keeps the feature off on Windows on purpose (it lists GPU AV1
+  encoder driver bugs), and it only matters when AV1 is the send codec, which today happens only with AV1 pinned
+  ("Automático" never picks AV1). The plugin's `core/av1Flag.ts` asks for it from `hwOnlyWanted("av1", codec)`. If AV1
+  is ever promoted into "Automático" (`AUTO_HW_ONLY` in `core/codec.ts`), the same function asks for the feature
+  without AV1 pinned.
+- **Takes effect from the next Discord start.** Pinning AV1 saves the key; until Discord restarts, AV1 is not sent and
+  the plugin says why ("reinicie o Discord…") under "Formato de vídeo", in the voice bar when a stream starts, and in
+  the log. The option's line has a "Reiniciar o Discord agora" button.
+- No Windows build gate: whether the GPU has an AV1 encoder MFT (RTX 40/50, Radeon RX 7000+, Intel Arc) is the probe's
+  job (`encodingInfo` and a WebCodecs `VideoEncoder` in `prefer-hardware`).
 
 The other option of the same group, "Prioridade da captura na placa de vídeo" (`gpuPriority`, experimental, off by
 default), needs no restart and no file. While a stream is live, the plugin's natives (`core/captureBoostMain.ts`) run

@@ -130,18 +130,20 @@ function newProbeWorker(): { worker: Worker; release(): void; } | null {
 }
 
 /**
- * Roda a sonda para o perfil H.264 `profile` (profile-level-id, ex.: "42001f") ou, com `codec` "h265", para o codec
- * WebCodecs H.265 `profile` inteiro (ex.: "hvc1.1.6.L123.B0", core/stuckEncoder.ts → h265ProbeCodec). Nunca rejeita. Um
- * Worker preso fica guardado (nunca terminado) e o resultado vem com `hung` (quem chama loga uma linha).
+ * Roda a sonda para o perfil H.264 `profile` (profile-level-id, ex.: "42001f") ou, com `codec` "h265"/"av1", para o codec
+ * WebCodecs `profile` inteiro (ex.: "hvc1.1.6.L123.B0" ou "av01.0.05M.08", core/stuckEncoder.ts → h265ProbeCodec /
+ * av1ProbeCodec). Nunca rejeita. Um Worker preso fica guardado (nunca terminado) e o resultado vem com `hung` (quem chama
+ * loga uma linha). AV1: "prefer-hardware" de verdade (o libaom por software nao passa no isConfigSupported com ele: medido
+ * no Edge 156, RTX 3070, false em prefer-hardware e true em no-preference), entao um "ok" e o encoder da placa.
  */
-export function runEncoderProbe(profile: string, codec: "h264" | "h265" = "h264"): Promise<ProbeResult> {
+export function runEncoderProbe(profile: string, codec: "h264" | "h265" | "av1" = "h264"): Promise<ProbeResult> {
     const made = newProbeWorker();
     if (!made) return Promise.resolve({ verdict: "unknown", detail: "sem Worker (ou o Discord recusou criar um)" });
     const { worker, release } = made;
     const base = { ...PROBE_SIZE, bitrate: 2_000_000, hardwareAcceleration: "prefer-hardware", latencyMode: "realtime" };
-    const config = codec === "h265"
-        ? { codec: profile, ...base, hevc: { format: "annexb" } }
-        : { codec: `avc1.${profile}`, ...base, avc: { format: "annexb" } };
+    const config = codec === "h265" ? { codec: profile, ...base, hevc: { format: "annexb" } }
+        : codec === "av1" ? { codec: profile, ...base }
+            : { codec: `avc1.${profile}`, ...base, avc: { format: "annexb" } };
     return new Promise<ProbeResult>(resolve => {
         let phase = "início";
         let chunks = false;

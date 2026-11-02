@@ -13,6 +13,7 @@ import { app, desktopCapturer, type IpcMainInvokeEvent } from "electron";
 
 import { readScreenAudioMain, screenAudioStatusMain, startScreenAudioMain, stopScreenAudioMain } from "./core/audio/screenAudioMain";
 import type { ScreenAudioRead, ScreenAudioStart, ScreenAudioStatus } from "./core/audio/types";
+import { type Av1FlagStatus, av1FlagStatusMain, setAv1FlagMain } from "./core/av1FlagMain";
 import { type GpuCaptureStatus, gpuCaptureStatusMain, type GpuPriorityReport, setGpuCaptureMain, setGpuPriorityMain } from "./core/captureBoostMain";
 import { appendDiagLogMain, clearDiagLogMain, readDiagLogMain } from "./core/diagLogMain";
 import { type LiveWeightReport, type LiveWeightStart, readLiveWeightMain, startLiveWeightMain, stopLiveWeightMain } from "./core/liveWeightMain";
@@ -325,6 +326,20 @@ export function setGpuCapture(_: IpcMainInvokeEvent, on: boolean): GpuCaptureSta
  */
 export function setGpuPriority(_: IpcMainInvokeEvent, mode: string): Promise<GpuPriorityReport> {
     return setGpuPriorityMain(mode === "high" ? "high" : "restore");
+}
+
+// #endregion
+
+// #region AV1 da placa (core/av1Flag.ts → core/av1FlagMain.ts)
+
+/** O WebRtcAV1HWEncode do Chromium: o que vale nesta partida do Discord e o que esta salvo para a proxima. */
+export function av1FlagStatus(_: IpcMainInvokeEvent): Av1FlagStatus {
+    return av1FlagStatusMain();
+}
+
+/** Liga/desliga o WebRtcAV1HWEncode para a proxima partida do Discord (%APPDATA%\Telinha\capture-flags.json). */
+export function setAv1Flag(_: IpcMainInvokeEvent, on: boolean): Av1FlagStatus {
+    return setAv1FlagMain(on === true);
 }
 
 // #endregion

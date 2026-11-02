@@ -861,7 +861,7 @@ export const mediaDevices = {
     removeEventListener() { }
 };
 
-/** H.264 profile-level-ids the fake says are hardware (powerEfficient) for encodingInfo / decodingInfo; "h265" = H.265. */
+/** H.264 profile-level-ids the fake says are hardware (powerEfficient) for encodingInfo / decodingInfo; "h265" = H.265, "av1" = AV1. */
 export const mediaCapabilities = {
     hwEncode: [] as string[],
     hwDecode: [] as string[],
@@ -869,10 +869,10 @@ export const mediaCapabilities = {
     answer(kind: "encodingInfo" | "decodingInfo", config: any) {
         mediaCapabilities.calls.push({ kind, config });
         const contentType = String(config?.video?.contentType ?? "");
-        const h265 = /^video\/h265;/i.test(contentType);
-        const profile = h265 ? "h265" : /profile-level-id=([0-9a-f]{6})/i.exec(contentType)?.[1]?.toLowerCase();
+        const other = /^video\/(h265|av1);/i.exec(contentType)?.[1]?.toLowerCase();
+        const profile = other ?? /profile-level-id=([0-9a-f]{6})/i.exec(contentType)?.[1]?.toLowerCase();
         const hw = kind === "encodingInfo" ? mediaCapabilities.hwEncode : mediaCapabilities.hwDecode;
-        const powerEfficient = !!profile && hw.includes(profile) && (h265 || /packetization-mode=1/.test(contentType));
+        const powerEfficient = !!profile && hw.includes(profile) && (!!other || /packetization-mode=1/.test(contentType));
         return Promise.resolve({ supported: true, smooth: true, powerEfficient });
     },
     encodingInfo: (config: any) => mediaCapabilities.answer("encodingInfo", config),

@@ -33,7 +33,7 @@ import { migrateAccessSettings, migrateQualitySettings, settings } from "./setti
 // defaultQuality ("Qualidade padrão", ate a v0.3.x) virou defaultResolution + defaultFps: migrateQualitySettings
 const STORED_KEYS = [
     "groupPassword", "rejectOutsiders", "defaultAccess", "requireVerifiedIdentity", "defaultResolution", "defaultFps", "autoQuality", "jitterCushion",
-    "shareAudioByDefault", "playSounds", "codec", "autoUpdate", "shareDiagnostics", "gpuCapture", "gpuPriority", "captureBoostStatus"
+    "shareAudioByDefault", "playSounds", "codec", "codecStatus", "autoUpdate", "shareDiagnostics", "gpuCapture", "gpuPriority", "captureBoostStatus"
 ];
 
 describe("as opcoes", () => {
