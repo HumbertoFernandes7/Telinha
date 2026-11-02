@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+// ATENCAO: DESLIGADA de fabrica desde a 0.3.8 (COPY_ON_ARRIVAL, mais abaixo); o codigo fica para testes.
+//
 // "Copia na hora" da captura pela placa de video (core/captureBoost.ts → textureCaptureActive). Com o
 // WebRtcAllowWgcUsingTexture, o quadro da captura e a propria textura do pool do Windows Graphics Capture: o Chromium 152
 // devolve o quadro ao WGC logo depois de embrulha-lo, e ~2 capturas depois o DWM escreve um quadro mais novo nela. Se o
@@ -159,6 +161,11 @@ export const COPY_RATE_RESIZE_RESETS = 2;
 export const COPY_RATE_RESIZE_WINDOW_MS = 60_000;
 /** Uma linha de custo no log a cada este tempo. */
 export const COPY_LOG_MS = 30_000;
+/**
+ * A copia na hora liga sozinha com a captura pela placa? NAO: desligada de fabrica desde a 0.3.8. Com jogo pesado ou lives
+ * abertas a copia derrubava o envio (God of War: 27 → 11 fps, 79% dos quadros recusados); o codigo fica para testes.
+ */
+export const COPY_ON_ARRIVAL = false;
 const POLL_MS = 2000;
 
 const METHOD_TEXT: Record<CopyMethod, string> = { webgpu: "WebGPU", canvas2d: "canvas 2D" };
@@ -168,6 +175,7 @@ let lastReport: { method: CopyMethod; adapter: string | null; stats: CaptureCopy
 let lastUnavailable: string | null = null;
 
 let envOverride: CaptureCopyEnv | null = null;
+let copyOnOverride: boolean | null = null;
 
 function browserEnv(): CaptureCopyEnv {
     if (envOverride) return envOverride;
@@ -492,6 +500,16 @@ export function captureCopyDiagnostics(): string | null {
     return `${base}; desde o início: ${line ?? "nenhum quadro"}`;
 }
 
+/** Quem liga a copia na transmissao (core/streaming.ts): COPY_ON_ARRIVAL, ou o que os testes pediram. */
+export function copyOnArrival(): boolean {
+    return copyOnOverride ?? COPY_ON_ARRIVAL;
+}
+
+/** So para testes: liga/desliga a copia na hora (null = COPY_ON_ARRIVAL). */
+export function setCopyOnArrivalForTests(on: boolean | null) {
+    copyOnOverride = on;
+}
+
 /** So para testes: o navegador falso (null = o de verdade). */
 export function setCaptureCopyEnvForTests(env: CaptureCopyEnv | null) {
     envOverride = env;
@@ -502,4 +520,5 @@ export function resetCaptureCopyForTests() {
     lastReport = null;
     lastUnavailable = null;
     envOverride = null;
+    copyOnOverride = null;
 }
