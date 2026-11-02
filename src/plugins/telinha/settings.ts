@@ -115,7 +115,8 @@ export const settings = definePluginSettings({
         type: OptionType.SELECT,
         displayName: "Formato de vídeo (codec)",
         description: "Codec de vídeo ao transmitir. Automático: H.264 quando o seu PC codifica e o do amigo decodifica por hardware; senão VP9. "
-            + "H.265 só ajuda com internet boa; com internet fraca pode perder fps. Ele só vai com a placa de vídeo dos dois lados; senão, vai o do automático.",
+            + "H.265 só ajuda com internet boa; com internet fraca pode perder fps. Ele só vai com a placa de vídeo dos dois lados; senão, vai o do automático. "
+            + "Escolhido durante uma transmissão, o teste da placa roda quando ela acabar.",
         options: [
             { label: "Automático (recomendado)", value: "auto", default: true },
             { label: "H.265", value: "h265" },

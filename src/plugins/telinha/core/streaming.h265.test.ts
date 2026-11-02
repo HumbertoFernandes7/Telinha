@@ -160,6 +160,26 @@ test("o WebRTC trocou sozinho do H.265 para o H.264 (o encoder H.265 falhou): cu
     assert.equal(plan(next.peerId).h264Profile, "640032");
 });
 
+test("o encoder H.265 morreu antes do 1o quadro: o WebRTC ja estava no H.264 (o libwebrtc poe o codec atual na frente da lista), o H.265 so presente nela: culpa do H.265", async () => {
+    const v = await watcher("morreu", BOTH);
+    // nenhuma leitura em H.265 antes; a lista negociada com o H.264 (o codec de envio atual) em 1o e o H.265 depois
+    const h264First = VIDEO.filter(c => c.mimeType === "video/H264").concat(VIDEO.filter(c => c.mimeType !== "video/H264"));
+    v.sender.params.codecs = negotiatedCodecs(h264First);
+    assert.equal(v.sender.params.codecs[0].mimeType, "video/H264");
+    v.sender.stats = videoSenderStats({ mimeType: "video/H264", codecFmtp: fmtp("640032"), encoderImplementation: NVENC, powerEfficientEncoder: true, framesEncoded: 300, bytesSent: 600_000 });
+    const since = logMark();
+    await seconds(rig, 2);
+    const lines = since();
+    assert.ok(lines.includes(`O H.265 para ${v.label} saiu do ar: o WebRTC trocou sozinho para H264 (o encoder H.265 da placa de vídeo falhou). `
+        + "O H.265 fica desligado neste PC até o driver, o Chromium ou a placa mudarem; o H.264 não leva a culpa."), lines.join("\n"));
+    await turns();
+    assert.equal(h265ProbeRecord()?.verdict, "broken", "o proximo espectador nao tenta de novo");
+    assert.equal(stuckRecord(), null);
+    assert.equal(plan(v.peerId).codec, "h264");
+    const next = await watcher("depoismorreu", BOTH);
+    assert.equal(plan(next.peerId).codec, "h264");
+});
+
 test("H.265 fora da placa (powerEfficientEncoder false): o H.265 marcado; so ele vai para a reserva H.264, sem reconectar", async () => {
     const v = await watcher("fora", BOTH);
     v.sender.stats = h265Stats({ powerEfficientEncoder: false, encoderImplementation: "?" });

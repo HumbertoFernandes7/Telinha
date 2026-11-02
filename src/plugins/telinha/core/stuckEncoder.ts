@@ -536,10 +536,23 @@ export function settleH265(env: EncoderEnv, delayMs: number): Promise<void> | nu
 /**
  * O formato de video mudou nas configuracoes (settings.ts → codec.onChange): fixado em H.265 depois do inicio da sessao,
  * a sonda do H.265 roda agora (settleH265, as mesmas regras: nunca com uma transmissao comecando ou no ar, nem ao lado
- * de outra sonda). Antes do inicio, ou com outra sonda rodando, quem vem depois (startLocalCaps, o botao) ja olha o
+ * de outra sonda; com uma transmissao no ar, ela roda quando a transmissao acabar: onStreamStopped). Antes do inicio, ou com outra sonda rodando, quem vem depois (startLocalCaps, o botao) ja olha o
  * formato. Devolve a promessa da sonda quando ela roda (null = nao roda).
  */
 export function onCodecSettingChanged(): Promise<void> | null {
+    return settleH265Now();
+}
+
+/**
+ * A transmissao acabou (streaming.ts → stopStreaming): com o H.265 fixado e a sonda dele ainda sem resultado (ela nao
+ * roda com uma transmissao no ar), ela roda agora, PROBE_START.delayMs depois e com as mesmas regras (uma transmissao
+ * que comeca nesse meio tempo a adia de novo). Com resultado salvo, ou sem o H.265 fixado, nada.
+ */
+export function onStreamStopped(): Promise<void> | null {
+    return settleH265Now();
+}
+
+function settleH265Now(): Promise<void> | null {
     if (!h265Forced() || !started || !envNow || probeRunning || highProbeRunning || h265ProbeRunning) return null;
     return settleH265(envNow, PROBE_START.delayMs);
 }

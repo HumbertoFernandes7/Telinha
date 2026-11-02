@@ -47,7 +47,7 @@ import { QualityController } from "./quality/controller";
 import { encodingFor, LEVELS, levelText, scaledSize } from "./quality/levels";
 import { isHardwareEncoder } from "./quality/stats";
 import { h264ProfileLevelId, isH264High, sameH264Profile } from "./sdp";
-import { noteH265Failed, noteHighFailed, noteStreamStarting, noteStuckEncoder, STUCK_NOTICE, STUCK_NOTICE_H265, STUCK_NOTICE_HIGH, STUCK_NOTICE_PINNED } from "./stuckEncoder";
+import { noteH265Failed, noteHighFailed, noteStreamStarting, noteStuckEncoder, onStreamStopped, STUCK_NOTICE, STUCK_NOTICE_H265, STUCK_NOTICE_HIGH, STUCK_NOTICE_PINNED } from "./stuckEncoder";
 
 export interface QualityProfile {
     width: number;
@@ -565,6 +565,8 @@ export function stopStreaming(reason = "parada pelo usuário") {
     endOfStreamGuards();
     sendPresence();
     publish();
+    // H.265 fixado com a transmissao no ar: a sonda dele, que esperava, roda agora (stuckEncoder.ts; as mesmas regras)
+    void onStreamStopped();
 }
 
 // #region quem pode receber
@@ -1521,9 +1523,10 @@ function blameOf(send: ViewerSend): { kind: "h265"; } | { kind: "high"; profile:
 /**
  * Uma decisao H.265 no ar (tick, antes de logar o codec): confere o codec de fato em uso.
  * - H.265 no ar, na placa: anota (send.h265Seen). Fora da placa (powerEfficientEncoder false): o H.265 falhou (leaveH265).
- * - Outro codec no ar depois de o H.265 ter estado no ar, ou com o H.265 em 1o na lista negociada
- *   (sender.getParameters().codecs, lido so com o encoder em uso ja soltando quadros: um encoder saudavel), = o WebRTC
- *   trocou sozinho (o encoder H.265 da placa falhou ao subir ou no meio): culpa do H.265 (noteH265Failed), sem marcar o
+ * - Outro codec no ar depois de o H.265 ter estado no ar, ou com o H.265 na lista negociada (sender.getParameters()
+ *   .codecs, lido so com o encoder em uso ja soltando quadros: um encoder saudavel; a PRESENCA, nunca a posicao: o
+ *   libwebrtc poe o codec de envio ATUAL na frente, entao depois da troca o 1o ja e o H.264), = o WebRTC trocou sozinho (o
+ *   encoder H.265 da placa falhou ao subir, antes do 1o quadro, ou no meio): culpa do H.265 (noteH265Failed), sem marcar o
  *   H.264, e o envio passa a ser tratado como o codec que esta no ar (a reserva H.264, com as checagens dele do zero).
  * - Outro codec no ar sem o H.265 negociado (o outro lado nao aceitou H.265): nada fica marcado; so o envio passa a ser
  *   tratado como o codec que esta no ar.
@@ -1540,7 +1543,7 @@ function checkH265(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: E
     let negotiatedH265 = send.h265Seen === true;
     if (!negotiatedH265) {
         try {
-            negotiatedH265 = /^video\/h265$/i.test(videoSender(peerId, local)?.getParameters().codecs?.[0]?.mimeType ?? "");
+            negotiatedH265 = (videoSender(peerId, local)?.getParameters().codecs ?? []).some(c => /^video\/h265$/i.test(c.mimeType));
         } catch { }
     }
     const inUse = enc.mimeType.replace(/^video\//i, "").toUpperCase();

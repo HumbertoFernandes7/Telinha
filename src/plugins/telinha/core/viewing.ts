@@ -439,7 +439,7 @@ function askForVp9(v: ViewerEntry, s: InboundSample, streamAt: number) {
         const received = s.log.framesReceived != null ? `${s.log.framesReceived} quadros recebidos` : `${Math.round(s.bytes / 1000)} kB recebidos`;
         const detail = `${received}${s.decoder ? `, decodificador ${s.decoder}` : ""}`;
         const what = s.codec
-            ? `nenhum quadro do vídeo em H.264 decodificado em ${secs} s (${detail})`
+            ? `nenhum quadro do vídeo em ${/h265/i.test(s.codec) ? "H.265" : "H.264"} decodificado em ${secs} s (${detail})`
             : `nenhum quadro de vídeo decodificado em ${secs} s e nenhum pacote de vídeo identificado (codec desconhecido, ${detail})`;
         log.warn(`Assistir ${peerLabel(v.peerId)}: ${what}; pedindo ao transmissor para mandar VP9`);
     }

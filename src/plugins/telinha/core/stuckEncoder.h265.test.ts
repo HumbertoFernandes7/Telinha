@@ -25,7 +25,7 @@ import { type FakeWorker, healthyProbe, installWorker, stuckProbe, type WorkerEn
 import { chooseCodec, getLocalCaps, setH264HwStuck } from "./codec";
 import { ENCODER_PROBE_TIMING } from "./encoderProbe";
 import {
-    type EncoderEnv, forgetStuckEncoder, h265ProbeCodec, h265ProbeRecord, noteH265Failed, noteStreamStarting, noteStuckEncoder, onCodecSettingChanged, PROBE_START, probeRecord,
+    type EncoderEnv, forgetStuckEncoder, h265ProbeCodec, h265ProbeRecord, noteH265Failed, noteStreamStarting, noteStuckEncoder, onCodecSettingChanged, onStreamStopped, PROBE_START, probeRecord,
     runH265Probe, settleH265, startLocalCaps, stuckEncoderDiagnostics, stuckRecord
 } from "./stuckEncoder";
 
@@ -168,6 +168,34 @@ describe("settleH265: o resultado salvo deste ambiente, ou por que a sonda nao r
             assert.equal(chooseCodec(BOTH, "h265").codec, "h265");
             assert.equal(chooseCodec(BOTH, "auto").codec, "h264", "o automatico nunca usa H.265, nem com a sonda ok");
         } finally {
+            pluginSettings.set("codec", "h265");
+            workers.restore();
+        }
+    });
+
+    test("fixado com uma transmissao no ar: a sonda espera e roda quando ela acabar (onStreamStopped)", async () => {
+        pluginSettings.set("hwH265Probe", null);
+        pluginSettings.set("codec", "auto");
+        workers = installWorker(healthyProbe());
+        try {
+            noteStreamStarting(true);
+            pluginSettings.set("codec", "h265");
+            await eventually(() => /não feita \(uma transmissão estava começando ou no ar/.test(h265Line()!));
+            assert.equal(workers.instances.length, 0, "nada com a transmissao no ar");
+            noteStreamStarting(false);
+            const run = onStreamStopped();
+            assert.ok(run, "a transmissao acabou: roda");
+            await run;
+            assert.equal(workers.instances.length, 1);
+            assert.equal(h265ProbeRecord()?.verdict, "ok");
+            assert.equal(onStreamStopped(), null, "com resultado salvo: nada");
+            pluginSettings.set("codec", "auto");
+            pluginSettings.set("hwH265Probe", null);
+            assert.equal(onStreamStopped(), null, "sem o H.265 fixado: nada");
+        } finally {
+            noteStreamStarting(false);
+            // um ok salvo antes de voltar ao H.265: o onChange nao abre outra sonda (o proximo teste conta os Workers)
+            pluginSettings.set("hwH265Probe", { at: AT, env: NV_ENV, verdict: "ok", detail: OK_DETAIL, codec: CODEC });
             pluginSettings.set("codec", "h265");
             workers.restore();
         }
