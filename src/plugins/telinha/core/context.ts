@@ -12,6 +12,7 @@ import type {
 } from "@plugins/telinha/types";
 import type { MessageAction, Room } from "trystero";
 
+import type { CaptureCopy } from "./captureCopy";
 import { isIdentityConfigured } from "./identity/config";
 import type { PeerIdentity } from "./identity/policy";
 import type { IdentityFailure } from "./identity/verify";
@@ -71,7 +72,15 @@ export interface PendingEntry {
 }
 
 export interface LocalCapture {
+    /** o que vai para os envios (e a previa): com a copia na hora, a faixa copiada + o audio; sem ela, a captura */
     stream: MediaStream;
+    /**
+     * a faixa de video ORIGINAL da captura (getDisplayMedia): tamanho (getSettings), contador de quadros, "ended" e
+     * applyConstraints sao sempre dela (captureTrackOf). Ausente = a faixa de video de `stream`
+     */
+    captureTrack?: MediaStreamTrack;
+    /** a copia na hora entre a captura e os envios (core/captureCopy.ts); null/ausente = os envios usam a captura direto */
+    copy?: CaptureCopy | null;
     source: CaptureSource;
     quality: Quality;
     info: StreamInfo;
@@ -193,6 +202,11 @@ export const rt = {
 };
 
 /** Bloqueio que vale para esta conexao: pelo discordUserId anunciado ou pela propria conexao. */
+/** A faixa de video original da captura (LocalCapture.captureTrack), nunca a copia que vai para os envios. */
+export function captureTrackOf(local: LocalCapture): MediaStreamTrack | undefined {
+    return local.captureTrack ?? local.stream.getVideoTracks()[0];
+}
+
 export function blockOf(peerId: PeerId, discordUserId: string | undefined): BlockEntry | null {
     if (discordUserId) {
         const byUser = rt.blocked.get(discordUserId);
@@ -299,7 +313,7 @@ function buildSnapshot(): TelinhaState {
 
     const { local } = rt;
     // 2K numa captura de 1080p ou menos: a altura de agora (a janela pode mudar de tamanho no meio; sem leitura, a do inicio)
-    const track = local?.stream.getVideoTracks()[0]?.getSettings();
+    const track = local && captureTrackOf(local)?.getSettings();
     const sizeNote = local && sourceSizeNote(local.quality, local.info.kind, track?.height ?? local.info.height, track?.width ?? local.info.width);
     return {
         inRoom: !!rt.room,

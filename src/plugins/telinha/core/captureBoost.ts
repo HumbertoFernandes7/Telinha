@@ -27,6 +27,7 @@
 import { settings } from "@plugins/telinha/settings";
 
 import type { GpuCaptureStatus, GpuPriorityReport, GpuPriorityTarget } from "./captureBoostMain";
+import { captureCopyDiagnostics } from "./captureCopy";
 import { rt } from "./context";
 import { errorText, log } from "./log";
 import { getNativeOrNull } from "./nativeApi";
@@ -298,14 +299,22 @@ export async function startCaptureBoost(): Promise<void> {
 }
 
 /**
+ * A "Captura pela placa de vídeo" (WebRtcAllowWgcUsingTexture) vale nesta partida do Discord: os quadros da captura sao
+ * texturas do Windows Graphics Capture, e core/streaming.ts liga a copia na hora (core/captureCopy.ts).
+ */
+export function textureCaptureActive(): boolean {
+    const st = gpuCapture;
+    return !!st?.loader && !!st.requested && st.applied !== false;
+}
+
+/**
  * A captura terminou sozinha (core/streaming.ts, evento "ended" da faixa) com a captura pela placa de video valendo nesta
  * partida: o Chromium encerra a captura quando a placa de video reinicia ou troca (processo da GPU reiniciado, TDR, troca
  * de placa num notebook), sem voltar para a copia pelo processador. null = a opcao nao vale nesta partida (a mensagem de
  * sempre). Recomecar sozinho nao da: o getDisplayMedia precisa de um clique novo.
  */
 export function captureEndedText(kind: "screen" | "window"): { log: string; message: string; } | null {
-    const st = gpuCapture;
-    if (!st?.loader || !st.requested || st.applied === false) return null;
+    if (!textureCaptureActive()) return null;
     return kind === "screen"
         ? {
             log: "A captura terminou sozinha com a captura pela placa de vídeo ligada: provavelmente a placa de vídeo reiniciou ou trocou (o Chromium não volta sozinho nesse caso)",
@@ -346,7 +355,8 @@ export function captureBoostNeedsRestart(): boolean {
 /** Para o "Copiar diagnóstico". Nunca lanca (as configuracoes podem nao estar disponiveis). */
 export function captureBoostDiagnostics(): string {
     try {
-        return `${gpuCaptureDiagnostics(gpuCapture)}\n${gpuPriorityDiagnostics()}`;
+        const copy = captureCopyDiagnostics();
+        return `${gpuCaptureDiagnostics(gpuCapture)}${copy ? `; ${copy}` : ""}\n${gpuPriorityDiagnostics()}`;
     } catch (e) {
         return `captura pela placa de vídeo: diagnóstico indisponível (${e instanceof Error ? e.message : String(e)})`;
     }

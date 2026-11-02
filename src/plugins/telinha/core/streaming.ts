@@ -29,12 +29,13 @@ import {
     type ProofState, verifyPasswordProof, type WatchAccessInput, type WatchDecision
 } from "./access";
 import { startScreenAudioCapture } from "./audio/screenAudio";
-import { captureEndedText, noteCaptureStarted, noteCaptureStopped } from "./captureBoost";
+import { captureEndedText, noteCaptureStarted, noteCaptureStopped, textureCaptureActive } from "./captureBoost";
+import { startCaptureCopy } from "./captureCopy";
 import {
     chooseCodec, type CodecDecision, type EncoderReport, getLocalCaps, h264ReserveOf, isOffHardwareH265, isSoftwareH264, isTransientSoftwareH264, noteH264Fallback, pickNegotiatedCodec,
     softwareFallback
 } from "./codec";
-import { blockOf, getPc, type LocalCapture, peerLabel, publish, rt, setLastError } from "./context";
+import { blockOf, captureTrackOf, getPc, type LocalCapture, peerLabel, publish, rt, setLastError } from "./context";
 import { isIdentityConfigured } from "./identity/config";
 import { type ApprovalInput, identityRequiresApproval } from "./identity/policy";
 import { currentLiveWeight, liveWeightTick, startLiveWeight, stopLiveWeight } from "./liveWeight";
@@ -223,7 +224,7 @@ function qualityOf(local: LocalCapture): QualityController | null {
  * meio). Sempre par: o capturador do Chromium ja entrega a janela em tamanho par (ver checkEncoder).
  */
 function captureSizeOf(local: LocalCapture): { width: number; height: number; } {
-    const s = local.stream.getVideoTracks()[0]?.getSettings();
+    const s = captureTrackOf(local)?.getSettings();
     return { width: s?.width ?? local.info.width, height: s?.height ?? local.info.height };
 }
 
@@ -362,13 +363,19 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
                 log.warn(`${e instanceof Error ? e.message : String(e)} Transmitindo a tela sem áudio.`);
             }
         }
+        // captura pela placa de video: cada quadro e copiado na chegada para uma textura nossa antes dos envios (o
+        // "mini rollback", core/captureCopy.ts). Indisponivel: null, e os envios usam a captura direto
+        const copy = textureCaptureActive() ? await startCaptureCopy(video) : null;
         if (!rt.room) {
+            copy?.stop();
             stream.getTracks().forEach(t => t.stop());
             throw new Error("Você saiu do canal de voz enquanto a transmissão começava.");
         }
         const [audio] = stream.getAudioTracks();
 
+        // o encoder le o contentHint da faixa que o envio usa (a copia, quando ligada)
         video.contentHint = "motion";
+        if (copy) copy.track.contentHint = "motion";
         if (audio) audio.contentHint = "music";
         if (wantAudio) log.info(`Áudio: ${audio ? "capturando" : "sem faixa de áudio"} — ${report?.audio?.reason ?? "sem decisão do handler"}`);
         else if (wantScreenAudio) log.info(`Áudio da tela: ${audio ? "capturando o PC sem o Discord" : "sem faixa de áudio"}`);
@@ -393,10 +400,14 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
         if (previous) stopCapture(previous, "trocando de fonte");
 
         const local: LocalCapture = {
-            stream, source: { ...source }, quality: opts.quality, info, startedAt: Date.now(), viewers: new Set(),
+            stream: copy ? new MediaStream([copy.track, ...stream.getAudioTracks()]) : stream, captureTrack: video, copy,
+            source: { ...source }, quality: opts.quality, info, startedAt: Date.now(), viewers: new Set(),
             access: access.access, password: access.password
         };
         rt.local = local;
+        copy?.onFail(() => {
+            if (rt.local === local) dropCopy(local);
+        });
         rt.lastError = null;
         startExtras(local, video);
 
@@ -506,6 +517,29 @@ function checkCaptureSize(ex: CaptureExtras) {
     quality.captureResized();
 }
 
+/**
+ * A copia na hora parou no meio (core/captureCopy.ts → onFail, ou o checkStall vendo a copia parada): cada envio volta
+ * para a faixa original da captura (replaceTrack, sem renegociar) com a janela do checkStall do zero, e quem pedir
+ * depois recebe a original. Envio travado (contained) fica como esta.
+ */
+function dropCopy(local: LocalCapture) {
+    const { copy } = local;
+    const source = local.captureTrack;
+    if (!copy || !source) return;
+    for (const peerId of local.viewers) {
+        if (contained(peerId)) continue;
+        // o encoder passa a receber outra faixa: a janela do checkStall recomeca (sem quadro ate aqui nao era culpa dele)
+        const send = sends.get(peerId);
+        if (send) send.stall = undefined;
+        videoSender(peerId, local)?.replaceTrack(source).catch(e => log.warn(`Falha ao voltar ${peerLabel(peerId)} para a captura direta: ${errorText(e)}`));
+    }
+    local.stream.removeTrack(copy.track);
+    local.stream.addTrack(source);
+    local.copy = null;
+    copy.stop();
+    publish();
+}
+
 function stopExtras(local: LocalCapture) {
     if (extras?.local !== local) return;
     extras.quality.dispose();
@@ -554,6 +588,8 @@ function stopCapture(local: LocalCapture, reason: string) {
             + "(desmontar travaria o Discord): só a captura para");
     }
     local.stream.getTracks().forEach(t => t.stop());
+    local.copy?.stop();
+    local.captureTrack?.stop();
     // a senha vale so para esta captura (trocando de fonte, a nova ja recebeu uma copia)
     local.password = null;
     if (rt.local === local) rt.local = null;
@@ -1123,6 +1159,8 @@ function sendTo(peerId: PeerId, carried?: CarriedCodec) {
                 return;
             }
             if (sends.get(peerId) !== send) return;
+            // copia na hora numa tela parada: a captura so entrega quadro quando muda, e o encoder novo precisa de um
+            local.copy?.refresh();
             const quality = qualityOf(local);
             if (quality) quality.markReady(peerId);
             else void applySenderParams(peerId, local, local.quality);
@@ -1354,7 +1392,7 @@ function fallBack(peerId: PeerId, local: LocalCapture, send: ViewerSend, next: C
 function capturedFrames(local: LocalCapture, source: any): number | null {
     let total: unknown;
     try {
-        total = (local.stream.getVideoTracks()[0] as any)?.stats?.totalFrames;
+        total = (captureTrackOf(local) as any)?.stats?.totalFrames;
     } catch { }
     if (typeof total === "number" && Number.isFinite(total)) return total;
     const frames = source?.frames;
@@ -1444,6 +1482,13 @@ function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: 
 
     const label = peerLabel(peerId);
     const secs = Math.round((now - w.since) / 1000);
+    // a copia na hora (core/captureCopy.ts) nao entrega quadros ao gerador com a captura andando: o encoder esta sem
+    // quadro, nao travado. Os envios voltam para a captura direta (dropCopy, via onFail) e a janela recomeca
+    if (local.copy?.outputFlat()) {
+        send.stall = undefined;
+        local.copy.abandon(`os quadros não saem da cópia (o envio para ${label} ficou ${secs} s sem vídeo com a captura entregando quadros)`);
+        return;
+    }
     const name = /h265/i.test(enc.mimeType) ? "H.265" : "H.264";
     const what = encoded === 0
         ? `O encoder ${name} para ${label} não codificou nenhum quadro em ${secs} s`
