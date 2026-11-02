@@ -16,7 +16,7 @@
 // tambem troca a placa pelo OpenH264 DE PROPOSITO em quadros de tamanho impar ou abaixo de 360p (ver
 // isTransientSoftwareH264): isso nao e a placa falhando e nunca conta como queda.
 //
-// H.264 High (6400xx, desde depois da v0.3.1): CABAC e transformada 8x8, ~10-20% melhor por bit. O encoder da placa
+// H.264 High (6400xx, desde depois da v0.3.2): CABAC e transformada 8x8, ~10-20% melhor por bit. O encoder da placa
 // (MediaFoundation NVENC) codifica Main e High, e o RTCVideoEncoder do Chromium passa o perfil negociado para ele. So vai
 // quando os dois lados tem High na placa: este PC codifica (encodingInfo do 6400xx do sender, h264HighHwProfile) com a
 // sonda WebCodecs do High "ok" neste ambiente (core/stuckEncoder.ts → setH264HighProbeOk) E o espectador anuncia que
@@ -303,6 +303,11 @@ export function chooseCodec(viewerCaps: ViewerCodecCaps | undefined, setting: Co
                 reason: `automático: H.264 High por hardware nos dois lados (perfil ${local.h264HighHwProfile}: este PC codifica High na placa, `
                     + `com a sonda do High ok, e o espectador decodifica High na placa${backup ? `; reserva ${backup}` : ""})`
             };
+        }
+        // placa que so codifica High por hardware: o perfil dela e o High (como antes desta versao); o log diz a verdade
+        if (isH264High(local.h264HwProfile)) {
+            return h264(`automático: H.264 por hardware nos dois lados (perfil ${local.h264HwProfile}: o único que a placa codifica por hardware, `
+                + `então vai High mesmo assim, como antes; ${noHigh})`);
         }
         return h264(`automático: H.264 por hardware nos dois lados (${local.h264HwProfile ? `perfil ${local.h264HwProfile}; ` : ""}High não: ${noHigh})`);
     }

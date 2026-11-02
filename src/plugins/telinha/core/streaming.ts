@@ -44,8 +44,8 @@ import { CaptureMonitor } from "./quality/captureMonitor";
 import { QualityController } from "./quality/controller";
 import { encodingFor, levelText, scaledSize } from "./quality/levels";
 import { isHardwareEncoder } from "./quality/stats";
-import { h264ProfileLevelId, sameH264Profile } from "./sdp";
-import { noteStreamStarting, noteStuckEncoder, STUCK_NOTICE, STUCK_NOTICE_PINNED } from "./stuckEncoder";
+import { h264ProfileLevelId, isH264High, sameH264Profile } from "./sdp";
+import { noteHighFailed, noteStreamStarting, noteStuckEncoder, STUCK_NOTICE, STUCK_NOTICE_HIGH, STUCK_NOTICE_PINNED } from "./stuckEncoder";
 
 export interface QualityProfile {
     width: number;
@@ -116,6 +116,8 @@ interface ViewerSend {
     degradation?: { kind: EncoderKind; index: number; };
     /** onde o encoder roda, pelo 1o relato das estatisticas (depois de cada troca de codec); ausente = o esperado (encoderKindOf) */
     encoderKind?: EncoderKind;
+    /** onde o encoder deveria rodar, decidido quando o envio comecou ou trocou de codec (expectedKindFor) */
+    expectedKind?: EncoderKind;
     /** a checagem do encoder ja agiu neste espectador (H.264 por software): nunca de novo */
     fellBack?: boolean;
     /** o H.264 esta no OpenH264 de passagem (o WebRTC reduziu a resolucao para um tamanho que a placa nao aceita) */
@@ -969,11 +971,11 @@ function sendTo(peerId: PeerId) {
     }
 
     const decision = chooseCodec(entry.presence?.caps, settings.store.codec as CodecSetting, getLocalCaps());
-    const send: ViewerSend = { decision };
+    const send: ViewerSend = { decision, expectedKind: expectedKindFor(decision) };
     sends.set(peerId, send);
     local.viewers.add(peerId);
     // H.264 com este PC codificando por hardware: mais um encoder na placa de video (a qualidade automatica preve o tempo dela)
-    qualityOf(local)?.addViewer(peerId, decision.codec === "h264" && getLocalCaps().h264HwEncode);
+    qualityOf(local)?.addViewer(peerId, send.expectedKind === "hardware");
     log.info(`Enviando para ${peerLabel(peerId)}: codec ${decision.codec.toUpperCase()} (${decision.reason})`);
     if (decision.codec === "h264" && entry.presence?.caps.h264HwDecode !== true)
         log.warn(`${peerLabel(peerId)} não decodifica H.264 por hardware: o início pode travar por 15+ s`);
@@ -1035,7 +1037,16 @@ function videoSender(peerId: PeerId, local: LocalCapture): RTCRtpSender | null {
  * placa de video = placa; o resto = software).
  */
 function encoderKindOf(send: ViewerSend | undefined): EncoderKind {
-    return send?.encoderKind ?? (send?.decision.codec === "h264" && getLocalCaps().h264HwEncode ? "hardware" : "software");
+    return send?.encoderKind ?? send?.expectedKind ?? expectedKindFor(send?.decision);
+}
+
+/**
+ * O tipo de encoder que uma decisao cria AGORA (H.264 com este PC codificando na placa = placa; o resto = software).
+ * Guardado no envio (expectedKind) quando ele comeca ou troca de codec: o h264HwEncode mudando depois (a sonda do High
+ * segurando o H.264, uma queda de outro envio) nao muda o encoder que ja esta no ar.
+ */
+function expectedKindFor(decision: CodecDecision | undefined): EncoderKind {
+    return decision?.codec === "h264" && getLocalCaps().h264HwEncode ? "hardware" : "software";
 }
 
 /**
@@ -1181,6 +1192,12 @@ function fallBack(peerId: PeerId, local: LocalCapture, send: ViewerSend, next: C
     send.fellBack = true;
     const label = peerLabel(peerId);
     const name = next.codec.toUpperCase();
+    // envio em High: a placa nao segurou o High; ele fica desligado neste PC (o Baseline nao leva a culpa)
+    const high = highProfileOf(send);
+    if (high) {
+        noteHighFailed(high, `caiu para o software numa transmissão em High (${label})`);
+        log.warn(`O H.264 High (perfil ${high}) para ${label} caiu para o software: o High fica desligado neste PC até o driver, o Chromium ou a placa mudarem`);
+    }
     const { count, disabledNow } = noteH264Fallback();
     if (next.codec === send.decision.codec) {
         const session = disabledNow ? ` Foi a ${count}ª queda nesta sessão: o H.264 automático fica desligado.` : "";
@@ -1331,11 +1348,25 @@ function containStuck(peerId: PeerId, local: LocalCapture, send: ViewerSend, why
     if (pc) containPeerConnection(pc, [send, videoSender(peerId, local), local.stream]);
     qualityOf(local)?.removeViewer(peerId);
     const pinned = settings.store.codec === "h264";
-    noteStuckEncoder();
-    log.warn(`${why}: a placa de vídeo travou com H.264. O envio para ${label} fica como está até o Discord reiniciar (trocar o codec, `
-        + "parar ou fechar a conexão travaria o Discord inteiro). O H.264 automático fica desligado neste PC até o driver, o Chromium ou a placa mudarem.");
-    setLastError(pinned ? STUCK_NOTICE_PINNED : STUCK_NOTICE);
+    // envio em High: a culpa e do High (o Baseline passou na sonda dele); depois de reiniciar, vai o Baseline
+    const high = highProfileOf(send);
+    noteStuckEncoder(high);
+    log.warn(`${why}: a placa de vídeo travou com H.264${high ? ` High (perfil ${high})` : ""}. O envio para ${label} fica como está até o Discord reiniciar (trocar o codec, `
+        + "parar ou fechar a conexão travaria o Discord inteiro). "
+        + (high ? "O High fica desligado neste PC até o driver, o Chromium ou a placa mudarem; nesta sessão, o automático vai em VP9."
+            : "O H.264 automático fica desligado neste PC até o driver, o Chromium ou a placa mudarem."));
+    setLastError(high ? STUCK_NOTICE_HIGH : pinned ? STUCK_NOTICE_PINNED : STUCK_NOTICE);
     reply(peerId, { op: "stuck" });
+}
+
+/**
+ * O perfil High deste envio em H.264 (6400xx), ou null (Baseline, outro codec). Numa placa cujo unico perfil por hardware
+ * ja e o High (h264HwProfile 6400xx) nao ha Baseline para separar: null, e a falha marca o H.264 da placa como sempre.
+ */
+function highProfileOf(send: ViewerSend): string | null {
+    const profile = send.decision.h264Profile;
+    if (send.decision.codec !== "h264" || !isH264High(profile) || isH264High(getLocalCaps().h264HwProfile)) return null;
+    return profile!;
 }
 
 /**
@@ -1352,6 +1383,7 @@ async function switchSendCodec(peerId: PeerId, local: LocalCapture, send: Viewer
     const name = next.codec.toUpperCase();
     // renegociacoes futuras (sendPlanFor) ja vao com o codec novo
     send.decision = next;
+    send.expectedKind = expectedKindFor(next);
     let error = "";
     for (let attempt = 0; attempt < 2; attempt++) {
         if (attempt) await new Promise(resolve => setTimeout(resolve, 500));

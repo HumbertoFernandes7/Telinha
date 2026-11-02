@@ -22,11 +22,11 @@ import { pluginSettings } from "@test/fakes/vencord";
 import { DEFAULT_VIDEO_CODECS, installWebRtc, rtpCapabilities, type WebRtcEnv } from "@test/fakes/webrtc";
 import { type FakeWorker, healthyProbe, installWorker, stuckProbe, type WorkerEnv } from "@test/fakes/worker";
 
-import { chooseCodec, getLocalCaps, setH264HwStuck } from "./codec";
+import { chooseCodec, getLocalCaps, setH264HighProbeOk, setH264HwStuck } from "./codec";
 import { ENCODER_PROBE_TIMING } from "./encoderProbe";
 import {
-    type EncoderEnv, forgetStuckEncoder, highProbeRecord, noteStreamStarting, PROBE_START, probeRecord, runHighProbe, settleHigh, startLocalCaps,
-    stuckEncoderDiagnostics, stuckRecord
+    type EncoderEnv, forgetStuckEncoder, highProbeRecord, noteHighFailed, noteStreamStarting, noteStuckEncoder, PROBE_START, probeRecord, runHighProbe,
+    runStartupProbe, settleHigh, startLocalCaps, stuckEncoderDiagnostics, stuckInThisSession, stuckRecord
 } from "./stuckEncoder";
 
 /** Uma RTX 3070 com o driver de 31/10. */
@@ -34,7 +34,7 @@ const NV_ENV: EncoderEnv = { vendorId: "10de", deviceId: "2484", driver: "32.0.1
 const h264 = (mode: 0 | 1, profile: string): RTCRtpCodec => ({
     mimeType: "video/H264", clockRate: 90000, sdpFmtpLine: `level-asymmetry-allowed=1;packetization-mode=${mode};profile-level-id=${profile}`
 });
-/** Espectador com High na placa (presenca caps.hwDecode) e um da v0.3.1 (so o booleano). */
+/** Espectador com High na placa (presenca caps.hwDecode) e um da v0.3.2 (so o booleano). */
 const HIGH_VIEWER = { h264HwDecode: true, hwDecode: { v: 1, h264High: true } };
 const OLD_VIEWER = { h264HwDecode: true };
 const OK_DETAIL = "30 pacotes de 30 quadros";
@@ -104,7 +104,7 @@ describe("inicio da sessao num ambiente novo", () => {
             codec: "h264", h264Profile: "640032", h264Backup: "42001f",
             reason: "automático: H.264 High por hardware nos dois lados (perfil 640032: este PC codifica High na placa, com a sonda do High ok, e o espectador decodifica High na placa; reserva 42001f)"
         });
-        assert.equal(chooseCodec(OLD_VIEWER, "auto").h264Profile, "42001f", "espectador na v0.3.1: o Baseline de sempre");
+        assert.equal(chooseCodec(OLD_VIEWER, "auto").h264Profile, "42001f", "espectador na v0.3.2: o Baseline de sempre");
         assert.equal(chooseCodec(HIGH_VIEWER, "h264").h264Profile, "42001f", "fixado em H.264: o Baseline de sempre");
         assert.equal(chooseCodec(HIGH_VIEWER, "vp9").codec, "vp9");
         assert.match(highLine()!, new RegExp(`^H\\.264 High: codifica na placa sim \\(perfil 640032\\), decodifica na placa sim; sonda WebCodecs High: ok \\(${OK_DETAIL}\\); `
@@ -161,26 +161,45 @@ describe("settleHigh: o resultado salvo deste ambiente, ou por que a sonda nao r
 });
 
 describe("runHighProbe", () => {
-    test("enquanto roda: o Baseline vale (nunca espera pela do High), o High nao; uma segunda chamada nao abre outra", async () => {
+    const STUCK = "nenhum pacote em 0.06 s desde o 1º quadro (o flush() não terminou)";
+
+    test("enquanto roda, segura o H.264 da placa (VP9: nenhum encoder H.264 do WebRTC ao lado do dela); uma segunda chamada nao abre outra", async () => {
         let held: FakeWorker | null = null;
         workers = installWorker(w => {
             held = w;
         });
         const run = runHighProbe(NV_ENV, "640032", 0);
         await eventually(() => held);
-        assert.equal(getLocalCaps().h264HwEncode, true);
-        assert.equal(getLocalCaps().h264HighProbeOk, false);
-        assert.equal(chooseCodec(HIGH_VIEWER, "auto").reason, "automático: H.264 por hardware nos dois lados (perfil 42001f; High não: a sonda WebCodecs do High não passou neste PC)");
+        assert.equal(getLocalCaps().h264HwEncode, false, "segurado");
+        assert.equal(chooseCodec(HIGH_VIEWER, "auto").codec, "vp9");
         assert.match(highLine()!, /sonda WebCodecs High: rodando/);
         await runHighProbe(NV_ENV, "640032", 0);
         assert.equal(workers.instances.length, 1);
         healthyProbe()(held!, null);
         await run;
+        assert.equal(getLocalCaps().h264HwEncode, true, "solto");
         assert.equal(chooseCodec(HIGH_VIEWER, "auto").h264Profile, "640032");
         workers.restore();
     });
 
-    test("inconclusiva (a placa nao aceita avc1.640032): nada salvo, sem High nesta sessao, o Baseline continua", async () => {
+    test("a trava da sonda do High e a do Baseline sao independentes: o H.264 so volta quando as duas soltam", async () => {
+        let held: FakeWorker | null = null;
+        workers = installWorker((w, data) => {
+            if (!held) held = w;
+            else healthyProbe()(w, data);
+        });
+        const high = runHighProbe(NV_ENV, "640032", 0);
+        await eventually(() => held);
+        await runStartupProbe(NV_ENV, "42001f", 0);
+        assert.equal(probeRecord()?.verdict, "ok");
+        assert.equal(getLocalCaps().h264HwEncode, false, "a do Baseline acabou; a do High ainda segura");
+        healthyProbe()(held!, null);
+        await high;
+        assert.equal(getLocalCaps().h264HwEncode, true);
+        workers.restore();
+    });
+
+    test("inconclusiva sem nada preso (a placa nao aceita avc1.640032): nada salvo, sem High nesta sessao, o Baseline volta", async () => {
         pluginSettings.set("hwH264HighProbe", null);
         workers = installWorker(w => w.emit({ ev: "done", verdict: "unsupported" }));
         const since = logMark();
@@ -212,19 +231,33 @@ describe("runHighProbe", () => {
         workers.restore();
     });
 
-    test("travou (Baseline ok, High trava): salvo, High desligado neste ambiente, VP9 so nesta sessao; o Worker preso fica", async () => {
+    test("travou na 1a e passou na 2a (a placa so estava ocupada, ex.: um jogo abrindo): ok, salvo; o preso da 1a fica", async () => {
+        workers = workersFor(stuckProbe(), healthyProbe());
+        await runHighProbe(NV_ENV, "640032", 0);
+        assert.equal(workers.instances.length, 2, "a 2a rodada confirma");
+        assert.equal(workers.instances[0].terminated, false);
+        assert.deepEqual({ ...highProbeRecord()!, at: 0 }, { at: 0, env: NV_ENV, verdict: "ok", detail: `${OK_DETAIL} (a 1ª rodada tinha travado: ${STUCK})`, profile: "640032" });
+        assert.equal(getLocalCaps().h264HwEncode, true);
+        assert.equal(chooseCodec(HIGH_VIEWER, "auto").h264Profile, "640032");
+        workers.restore();
+    });
+
+    test("travou duas vezes: salvo, High desligado neste ambiente, VP9 so nesta sessao; os Workers presos ficam", async () => {
         workers = installWorker(stuckProbe());
         const since = logMark();
         await runHighProbe(NV_ENV, "640032", 0);
-        const detail = "nenhum pacote em 0.06 s desde o 1º quadro (o flush() não terminou)";
+        const detail = `${STUCK}; confirmado na 2ª rodada`;
         assert.deepEqual({ ...highProbeRecord()!, at: 0 }, { at: 0, env: NV_ENV, verdict: "broken", detail, profile: "640032" });
-        assert.equal(workers.instances[0].terminated, false, "nunca terminado");
+        assert.deepEqual(workers.instances.map(w => w.terminated), [false, false], "nunca terminados");
         assert.equal(stuckRecord(), null, "o Baseline nao fica marcado como travado");
         assert.equal(probeRecord()?.verdict, "ok", "nem a sonda do Baseline muda");
         assert.equal(getLocalCaps().h264HwEncode, false, "nesta sessao: VP9");
         assert.equal(chooseCodec(HIGH_VIEWER, "auto").codec, "vp9");
+        const hung = `warn: Sonda WebCodecs do H.264 High da placa de vídeo: o encoder ficou preso (${STUCK}); o Worker dela fica como está até o Discord fechar`;
         assert.deepEqual(since(), [
-            `warn: Sonda WebCodecs do H.264 High da placa de vídeo: o encoder ficou preso (${detail}); o Worker dela fica como está até o Discord fechar`,
+            hung,
+            `info: Sonda WebCodecs do H.264 High (perfil 640032) da placa de vídeo: travou (${STUCK}); confirmando em 0 s`,
+            hung,
             `warn: A sonda WebCodecs do H.264 High (perfil 640032) travou neste PC (${detail}): o High fica desligado neste ambiente (só o Baseline) e, `
             + "com um encoder H.264 preso na placa de vídeo, o automático vai em VP9 nesta sessão"
         ]);
@@ -236,22 +269,52 @@ describe("runHighProbe", () => {
         assert.equal(chooseCodec(HIGH_VIEWER, "auto").reason, "automático: H.264 por hardware nos dois lados (perfil 42001f; High não: a sonda WebCodecs do High não passou neste PC)");
     });
 
-    test("\"Tentar a placa de vídeo de novo\": esquece as duas sondas; o High so volta depois de a dele passar de novo", async () => {
-        workers = installWorker(healthyProbe());
-        assert.equal(forgetStuckEncoder(), "testing");
-        assert.equal(highProbeRecord(), null);
-        assert.equal(getLocalCaps().h264HighProbeOk, false);
-        await eventually(() => highProbeRecord()?.verdict === "ok");
-        assert.deepEqual(workers.instances.map(codecOf), ["avc1.42001f", "avc1.640032"]);
-        await eventually(() => getLocalCaps().h264HighProbeOk);
-        assert.equal(chooseCodec(HIGH_VIEWER, "auto").h264Profile, "640032");
+    test("Worker preso (um passo sem resposta) duas vezes: vale como travou, e nao fica um Worker preso a cada abertura", async () => {
+        pluginSettings.set("hwH264HighProbe", null);
+        workers = installWorker(w => w.emit({ ev: "phase", phase: "isConfigSupported" }));
+        await runHighProbe(NV_ENV, "640032", 0);
+        assert.equal(highProbeRecord()?.verdict, "broken");
+        assert.equal(highProbeRecord()?.detail, "isConfigSupported sem resposta em 0.04 s; confirmado na 2ª rodada");
+        assert.deepEqual(workers.instances.map(w => w.terminated), [false, false]);
+        assert.equal(settleHigh(NV_ENV, 0), null, "na proxima abertura: nao roda de novo");
         workers.restore();
+        setH264HwStuck(false);
+    });
 
-        // sem Worker: o Baseline volta ja (como antes), o High nao (nao da para testar)
-        assert.equal(forgetStuckEncoder(), "now");
-        assert.equal(getLocalCaps().h264HwEncode, true);
-        assert.equal(chooseCodec(HIGH_VIEWER, "auto").h264Profile, "42001f");
-        assert.match(highLine()!, /não feita \(esquecida pelo botão; roda depois da do Baseline\)/);
+    test("travou e a 2a e inconclusiva sem nada preso, ou uma transmissao comecou antes dela: nada salvo, VP9 nesta sessao", async () => {
+        pluginSettings.set("hwH264HighProbe", null);
+        workers = workersFor(stuckProbe(), w => w.emit({ ev: "done", verdict: "unsupported" }));
+        await runHighProbe(NV_ENV, "640032", 0);
+        assert.equal(highProbeRecord(), null);
+        assert.equal(getLocalCaps().h264HwEncode, false);
+        assert.ok(highLine()!.includes(`sonda WebCodecs High: travou uma vez (${STUCK}); a 2ª rodada não conseguiu dizer (sem suporte: a placa não aceita avc1.640032): VP9 nesta sessão`));
+        workers.restore();
+        setH264HwStuck(false);
+
+        workers = installWorker((w, data) => {
+            stuckProbe()(w, data);
+            noteStreamStarting(true);
+        });
+        try {
+            await runHighProbe(NV_ENV, "640032", 0);
+        } finally {
+            noteStreamStarting(false);
+        }
+        assert.equal(workers.instances.length, 1);
+        assert.equal(highProbeRecord(), null);
+        assert.equal(getLocalCaps().h264HwEncode, false);
+        assert.ok(highLine()!.includes(`travou uma vez (${STUCK}), sem confirmar (uma transmissão começou): VP9 nesta sessão`));
+        workers.restore();
+        setH264HwStuck(false);
+    });
+
+    test("perfil diferente do salvo (o Chromium passou a oferecer outro nivel): a sonda do High roda de novo", async () => {
+        pluginSettings.set("hwH264HighProbe", { at: AT, env: NV_ENV, verdict: "ok", detail: "x", profile: "640034" });
+        workers = installWorker(healthyProbe());
+        await settleHigh(NV_ENV, 0);
+        assert.equal(workers.instances.length, 1);
+        assert.equal(highProbeRecord()?.profile, "640032");
+        workers.restore();
     });
 
     test("registro do High estragado ou editado a mao: nenhum; perfil fora do formato vira \"?\"", () => {
@@ -267,5 +330,69 @@ describe("runHighProbe", () => {
         assert.equal(highProbeRecord()?.detail, "");
         pluginSettings.set("hwH264HighProbe", { at: 1, env: {}, verdict: "broken", detail: "x" });
         assert.equal(highProbeRecord()?.profile, null, "sem o perfil");
+    });
+});
+
+describe("\"Tentar a placa de vídeo de novo\" e o High", () => {
+    test("esquece o ok do High (a sonda dele roda de novo depois da do Baseline)", async () => {
+        pluginSettings.set("hwH264HighProbe", { at: AT, env: NV_ENV, verdict: "ok", detail: "x", profile: "640032" });
+        workers = installWorker(healthyProbe());
+        assert.equal(forgetStuckEncoder(), "testing");
+        assert.equal(highProbeRecord(), null);
+        assert.equal(getLocalCaps().h264HighProbeOk, false);
+        await eventually(() => highProbeRecord()?.verdict === "ok");
+        assert.deepEqual(workers.instances.map(codecOf), ["avc1.42001f", "avc1.640032"]);
+        await eventually(() => getLocalCaps().h264HighProbeOk && getLocalCaps().h264HwEncode);
+        assert.equal(chooseCodec(HIGH_VIEWER, "auto").h264Profile, "640032");
+        workers.restore();
+
+        // sem Worker: o Baseline volta ja (como antes), o High nao (nao da para testar)
+        assert.equal(forgetStuckEncoder(), "now");
+        assert.equal(getLocalCaps().h264HwEncode, true);
+        assert.equal(chooseCodec(HIGH_VIEWER, "auto").h264Profile, "42001f");
+        assert.match(highLine()!, /não feita \(esquecida pelo botão; roda depois da do Baseline\)/);
+    });
+
+    test("nunca esquece o travou do High (High → trava → botao → High de novo seria um laco): so o Baseline e testado de novo", async () => {
+        pluginSettings.set("hwH264HighProbe", { at: AT, env: NV_ENV, verdict: "broken", detail: "travou", profile: "640032", source: "stream" });
+        workers = installWorker(healthyProbe());
+        assert.equal(forgetStuckEncoder(), "testing");
+        await eventually(() => probeRecord()?.verdict === "ok");
+        await eventually(() => getLocalCaps().h264HwEncode);
+        assert.deepEqual(workers.instances.map(codecOf), ["avc1.42001f"], "nenhum encoder High");
+        assert.equal(highProbeRecord()?.verdict, "broken");
+        assert.equal(chooseCodec(HIGH_VIEWER, "auto").h264Profile, "42001f");
+        assert.match(highLine()!, /salva: travou em \S+ \(perfil 640032: travou\) \[visto numa transmissão\]; High automático desligado$/);
+        workers.restore();
+    });
+});
+
+describe("um envio em High falhou no ar (streaming.ts)", () => {
+    test("caiu para o software (noteHighFailed): o High fica travado neste ambiente; o Baseline nao leva a culpa", async () => {
+        pluginSettings.set("hwH264HighProbe", null);
+        setH264HighProbeOk(true);
+        assert.equal(chooseCodec(HIGH_VIEWER, "auto").h264Profile, "640032");
+        noteHighFailed("640032", "caiu para o software numa transmissão em High (amigo)");
+        assert.equal(getLocalCaps().h264HighProbeOk, false, "ja");
+        await eventually(() => highProbeRecord()?.verdict === "broken");
+        assert.deepEqual({ ...highProbeRecord()!, at: 0 }, {
+            at: 0, env: NV_ENV, verdict: "broken", detail: "caiu para o software numa transmissão em High (amigo)", profile: "640032", source: "stream"
+        });
+        assert.equal(stuckRecord(), null);
+        assert.equal(getLocalCaps().h264HwEncode, true);
+        assert.equal(chooseCodec(HIGH_VIEWER, "auto").h264Profile, "42001f");
+        assert.equal(settleHigh(NV_ENV, 0), null, "a proxima abertura: nao testa de novo");
+    });
+
+    test("travou num envio em High (noteStuckEncoder com o perfil): VP9 ate reiniciar e o High marcado; nenhum registro de H.264 travado", async () => {
+        pluginSettings.set("hwH264HighProbe", null);
+        noteStuckEncoder("640032");
+        assert.equal(getLocalCaps().h264HwEncode, false);
+        assert.equal(stuckInThisSession(), true);
+        await eventually(() => highProbeRecord()?.source === "stream");
+        assert.equal(highProbeRecord()?.detail, "o encoder da placa de vídeo travou numa transmissão em High");
+        assert.equal(stuckRecord(), null, "o Baseline passou na sonda dele: na proxima abertura, Baseline");
+        assert.equal(forgetStuckEncoder(), "restart");
+        assert.equal(highProbeRecord()?.verdict, "broken", "o botao nao esquece o High travado");
     });
 });

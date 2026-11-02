@@ -548,7 +548,7 @@ describe("H.264 High (6400xx) so quando os dois lados tem High na placa", () => 
     const HIGH_PC = caps({ h264HighHwDecode: true, h264HighHwProfile: "640032", h264HighProbeOk: true });
     /** Espectador desta versao com High na placa (presenca caps.hwDecode, protocol.ts passo 11). */
     const HIGH_VIEWER = { h264HwDecode: true, hwDecode: { v: 1, h264High: true } };
-    /** Espectador na v0.3.1 ou antes: so o booleano de sempre. */
+    /** Espectador na v0.3.2 ou antes: so o booleano de sempre. */
     const OLD_VIEWER = { h264HwDecode: true };
     const HIGH_REASON = "automático: H.264 High por hardware nos dois lados (perfil 640032: este PC codifica High na placa, com a sonda do High ok, "
         + "e o espectador decodifica High na placa; reserva 42001f)";
@@ -559,7 +559,7 @@ describe("H.264 High (6400xx) so quando os dois lados tem High na placa", () => 
         assert.deepEqual(chooseCodec(HIGH_VIEWER, "auto", HIGH_PC), { codec: "h264", h264Profile: "640032", h264Backup: "42001f", reason: HIGH_REASON });
         // so este PC tem High: o espectador nao anuncia (versao antiga, ou sem High na placa)
         const noViewer = baseline("o espectador não anuncia High por hardware (não tem, ou é uma versão antiga do Telinha)");
-        assert.deepEqual(chooseCodec(OLD_VIEWER, "auto", HIGH_PC), noViewer, "v0.3.1 ou antes: o Baseline de sempre");
+        assert.deepEqual(chooseCodec(OLD_VIEWER, "auto", HIGH_PC), noViewer, "v0.3.2 ou antes: o Baseline de sempre");
         assert.deepEqual(chooseCodec({ h264HwDecode: true, hwDecode: { v: 1 } }, "auto", HIGH_PC), noViewer, "versao nova sem High na placa");
         assert.deepEqual(chooseCodec({ h264HwDecode: true, hwDecode: { v: 1, h264High: false } }, "auto", HIGH_PC), noViewer);
         // so o espectador tem High: este PC nao codifica High na placa
@@ -592,6 +592,12 @@ describe("H.264 High (6400xx) so quando os dois lados tem High na placa", () => 
         assert.deepEqual(chooseCodec(HIGH_VIEWER, "auto", onlyHigh), {
             codec: "h264", h264Profile: "640032",
             reason: "automático: H.264 High por hardware nos dois lados (perfil 640032: este PC codifica High na placa, com a sonda do High ok, e o espectador decodifica High na placa)"
+        });
+        // espectador sem High: vai o unico perfil da placa (o High, como antes desta versao), e o log diz isso
+        assert.deepEqual(chooseCodec(OLD_VIEWER, "auto", onlyHigh), {
+            codec: "h264", h264Profile: "640032",
+            reason: "automático: H.264 por hardware nos dois lados (perfil 640032: o único que a placa codifica por hardware, então vai High mesmo assim, "
+                + "como antes; o espectador não anuncia High por hardware (não tem, ou é uma versão antiga do Telinha))"
         });
         const OPENH264: EncoderReport = { mimeType: "video/H264", implementation: "OpenH264", powerEfficient: false, framesEncoded: 30 };
         assert.equal(softwareFallback(OPENH264, false, HIGH_VIEWER, "auto", HIGH_PC)?.codec, "vp9", "queda de um envio High: VP9 para ele, como no Baseline");

@@ -113,7 +113,7 @@
 //    Tambem e a resposta a um "start" ou a um pedido de codec enquanto isso durar. O espectador para de esperar e mostra
 //    "A placa de vídeo de X travou; ele precisa reiniciar o Discord." em vez do aviso generico de 45 s.
 //    Compatibilidade: versoes antigas ignoram o op desconhecido (parseWatchReply devolve null) e caem no aviso de 45 s.
-// 11. Decodificacao por hardware por perfil (depois da v0.3.1, adicionado sem mudar PROTOCOL_VERSION): a presenca pode
+// 11. Decodificacao por hardware por perfil (depois da v0.3.2, adicionado sem mudar PROTOCOL_VERSION): a presenca pode
 //    trazer `caps.hwDecode`, um objeto VERSIONADO: { v: HW_DECODE_CAPS_VERSION, h264High?: true }.
 //    - h264High: este PC decodifica H.264 High (6400xx) na placa de video (mediaCapabilities.decodingInfo do perfil
 //      High do receiver, powerEfficient). O transmissor so manda High (core/codec.ts → chooseCodec) quando o
@@ -122,7 +122,7 @@
 //    - so sai quando ha pelo menos uma marca verdadeira (sem nada a anunciar = a presenca de antes);
 //    - `v` diferente de HW_DECODE_CAPS_VERSION (uma versao futura que mude o sentido das marcas) = o campo inteiro e
 //      ignorado; marca desconhecida (H.265, AV1 nas proximas versoes, sem mudar `v`) e descartada.
-//    Compatibilidade: a v0.3.1 e anteriores (e o amigo virtual) descartam o campo no sanitizePresence: como espectadoras
+//    Compatibilidade: a v0.3.2 e anteriores (e o amigo virtual) descartam o campo no sanitizePresence: como espectadoras
 //    nunca anunciam High e recebem o Baseline de sempre; como transmissoras ignoram o campo de quem assiste.
 // ============================================================================
 

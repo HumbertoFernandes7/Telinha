@@ -106,7 +106,7 @@ export function setMembers(rig: StreamingRig, ids: string[]) {
 export interface ViewerOptions {
     /** what his presence says about H.264 decoding (default false) */
     h264HwDecode?: boolean;
-    /** caps.hwDecode in his presence, as sent (protocol.ts step 11; e.g. { v: 1, h264High: true }); undefined = left out, like v0.3.1 */
+    /** caps.hwDecode in his presence, as sent (protocol.ts step 11; e.g. { v: 1, h264High: true }); undefined = left out, like v0.3.2 */
     hwDecode?: unknown;
     /** false = not in the voice channel (not admitted with "Recusar quem não está na call") */
     inVoice?: boolean;

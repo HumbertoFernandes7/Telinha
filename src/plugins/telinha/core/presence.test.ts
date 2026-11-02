@@ -110,12 +110,12 @@ describe("presenca recebida: caps.hwDecode (protocol.ts passo 11)", () => {
         }
     });
 
-    test("o que mandamos e o que a v0.3.1 aceita: o campo novo e opcional e o resto da presenca fica igual", () => {
+    test("o que mandamos e o que a v0.3.2 aceita: o campo novo e opcional e o resto da presenca fica igual", () => {
         assert.equal(buildHwDecodeCaps(false), null);
         assert.deepEqual(buildHwDecodeCaps(true), { v: HW_DECODE_CAPS_VERSION, h264High: true });
         const ours = { ...base, caps: { h264HwDecode: true, hwDecode: buildHwDecodeCaps(true)! } };
         assert.equal(isPresenceMessage(ours), true);
-        // o sanitizePresence da v0.3.1 so copia h264HwDecode e diag: o mesmo resultado de uma presenca sem o campo
+        // o sanitizePresence da v0.3.2 so copia h264HwDecode e diag: o mesmo resultado de uma presenca sem o campo
         const { hwDecode: _ignored, ...oldView } = sanitizePresence(ours).caps;
         assert.deepEqual(oldView, { h264HwDecode: true });
     });
