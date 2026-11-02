@@ -19,7 +19,7 @@ import { installNative, type NativeEnv } from "@test/fakes/native";
 import { pluginSettings, resetVencordFakes } from "@test/fakes/vencord";
 
 import {
-    captureBoostDiagnostics, captureBoostLines, captureBoostNeedsRestart, captureEndedText, gpuCaptureNeedsRestart, gpuCaptureState, gpuPriorityState, noteCaptureStarted,
+    captureBoostDiagnostics, captureBoostLines, captureBoostNeedsRestart, captureEndedText, gpuCaptureNeedsRestart, gpuCaptureState, gpuPriorityModeSetting, gpuPriorityState, migrateGpuPrioritySetting, noteCaptureStarted,
     noteCaptureStopped, onGpuCaptureSettingChanged, onGpuPrioritySettingChanged, refreshGpuCapture, resetCaptureBoostForTests, startCaptureBoost,
     subscribeCaptureBoost
 } from "./captureBoost";
@@ -277,7 +277,7 @@ describe("prioridade da captura na placa de video", () => {
     });
 
     test("ligada: a transmissao pede HIGH, o log diz o modo e a resposta; parar volta ao normal", async () => {
-        pluginSettings.load({ gpuPriority: true });
+        pluginSettings.load({ gpuPriorityMode: "high" });
         nativeWith();
         assert.deepEqual(captureBoostLines(), [`${P}: vale quando você transmitir.`]);
         noteCaptureStarted();
@@ -309,7 +309,7 @@ describe("prioridade da captura na placa de video", () => {
 
     test("o processo da GPU ja em REALTIME: o log e a pagina dizem 'já estava REALTIME', na subida e na volta", async () => {
         // o log do dono em 02/11/2026 dizia "GPU do Discord 17188 REALTIME→HIGH", e a volta nem citava o processo da GPU
-        pluginSettings.load({ gpuPriority: true });
+        pluginSettings.load({ gpuPriorityMode: "high" });
         nativeWith(
             report({ raised: 1, targets: [both("NORMAL", "HIGH")[0], gpuRealtime] }),
             restored({ targets: [both("HIGH", "NORMAL")[0], gpuRealtime] })
@@ -326,7 +326,7 @@ describe("prioridade da captura na placa de video", () => {
     });
 
     test("o Windows recusa: a transmissao segue; aviso no log e 'não foi possível: o Windows recusou (talvez precise de administrador)'", async () => {
-        pluginSettings.load({ gpuPriority: true });
+        pluginSettings.load({ gpuPriorityMode: "high" });
         nativeWith(report({ ok: false, done: 0, refused: true, raised: 0, hags: "off", targets: both(null, null, "open 0x80070005 Acesso negado.") }), restored({ targets: [] }));
         noteCaptureStarted();
         await flush();
@@ -340,7 +340,7 @@ describe("prioridade da captura na placa de video", () => {
     });
 
     test("so parte subiu, um motivo geral, ou um erro que nao e de administrador", async () => {
-        pluginSettings.load({ gpuPriority: true });
+        pluginSettings.load({ gpuPriorityMode: "high" });
         const partial = report({ ok: false, done: 1, refused: true, raised: 1, hags: null });
         partial.targets[1] = { ...partial.targets[1], before: null, after: null, error: "open 0x80070005 Acesso negado." };
         // [relatorio, resultado, resto da linha do log, resto da linha da pagina (sem pids; o que nao mudou nao diz o erro)]
@@ -364,7 +364,7 @@ describe("prioridade da captura na placa de video", () => {
     });
 
     test("a volta que falha tambem so avisa", async () => {
-        pluginSettings.load({ gpuPriority: true });
+        pluginSettings.load({ gpuPriorityMode: "high" });
         nativeWith(report(), restored({ ok: false, done: 0, reason: "o ajudante do Telinha (telinha-audio.exe) não foi instalado", targets: both(null, null) }));
         noteCaptureStarted();
         await flush();
@@ -386,7 +386,7 @@ describe("prioridade da captura na placa de video", () => {
     });
 
     test("o pedido que falha no IPC ou volta lixo: aviso no log, a transmissao segue, e parar ainda tenta voltar", async () => {
-        pluginSettings.load({ gpuPriority: true });
+        pluginSettings.load({ gpuPriorityMode: "high" });
         env = installNative({
             setGpuPriority: async (mode: string) => {
                 if (mode === "high") throw new Error("ipc caiu");
@@ -403,8 +403,17 @@ describe("prioridade da captura na placa de video", () => {
         assert.deepEqual(priorityCalls(), ["high", "restore"]);
     });
 
+    test("tempo real (teste): nesta etapa pede HIGH como a alta, e o log diz o modo", async () => {
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        nativeWith();
+        noteCaptureStarted();
+        await flush();
+        assert.deepEqual(priorityCalls(), ["high"]);
+        assert.equal(messages().at(-1), `${P}: alta — Discord 1234 NORMAL→HIGH, GPU do Discord 5678 NORMAL→HIGH; HAGS ligado`);
+    });
+
     test("sem a funcao na parte nativa: nada pedido, e a pagina e o log dizem", async () => {
-        pluginSettings.load({ gpuPriority: true });
+        pluginSettings.load({ gpuPriorityMode: "high" });
         env = installNative({});
         noteCaptureStarted();
         await flush();
@@ -416,29 +425,29 @@ describe("prioridade da captura na placa de video", () => {
 
     test("mudar a opcao: fora do ar so vale na proxima; no ar liga e desliga na hora (onChange de settings.ts)", async () => {
         nativeWith();
-        pluginSettings.set("gpuPriority", true);
+        pluginSettings.set("gpuPriorityMode", "high");
         assert.equal(messages().at(-1), `${P} ligada nas configurações: vale na próxima transmissão`);
         await flush();
         assert.deepEqual(priorityCalls(), []);
 
         rt.local = {} as typeof rt.local;
-        pluginSettings.set("gpuPriority", false);
+        pluginSettings.set("gpuPriorityMode", "off");
         assert.equal(messages().at(-1), `${P} desligada nas configurações`);
-        pluginSettings.set("gpuPriority", true);
+        pluginSettings.set("gpuPriorityMode", "high");
         assert.equal(messages().at(-1), `${P} ligada nas configurações`);
         await flush();
         assert.deepEqual(priorityCalls(), ["high"]);
         onGpuPrioritySettingChanged(); // de novo, ja alta: nada
         await flush();
         assert.deepEqual(priorityCalls(), ["high"]);
-        pluginSettings.set("gpuPriority", false);
+        pluginSettings.set("gpuPriorityMode", "off");
         await flush();
         assert.deepEqual(priorityCalls(), ["high", "restore"]);
         assert.equal(messages().at(-1), `${P}: de volta ao normal (opção desligada) — Discord 1234 HIGH→NORMAL, GPU do Discord 5678 HIGH→NORMAL; HAGS ligado`);
 
         env!.restore();
         env = installNative({});
-        pluginSettings.set("gpuPriority", true);
+        pluginSettings.set("gpuPriorityMode", "high");
         await flush();
         assert.deepEqual(priorityCalls(), [], "sem a funcao na parte nativa: nada");
     });
@@ -455,7 +464,7 @@ describe("prioridade da captura na placa de video", () => {
     });
 
     test("as notas do main (o processo da GPU reiniciou) vao para o log; a volta que falha de novo do mesmo jeito (quiet) nao", async () => {
-        pluginSettings.load({ gpuPriority: true });
+        pluginSettings.load({ gpuPriorityMode: "high" });
         const note = "o processo da GPU do Discord reiniciou às 21:03:04 UTC (5678 → 9999): alta de novo";
         nativeWith(report(), restored({ ok: false, done: 0, refused: true, quiet: true, notes: [note], targets: both(null, null, "open 0x80070005 Acesso negado.") }));
         noteCaptureStarted();
@@ -467,7 +476,7 @@ describe("prioridade da captura na placa de video", () => {
     });
 
     test("a volta recusada pelo Windows diz que tenta de novo", async () => {
-        pluginSettings.load({ gpuPriority: true });
+        pluginSettings.load({ gpuPriorityMode: "high" });
         nativeWith(report(), restored({ ok: false, done: 0, refused: true, targets: both(null, null, "open 0x80070005 Acesso negado.") }));
         noteCaptureStarted();
         await flush();
@@ -495,5 +504,37 @@ describe("a captura que termina sozinha com a captura pela placa de video ligada
             message: "A transmissão parou: a placa de vídeo provavelmente reiniciou. É só transmitir de novo."
         });
         assert.equal(captureEndedText("window")!.message, "A transmissão parou: a janela foi fechada ou a placa de vídeo reiniciou. É só transmitir de novo.");
+    });
+});
+
+describe("a opcao de prioridade: modo e migracao", () => {
+    beforeEach(() => {
+        resetVencordFakes();
+    });
+
+    test("gpuPriorityModeSetting: os tres modos valem; valor desconhecido conta como desligada", () => {
+        assert.equal(gpuPriorityModeSetting(), "off");
+        for (const mode of ["off", "high", "realtime"] as const) {
+            pluginSettings.load({ gpuPriorityMode: mode });
+            assert.equal(gpuPriorityModeSetting(), mode);
+        }
+        for (const junk of ["alta", true, 1, null]) {
+            pluginSettings.load({ gpuPriorityMode: junk });
+            assert.equal(gpuPriorityModeSetting(), "off", String(junk));
+        }
+    });
+
+    test("migrateGpuPrioritySetting: true vira alta; false so apaga a chave antiga; escolha nova valida vence; lixo nao conta", () => {
+        assert.deepEqual(migrateGpuPrioritySetting({ gpuPriority: true }), { mode: "high", dropOld: true });
+        assert.deepEqual(migrateGpuPrioritySetting({ gpuPriority: false }), { mode: null, dropOld: true });
+        assert.deepEqual(migrateGpuPrioritySetting({}), { mode: null, dropOld: false });
+        assert.deepEqual(migrateGpuPrioritySetting(undefined), { mode: null, dropOld: false });
+        assert.deepEqual(migrateGpuPrioritySetting(null), { mode: null, dropOld: false });
+        for (const mode of ["off", "high", "realtime"]) {
+            assert.deepEqual(migrateGpuPrioritySetting({ gpuPriority: true, gpuPriorityMode: mode }), { mode: null, dropOld: true });
+            assert.deepEqual(migrateGpuPrioritySetting({ gpuPriorityMode: mode }), { mode: null, dropOld: false });
+        }
+        assert.deepEqual(migrateGpuPrioritySetting({ gpuPriority: true, gpuPriorityMode: "tempo real" }), { mode: "high", dropOld: true });
+        assert.deepEqual(migrateGpuPrioritySetting({ gpuPriority: "true" }), { mode: null, dropOld: true });
     });
 });
