@@ -239,8 +239,10 @@ describe("cópia na hora: no ar", () => {
         assert.equal(copy.outputFlat(), false);
         // a captura volta a andar e o gerador fica parado
         total += COPY_FLOW_MIN_FRAMES;
-        assert.equal(copy.outputFlat(), true, "já conta na hora, sem esperar o próximo pedido");
-        await clock.tickAsync(2000 * COPY_FLOW_POLLS);
+        assert.equal(copy.outputFlat(), false, "entre respostas não conta: a próxima resposta ainda pode ver o gerador andar");
+        await clock.tickAsync(2000);
+        assert.equal(copy.outputFlat(), true, "uma resposta já viu a captura andar sem saída");
+        await clock.tickAsync(2000 * (COPY_FLOW_POLLS - 1));
         assert.deepEqual(reasons, [`os quadros não saem da cópia: ${COPY_FLOW_MIN_FRAMES} quadros da captura sem nenhum chegar aos envios`]);
         assert.equal(copy.outputFlat(), false, "parada, não diz mais nada");
     });

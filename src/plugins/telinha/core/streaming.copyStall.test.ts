@@ -86,7 +86,7 @@ afterEach(async () => {
  * Um espectador H.264 cujo encoder nao codifica nada enquanto a entrada e a copia parada (sem quadro), com a captura
  * andando; de volta na captura direta, codifica e manda (o encoder da placa esta bom).
  */
-async function starvedViewer() {
+async function starvedViewer(opts: { encodesOnSource?: boolean; } = {}) {
     seq++;
     const peerId = `cs${seq}`;
     const pc = await connectViewer(rig, peerId, String(820_000_000_000_000_000n + BigInt(seq)), `c${seq}`, { h264HwDecode: true });
@@ -100,7 +100,7 @@ async function starvedViewer() {
         const fresh = Math.round((rig.clock.now() - at) * 60 / 1000);
         source += fresh;
         at = rig.clock.now();
-        if (sender.track === captured) encoded += fresh;
+        if (sender.track === captured && opts.encodesOnSource !== false) encoded += fresh;
         if (encoded > 0) {
             return videoSenderStats({
                 mimeType: "video/H264", encoderImplementation: "MediaFoundationVideoEncodeAccelerator (NVIDIA)", powerEfficientEncoder: true,
@@ -151,5 +151,21 @@ describe("cópia na hora parada com o Worker vivo", () => {
         await seconds(rig, 12);
         assert.ok(rt.local!.copy, "a cópia continua");
         assert.equal(rt.local!.copy!.outputFlat(), false);
+    });
+
+    // por ultimo: conter desliga o H.264 automatico neste processo
+    test("cópia saudável e o encoder da placa travado de verdade: contido no 1o checkStall de 8 s, a cópia fica", async () => {
+        let written = 0;
+        fake.stats = { get written() { return (written += 120); } } as never;
+        const copy = rt.local!.copy!;
+        const v = await starvedViewer({ encodesOnSource: false });
+        const since = logMark();
+        await seconds(rig, H264_STALL_MS / 1000 + 1);
+        assert.equal(isContained(v.pc as unknown as RTCPeerConnection), true, "a placa travada é contida na hora");
+        assert.equal(rt.local!.copy, copy, "a cópia saudável não foi derrubada");
+        assert.equal(v.sender.track, fake.generators[0]);
+        const lines = since();
+        assert.ok(lines.some(l => l.includes("não codificou nenhum quadro em 8 s")), lines.join("\n"));
+        assert.ok(!lines.some(l => l.includes("a cópia na hora parou")));
     });
 });

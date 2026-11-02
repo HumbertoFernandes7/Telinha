@@ -82,8 +82,9 @@ export interface CaptureCopy {
     /** chamado uma vez se a copia morrer no meio (o Worker caiu, parou de responder ou os quadros pararam de sair) */
     onFail(cb: (reason: string) => void): void;
     /**
-     * Desde a ultima vez que o gerador aceitou um quadro, a captura ja entregou COPY_FLOW_MIN_FRAMES ou mais: a copia
-     * esta parada com a captura andando (core/streaming.ts → checkStall culpa a copia, nao o encoder)
+     * A ultima resposta do Worker ja viu a captura entregar COPY_FLOW_MIN_FRAMES ou mais desde a ultima vez que o gerador
+     * aceitou um quadro: a copia esta parada com a captura andando (core/streaming.ts → checkStall culpa a copia, nao o
+     * encoder). Nunca compara com a captura de agora: entre respostas uma copia saudavel pareceria parada
      */
     outputFlat(): boolean;
     /** desiste da copia agora (onFail com `reason`): os envios voltam para a faixa original */
@@ -384,7 +385,8 @@ export async function startCaptureCopy(source: MediaStreamTrack, env: CaptureCop
             failCb = cb;
         },
         outputFlat() {
-            return !stopped && flow != null && sourceNow() - flow.src >= COPY_FLOW_MIN_FRAMES;
+            // so o que uma resposta ja viu: entre respostas (2 s) a captura anda e o gerador ainda nao foi lido de novo
+            return !stopped && flow != null && flow.flat >= 1;
         },
         abandon(reason) {
             fail(reason);
