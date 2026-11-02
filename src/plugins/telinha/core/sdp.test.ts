@@ -100,7 +100,7 @@ describe("mungeRemoteSdp: ordem dos codecs de video", () => {
     test("H.264 com perfil por hardware: 42001f, depois 42e01f, depois mode 0, depois o resto na ordem original", () => {
         const sdp = sdpOf([audioSection(), videoSection(), DATA]);
         const res = mungeRemoteSdp(sdp, plan({ codec: "h264", h264Profile: "42001f" }));
-        assert.deepEqual(res.changes, ["mid 0: opus estéreo 128 kbps", "mid 1: H264 (perfil 42001f) primeiro"]);
+        assert.deepEqual(res.changes, ["mid 0: opus estéreo 192 kbps", "mid 1: H264 (perfil 42001f) primeiro"]);
         assert.deepEqual(res.notes, []);
         assert.deepEqual(payloads(res.sdp, "1"), ["100", "99", "98", "96", "97", "101", "102", "103", "104"]);
         assert.ok(res.sdp.includes("\r\n") && !/[^\r]\n/.test(res.sdp), "mantem o CRLF");
@@ -225,11 +225,11 @@ describe("mungeRemoteSdp: bitrate de envio", () => {
 });
 
 describe("mungeRemoteSdp: opus estereo", () => {
-    const STEREO = "stereo=1;sprop-stereo=1;maxaveragebitrate=128000";
+    const STEREO = "stereo=1;sprop-stereo=1;maxaveragebitrate=192000";
 
-    test("fmtp do opus ganha estereo a 128 kbps", () => {
+    test("fmtp do opus ganha estereo a 192 kbps", () => {
         const res = mungeRemoteSdp(sdpOf([audioSection()]), plan({ videoMids: new Set() }));
-        assert.deepEqual(res.changes, ["mid 0: opus estéreo 128 kbps"]);
+        assert.deepEqual(res.changes, ["mid 0: opus estéreo 192 kbps"]);
         assert.ok(res.sdp.includes(`a=fmtp:111 minptime=10;useinbandfec=1;${STEREO}\r\n`));
     });
 

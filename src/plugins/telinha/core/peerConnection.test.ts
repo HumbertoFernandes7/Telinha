@@ -167,8 +167,8 @@ describe("TelinhaPeerConnection", () => {
             assert.equal(applied.type, "offer");
             assert.match(applied.sdp!, /m=video 9 UDP\/TLS\/RTP\/SAVPF 98 96\r\n/);
             assert.match(applied.sdp!, /a=fmtp:96 x-google-start-bitrate=6000;x-google-max-bitrate=20000\r\n/);
-            assert.match(applied.sdp!, /a=fmtp:111 minptime=10;stereo=1;sprop-stereo=1;maxaveragebitrate=128000\r\n/);
-            assert.equal(logged(/^amigo: SDP remoto \(offer\) ajustado — mid 0: opus estéreo 128 kbps; mid 1: VP9 primeiro; mid 1: x-google/, mark).length, 1);
+            assert.match(applied.sdp!, /a=fmtp:111 minptime=10;stereo=1;sprop-stereo=1;maxaveragebitrate=192000\r\n/);
+            assert.equal(logged(/^amigo: SDP remoto \(offer\) ajustado — mid 0: opus estéreo 192 kbps; mid 1: VP9 primeiro; mid 1: x-google/, mark).length, 1);
 
             // o mesmo ajuste de novo (ex.: renegociacao): nao repete o log
             await pc.setRemoteDescription(remote("answer"));
