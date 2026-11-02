@@ -711,8 +711,13 @@ export class QualityController {
         let level = this.global;
         let reason: GlobalReason | null = null;
         let why = "";
+        // com a captura pela placa de video o tempo medido e quase todo espera pelo quadro atras do jogo (GPU_KEEP_UP):
+        // escalar pela taxa de pixels nao preve nada, e um encoder que ainda nao comecou nao tem como ficar para tras. Sem
+        // previsao da placa aqui; se o novo encoder lotar a placa de verdade, os encoders ficam para tras e a regra
+        // periodica (decide) desce em 2 janelas. CPU e upload como sempre
+        const gpuCapture = this.deps.gpuCapture?.() === true;
         for (let i = 0; i < 2; i++) {
-            const gpu = this.predictGpu(level);
+            const gpu = gpuCapture ? null : this.predictGpu(level);
             const gpuLimit = GPU_LIMIT * this.frameMs(level);
             const load = this.predictLoad(level);
             const up = this.uplinkFresh(now);
@@ -877,7 +882,7 @@ export class QualityController {
             this.uplink = { kbps: total, at: now };
             globalChanged = this.stepGlobalDown("upload", now, `${troubled.length} de ${active.length} espectadores com banda limitada, ${Math.round(total)} kbps enviados no total`);
         } else if (!gpuOver && !fpsShort && !cpuBinding && !uploadWide && this.global !== this.deps.ceiling) {
-            globalChanged = this.tryGlobalUp(active, now);
+            globalChanged = this.tryGlobalUp(active, now, gpuCapture);
         }
 
         if (uploadWide || globalChanged) {
@@ -916,13 +921,17 @@ export class QualityController {
         return true;
     }
 
-    private tryGlobalUp(active: Active[], now: number): boolean {
+    private tryGlobalUp(active: Active[], now: number, gpuCapture: boolean): boolean {
         if (now - this.globalHold.calmSince < this.globalHold.holdMs) return false;
         const next = stepUp(this.global, this.deps.ceiling, this.preferMotion());
         if (!next) return false;
         const n = this.viewers.size;
         const gpu = this.predictGpu(next);
-        if (gpu && gpu.ms > GPU_UP_LIMIT * this.frameMs(next)) return false;
+        // com a captura pela placa de video e os encoders acompanhando a fonte (ou nenhum para medir), a previsao vem do
+        // tempo de espera pelo quadro (GPU_KEEP_UP) e nao segura a subida; se o degrau de cima nao couber, os encoders ficam
+        // para tras, a regra periodica desce e a espera dobra
+        const gpuLatency = gpuCapture && (this.gpuKeepUp(active) ?? 1) >= GPU_KEEP_UP;
+        if (gpu && gpu.ms > GPU_UP_LIMIT * this.frameMs(next) && !gpuLatency) return false;
         const load = this.predictLoad(next);
         if (load && (load.perEncoder > UP_MAX_BUSY || load.total > cpuBudget() * 0.8)) return false;
         const up = this.uplinkFresh(now);
@@ -936,7 +945,8 @@ export class QualityController {
             if (unsettled.length >= Math.max(2, Math.ceil(considered.length / 2))) return false;
         }
         const stable = `estável há ${Math.round((now - this.globalHold.calmSince) / 1000)} s`;
-        this.setGlobal(next, this.globalReason ?? "cpu", now, gpu ? `${stable}, previsão de ${gpu.ms.toFixed(1)} ms por quadro na placa` : stable, "up");
+        const gpuText = !gpu ? "" : gpuLatency ? ", os encoders da placa acompanham a fonte" : `, previsão de ${gpu.ms.toFixed(1)} ms por quadro na placa`;
+        this.setGlobal(next, this.globalReason ?? "cpu", now, stable + gpuText, "up");
         return true;
     }
 

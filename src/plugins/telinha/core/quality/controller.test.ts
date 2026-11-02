@@ -14,11 +14,12 @@
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 
+import type { QualityLevel } from "@plugins/telinha/types";
 import { useFakeClock } from "@test/fakes/clock";
 import { type EncoderRates, EncoderSim, installWebRtc, type WebRtcEnv } from "@test/fakes/webrtc";
 import { EVAL_MS, GpuSim, logsDuring, measuredFrameMs, NVENC_IMPLEMENTATION, type QualityHarness, qualityHarness, qualityLines } from "@test/helpers/wpb-quality";
 
-import { BW_GRACE_MS } from "./levels";
+import { BW_GRACE_MS, LEVELS } from "./levels";
 
 describe("qualidade automatica: carencia de banda do espectador novo (levels.BW_GRACE_MS)", () => {
     test("a carencia e de 20 s", () => {
@@ -399,6 +400,117 @@ describe("qualidade automatica: limite da placa de video com a captura pela plac
         assert.deepEqual(qualityLines(lines), []);
         assert.match(lines.find(l => l.startsWith("Placa de vídeo:")) ?? "", /\(sem encoder para medir fora os limitados pela rede\)/);
     });
+
+    /**
+     * Encoders NVENC que seguem o degrau que o controller aplica: codificam min(fps do degrau, fonte) x `keep` quadros por
+     * segundo, a `ms` por quadro (o mesmo em todos: e a espera atras do jogo, nao o tamanho do quadro).
+     */
+    class TextureGpu {
+        ms: number;
+        keep = 1;
+        private readonly peers = new Map<string, { sim: EncoderSim; level: QualityLevel; }>();
+
+        constructor(readonly h: QualityHarness, readonly sourceFps: number, ms: number) {
+            this.ms = ms;
+            h.onApply = (peerId, level) => {
+                const p = this.peers.get(peerId);
+                if (p) p.level = level;
+                this.update();
+            };
+        }
+
+        async join(peerId: string) {
+            const sim = nvenc(this.sourceFps, { sourceFps: this.sourceFps });
+            this.h.attach(peerId, sim);
+            this.peers.set(peerId, { sim, level: this.h.controller.levelFor(peerId) });
+            this.update();
+            await this.h.join(peerId, true);
+        }
+
+        set(ms: number, keep = this.keep) {
+            this.ms = ms;
+            this.keep = keep;
+            this.update();
+        }
+
+        private update() {
+            for (const { sim, level } of this.peers.values()) {
+                const fps = Math.min(LEVELS[level].fps, this.sourceFps) * this.keep;
+                sim.set({ fps, encodeBusy: this.ms * fps / 1000, height: LEVELS[level].height, width: LEVELS[level].height * 16 / 9 });
+            }
+        }
+    }
+
+    const transitions = (lines: string[]) => qualityLines(lines).filter(l => l.includes("→"));
+
+    async function steve(t: Parameters<typeof useFakeClock>[0], gpuCapture: boolean) {
+        const h = qualityHarness(useFakeClock(t), {}, { gpuCapture: () => gpuCapture });
+        const gpu = new TextureGpu(h, 55, 6.6);
+        await gpu.join("A");
+        await gpu.join("B");
+        await h.runUntil(30_000);
+        return { h, gpu };
+    }
+
+    // Log do Steve (02/11 01:52, RTX 10de:2f04, captura pela placa ligada): 6,6 → 87 → 176 ms por quadro com os encoders
+    // codificando a fonte inteira; 1080p60 → 720p60 → 720p30 em 6 s, e depois 720p30 ↔ 720p60 a cada ~70 s
+    test("o caso do Steve, ligada: 87 e 176 ms por quadro (limite 14,5 ms) com os encoders acompanhando: fica em 1080p60, sem oscilar", async t => {
+        const { h, gpu } = await steve(t, true);
+        const lines = await logsDuring(async () => {
+            gpu.set(87);
+            await h.runUntil(120_000);
+            gpu.set(176);
+            await h.runUntil(720_000);
+        });
+        assert.deepEqual(transitions(lines), []);
+        assert.deepEqual(h.applied.map(a => a.level), ["1080p60", "1080p60"]);
+    });
+
+    test("o caso do Steve, desligada: o de antes, dois degraus em 6 s ate 720p30, e la fica", async t => {
+        const { h, gpu } = await steve(t, false);
+        gpu.set(87);
+        const lines = await logsDuring(() => h.runUntil(300_000));
+        assert.deepEqual(transitions(lines).map(l => l.replace(/ \(placa de vídeo: .*$/, "")), [
+            "Qualidade automática: 1080p 60 fps → 720p 60 fps para os 2 espectadores",
+            "Qualidade automática: 720p 60 fps → 720p 30 fps para os 2 espectadores"
+        ]);
+        assert.deepEqual(h.applied.filter(a => a.peerId === "A").map(a => [a.level, a.atMs]), [["1080p60", 0], ["720p60", 34_000], ["720p30", 40_000]]);
+    });
+
+    test("ligada: desceu ate 720p30 com os encoders para tras; voltando a acompanhar (30 ms por quadro), sobe ate 1080p60 e fica", async t => {
+        const { h, gpu } = await steve(t, true);
+        gpu.set(87, 0.7);
+        await h.runUntil(60_000);
+        assert.equal(h.controller.levelFor("A"), "720p30");
+        // a previsao com 30 ms passa de longe do limite da subida (60% do intervalo); acompanhando a fonte, nao segura
+        gpu.set(30, 1);
+        const up = await logsDuring(() => h.runUntil(120_000));
+        assert.deepEqual(transitions(up), [
+            "Qualidade automática: 720p 30 fps → 720p 60 fps para os 2 espectadores (placa de vídeo: estável há 10 s, os encoders da placa acompanham a fonte)",
+            "Qualidade automática: 720p 60 fps → 1080p 60 fps para os 2 espectadores (placa de vídeo: estável há 10 s, os encoders da placa acompanham a fonte)"
+        ]);
+        assert.deepEqual(transitions(await logsDuring(() => h.runUntil(720_000))), [], "sem oscilar");
+        assert.equal(h.controller.levelFor("A"), "1080p60");
+    });
+
+    for (const gpuCapture of [true, false]) {
+        test(`mais um espectador com 12 ms por quadro (a previsao com 2 passa do limite), ${gpuCapture ? "ligada: fica em 1080p60" : "desligada: desce antes, como antes"}`, async t => {
+            const h = qualityHarness(useFakeClock(t), {}, { gpuCapture: () => gpuCapture });
+            const gpu = new TextureGpu(h, 60, 12);
+            await gpu.join("A");
+            await h.runUntil(30_000);
+            const lines = await logsDuring(() => gpu.join("B"));
+            assert.deepEqual(transitions(lines), gpuCapture ? [] : [
+                "Qualidade automática: 1080p 60 fps → 720p 60 fps para os 2 espectadores (placa de vídeo: mais um espectador: previsão de 15.2 ms por quadro "
+                + "com 2 espectadores em 1080p 60 fps, o limite é 13.3 ms); nova subida só após 10 s estável"
+            ]);
+            assert.equal(h.controller.levelFor("B"), gpuCapture ? "1080p60" : "720p60");
+            if (gpuCapture) {
+                // os dois codificando a fonte inteira: a regra periodica tambem nao desce
+                assert.deepEqual(transitions(await logsDuring(() => h.runUntil(120_000))), []);
+            }
+        });
+    }
 
     for (const gpuCapture of [false, undefined]) {
         test(`${gpuCapture === false ? "desligada" : "sem a opcao nas dependencias"}: o limite de sempre, mesmo com os encoders acompanhando`, async t => {
