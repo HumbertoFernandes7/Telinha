@@ -22,9 +22,10 @@ import type { AccessMode, IdentityAlert, LocalStream, PendingViewer, QualityReas
 import { flushPromises } from "@test/fakes/clock";
 import { act, fireEvent, render, screen, settle, within } from "@test/fakes/render";
 import {
-    caughtErrors, clipboard, FRIEND_ID, makeUser, ME_ID, ModalHost, modals, OTHER_ID, PopoutActions, resetVencordFakes, SelectedChannelStore, toasts,
+    caughtErrors, clipboard, FRIEND_ID, loggerLines, makeUser, ME_ID, ModalHost, modals, OTHER_ID, PopoutActions, resetVencordFakes, SelectedChannelStore, toasts,
     UserStore, VOICE_CHANNEL_ID
 } from "@test/fakes/vencord";
+import { captureStream } from "@test/fakes/webrtc";
 import { type LiveScene, openLiveScene } from "@test/helpers/wpf-live";
 import { until } from "@test/helpers/wpf-modal";
 
@@ -58,6 +59,9 @@ const dialogTitle = () => document.querySelector("[role=dialog] h1")?.textConten
 /** the status row (the live one): the tooltip wrapper around the "Ao vivo" button */
 const statusRow = () => document.querySelector(".vc-telinha-bar-status") as HTMLButtonElement;
 const tooltipOf = (el: Element) => el.closest("[data-tooltip]")?.getAttribute("data-tooltip");
+/** the buttons of the bar's "Resolução" or "FPS" group, and one of them by its text */
+const segButtons = (group: string) => within(screen.getByRole("group", { name: group })).getAllByRole("button") as HTMLButtonElement[];
+const seg = (group: string, label: string) => within(screen.getByRole("group", { name: group })).getByRole("button", { name: label }) as HTMLButtonElement;
 
 function renderBar() {
     return render(<><VoiceBar /><ModalHost /></>);
@@ -284,6 +288,74 @@ describe("VoiceBar (so com o estado do Telinha)", () => {
         });
     });
 
+    describe("Resolução e FPS da transmissao no ar", () => {
+        test("os dois seletores lado a lado, logo depois de Quem assiste, com a qualidade do ar marcada", () => {
+            show({ local: mine({ quality: "1440p30" }) });
+            renderBar();
+            const row = document.querySelector(".vc-telinha-bar-quality") as HTMLElement;
+            assert.equal(row.previousElementSibling?.className, "vc-telinha-bar-access", "logo depois de Quem assiste");
+            assert.deepEqual(within(row).getAllByRole("group").map(g => g.getAttribute("aria-label")), ["Resolução", "FPS"]);
+            assert.deepEqual([...row.querySelectorAll(".vc-telinha-bar-seg-label")].map(l => l.textContent), ["Resolução", "FPS"]);
+            assert.deepEqual(segButtons("Resolução").map(b => [b.textContent, b.getAttribute("aria-pressed")]), [["720p", "false"], ["1080p", "false"], ["2K", "true"]]);
+            assert.deepEqual(segButtons("FPS").map(b => [b.textContent, b.getAttribute("aria-pressed")]), [["30", "true"], ["60", "false"]]);
+            assert.equal(segButtons("Resolução")[2].title, "2K (1440p) precisa de uma tela 2K: numa tela ou janela menor, vai no tamanho dela.");
+            assert.equal(segButtons("Resolução")[1].hasAttribute("title"), false);
+            assert.ok(segButtons("FPS")[0].className.includes("vc-telinha-bar-seg-active"));
+            assert.equal(document.querySelector(".vc-telinha-bar-wrap.vc-telinha-bar-info"), null, "sem aviso de tamanho");
+        });
+
+        test("2K numa tela menor: o aviso de que vai no tamanho dela aparece logo abaixo", () => {
+            show({ local: mine({ quality: "1440p60", sizeNote: "2K escolhido, a tela tem 1080p: enviando 1080p" }) });
+            renderBar();
+            const note = document.querySelector(".vc-telinha-bar-quality")?.nextElementSibling as HTMLElement;
+            assert.equal(note.textContent, "2K escolhido, a tela tem 1080p: enviando 1080p");
+            assert.equal(note.title, "2K escolhido, a tela tem 1080p: enviando 1080p");
+            assert.ok(note.className.includes("vc-telinha-bar-wrap"));
+        });
+
+        test("clicar na qualidade que ja esta no ar nao faz nada", async () => {
+            show({ local: mine({ quality: "1080p60" }) });
+            renderBar();
+            fireEvent.click(seg("Resolução", "1080p"));
+            fireEvent.click(seg("FPS", "60"));
+            await settle();
+            assert.deepEqual(toasts, []);
+            assert.deepEqual(loggerLines.filter(l => l.level === "error"), []);
+        });
+
+        test("trocar sem o nucleo transmitindo: o erro vai para o log, sem aviso de sucesso, e os botoes voltam", async () => {
+            show({ local: mine({ quality: "1080p60" }) });
+            renderBar();
+            fireEvent.click(seg("FPS", "30"));
+            assert.equal(seg("FPS", "60").disabled, true, "enquanto troca, nao da para clicar de novo");
+            await settle();
+            assert.deepEqual(toasts, []);
+            assert.deepEqual(loggerLines.filter(l => l.level === "error").map(l => [l.args[0], String(l.args[1])]), [["changeStreamQuality falhou", "Error: Você não está transmitindo."]]);
+            assert.equal(seg("FPS", "30").disabled, false);
+        });
+
+        test("qualidade bloqueada (envio H.264 da placa comecando, ou travado): botoes desligados, o motivo na dica, clicar nao faz nada", async () => {
+            const lock = "A qualidade pode mudar assim que o vídeo começar a sair para todos (alguns segundos)";
+            show({ local: mine({ quality: "1440p60", qualityLock: lock }) });
+            renderBar();
+            for (const b of [...segButtons("Resolução"), ...segButtons("FPS")]) {
+                assert.equal(b.disabled, true, b.textContent!);
+                assert.equal(b.title, lock, "a dica do 2K da lugar ao motivo");
+            }
+            assert.equal((document.querySelector(".vc-telinha-bar-quality") as HTMLElement).title, lock);
+            fireEvent.click(seg("FPS", "30"));
+            await settle();
+            assert.deepEqual(loggerLines.filter(l => l.level === "error"), [], "nem tentou trocar");
+
+            // liberada: os botoes voltam, com a dica do 2K
+            show({ local: mine({ quality: "1440p60" }) });
+            await settle();
+            assert.equal(seg("FPS", "30").disabled, false);
+            assert.equal(seg("Resolução", "2K").title, "2K (1440p) precisa de uma tela 2K: numa tela ou janela menor, vai no tamanho dela.");
+            assert.equal((document.querySelector(".vc-telinha-bar-quality") as HTMLElement).hasAttribute("title"), false);
+        });
+    });
+
     describe("qualidade automatica", () => {
         const auto = (patch: Partial<NonNullable<LocalStream["autoQuality"]>> = {}) => ({ current: "1080p60" as const, reason: null, reasonText: null, viewers: {}, ...patch });
 
@@ -499,6 +571,63 @@ describe("VoiceBar com o nucleo de verdade", () => {
         await flushPromises();
         assert.deepEqual(clipboard, ["pipoca-42"]);
         assert.deepEqual(toasts, [{ text: "Senha copiada", variant: "success" }]);
+    });
+
+    test("Resolução e FPS na barra: capturam de novo a mesma fonte; quem assiste continua, com o mesmo Quem pode assistir", async () => {
+        renderBar();
+        const before = getState().local!;
+        assert.deepEqual([before.quality, before.access, before.viewers], ["1080p60", "password", ["peerA"]]);
+        const calls = scene.rtc.mediaDevices.displayMediaCalls.length;
+
+        fireEvent.click(seg("Resolução", "2K"));
+        assert.equal(seg("FPS", "30").disabled, true, "trocando");
+        await act(async () => void await until(() => getState().local?.quality === "1440p60"));
+        await settle();
+        assert.deepEqual(toasts, [{ text: "Telinha: transmitindo em 2K · 60 fps", variant: "success" }]);
+        assert.equal(scene.rtc.mediaDevices.displayMediaCalls.length, calls + 1, "uma captura nova");
+        assert.deepEqual(scene.rtc.mediaDevices.displayMediaCalls.at(-1)?.video, {
+            width: { ideal: 2560, max: 2560 }, height: { ideal: 1440, max: 1440 }, frameRate: { ideal: 60, max: 60 }
+        });
+        const after = getState().local!;
+        assert.deepEqual([after.source.id, after.access, after.viewers], [before.source.id, "password", ["peerA"]]);
+        assert.equal(seg("Resolução", "2K").getAttribute("aria-pressed"), "true");
+        // a tela falsa tem 1920x1080: vai em 1080p, e a barra diz isso
+        screen.getByText("2K escolhido, a tela tem 1080p: enviando 1080p");
+
+        toasts.length = 0;
+        fireEvent.click(seg("FPS", "30"));
+        await act(async () => void await until(() => getState().local?.quality === "1440p30"));
+        await settle();
+        assert.deepEqual(toasts, [{ text: "Telinha: transmitindo em 2K · 30 fps", variant: "success" }]);
+        assert.deepEqual((scene.rtc.mediaDevices.displayMediaCalls.at(-1)?.video as MediaTrackConstraints).frameRate, { ideal: 30, max: 30 });
+
+        toasts.length = 0;
+        fireEvent.click(seg("Resolução", "1080p"));
+        await act(async () => void await until(() => getState().local?.quality === "1080p30"));
+        await settle();
+        assert.equal(screen.queryByText(/2K escolhido/), null, "sem 2K, sem aviso");
+        assert.deepEqual(getState().local?.viewers, ["peerA"]);
+    });
+
+    test("a captura nova falha (janela fechada): a transmissao continua como estava e o motivo aparece na barra", async () => {
+        if (!getState().local) await act(async () => scene.goLive({ access: "approval" })); // sozinho (sem os testes de antes): comeca a sua
+        renderBar();
+        const before = getState().local!;
+        // o outro fps: o que ja esta valendo nao captura de novo (o teste vale sozinho e em qualquer ordem)
+        const fps = before.quality.endsWith("30") ? "60" : "30";
+        scene.rtc.mediaDevices.getDisplayMediaImpl = () => Promise.reject(Object.assign(new Error("gone"), { name: "NotFoundError" }));
+        try {
+            fireEvent.click(seg("FPS", fps));
+            await act(async () => void await until(() => getState().lastError != null));
+            await settle();
+        } finally {
+            scene.rtc.mediaDevices.getDisplayMediaImpl = constraints => Promise.resolve(captureStream({ audio: !!constraints.audio }));
+        }
+        assert.deepEqual(toasts, []);
+        assert.deepEqual([getState().local?.quality, getState().local?.viewers], [before.quality, before.viewers]);
+        screen.getByTitle("Não foi possível capturar essa fonte (a janela foi fechada ou está protegida).");
+        assert.equal(seg("FPS", fps).disabled, false, "da para tentar de novo");
+        act(() => setLastError(null));
     });
 
     test("erro do nucleo aparece na barra e Dispensar o limpa de verdade", async () => {

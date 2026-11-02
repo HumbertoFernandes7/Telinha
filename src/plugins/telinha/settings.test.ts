@@ -17,20 +17,23 @@ import assert from "node:assert/strict";
 import { after, before, beforeEach, describe, test } from "node:test";
 
 import { stopStreaming } from "@plugins/telinha/actions";
+import { qualityFromSettings } from "@plugins/telinha/core/quality/choice";
 import { QUALITY } from "@plugins/telinha/core/streaming";
 import { isStreamAccess } from "@plugins/telinha/protocol";
 import { getEventLog, getState } from "@plugins/telinha/store";
+import { defaultQuality } from "@plugins/telinha/ui/common";
 import { eventually, useFakeClock } from "@test/fakes/clock";
 import { trystero } from "@test/fakes/trystero";
 import { OTHER_ID, pluginSettings, resetVencordFakes } from "@test/fakes/vencord";
 import { type Call, friendArrives, goLive, joinCall } from "@test/helpers/wpc-session";
 import { OptionType } from "@utils/types";
 
-import { migrateAccessSettings, settings } from "./settings";
+import { migrateAccessSettings, migrateQualitySettings, settings } from "./settings";
 
+// defaultQuality ("Qualidade padrão", ate a v0.3.x) virou defaultResolution + defaultFps: migrateQualitySettings
 const STORED_KEYS = [
-    "groupPassword", "rejectOutsiders", "defaultAccess", "requireVerifiedIdentity", "defaultQuality", "autoQuality", "jitterCushion", "shareAudioByDefault",
-    "playSounds", "codec", "autoUpdate", "shareDiagnostics", "gpuCapture", "gpuPriority", "captureBoostStatus"
+    "groupPassword", "rejectOutsiders", "defaultAccess", "requireVerifiedIdentity", "defaultResolution", "defaultFps", "autoQuality", "jitterCushion",
+    "shareAudioByDefault", "playSounds", "codec", "autoUpdate", "shareDiagnostics", "gpuCapture", "gpuPriority", "captureBoostStatus"
 ];
 
 describe("as opcoes", () => {
@@ -48,7 +51,8 @@ describe("as opcoes", () => {
             rejectOutsiders: true,
             defaultAccess: "all",
             requireVerifiedIdentity: true,
-            defaultQuality: "1080p60",
+            defaultResolution: 1080,
+            defaultFps: 60,
             autoQuality: true,
             jitterCushion: 200,
             shareAudioByDefault: true,
@@ -73,12 +77,37 @@ describe("as opcoes", () => {
     });
 
     test("os valores dos seletores sao aceitos pelo nucleo", () => {
-        const values = (key: "defaultAccess" | "defaultQuality" | "codec") => (settings.def[key].options as { value: string; }[]).map(o => o.value);
+        const values = (key: "defaultAccess" | "defaultResolution" | "defaultFps" | "codec") => (settings.def[key].options as { value: unknown; }[]).map(o => o.value);
         assert.deepEqual(values("defaultAccess"), ["all", "friends", "approval", "password"]);
         for (const mode of values("defaultAccess")) assert.ok(isStreamAccess(mode), `defaultAccess ${mode}`);
-        assert.deepEqual(values("defaultQuality"), ["1080p60", "720p60", "1080p30"]);
-        for (const quality of values("defaultQuality")) assert.ok(QUALITY[quality as keyof typeof QUALITY], `defaultQuality ${quality}`);
+        assert.deepEqual(values("defaultResolution"), [720, 1080, 1440]);
+        assert.deepEqual(values("defaultFps"), [30, 60]);
+        // todas as 6 combinacoes viram uma qualidade que o nucleo transmite (com o perfil da captura)
+        for (const resolution of values("defaultResolution")) {
+            for (const fps of values("defaultFps")) {
+                const quality = qualityFromSettings(resolution, fps);
+                assert.equal(quality, `${resolution}p${fps}`);
+                assert.deepEqual([QUALITY[quality].height, QUALITY[quality].fps], [resolution, fps]);
+            }
+        }
         assert.deepEqual(values("codec"), ["auto", "h264", "vp8", "vp9", "av1"]);
+    });
+
+    test("'Resolução padrão' (720p · 1080p · 2K) e 'FPS padrão' (30 · 60): 1080p a 60 fps; o texto fala da tela 2K e do teto de 20 Mbps", () => {
+        const resolution = settings.def.defaultResolution;
+        assert.equal(resolution.displayName, "Resolução padrão");
+        assert.deepEqual(resolution.options.map(o => [o.label, o.value, !!(o as { default?: boolean; }).default]), [
+            ["720p", 720, false], ["1080p", 1080, true], ["2K (1440p)", 1440, false]
+        ]);
+        assert.match(resolution.description, /2K precisa de uma tela 2K: numa tela ou janela menor, vai no tamanho dela/);
+        assert.match(resolution.description, /até 20 Mbps/);
+        assert.match(resolution.description, /720p a 30 fps: até 6 Mbps/, "o teto menor de cada combinação pequena");
+        assert.match(resolution.description, /durante ela, na barra do Telinha/);
+
+        const fps = settings.def.defaultFps;
+        assert.equal(fps.displayName, "FPS padrão");
+        assert.deepEqual(fps.options.map(o => [o.label, o.value, !!(o as { default?: boolean; }).default]), [["30 fps", 30, false], ["60 fps", 60, true]]);
+        assert.match(settings.def.autoQuality.description, /^Recomendado: a resolução e o fps escolhidos viram o máximo/);
     });
 
     test("'Colchão contra engasgos': Desligado, 0,2 s (padrão) ou 0,4 s, com uma linha simples", () => {
@@ -165,6 +194,84 @@ describe("migracao de 'Aprovar quem vai assistir' (v0.1.0 -> v0.2.0)", () => {
         migrateAccessSettings();
         assert.equal(warned.mock.callCount(), 1);
         assert.match(String(warned.mock.calls[0].arguments[0]), /migração de "Aprovar quem vai assistir" falhou/);
+    });
+});
+
+describe("migracao de 'Qualidade padrão' (ate a v0.3.x) para 'Resolução padrão' + 'FPS padrão'", () => {
+    // como acima: settings.plain traz so o que foi gravado em disco (modo lazy do fake)
+    function onDisk(values: Record<string, unknown>) {
+        pluginSettings.load(values, { lazy: true });
+    }
+
+    beforeEach(() => {
+        resetVencordFakes();
+    });
+
+    const cases: [old: string, resolution: number, fps: number][] = [["1080p60", 1080, 60], ["720p60", 720, 60], ["1080p30", 1080, 30]];
+    for (const [old, resolution, fps] of cases) {
+        test(`${old} vira ${resolution}p + ${fps} fps e a chave antiga some`, () => {
+            onDisk({ defaultQuality: old, groupPassword: "x" });
+            migrateQualitySettings();
+            assert.equal(settings.plain.defaultResolution, resolution);
+            assert.equal(settings.plain.defaultFps, fps);
+            assert.equal("defaultQuality" in settings.plain, false);
+            assert.equal(settings.plain.groupPassword, "x", "o resto da configuracao fica como estava");
+            assert.equal(defaultQuality(), old, "o seletor abre com a mesma escolha de antes");
+        });
+    }
+
+    test("valor antigo desconhecido (ou de outro tipo): so some a chave antiga, valem os padroes (1080p, 60)", () => {
+        for (const old of ["4k", "1080p", 1080, null, ""]) {
+            onDisk({ defaultQuality: old });
+            migrateQualitySettings();
+            assert.equal("defaultQuality" in settings.plain, false, String(old));
+            assert.equal("defaultResolution" in settings.plain, false, String(old));
+            assert.equal("defaultFps" in settings.plain, false, String(old));
+            assert.equal(defaultQuality(), "1080p60", String(old));
+        }
+    });
+
+    test("quem ja escolheu nas opcoes novas mantem a escolha; so a que falta vem da antiga", () => {
+        onDisk({ defaultQuality: "720p60", defaultResolution: 1440, defaultFps: 30 });
+        migrateQualitySettings();
+        assert.deepEqual([settings.plain.defaultResolution, settings.plain.defaultFps], [1440, 30]);
+        assert.equal("defaultQuality" in settings.plain, false);
+
+        onDisk({ defaultQuality: "1080p30", defaultResolution: 720 });
+        migrateQualitySettings();
+        assert.deepEqual([settings.plain.defaultResolution, settings.plain.defaultFps], [720, 30]);
+
+        onDisk({ defaultQuality: "720p60", defaultFps: 30, defaultResolution: "2K" });
+        migrateQualitySettings();
+        assert.deepEqual([settings.plain.defaultResolution, settings.plain.defaultFps], [720, 30], "uma resolucao invalida gravada nao conta como escolha");
+    });
+
+    test("configuracao limpa ou ja migrada: nada muda, e rodar de novo nao desfaz a escolha do usuario", () => {
+        onDisk({});
+        migrateQualitySettings();
+        assert.deepEqual(Object.keys(settings.plain), []);
+
+        onDisk({ defaultQuality: "720p60" });
+        migrateQualitySettings();
+        settings.store.defaultResolution = 1440;
+        migrateQualitySettings();
+        assert.deepEqual([settings.plain.defaultResolution, settings.plain.defaultFps], [1440, 60]);
+    });
+
+    test("nunca lanca: sem configuracoes carregadas nao ha o que migrar; uma falha vira so um aviso no console", t => {
+        const warn = t.mock.method(console, "warn", () => { });
+        t.mock.getter(settings, "plain", () => undefined as never);
+        migrateQualitySettings();
+        assert.equal(warn.mock.callCount(), 0);
+        t.mock.restoreAll();
+
+        const warned = t.mock.method(console, "warn", () => { });
+        t.mock.getter(settings, "plain", () => {
+            throw new Error("Cannot access settings before plugin is initialized");
+        });
+        migrateQualitySettings();
+        assert.equal(warned.mock.callCount(), 1);
+        assert.match(String(warned.mock.calls[0].arguments[0]), /migração de "Qualidade padrão" falhou/);
     });
 });
 

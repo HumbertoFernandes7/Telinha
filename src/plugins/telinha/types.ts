@@ -126,7 +126,18 @@ export interface CaptureSource {
     thumbnail?: string;
 }
 
-export type Quality = "1080p60" | "720p60" | "1080p30";
+/** Resolucao escolhida, pela altura: 720p, 1080p ou 2K (1440p). Nunca amplia: captura menor vai no tamanho dela. */
+export type Resolution = 720 | 1080 | 1440;
+
+/** fps escolhido. */
+export type FrameRate = 30 | 60;
+
+/**
+ * Qualidade escolhida: resolucao x fps, as 6 combinacoes (ex.: "1440p60" = 2K a 60 fps), nos seletores Resolução e FPS
+ * (core/quality/choice.ts). So deste PC: o que vai para os outros (presenca) leva o tamanho e o fps da captura, nunca
+ * este nome.
+ */
+export type Quality = `${Resolution}p${FrameRate}`;
 
 export interface StreamOptions {
     source: CaptureSource;
@@ -159,8 +170,8 @@ export interface ViewerSession {
     checkingPassword?: boolean;
 }
 
-/** Degrau da qualidade automatica. A qualidade escolhida e o teto; 720p30 so existe como degrau automatico. */
-export type QualityLevel = Quality | "720p30";
+/** Degrau da qualidade automatica: as mesmas 6 combinacoes; a qualidade escolhida e o teto. */
+export type QualityLevel = Quality;
 
 /** Por que a qualidade automatica desceu: processador, placa de video (encoder por hardware), upload do streamer ou conexao de um espectador. */
 export type QualityReason = "cpu" | "gpu" | "upload" | "bandwidth";
@@ -189,6 +200,16 @@ export interface LocalStream {
     viewers: PeerId[];
     /** Qualidade automatica (configuracao autoQuality). Ausente/null = desligada. */
     autoQuality?: AutoQualityState | null;
+    /**
+     * 2K escolhido e a captura com 1080p ou menos (nao amplia), em pt-BR: ex. "2K escolhido, a tela tem 1080p: enviando
+     * 1080p". Ausente/null = a captura comporta a resolucao escolhida.
+     */
+    sizeNote?: string | null;
+    /**
+     * Por que a resolucao e o fps nao podem mudar agora, em pt-BR (a barra desliga os botoes e mostra isto na dica): um
+     * envio H.264 da placa de video cujo video ainda nao saiu, ou um envio travado. Ausente/null = pode mudar.
+     */
+    qualityLock?: string | null;
     /** Aviso sobre a captura em pt-BR (imagem preta / janela congelada). Ausente/null = captura ok. */
     captureWarning?: string | null;
     /** pedidos esperando a sua aprovacao (Permitir/Recusar), mais antigo primeiro */

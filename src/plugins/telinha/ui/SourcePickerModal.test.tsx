@@ -15,7 +15,7 @@ import "@test/fakes/dom";
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, test } from "node:test";
 
-import { getState, resetState } from "@plugins/telinha/store";
+import { getState, resetState, setState } from "@plugins/telinha/store";
 import type { CaptureSource } from "@plugins/telinha/types";
 import { installWebAudio, type WebAudioEnv } from "@test/fakes/audio";
 import { installNative } from "@test/fakes/native";
@@ -33,8 +33,9 @@ const sources = (...list: CaptureSource[]) => async () => ({ sources: list });
 const tab = (name: RegExp) => screen.getByRole("tab", { name });
 const card = (name: string) => screen.getByTitle(name) as HTMLButtonElement;
 const audioSwitch = () => screen.getByRole("switch") as HTMLInputElement;
-const qualitySelect = () => screen.getAllByRole("combobox")[0] as HTMLSelectElement;
-const accessSelect = () => screen.getAllByRole("combobox")[1] as HTMLSelectElement;
+const resolutionSelect = () => screen.getAllByRole("combobox")[0] as HTMLSelectElement;
+const fpsSelect = () => screen.getAllByRole("combobox")[1] as HTMLSelectElement;
+const accessSelect = () => screen.getAllByRole("combobox")[2] as HTMLSelectElement;
 
 describe("openSourcePicker: antes de abrir", () => {
     beforeEach(() => {
@@ -175,16 +176,36 @@ describe("SourcePickerModal: a lista e as opcoes", () => {
         assert.match(getState().lastError ?? "", /nativa/);
     });
 
-    describe("qualidade", () => {
-        test("vem a qualidade padrao das configuracoes e da para trocar", async t => {
-            pluginSettings.set("defaultQuality", "720p60");
+    describe("qualidade: Resolução e FPS lado a lado", () => {
+        const labels = () => [...document.querySelectorAll(".vc-telinha-quality-field")].map(f => f.querySelector(".vc-telinha-option-label")?.textContent);
+
+        test("os dois seletores, na mesma linha, com os padroes das configuracoes; da para trocar cada um", async t => {
+            pluginSettings.set("defaultResolution", 720);
+            pluginSettings.set("defaultFps", 30);
             openWith(t, sources(GAME));
             await settle();
 
-            assert.deepEqual([...qualitySelect().options].map(o => o.textContent), ["1080p · 60 fps", "720p · 60 fps", "1080p · 30 fps"]);
-            assert.equal(qualitySelect().value, "720p60");
-            fireEvent.change(qualitySelect(), { target: { value: "1080p30" } });
-            assert.equal(qualitySelect().value, "1080p30");
+            assert.deepEqual(labels(), ["Resolução", "FPS"]);
+            assert.equal(document.querySelectorAll(".vc-telinha-quality").length, 1, "uma linha so");
+            assert.deepEqual([...resolutionSelect().options].map(o => o.textContent), ["720p", "1080p", "2K"]);
+            assert.deepEqual([...fpsSelect().options].map(o => o.textContent), ["30", "60"]);
+            assert.deepEqual([resolutionSelect().value, fpsSelect().value], ["720", "30"], "720p30 agora e escolhivel");
+
+            fireEvent.change(resolutionSelect(), { target: { value: "1080" } });
+            fireEvent.change(fpsSelect(), { target: { value: "60" } });
+            assert.deepEqual([resolutionSelect().value, fpsSelect().value], ["1080", "60"]);
+        });
+
+        test("2K: a dica de que precisa de uma tela 2K aparece so com ele marcado", async t => {
+            openWith(t, sources(GAME));
+            await settle();
+            assert.deepEqual([resolutionSelect().value, fpsSelect().value], ["1080", "60"], "padrao: 1080p a 60 fps");
+            assert.equal(screen.queryByText(/precisa de uma tela 2K/), null);
+
+            fireEvent.change(resolutionSelect(), { target: { value: "1440" } });
+            screen.getByText("2K (1440p) precisa de uma tela 2K: numa tela ou janela menor, vai no tamanho dela.");
+            fireEvent.change(resolutionSelect(), { target: { value: "720" } });
+            assert.equal(screen.queryByText(/precisa de uma tela 2K/), null);
         });
     });
 
@@ -308,5 +329,49 @@ describe("SourcePickerModal: a lista e as opcoes", () => {
         modal.click("Cancelar");
         assert.equal(modals.list().length, 0);
         assert.deepEqual(toasts, []);
+    });
+});
+
+describe("SourcePickerModal: Trocar com a captura bloqueada (streaming.ts → recaptureLock)", () => {
+    const STARTING = "A qualidade pode mudar assim que o vídeo começar a sair para todos (alguns segundos)";
+    const STUCK = "A placa de vídeo travou num envio: a qualidade só pode mudar depois de reiniciar o Discord";
+
+    beforeEach(() => {
+        resetVencordFakes();
+        resetState();
+        SelectedChannelStore.setVoiceChannel(VOICE_CHANNEL_ID);
+    });
+
+    afterEach(() => assert.deepEqual(caughtErrors, [], "nenhum componente quebrou"));
+
+    function live(t: { after(fn: () => void): void; }, qualityLock: string) {
+        setState({ ...getState(), local: { source: GAME, quality: "1080p60", hasAudio: false, startedAt: 0, viewers: ["p1"], access: "all", qualityLock } });
+        const native = installNative({ listSources: sources(GAME, CHAT) });
+        t.after(() => native.restore());
+        return openInHost(openSourcePicker);
+    }
+
+    test("envio H.264 da placa comecando: Trocar desligado, com o motivo, para a mesma fonte e para outra", async t => {
+        const modal = live(t, STARTING);
+        await settle();
+        for (const name of ["Jogo", "Navegador"]) {
+            fireEvent.click(card(name));
+            await settle();
+            assert.equal(modal.button("Trocar").disabled, true, name);
+            screen.getByText(STARTING);
+        }
+    });
+
+    test("envio travado: so mudar a qualidade da mesma fonte fica bloqueado; outra fonte troca (o travado fica contido)", async t => {
+        const modal = live(t, STUCK);
+        await settle();
+        fireEvent.click(card("Jogo"));
+        await settle();
+        assert.equal(modal.button("Trocar").disabled, true);
+        screen.getByText(STUCK);
+        fireEvent.click(card("Navegador"));
+        await settle();
+        assert.equal(modal.button("Trocar").disabled, false);
+        assert.equal(screen.queryByText(STUCK), null);
     });
 });

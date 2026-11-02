@@ -38,14 +38,17 @@ import { log, logThrottled } from "@plugins/telinha/core/log";
 import { guardStatsLog, type SenderLevels, SenderLog } from "@plugins/telinha/core/statsLog";
 import type { AutoQualityState, AutoQualityViewer, PeerId, Quality, QualityLevel, QualityReason } from "@plugins/telinha/types";
 
-import { inBandwidthGrace, isAtMost, LEVELS, levelText, meet, pixelRate, rank, stepDown, stepUp } from "./levels";
+import { fitToSource, inBandwidthGrace, isAtMost, LEVELS, levelText, meet, pixelRate, rank, stepDown, stepUp } from "./levels";
 import { diffSamples, readSenderSample, type SenderSample, type WindowMetrics } from "./stats";
 
 /** Motivos que descem o degrau global (de todos): recursos compartilhados do PC de quem transmite. */
 type GlobalReason = "cpu" | "gpu" | "upload";
 
 export interface QualityDeps {
-    /** qualidade escolhida pelo usuario: teto de todos os degraus */
+    /**
+     * qualidade escolhida pelo usuario: teto de todos os degraus. 2K numa captura de 1080p ou menos vale como o 1080p no
+     * mesmo fps (levels.fitToSource), e volta a ser 2K se a captura crescer (syncTop)
+     */
     ceiling: Quality;
     /** configuracao autoQuality (lida a cada uso) */
     enabled(): boolean;
@@ -363,6 +366,11 @@ interface ViewerState {
     fresh: boolean;
     /** teto deste espectador por causa da banda dele */
     bwLevel: QualityLevel;
+    /**
+     * Com o teto reduzido pela captura (syncTop): o degrau de banda ja estava abaixo do teto antigo, ou mudou depois. Quando
+     * a captura voltar a crescer ele fica onde esta e sobe pelo caminho normal (com a espera); false = volta direto ao 2K.
+     */
+    bwHeld: boolean;
     bwHold: Hold;
     net: NetState;
     applied: QualityLevel | null;
@@ -419,8 +427,17 @@ interface GpuSample {
 export class QualityController {
     private readonly deps: QualityDeps;
     private readonly viewers = new Map<PeerId, ViewerState>();
+    /** o teto efetivo: a qualidade escolhida no tamanho atual da captura (fittedCeiling) */
+    private top: QualityLevel;
     private global: QualityLevel;
     private globalReason: GlobalReason | null = null;
+    /**
+     * Com o teto reduzido pela captura (syncTop): o motivo que segura o degrau de todos quando a captura voltar a crescer.
+     * E o que o deixava abaixo do teto antigo (apagado do globalReason quando ele ficou no teto novo) ou o da ultima troca
+     * depois. Null = estava no teto sem motivo e nao mudou: volta direto ao 2K; com motivo, sobe pelo tryGlobalUp, com a
+     * espera e as previsoes de CPU e placa (senao uma janela indo e voltando faria o degrau subir e cair de novo).
+     */
+    private heldBy: GlobalReason | null = null;
     private globalHold: Hold;
     private fpsStreak = 0;
     private cpuStreak = 0;
@@ -437,7 +454,8 @@ export class QualityController {
 
     constructor(deps: QualityDeps) {
         this.deps = deps;
-        this.global = deps.ceiling;
+        this.top = this.fittedCeiling();
+        this.global = this.top;
         this.globalHold = newHold(performance.now(), GLOBAL_HOLD);
         this.published = this.buildState();
         this.publishedKey = JSON.stringify(this.published);
@@ -450,7 +468,7 @@ export class QualityController {
 
     /** Degrau que o espectador deve receber agora. */
     levelFor(peerId: PeerId): QualityLevel {
-        if (!this.deps.enabled()) return this.deps.ceiling;
+        if (!this.deps.enabled()) return this.top;
         const v = this.viewers.get(peerId);
         return v ? meet(this.global, v.bwLevel) : this.global;
     }
@@ -462,10 +480,11 @@ export class QualityController {
      */
     addViewer(peerId: PeerId, gpu?: boolean) {
         if (this.disposed || this.viewers.has(peerId)) return;
+        this.syncTop();
         const now = performance.now();
         this.viewers.set(peerId, {
             peerId, ready: false, readyAt: Infinity, ignoreUntil: now + WARMUP_MS, prev: null, metrics: null, fresh: false,
-            bwLevel: this.deps.ceiling, bwHold: newHold(now, BW_HOLD), net: newNet(), applied: null, applying: false, resized: false, expectGpu: gpu,
+            bwLevel: this.top, bwHeld: false, bwHold: newHold(now, BW_HOLD), net: newNet(), applied: null, applying: false, resized: false, expectGpu: gpu,
             log: new SenderLog(now), changeWhy: null
         });
         if (this.deps.enabled()) {
@@ -502,6 +521,7 @@ export class QualityController {
      */
     captureResized() {
         if (this.disposed) return;
+        this.syncTop();
         for (const v of this.viewers.values()) {
             v.resized = true;
             this.applyViewer(v);
@@ -520,22 +540,24 @@ export class QualityController {
     settingChanged() {
         if (this.disposed) return;
         const now = performance.now();
-        this.global = this.deps.ceiling;
-        this.globalReason = null;
+        this.top = this.fittedCeiling();
+        this.global = this.top;
+        this.globalReason = this.heldBy = null;
         this.globalHold = newHold(now, GLOBAL_HOLD);
         this.fpsStreak = this.cpuStreak = this.gpuStreak = 0;
         this.gpuLatencyLoggedAt = -Infinity;
         this.uplink = null;
         for (const v of this.viewers.values()) {
-            v.bwLevel = this.deps.ceiling;
+            v.bwLevel = this.top;
+            v.bwHeld = false;
             v.bwHold = newHold(now, BW_HOLD);
             v.net = newNet();
             v.ignoreUntil = Math.max(v.ignoreUntil, now + SETTLE_MS);
             this.applyViewer(v);
         }
         log.info(this.deps.enabled()
-            ? `Qualidade automática ligada (teto ${levelText(this.deps.ceiling)})`
-            : `Qualidade automática desligada: todos recebem ${levelText(this.deps.ceiling)}`);
+            ? `Qualidade automática ligada (teto ${levelText(this.top)})`
+            : `Qualidade automática desligada: todos recebem ${levelText(this.top)}`);
         this.emit();
     }
 
@@ -554,6 +576,7 @@ export class QualityController {
         try {
             await this.sample();
             if (this.disposed) return;
+            this.syncTop();
             if (this.deps.enabled()) this.decide(performance.now());
             this.logStats();
             for (const v of this.viewers.values()) this.applyViewer(v);
@@ -644,7 +667,51 @@ export class QualityController {
 
     // #region decisao
 
-    /** Conteudo em movimento (jogo): ao descer de 1080p60, manter 60 fps (720p60) em vez de 1080p30. */
+    /**
+     * O teto efetivo: a qualidade escolhida, ou, se ela e 2K e a captura tem 1080p ou menos, a de 1080p no mesmo fps
+     * (levels.fitToSource). Sem ampliar, os degraus 2K mandariam o mesmo que os de 1080p, e a qualidade automatica perderia
+     * uma descida (2K → 1080p) que nao muda nada; assim ela pula os degraus 2K.
+     */
+    private fittedCeiling(): QualityLevel {
+        return fitToSource(this.deps.ceiling, this.deps.captureSize().height);
+    }
+
+    /**
+     * A captura mudou de tamanho e o teto efetivo com ela (2K escolhido e a janela passou de 1080p, ou voltou). Baixou: tudo
+     * fica no maximo no teto novo, e cada degrau anota se estava no teto antigo sem motivo (heldBy / bwHeld). Subiu: so
+     * volta direto ao 2K quem estava nele sem motivo e nao mudou desde entao; o resto fica onde esta e sobe pelo caminho
+     * normal (tryGlobalUp / a banda de cada um), com a espera e as previsoes. A cada avaliacao e quando a captura muda.
+     */
+    private syncTop() {
+        const top = this.fittedCeiling();
+        if (top === this.top) return;
+        const from = this.top;
+        this.top = top;
+        if (LEVELS[top].height < LEVELS[from].height) {
+            this.heldBy = this.global === from ? null : this.globalReason;
+            this.global = meet(this.global, top);
+            if (this.global === top) this.globalReason = null;
+            for (const v of this.viewers.values()) {
+                v.bwHeld = v.bwLevel !== from;
+                v.bwLevel = meet(v.bwLevel, top);
+            }
+        } else {
+            if (this.global === from && !this.heldBy) {
+                this.global = top;
+                this.globalReason = null;
+            } else this.globalReason ??= this.heldBy;
+            for (const v of this.viewers.values()) if (v.bwLevel === from && !v.bwHeld) v.bwLevel = top;
+        }
+        const height = Math.round(this.deps.captureSize().height);
+        // uma janela redimensionada na borda de 1080p cruza o limite varias vezes: no maximo 1 linha a cada 30 s por direcao
+        const down = LEVELS[top].height < LEVELS[from].height;
+        logThrottled(down ? "capture-fit-down" : "capture-fit-up", "info", down
+            ? `2K escolhido, a captura agora tem ${height}p: enviando ${height}p (teto ${levelText(top)})`
+            : `2K escolhido, a captura agora tem ${height}p: teto de volta em ${levelText(top)}`, 30_000);
+        this.emit();
+    }
+
+    /** Conteudo em movimento (jogo): ao descer de 60 fps, manter 60 fps com menos resolucao (1080p60 → 720p60, nao 1080p30). */
     private preferMotion(): boolean {
         if (this.sourceFpsEma != null && this.sourceFpsEma < STATIC_SOURCE_FPS) return false;
         const motion = this.deps.motion();
@@ -933,7 +1000,7 @@ export class QualityController {
             const total = active.reduce((acc, v) => acc + v.metrics.sentKbps, 0);
             this.uplink = { kbps: total, at: now };
             globalChanged = this.stepGlobalDown("upload", now, `${troubled.length} de ${active.length} espectadores com banda limitada, ${Math.round(total)} kbps enviados no total`);
-        } else if (!gpuOver && !fpsShort && !cpuBinding && !uploadWide && this.global !== this.deps.ceiling) {
+        } else if (!gpuOver && !fpsShort && !cpuBinding && !uploadWide && this.global !== this.top) {
             globalChanged = this.tryGlobalUp(active, now, gpuCapture);
         }
 
@@ -948,7 +1015,7 @@ export class QualityController {
         for (const v of active) {
             relax(v.bwHold, now);
             const bad = bwBad.get(v);
-            const next = v.bwLevel !== this.deps.ceiling ? stepUp(v.bwLevel, this.deps.ceiling, preferMotion) : null;
+            const next = v.bwLevel !== this.top ? stepUp(v.bwLevel, this.top, preferMotion) : null;
             if (bad) {
                 // sem espera entre duas descidas: depois de uma, o problema precisa durar de novo (trackNet recomeca a conta)
                 const down = stepDown(this.levelFor(v.peerId), preferMotion);
@@ -975,7 +1042,7 @@ export class QualityController {
 
     private tryGlobalUp(active: Active[], now: number, gpuCapture: boolean): boolean {
         if (now - this.globalHold.calmSince < this.globalHold.holdMs) return false;
-        const next = stepUp(this.global, this.deps.ceiling, this.preferMotion());
+        const next = stepUp(this.global, this.top, this.preferMotion());
         if (!next) return false;
         const n = this.viewers.size;
         const gpu = this.predictGpu(next);
@@ -1010,7 +1077,8 @@ export class QualityController {
             noteDown(this.globalHold, now);
         } else noteUp(this.globalHold, now);
         this.global = level;
-        this.globalReason = level === this.deps.ceiling ? null : reason;
+        this.globalReason = level === this.top ? null : reason;
+        this.heldBy = reason; // mudou: com o teto reduzido, nao volta direto ao 2K (syncTop)
         this.fpsStreak = this.cpuStreak = this.gpuStreak = 0;
         for (const v of this.viewers.values()) {
             v.ignoreUntil = Math.max(v.ignoreUntil, now + SETTLE_MS);
@@ -1027,6 +1095,7 @@ export class QualityController {
         if (dir === "down") noteDown(v.bwHold, now);
         else noteUp(v.bwHold, now);
         v.bwLevel = level;
+        v.bwHeld = true; // mudou: com o teto reduzido, nao volta direto ao 2K (syncTop)
         v.net.congestedSince = v.net.troubleSince = null;
         v.ignoreUntil = Math.max(v.ignoreUntil, now + SETTLE_MS);
         v.changeWhy = tag;
@@ -1062,7 +1131,7 @@ export class QualityController {
 
     private buildState(): AutoQualityState | null {
         if (!this.deps.enabled()) return null;
-        const { ceiling } = this.deps;
+        const ceiling = this.top;
         const viewers: Record<PeerId, AutoQualityViewer> = {};
         let current: QualityLevel = this.viewers.size ? ceiling : this.global;
         let reason: QualityReason | null = this.viewers.size ? null : this.globalReason;

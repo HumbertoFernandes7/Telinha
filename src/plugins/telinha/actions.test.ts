@@ -27,11 +27,12 @@ import { discordOAuth } from "@test/helpers/wpc-oauth";
 import { type Call, friendArrives, goLive, joinCall } from "@test/helpers/wpc-session";
 
 import {
-    approveViewer, authorizeAndRewatch, authorizeTelinhaIdentity, clearLastError, declineViewer, findPeerByDiscordId, friendsAccessAvailable, generateStreamPassword,
-    getConnectionInfo, getLocalIdentity, getLocalPreviewStream, getScreenAudioStatus, getStreamPassword, identityEnabled, kickViewer, listSources, screenAudioSupported,
-    setStreamAccess, startSession, startStreaming, stopSession, stopStreaming, submitWatchPassword, subscribeLocalIdentityState, unblockViewer, unlinkTelinhaIdentity,
-    unwatch, watch
+    approveViewer, authorizeAndRewatch, authorizeTelinhaIdentity, changeStreamQuality, clearLastError, declineViewer, findPeerByDiscordId, friendsAccessAvailable,
+    generateStreamPassword, getConnectionInfo, getLocalIdentity, getLocalPreviewStream, getScreenAudioStatus, getStreamPassword, identityEnabled, kickViewer, listSources,
+    screenAudioSupported, setStreamAccess, startSession, startStreaming, stopSession, stopStreaming, submitWatchPassword, subscribeLocalIdentityState, unblockViewer,
+    unlinkTelinhaIdentity, unwatch, watch
 } from "./actions";
+import { rt } from "./core/context";
 
 const EMPTY: TelinhaState = { inRoom: false, channelId: null, peers: [], local: null, viewing: {}, lastError: null, blocked: [], identityAlerts: [] };
 const peerOf = (peerId: string, over: Partial<RemotePeer>): RemotePeer => ({ peerId, discordUserId: FRIEND_ID, username: "amigo", streaming: false, admitted: true, ...over });
@@ -193,6 +194,7 @@ describe("sem estar em uma call", () => {
         assert.equal(unblockViewer(FRIEND_ID), false);
         assert.equal(submitWatchPassword("peerX", "senha"), false);
         assert.throws(() => setStreamAccess("all"), /Você não está transmitindo\./);
+        await assert.rejects(changeStreamQuality("1440p60"), /Você não está transmitindo\./);
         assert.equal(getStreamPassword(), null);
         assert.equal(getLocalPreviewStream(), null);
         assert.equal(await getConnectionInfo("peerX"), null);
@@ -280,6 +282,19 @@ describe("dentro de uma call", () => {
         setStreamAccess("approval");
         await flushPromises();
         assert.equal(getState().local?.access, "approval");
+    });
+
+    test("trocar Resolução/FPS no ar: a mesma fonte, com o mesmo som e o mesmo modo; a mesma qualidade nao captura de novo", async () => {
+        const before = rt.local!;
+        const captures = call.room.streamsAdded.length;
+        await changeStreamQuality("1080p60");
+        assert.equal(rt.local, before, "a mesma qualidade: nada muda");
+
+        await changeStreamQuality("720p30");
+        await eventually(() => getState().local?.quality === "720p30");
+        assert.notEqual(rt.local, before, "captura nova");
+        assert.deepEqual([rt.local!.source, rt.local!.access, rt.local!.info.hasAudio], [before.source, "approval", before.info.hasAudio]);
+        assert.equal(call.room.streamsAdded.length, captures, "ninguem assistia: nada a reenviar");
     });
 
     test("pedidos pendentes: permitir, recusar, expulsar e liberar", async () => {

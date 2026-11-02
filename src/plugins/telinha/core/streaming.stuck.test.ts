@@ -232,6 +232,9 @@ describe("envio travado na placa de video: nada desmonta", () => {
         await turns();
         assertUntouched(v, "trocar a senha");
 
+        // o tick confirma que o video do saudavel ja sai (checkStall → sending): sem isso, o Trocar fica bloqueado
+        // (streaming.ts → recaptureLock: o envio H.264 da placa dele ainda poderia estar travado)
+        await seconds(rig, 1);
         const oldTracks = rt.local!.stream.getTracks() as unknown as FakeMediaStreamTrack[];
         await startStreaming(windowOptions({ withAudio: true, source: { id: "window:999:0", name: "Outro", kind: "window" }, access: "all" }));
         await turns();

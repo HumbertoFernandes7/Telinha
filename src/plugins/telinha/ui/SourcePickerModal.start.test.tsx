@@ -28,8 +28,9 @@ import { openSourcePicker } from "./SourcePickerModal";
 const tab = (name: RegExp) => screen.getByRole("tab", { name });
 const card = (name: string) => screen.getByTitle(name) as HTMLButtonElement;
 const audioSwitch = () => screen.getByRole("switch") as HTMLInputElement;
-const qualitySelect = () => screen.getAllByRole("combobox")[0] as HTMLSelectElement;
-const accessSelect = () => screen.getAllByRole("combobox")[1] as HTMLSelectElement;
+const resolutionSelect = () => screen.getAllByRole("combobox")[0] as HTMLSelectElement;
+const fpsSelect = () => screen.getAllByRole("combobox")[1] as HTMLSelectElement;
+const accessSelect = () => screen.getAllByRole("combobox")[2] as HTMLSelectElement;
 
 describe("SourcePickerModal: Transmitir de verdade (nucleo por tras)", () => {
     let scene: LiveScene;
@@ -76,7 +77,7 @@ describe("SourcePickerModal: Transmitir de verdade (nucleo por tras)", () => {
     test("som desligado, 720p e Quem pode assistir = so quem eu aprovar: o nucleo recebe exatamente isso", async () => {
         const modal = await pick("Jogo");
         fireEvent.click(audioSwitch());
-        fireEvent.change(qualitySelect(), { target: { value: "720p60" } });
+        fireEvent.change(resolutionSelect(), { target: { value: "720" } });
         fireEvent.change(accessSelect(), { target: { value: "approval" } });
         modal.click("Transmitir");
         await until(() => modals.list().length === 0);
@@ -85,6 +86,19 @@ describe("SourcePickerModal: Transmitir de verdade (nucleo por tras)", () => {
         assert.equal(local?.quality, "720p60");
         assert.equal(local?.access, "approval");
         assert.equal(local?.hasAudio, false);
+    });
+
+    test("2K a 30 fps: o nucleo recebe 1440p30 e pede a captura ate 2560x1440 a 30 fps", async () => {
+        const modal = await pick("Jogo");
+        fireEvent.change(resolutionSelect(), { target: { value: "1440" } });
+        fireEvent.change(fpsSelect(), { target: { value: "30" } });
+        modal.click("Transmitir");
+        await until(() => modals.list().length === 0);
+
+        assert.equal(getState().local?.quality, "1440p30");
+        assert.deepEqual(scene.rtc.mediaDevices.displayMediaCalls.at(-1)?.video, {
+            width: { ideal: 2560, max: 2560 }, height: { ideal: 1440, max: 1440 }, frameRate: { ideal: 30, max: 30 }
+        });
     });
 
     test("Com senha: so transmite com a senha, e o nucleo guarda a senha ja sem espacos", async () => {
@@ -161,7 +175,7 @@ describe("SourcePickerModal: Transmitir de verdade (nucleo por tras)", () => {
     test("com a transmissao no ar o seletor vira Trocar: sem Quem pode assistir, qualidade atual e aviso proprio", async () => {
         // no ar em 720p60 e "Só quem eu aprovar": trocar de fonte nao mexe em nenhum dos dois
         const first = await pick("Jogo");
-        fireEvent.change(qualitySelect(), { target: { value: "720p60" } });
+        fireEvent.change(resolutionSelect(), { target: { value: "720" } });
         fireEvent.change(accessSelect(), { target: { value: "approval" } });
         first.click("Transmitir");
         await until(() => modals.list().length === 0);
@@ -171,18 +185,20 @@ describe("SourcePickerModal: Transmitir de verdade (nucleo por tras)", () => {
         await settle();
         assert.equal(modal.title(), "Trocar o que você transmite");
         assert.match(modal.text(), /Quem está assistindo passa a ver a nova tela ou janela\./);
-        assert.equal(screen.getAllByRole("combobox").length, 1, "so a qualidade: quem pode assistir se muda pela barra");
-        assert.equal(qualitySelect().value, "720p60", "a qualidade do ar");
+        assert.equal(screen.getAllByRole("combobox").length, 2, "so Resolução e FPS: quem pode assistir se muda pela barra");
+        assert.deepEqual([resolutionSelect().value, fpsSelect().value], ["720", "60"], "a qualidade do ar");
         assert.equal(modal.button("Trocar").disabled, true);
 
         fireEvent.click(tab(/^Telas/));
         fireEvent.click(card("Tela inteira"));
+        fireEvent.change(fpsSelect(), { target: { value: "30" } });
         modal.click("Trocar");
         await until(() => modals.list().length === 0);
 
         assert.deepEqual(toasts, [{ text: "Telinha: transmissão trocada", variant: "success" }]);
         const { local } = getState();
         assert.equal(local?.source.kind, "screen");
+        assert.equal(local?.quality, "720p30", "trocar o FPS junto vale na captura nova");
         assert.equal(local?.access, "approval", "o modo continua o mesmo");
     });
 

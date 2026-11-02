@@ -315,7 +315,7 @@ const queued = $(`Vencord.WebpackPatcher.patches.filter(p => p.plugin === ${N}).
 check(`all ${pluginPatches} patches queued in Vencord's patch list`, pluginPatches > 0 && queued === pluginPatches, { pluginPatches, queued });
 check("$self canonicalised to Vencord.Plugins.plugins[\"Telinha\"]", $(`Vencord.WebpackPatcher.patches.filter(p => p.plugin === ${N}).every(p => [].concat(p.replacement).every(r => typeof r.replace === "function" || String(r.replace).includes('Vencord.Plugins.plugins["Telinha"]')))`));
 check("listed for Settings -> Plugins, with a settings cog", $(`Object.values(Vencord.Plugins.plugins).some(p => p.name === ${N}) && Vencord.Plugins.hasAnyVisibleSettings(Vencord.Plugins.plugins[${N}])`));
-check("settings defaults through Vencord's store", $(`Vencord.Settings.plugins[${N}].codec === "auto" && Vencord.Settings.plugins[${N}].rejectOutsiders === true && Vencord.Plugins.plugins[${N}].settings.store.defaultQuality === "1080p60"`));
+check("settings defaults through Vencord's store", $(`Vencord.Settings.plugins[${N}].codec === "auto" && Vencord.Settings.plugins[${N}].rejectOutsiders === true && Vencord.Plugins.plugins[${N}].settings.store.defaultResolution === 1080 && Vencord.Plugins.plugins[${N}].settings.store.defaultFps === 60`));
 $(`Vencord.Settings.plugins[${N}].codec = "vp9"`);
 await new Promise(r => setTimeout(r, 10));
 check("setting change visible to the plugin and persisted via VencordNative.settings.set", $(`Vencord.Plugins.plugins[${N}].settings.store.codec`) === "vp9" && page.savedSettings.at(-1)?.plain?.plugins?.Telinha?.codec === "vp9");
