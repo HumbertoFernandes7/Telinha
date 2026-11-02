@@ -12,9 +12,9 @@
 // Por que funciona: no libwebrtc, o codec e os limites de bitrate de ENVIO saem da descricao remota
 // (o primeiro codec da lista do outro lado que nos suportamos; x-google-* do fmtp desse codec).
 
-export type VideoCodecName = "h264" | "vp8" | "vp9" | "av1";
+export type VideoCodecName = "h264" | "h265" | "vp8" | "vp9" | "av1";
 
-export const CODEC_RTP_NAME: Record<VideoCodecName, string> = { h264: "H264", vp8: "VP8", vp9: "VP9", av1: "AV1" };
+export const CODEC_RTP_NAME: Record<VideoCodecName, string> = { h264: "H264", h265: "H265", vp8: "VP8", vp9: "VP9", av1: "AV1" };
 
 const NON_MEDIA_CODECS = /^(rtx|red|ulpfec|flexfec)$/i;
 
@@ -56,6 +56,22 @@ export function h264Rank(fmtp: string, hwProfile: string | null | undefined, bac
     return backup && sameH264Profile(profile, backup) ? 1 : 1 + extra;
 }
 
+/**
+ * H.265 Main (profile-id=1, ou sem profile-id: o padrao do RFC 7798 e Main) com tx-mode SRST (ou sem tx-mode), o que o
+ * Chromium oferece para o encoder da placa de video. Medido no Chrome 156 (RTX 3070): o sender oferece so
+ * "level-id=123;profile-id=1;tier-flag=0;tx-mode=SRST" (Main, nivel 4.1); o receiver, Main e Main 10 em level-id=180.
+ */
+export function isH265Main(fmtp: string): boolean {
+    const profile = /profile-id=(\d+)/.exec(fmtp)?.[1];
+    const tx = /tx-mode=([a-z]+)/i.exec(fmtp)?.[1];
+    return (profile === undefined || profile === "1") && (tx === undefined || tx.toUpperCase() === "SRST");
+}
+
+/** Ordem das variantes H.265 (menor vai antes): Main/SRST, depois o resto (Main 10 nunca na frente: o envio e 8 bits). */
+export function h265Rank(fmtp: string): number {
+    return isH265Main(fmtp) ? 0 : 1;
+}
+
 export interface RemoteSdpPlan {
     /** mids das m-sections de video em que enviamos para este peer */
     videoMids: Set<string>;
@@ -63,7 +79,10 @@ export interface RemoteSdpPlan {
     audioMids: Set<string>;
     /** codec de video que queremos ENVIAR (vai para o inicio da lista) */
     codec: VideoCodecName | null;
-    /** H.264: perfil por hardware deste PC (profile-level-id), na frente das outras variantes H.264 */
+    /**
+     * H.264: perfil por hardware deste PC (profile-level-id), na frente das outras variantes H.264. H.265: o perfil do
+     * H.264 reserva (o que iria sem o H.265), com as variantes H.264 logo depois das H.265
+     */
     h264Profile?: string | null;
     /** H.264 High: o perfil Baseline da placa, logo depois do High (se o outro lado nao tiver High, fica ele, nunca o 42e01f) */
     h264Backup?: string | null;
@@ -106,14 +125,32 @@ function fmtpIndex(lines: string[], pt: string) {
  * Poe as variantes do codec escolhido no inicio da linha m= (H.264: o perfil por hardware, depois o reserva, depois
  * packetization-mode=1; VP9 perfil 0 primeiro). Ex.: o outro lado lista 42e01f (OpenH264 aqui) antes de 42001f (placa de
  * video): 42001f vai na frente. Com High (640032) e reserva 42001f: 6400xx, depois 42001f, depois o resto.
+ * H.265: H.265 Main, depois as variantes H.264 na ordem do H.264 reserva (`h264Profile`/`h264Backup`), depois o resto.
+ * Sem H.265 do outro lado, o H.264 reserva vai na frente (nunca o VP8 que o Chromium lista primeiro).
  */
 function reorderVideoCodecs(lines: string[], codec: VideoCodecName, h264Profile: string | null | undefined, h264Backup: string | null | undefined, notes: string[]): string | null {
     const parts = lines[0].split(" ");
     if (parts.length < 4) return null;
     const pts = parts.slice(3);
-    const wantedName = CODEC_RTP_NAME[codec];
     const names = new Map(parseRtpmaps(lines).map(r => [r.pt, r.name.toUpperCase()]));
     const fmtp = (pt: string) => lines[fmtpIndex(lines, pt)] ?? "";
+    const pick = (name: string, rank: (pt: string) => number) => pts.filter(pt => names.get(pt) === name).sort((a, b) => rank(a) - rank(b));
+
+    if (codec === "h265") {
+        const h265 = pick("H265", pt => h265Rank(fmtp(pt)));
+        const reserve = h264Profile && !sameH264Profile(h264Profile, h264Backup) ? h264Backup : null;
+        const h264 = h264Profile ? pick("H264", pt => h264Rank(fmtp(pt), h264Profile, reserve)) : [];
+        if (!h265.length) notes.push(`H265 ausente no SDP do outro lado; ${h264.length ? "fica o H.264 reserva" : "fica o codec padrão"}`);
+        else if (h265Rank(fmtp(h265[0])) !== 0) notes.push("H.265 Main ausente no SDP do outro lado; fica outra variante H.265");
+        const front = [...h265, ...h264];
+        const next = [...front, ...pts.filter(pt => !front.includes(pt))];
+        if (!front.length || next.every((pt, i) => pt === pts[i])) return null;
+        lines[0] = [...parts.slice(0, 3), ...next].join(" ");
+        const reserveText = `H264 reserva${h264Profile ? ` (perfil ${h264Profile})` : ""}`;
+        return h265.length ? `H265 primeiro${h264.length ? `, ${reserveText} logo depois` : ""}` : `${reserveText} primeiro`;
+    }
+
+    const wantedName = CODEC_RTP_NAME[codec];
     const backup = codec === "h264" && h264Profile && !sameH264Profile(h264Profile, h264Backup) ? h264Backup : null;
 
     const rank = (pt: string) => {
@@ -122,7 +159,7 @@ function reorderVideoCodecs(lines: string[], codec: VideoCodecName, h264Profile:
         return 0;
     };
 
-    const wanted = pts.filter(pt => names.get(pt) === wantedName).sort((a, b) => rank(a) - rank(b));
+    const wanted = pick(wantedName, rank);
     if (!wanted.length) {
         notes.push(`${wantedName} ausente no SDP do outro lado; fica o codec padrão`);
         return null;

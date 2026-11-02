@@ -35,8 +35,8 @@ export function selfPresence(): PresenceMessage {
     const { id, username } = me();
     const { local } = rt;
     const caps = getLocalCaps();
-    // caps.hwDecode (protocol.ts, passo 11): so com algo a anunciar (sem High na placa = a presenca de antes)
-    const hwDecode = buildHwDecodeCaps(caps.h264HighHwDecode);
+    // caps.hwDecode (protocol.ts, passo 11): so com algo a anunciar (sem High nem H.265 na placa = a presenca de antes)
+    const hwDecode = buildHwDecodeCaps(caps.h264HighHwDecode, caps.h265HwDecode);
     return {
         v: PROTOCOL_VERSION,
         discordUserId: id,

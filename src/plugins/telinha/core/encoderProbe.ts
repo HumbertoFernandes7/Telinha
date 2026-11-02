@@ -130,17 +130,18 @@ function newProbeWorker(): { worker: Worker; release(): void; } | null {
 }
 
 /**
- * Roda a sonda para o perfil H.264 `profile` (profile-level-id, ex.: "42001f"). Nunca rejeita. Um Worker preso fica
- * guardado (nunca terminado) e o resultado vem com `hung` (quem chama loga uma linha).
+ * Roda a sonda para o perfil H.264 `profile` (profile-level-id, ex.: "42001f") ou, com `codec` "h265", para o codec
+ * WebCodecs H.265 `profile` inteiro (ex.: "hvc1.1.6.L123.B0", core/stuckEncoder.ts → h265ProbeCodec). Nunca rejeita. Um
+ * Worker preso fica guardado (nunca terminado) e o resultado vem com `hung` (quem chama loga uma linha).
  */
-export function runEncoderProbe(profile: string): Promise<ProbeResult> {
+export function runEncoderProbe(profile: string, codec: "h264" | "h265" = "h264"): Promise<ProbeResult> {
     const made = newProbeWorker();
     if (!made) return Promise.resolve({ verdict: "unknown", detail: "sem Worker (ou o Discord recusou criar um)" });
     const { worker, release } = made;
-    const config = {
-        codec: `avc1.${profile}`, ...PROBE_SIZE, bitrate: 2_000_000, hardwareAcceleration: "prefer-hardware", latencyMode: "realtime",
-        avc: { format: "annexb" }
-    };
+    const base = { ...PROBE_SIZE, bitrate: 2_000_000, hardwareAcceleration: "prefer-hardware", latencyMode: "realtime" };
+    const config = codec === "h265"
+        ? { codec: profile, ...base, hevc: { format: "annexb" } }
+        : { codec: `avc1.${profile}`, ...base, avc: { format: "annexb" } };
     return new Promise<ProbeResult>(resolve => {
         let phase = "início";
         let chunks = false;
@@ -186,7 +187,7 @@ export function runEncoderProbe(profile: string): Promise<ProbeResult> {
             } else if (data.ev === "done") {
                 const error = typeof data.error === "string" ? data.error.slice(0, 200) : encoderError;
                 if (data.verdict === "nowebcodecs") finish({ verdict: "unknown", detail: "sem WebCodecs" }, false);
-                else if (data.verdict === "unsupported") finish({ verdict: "unknown", detail: `sem suporte: a placa não aceita avc1.${profile}${error ? ` (${error})` : ""}` }, false);
+                else if (data.verdict === "unsupported") finish({ verdict: "unknown", detail: `sem suporte: a placa não aceita ${config.codec}${error ? ` (${error})` : ""}` }, false);
                 else if (data.verdict === "configure") finish({ verdict: "unknown", detail: `configure falhou${error ? `: ${error}` : ""}` }, false);
                 else if (typeof data.chunks === "number" && data.chunks > 0) finish({ verdict: "ok", detail: `${data.chunks} pacotes de ${PROBE_FRAMES} quadros` }, false);
                 else if (error) finish({ verdict: "unknown", detail: `erro do encoder sem nenhum pacote: ${error}` }, false);
