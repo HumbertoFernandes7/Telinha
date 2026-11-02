@@ -20,8 +20,8 @@ import { changeStreamQuality } from "@plugins/telinha/actions";
 import { rt } from "@plugins/telinha/core/context";
 import { getState } from "@plugins/telinha/store";
 import { pluginSettings } from "@test/fakes/vencord";
-import { type FakeRTCPeerConnection, videoSenderStats } from "@test/fakes/webrtc";
-import { connectViewer, createRig, destroyRig, enterCall, logMark, removalsFrom, screenOptions, seconds, type StreamingRig, turns, videoSenderOf } from "@test/helpers/wpb-streaming";
+import { captureStream, type FakeMediaStream, type FakeRTCPeerConnection, videoSenderStats } from "@test/fakes/webrtc";
+import { connectViewer, createRig, destroyRig, enterCall, logMark, removalsFrom, screenOptions, seconds, type StreamingRig, turns, videoSenderOf, windowOptions } from "@test/helpers/wpb-streaming";
 
 import { getLocalCaps } from "./codec";
 import { H264_STALL_MS, QUALITY_LOCK_STARTING, QUALITY_LOCK_STUCK, qualityChangeBlocked, sendPlanFor, SENT_MIN_BYTES, startStreaming, stopStreaming } from "./streaming";
@@ -30,6 +30,8 @@ const NVENC = "MediaFoundationVideoEncodeAccelerator (NVIDIA H.264 Encoder MFT)"
 
 let rig: StreamingRig;
 let seq = 0;
+/** o espectador do envio travado (o teste do travado → o do codec fixado) */
+let stuck: TestViewer | null = null;
 
 /** O que o envio H.264 da placa ja mandou (bytesSent); 0 = nada saiu ainda. Mudavel no meio. */
 interface Out {
@@ -43,8 +45,11 @@ interface TestViewer {
     out: Out;
 }
 
-/** Estatisticas do envio H.264 da placa (NVENC) com a captura entregando 60 fps e `out.bytes` enviados. */
-function h264Stats(out: Out) {
+/**
+ * Estatisticas do envio H.264 da placa (NVENC) com a captura entregando 60 fps e `out.bytes` enviados. `named` false: sem
+ * encoderImplementation nem powerEfficientEncoder (o Chromium nao diz o encoder, como no log da AMD de 31/10).
+ */
+function h264Stats(out: Out, named = true) {
     let frames = 0;
     let at = rig.clock.now();
     return () => {
@@ -53,25 +58,26 @@ function h264Stats(out: Out) {
         at = now;
         return videoSenderStats({
             mimeType: "video/H264", encoderImplementation: NVENC, powerEfficientEncoder: true, framesEncoded: out.bytes ? 600 : 0,
-            bytesSent: out.bytes, sourceFrames: Math.floor(frames + 1e-9), sourceFps: 60
+            bytesSent: out.bytes, sourceFrames: Math.floor(frames + 1e-9), sourceFps: 60,
+            omit: named ? [] : ["encoderImplementation", "powerEfficientEncoder"]
         });
     };
 }
 
 /** O envio de video atual para `v` (o da captura de agora) reporta `v.out`. */
-function report(v: TestViewer) {
-    videoSenderOf(v.pc)!.stats = h264Stats(v.out);
+function report(v: TestViewer, named = true) {
+    videoSenderOf(v.pc)!.stats = h264Stats(v.out, named);
 }
 
 /** Um espectador novo (decodifica H.264 por hardware) que pede para assistir; `bytes`: o que o envio dele ja mandou. */
-async function watcher(name: string, bytes: number): Promise<TestViewer> {
+async function watcher(name: string, bytes: number, named = true): Promise<TestViewer> {
     seq++;
     const peerId = `q${name}`;
     const pc = await connectViewer(rig, peerId, String(830_000_000_000_000_000n + BigInt(seq)), name, { h264HwDecode: true });
     rig.room.receive("watch", { op: "start" }, peerId);
     await turns();
     const v = { peerId, label: `${name} (${peerId.slice(0, 6)})`, pc, out: { bytes } };
-    report(v);
+    report(v, named);
     return v;
 }
 
@@ -159,6 +165,43 @@ describe("trocar a qualidade no ar", () => {
         await turns();
     });
 
+    test("um espectador entra enquanto a captura nova e pedida: desiste antes de desmontar; a nova para e a do ar continua", async () => {
+        const before = rt.local!;
+        let release!: () => void;
+        let fresh: FakeMediaStream | null = null;
+        rig.rtc.mediaDevices.getDisplayMediaImpl = constraints => new Promise(resolve => {
+            release = () => resolve(fresh = captureStream({ audio: !!constraints.audio }));
+        });
+        try {
+            const change = changeStreamQuality("720p60");
+            await turns();
+            const v = await watcher("nomeio", 0);
+            release();
+            await assert.rejects(change, { message: QUALITY_LOCK_STARTING });
+            assert.equal(rt.local, before, "a captura do ar continua");
+            assert.ok(fresh!.getTracks().every(t => t.readyState === "ended"), "a captura nova parou");
+            assert.ok(before.stream.getTracks().every(t => t.readyState === "live"));
+            assert.equal(removalsFrom(rig.room, v.peerId).length, 0, "nenhum removeStream no envio que ainda nao mandou video");
+            v.out.bytes = SENDING;
+            await seconds(rig, 1);
+            rig.room.receive("watch", { op: "stop" }, v.peerId);
+            await turns();
+        } finally {
+            rig.rtc.mediaDevices.getDisplayMediaImpl = constraints => Promise.resolve(captureStream({ audio: !!constraints.audio }));
+        }
+    });
+
+    test("Trocar para outra fonte com um envio H.264 da placa comecando: recusado do mesmo jeito", async () => {
+        const v = await watcher("trocar", 0);
+        const before = rt.local;
+        await assert.rejects(startStreaming(windowOptions()), { message: QUALITY_LOCK_STARTING });
+        assert.equal(rt.local, before);
+        v.out.bytes = SENDING;
+        await seconds(rig, 1);
+        rig.room.receive("watch", { op: "stop" }, v.peerId);
+        await turns();
+    });
+
     // por ultimo: o envio travado desliga o H.264 automatico nesta sessao
     test("com um envio travado (contido), a troca fica bloqueada", async () => {
         const v = await watcher("travado", 0);
@@ -168,5 +211,25 @@ describe("trocar a qualidade no ar", () => {
         await assert.rejects(changeStreamQuality("720p60"), { message: QUALITY_LOCK_STUCK });
         assert.equal(rt.local, before);
         assert.equal(removalsFrom(rig.room, v.peerId).length, 0);
+        stuck = v;
+    });
+
+    test("codec fixado em H.264 com o da placa desligado (marca de travado): sem o encoder nas estatisticas, conta como da placa", async () => {
+        assert.equal(getLocalCaps().h264HwEncode, false, "a marca do travado desligou o H.264 da placa");
+        rig.room.receive("watch", { op: "stop" }, stuck!.peerId);
+        await turns();
+        assert.equal(qualityChangeBlocked(), null);
+        pluginSettings.set("codec", "h264");
+        try {
+            const v = await watcher("fixado", 0, false);
+            assert.equal(sendPlanFor(v.peerId)?.codec, "h264");
+            await seconds(rig, 2);
+            assert.equal(qualityChangeBlocked(), QUALITY_LOCK_STARTING, "o envio nasce software, mas o encoder pode ser o da placa");
+            v.out.bytes = SENDING;
+            await seconds(rig, 1);
+            assert.equal(qualityChangeBlocked(), null, "o video saiu: liberado");
+        } finally {
+            pluginSettings.set("codec", "auto");
+        }
     });
 });

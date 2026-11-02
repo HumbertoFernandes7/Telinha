@@ -82,6 +82,15 @@ export function changeStreamQuality(quality: Quality): Promise<void> {
     return streaming.startStreaming({ source: local.source, quality, withAudio: local.info.hasAudio });
 }
 
+/**
+ * Por que o seletor de fonte nao pode capturar de novo agora, com a transmissao no ar: `lock` e o
+ * getState().local.qualityLock; `sameSource`, a fonte escolhida e a do ar (so a qualidade mudaria). null = pode.
+ * startStreaming confere o mesmo e recusa com esta frase.
+ */
+export function recaptureLock(lock: string | null | undefined, sameSource: boolean): string | null {
+    return streaming.recaptureLock(lock, sameSource);
+}
+
 export function stopStreaming(): void {
     streaming.stopStreaming();
 }

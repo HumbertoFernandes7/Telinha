@@ -284,6 +284,9 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
     }
 
     const { source, profile, access: chosenAccess } = validateOptions(opts);
+    // com a transmissao no ar, capturar de novo desmonta o envio de cada espectador (stopCapture): recaptureLock
+    const early = rt.local && recaptureLock(qualityLockOf(rt.local), rt.local.source.id === source.id);
+    if (early) throw new Error(early);
     const kind = source.id.startsWith("screen:") ? "screen" : "window";
     // janela: audio so do processo da janela (getDisplayMedia); tela inteira: audio do PC sem o Discord (telinha-audio.exe)
     const wantAudio = !!opts.withAudio && kind === "window";
@@ -364,6 +367,13 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
         const access: AccessChoice = chosenAccess ?? (previous ? { access: previous.access, password: previous.password } : { access: "all", password: null });
         // escolha nova de "Quem pode assistir" ao trocar de fonte: vale como setStreamAccess (antes de stopCapture apagar a senha)
         const accessChanged = !!previous && (access.access !== previous.access || access.password !== previous.password);
+        // de novo: um espectador pode ter entrado durante o getDisplayMedia (o envio H.264 dele ainda nao mandou nada).
+        // Desiste sem mexer na captura no ar: so a nova para
+        const late = previous && recaptureLock(qualityLockOf(previous), previous.source.id === source.id);
+        if (late) {
+            stream.getTracks().forEach(t => t.stop());
+            throw new Error(late);
+        }
         const carried = carryCodecs(keepViewers);
         if (previous) stopCapture(previous, "trocando de fonte");
 
@@ -990,17 +1000,34 @@ export const QUALITY_LOCK_STUCK = "A placa de vídeo travou num envio: a qualida
  * espectador (stopCapture → removeStream). Num envio H.264 da placa de video cujo video ainda nao saiu (o mesmo sinal do
  * checkStall: send.sending), o encoder pode estar travado sem o checkStall ter visto ainda (H264_STALL_MS), e desmontar um
  * envio travado trava o Discord na placa AMD dos logs de 31/10 (containStuck). Com um envio travado (contido), espera o
- * Discord reiniciar.
+ * Discord reiniciar. O envio comecando vem primeiro: ele tambem segura o "Trocar" para outra fonte (recaptureLock).
+ *
+ * Codec fixado em H.264 com o h264HwEncode desligado (a sonda do High ou a marca de encoder travado, stuckEncoder.ts): o
+ * envio nasce "software" (expectedKindFor), mas o Chromium pode ainda usar a placa. Ate as estatisticas dizerem o encoder
+ * (no log da AMD de 31/10 elas nunca disseram), ele conta como da placa.
  */
 function qualityLockOf(local: LocalCapture): string | null {
-    let starting = false;
+    let stuck = false;
     for (const peerId of local.viewers) {
         const send = sends.get(peerId);
-        if (send?.stuck || contained(peerId)) return QUALITY_LOCK_STUCK;
-        if (send && !send.sending && !send.fellBack && encoderKindOf(send) === "hardware"
-            && /^video\/h264$/i.test(send.reportedCodec ?? `video/${send.decision.codec}`)) starting = true;
+        if (send?.stuck || contained(peerId)) {
+            stuck = true;
+            continue;
+        }
+        if (!send || send.sending || send.fellBack || !/^video\/h264$/i.test(send.reportedCodec ?? `video/${send.decision.codec}`)) continue;
+        const pinnedUnknown = !send.encoderKind && settings.store.codec === "h264";
+        if (pinnedUnknown || encoderKindOf(send) === "hardware") return QUALITY_LOCK_STARTING;
     }
-    return starting ? QUALITY_LOCK_STARTING : null;
+    return stuck ? QUALITY_LOCK_STUCK : null;
+}
+
+/**
+ * O bloqueio de capturar de novo com a transmissao no ar (startStreaming com uma captura no ar; o seletor de fonte).
+ * A mesma fonte (so a qualidade muda): todo o qualityLockOf. Outra fonte ("Trocar"): so o envio H.264 da placa
+ * comecando; o travado ja esta contido e o stopCapture o deixa de fora do removeStream.
+ */
+export function recaptureLock(lock: string | null | undefined, sameSource: boolean): string | null {
+    return !lock || (lock === QUALITY_LOCK_STUCK && !sameSource) ? null : lock;
 }
 
 /** A barra (store) acompanha o qualityLockOf: publica quando ele muda. */

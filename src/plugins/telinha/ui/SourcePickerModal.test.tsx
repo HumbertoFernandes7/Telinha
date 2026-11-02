@@ -15,7 +15,7 @@ import "@test/fakes/dom";
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, test } from "node:test";
 
-import { getState, resetState } from "@plugins/telinha/store";
+import { getState, resetState, setState } from "@plugins/telinha/store";
 import type { CaptureSource } from "@plugins/telinha/types";
 import { installWebAudio, type WebAudioEnv } from "@test/fakes/audio";
 import { installNative } from "@test/fakes/native";
@@ -329,5 +329,49 @@ describe("SourcePickerModal: a lista e as opcoes", () => {
         modal.click("Cancelar");
         assert.equal(modals.list().length, 0);
         assert.deepEqual(toasts, []);
+    });
+});
+
+describe("SourcePickerModal: Trocar com a captura bloqueada (streaming.ts → recaptureLock)", () => {
+    const STARTING = "A qualidade pode mudar assim que o vídeo começar a sair para todos (alguns segundos)";
+    const STUCK = "A placa de vídeo travou num envio: a qualidade só pode mudar depois de reiniciar o Discord";
+
+    beforeEach(() => {
+        resetVencordFakes();
+        resetState();
+        SelectedChannelStore.setVoiceChannel(VOICE_CHANNEL_ID);
+    });
+
+    afterEach(() => assert.deepEqual(caughtErrors, [], "nenhum componente quebrou"));
+
+    function live(t: { after(fn: () => void): void; }, qualityLock: string) {
+        setState({ ...getState(), local: { source: GAME, quality: "1080p60", hasAudio: false, startedAt: 0, viewers: ["p1"], access: "all", qualityLock } });
+        const native = installNative({ listSources: sources(GAME, CHAT) });
+        t.after(() => native.restore());
+        return openInHost(openSourcePicker);
+    }
+
+    test("envio H.264 da placa comecando: Trocar desligado, com o motivo, para a mesma fonte e para outra", async t => {
+        const modal = live(t, STARTING);
+        await settle();
+        for (const name of ["Jogo", "Navegador"]) {
+            fireEvent.click(card(name));
+            await settle();
+            assert.equal(modal.button("Trocar").disabled, true, name);
+            screen.getByText(STARTING);
+        }
+    });
+
+    test("envio travado: so mudar a qualidade da mesma fonte fica bloqueado; outra fonte troca (o travado fica contido)", async t => {
+        const modal = live(t, STUCK);
+        await settle();
+        fireEvent.click(card("Jogo"));
+        await settle();
+        assert.equal(modal.button("Trocar").disabled, true);
+        screen.getByText(STUCK);
+        fireEvent.click(card("Navegador"));
+        await settle();
+        assert.equal(modal.button("Trocar").disabled, false);
+        assert.equal(screen.queryByText(STUCK), null);
     });
 });
