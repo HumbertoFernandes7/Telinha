@@ -333,6 +333,27 @@ describe("VoiceBar (so com o estado do Telinha)", () => {
             assert.deepEqual(loggerLines.filter(l => l.level === "error").map(l => [l.args[0], String(l.args[1])]), [["changeStreamQuality falhou", "Error: Você não está transmitindo."]]);
             assert.equal(seg("FPS", "30").disabled, false);
         });
+
+        test("qualidade bloqueada (envio H.264 da placa comecando, ou travado): botoes desligados, o motivo na dica, clicar nao faz nada", async () => {
+            const lock = "A qualidade pode mudar assim que o vídeo começar a sair para todos (alguns segundos)";
+            show({ local: mine({ quality: "1440p60", qualityLock: lock }) });
+            renderBar();
+            for (const b of [...segButtons("Resolução"), ...segButtons("FPS")]) {
+                assert.equal(b.disabled, true, b.textContent!);
+                assert.equal(b.title, lock, "a dica do 2K da lugar ao motivo");
+            }
+            assert.equal((document.querySelector(".vc-telinha-bar-quality") as HTMLElement).title, lock);
+            fireEvent.click(seg("FPS", "30"));
+            await settle();
+            assert.deepEqual(loggerLines.filter(l => l.level === "error"), [], "nem tentou trocar");
+
+            // liberada: os botoes voltam, com a dica do 2K
+            show({ local: mine({ quality: "1440p60" }) });
+            await settle();
+            assert.equal(seg("FPS", "30").disabled, false);
+            assert.equal(seg("Resolução", "2K").title, "2K (1440p) precisa de uma tela 2K: numa tela ou janela menor, vai no tamanho dela.");
+            assert.equal((document.querySelector(".vc-telinha-bar-quality") as HTMLElement).hasAttribute("title"), false);
+        });
     });
 
     describe("qualidade automatica", () => {

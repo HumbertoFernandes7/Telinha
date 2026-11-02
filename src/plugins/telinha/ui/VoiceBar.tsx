@@ -88,14 +88,16 @@ function Segmented<T extends number>({ label, options, value, disabled, titleOf,
 
 /**
  * Resolução and FPS of the live stream. Picking one captures the same source again at the new quality (changeStreamQuality,
- * like "Trocar" in the source picker): viewers keep watching. A failure shows up as the bar's last error.
+ * like "Trocar" in the source picker): viewers keep watching. A failure shows up as the bar's last error. `lock`: why it
+ * can't change right now (an H.264 hardware send still starting, or a stuck one): the buttons are off, the reason in
+ * their tooltip.
  */
-function LiveQuality({ quality, sizeNote }: { quality: Quality; sizeNote?: string | null; }) {
+function LiveQuality({ quality, sizeNote, lock }: { quality: Quality; sizeNote?: string | null; lock?: string | null; }) {
     const [busy, setBusy] = useState(false);
     const { resolution, fps } = splitQuality(quality);
 
     const change = (next: Quality) => {
-        if (busy || next === quality) return;
+        if (busy || lock || next === quality) return;
         setBusy(true);
         changeStreamQuality(next)
             .then(
@@ -107,16 +109,23 @@ function LiveQuality({ quality, sizeNote }: { quality: Quality; sizeNote?: strin
 
     return (
         <>
-            <div className={cl("bar-quality")}>
+            <div className={cl("bar-quality")} title={lock ?? undefined}>
                 <Segmented
                     label="Resolução"
                     options={RESOLUTION_OPTIONS}
                     value={resolution}
-                    disabled={busy}
-                    titleOf={r => (r === 1440 ? HINT_2K : undefined)}
+                    disabled={busy || !!lock}
+                    titleOf={r => lock ?? (r === 1440 ? HINT_2K : undefined)}
                     onPick={r => change(qualityOf(r, fps))}
                 />
-                <Segmented label="FPS" options={FPS_OPTIONS} value={fps} disabled={busy} onPick={f => change(qualityOf(resolution, f))} />
+                <Segmented
+                    label="FPS"
+                    options={FPS_OPTIONS}
+                    value={fps}
+                    disabled={busy || !!lock}
+                    titleOf={lock ? () => lock : undefined}
+                    onPick={f => change(qualityOf(resolution, f))}
+                />
             </div>
             {sizeNote && (
                 <div className={cl("bar-info", "bar-wrap")} title={sizeNote}>
@@ -197,7 +206,7 @@ function VoiceBarInner() {
                 </div>
             )}
 
-            {local && <LiveQuality quality={local.quality} sizeNote={local.sizeNote} />}
+            {local && <LiveQuality quality={local.quality} sizeNote={local.sizeNote} lock={local.qualityLock} />}
 
             {local?.pendingViewers?.map(p => {
                 const name = displayName(p.discordUserId, p.username);

@@ -205,6 +205,11 @@ export interface LocalStream {
      * 1080p". Ausente/null = a captura comporta a resolucao escolhida.
      */
     sizeNote?: string | null;
+    /**
+     * Por que a resolucao e o fps nao podem mudar agora, em pt-BR (a barra desliga os botoes e mostra isto na dica): um
+     * envio H.264 da placa de video cujo video ainda nao saiu, ou um envio travado. Ausente/null = pode mudar.
+     */
+    qualityLock?: string | null;
     /** Aviso sobre a captura em pt-BR (imagem preta / janela congelada). Ausente/null = captura ok. */
     captureWarning?: string | null;
     /** pedidos esperando a sua aprovacao (Permitir/Recusar), mais antigo primeiro */

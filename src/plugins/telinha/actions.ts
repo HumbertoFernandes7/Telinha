@@ -70,11 +70,15 @@ export function startStreaming(opts: StreamOptions): Promise<void> {
  * Troca a resolucao e o fps com a transmissao no ar (seletores da barra do Telinha): captura de novo a mesma fonte, com o
  * mesmo som e o mesmo "Quem pode assistir", como o Trocar do seletor de fonte; quem assiste continua assistindo. Chame
  * direto do clique (a captura precisa de um gesto). Rejeita com a frase pronta em pt-BR (tambem vai para lastError).
+ * Bloqueada (rejeita com o motivo, o mesmo de getState().local.qualityLock) enquanto um envio H.264 da placa de video
+ * ainda nao mandou video ou com um envio travado: desmontar esse envio pode travar o Discord (streaming.ts → qualityLockOf).
  */
 export function changeStreamQuality(quality: Quality): Promise<void> {
     const { local } = rt;
     if (!local) return Promise.reject(new Error("Você não está transmitindo."));
     if (local.quality === quality) return Promise.resolve();
+    const lock = streaming.qualityChangeBlocked();
+    if (lock) return Promise.reject(new Error(lock));
     return streaming.startStreaming({ source: local.source, quality, withAudio: local.info.hasAudio });
 }
 

@@ -81,6 +81,8 @@ export interface LocalCapture {
     autoQuality?: AutoQualityState | null;
     /** aviso da captura (core/quality/captureMonitor.ts); null = ok */
     captureWarning?: string | null;
+    /** por que a qualidade nao pode mudar agora (streaming.ts → qualityChangeBlock); null = pode */
+    qualityLock?: string | null;
     /** quem pode assistir (core/access.ts); muda pela barra do Telinha com a transmissao no ar */
     access: AccessMode;
     /** com access "password": a senha desta transmissao, normalizada. So na memoria; some quando ela acaba */
@@ -312,6 +314,7 @@ function buildSnapshot(): TelinhaState {
                 autoQuality: local.autoQuality ?? null,
                 captureWarning: local.captureWarning ?? null,
                 ...(sizeNote ? { sizeNote } : {}),
+                ...(local.qualityLock ? { qualityLock: local.qualityLock } : {}),
                 pendingViewers,
                 access: local.access
             }
