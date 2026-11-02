@@ -14,15 +14,24 @@
 // %APPDATA%\Telinha\capture-flags.json antes do app ficar pronto e publica o que fez em globalThis.__TelinhaAddon.capture.
 // Aqui so se grava o arquivo (para a proxima partida) e se le o que o loader fez nesta.
 //
-// "Prioridade da captura na placa de vídeo": enquanto transmite, o processo principal do Discord (onde o Chromium copia
-// cada quadro da captura) e o da GPU (onde converte e codifica) passam para a classe HIGH do agendador da placa de video,
-// pelo telinha-audio.exe --gpu-priority (D3DKMTSetProcessSchedulingPriorityClass). Funciona sem administrador (medido em
-// 01/11/2026 no Windows 11, nivel de integridade medio: HIGH num outro processo do mesmo usuario e aceito). Nunca
-// REALTIME: com o HAGS ligado pode travar o encoder NVENC (o helper recusa). Quando o Windows recusa, so fica no log e na
-// pagina do plugin ("não foi possível (precisa de administrador)"); nunca pede elevacao.
-// Ao parar a transmissao cada processo volta para a classe que tinha (normalmente NORMAL): o ganho so importa durante a
-// captura, e o Discord em HIGH depois disso so disputaria a placa com o jogo (a interface, e o video de quem voce assiste)
-// sem ganho nenhum. A classe tambem some quando o Discord fecha.
+// "Prioridade da captura na placa de vídeo": enquanto transmite, o processo principal do Discord (onde o Chromium captura
+// a tela e copia cada quadro) e o da GPU (onde converte e codifica) sobem para a classe HIGH do agendador da placa de
+// video, pelo telinha-audio.exe --gpu-priority --raise (D3DKMTSetProcessSchedulingPriorityClass). Funciona sem
+// administrador (medido em 01/11/2026 no Windows 11, nivel de integridade medio: HIGH num outro processo do mesmo usuario
+// e aceito). O Telinha nunca pede REALTIME (com o HAGS ligado pode travar o encoder NVENC; o helper recusa) e nunca
+// abaixa: o processo da GPU do Discord pode ja estar em REALTIME, posto pelo proprio Discord, e fica assim (02/11/2026,
+// RTX 3070: baixado para HIGH, o NVENC foi de ~7 ms para ~400 ms por quadro com um jogo pesado). Quando o Windows recusa,
+// so fica no log e na pagina do plugin ("não foi possível (precisa de administrador)"); nunca pede elevacao.
+// Ao parar a transmissao volta so o que o Telinha subiu, para a classe que tinha (normalmente NORMAL), e so se ainda
+// estiver em HIGH (--if-class high: se outro mudou a classe depois, fica): o ganho so importa durante a captura, e o
+// Discord em HIGH depois disso so disputaria a placa com o jogo (a interface, e o video de quem voce assiste) sem ganho
+// nenhum. A classe tambem some quando o Discord fecha.
+//
+// Por que estes dois processos (conferido no codigo do Chromium 152, branch 7977): o getDisplayMedia nao passa pelo
+// processo utilitario "Video Capture", que so atende cameras (VideoCaptureProviderSwitcher manda para ele so o
+// DEVICE_VIDEO_CAPTURE). A captura da tela e da janela roda no processo principal (InProcessVideoCaptureProvider →
+// DesktopCaptureDevice numa thread "desktopCaptureThread"), e e la que o WGC cria o seu D3D11 device e faz a copia e o
+// Map de cada quadro; com o WebRtcAllowWgcUsingTexture o quadro vai como textura compartilhada para o processo da GPU.
 //
 // Nada roda no carregamento do modulo.
 
@@ -130,17 +139,22 @@ export function setGpuCaptureMain(on: boolean): GpuCaptureStatus {
 
 // #region prioridade na placa de video
 
-/** "high": inicio da transmissao; "restore": cada processo volta para a classe que tinha antes do "high". */
+/** "high": inicio da transmissao; "restore": o que o "high" subiu volta para a classe que tinha. */
 export type GpuPriorityMode = "high" | "restore";
 
 /** Um processo do Discord e o que o helper fez nele. */
 export interface GpuPriorityTarget {
     pid: number;
-    /** "Discord" = o processo principal (a copia da captura); "GPU" = o processo da GPU (conversao e codificacao) */
+    /** "Discord" = o processo principal (a captura e a copia de cada quadro); "GPU" = o processo da GPU (conversao e codificacao) */
     role: "Discord" | "GPU";
-    /** classe antes e depois (IDLE, BELOW_NORMAL, NORMAL, ABOVE_NORMAL, HIGH); null = nao mexeu */
+    /** classe antes e depois (IDLE, BELOW_NORMAL, NORMAL, ABOVE_NORMAL, HIGH, REALTIME); null = sem resposta */
     before: string | null;
     after: string | null;
+    /**
+     * deixado como estava (before = after = a classe que tinha): no "high", ja estava em HIGH ou acima (o REALTIME que o
+     * Discord da ao processo da GPU); na volta, ja nao estava na classe que o Telinha pos, ou a subida nem mexeu nele
+     */
+    kept: boolean;
     /** a linha de erro do helper ("open 0x80070005 Acesso negado.", "gone ..." = o processo terminou), ou o que faltou */
     error: string | null;
 }
@@ -151,6 +165,7 @@ export interface GpuPriorityReport {
     ok: boolean;
     /** quantos ficaram como pedido */
     done: number;
+    /** na volta, tambem os que a subida deixou como estavam (kept), para o log citar todos */
     targets: GpuPriorityTarget[];
     /** agendamento da placa por hardware (HAGS), segundo o helper; null = desconhecido */
     hags: "on" | "off" | null;
@@ -193,10 +208,15 @@ const GPU_RESTART_TRIES = 3;
 /** o processo novo pode nascer um pouco antes de o evento chegar ao JS */
 const GPU_RESTART_SLACK_MS = 5000;
 const HIGH = "HIGH";
-/** as classes abaixo de HIGH: so estas sao lembradas para voltar (um processo ja em HIGH fica como estava) */
+/** as classes abaixo de HIGH: so estas sao lembradas para voltar (um processo ja em HIGH ou acima fica como estava) */
 const BELOW_HIGH = new Set(["IDLE", "BELOW_NORMAL", "NORMAL", "ABOVE_NORMAL"]);
+/** a subida nunca abaixa: o helper so muda quem esta abaixo de HIGH (REALTIME e HIGH ficam, com uma linha "keep") */
+const RAISE_ONLY = ["--raise"];
+/** a volta so muda quem ainda esta na classe que o Telinha pos (se o Discord mudou depois, fica) */
+const IF_STILL_HIGH = ["--if-class", "high"];
 const HAGS_RE = /^hags (on|off|unknown)$/;
 const OK_RE = /^ok pid=(\d+) before=(\S+) after=(\S+)$/;
+const KEEP_RE = /^keep pid=(\d+) class=(\S+)$/;
 const TARGET_ERROR_RE = /^error (\w+) (0x[0-9A-Fa-f]{8}) pid=(\d+)\s*(.*)$/;
 const GENERAL_ERROR_RE = /^error (\S+) (0x[0-9A-Fa-f]{8})/;
 /** OpenProcess negado, STATUS_ACCESS_DENIED, STATUS_PRIVILEGE_NOT_HELD: o Windows recusou (talvez precise de administrador) */
@@ -206,6 +226,8 @@ const GONE_ERROR_RE = /^(?:gone|tree) /;
 
 /** pid → o que o Telinha subiu para HIGH e ainda nao voltou */
 const raised = new Map<number, Raised>();
+/** pid → o que a ultima subida deixou como estava (ja em HIGH ou acima): nada a voltar, so entra no relatorio da volta */
+const untouched = new Map<number, GpuPriorityTarget>();
 /** a transmissao pediu HIGH e ainda nao pediu a volta (o processo da GPU que reinicia sobe de novo) */
 let active = false;
 /** o que o main fez sozinho, entregue no proximo relatorio (GpuPriorityReport.notes) */
@@ -240,14 +262,15 @@ function helperProblem(): string | null {
 const toLines = (output: string) => output.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
 
 /**
- * Roda `telinha-audio.exe --gpu-priority <pids> --class <cls>` e junta as linhas (stdout e stderr). Sem resposta a tempo,
- * mata o helper e fica com o que ele ja tinha dito (um "ok pid=" ja escrito valeu). Nunca rejeita.
+ * Roda `telinha-audio.exe --gpu-priority <pids> --class <cls> <condicao>` (RAISE_ONLY ou IF_STILL_HIGH) e junta as linhas
+ * (stdout e stderr). Sem resposta a tempo, mata o helper e fica com o que ele ja tinha dito (um "ok pid=" ja escrito
+ * valeu). Nunca rejeita.
  */
-function runHelper(pids: number[], cls: string): Promise<HelperAnswer> {
+function runHelper(pids: number[], cls: string, condition: string[]): Promise<HelperAnswer> {
     return new Promise(resolve => {
         let child: ChildProcessByStdio<null, Readable, Readable>;
         try {
-            child = spawn(helperPath(), ["--gpu-priority", pids.join(","), "--class", cls], { windowsHide: true, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+            child = spawn(helperPath(), ["--gpu-priority", pids.join(","), "--class", cls, ...condition], { windowsHide: true, shell: false, stdio: ["ignore", "pipe", "pipe"] });
         } catch (e) {
             resolve({ lines: [], code: null, reason: spawnErrorReason(e as NodeJS.ErrnoException, HELPER_NAME) });
             return;
@@ -283,8 +306,9 @@ function runHelper(pids: number[], cls: string): Promise<HelperAnswer> {
 const isGone = (t: GpuPriorityTarget) => !!t.error && GONE_ERROR_RE.test(t.error);
 
 function summarize(mode: GpuPriorityMode, targets: GpuPriorityTarget[], hags: GpuPriorityReport["hags"], reason: string | null, quiet = false): GpuPriorityReport {
-    // na volta, o processo que ja terminou nao tem o que voltar: conta como feito
-    const done = targets.filter(t => (!t.error && t.after && (mode !== "high" || t.after === HIGH)) || (mode === "restore" && isGone(t))).length;
+    // na subida, quem ja estava em HIGH ou acima (kept) ficou como pedido; na volta, o processo que ja terminou nao tem o
+    // que voltar: conta como feito
+    const done = targets.filter(t => (!t.error && t.after && (mode !== "high" || t.after === HIGH || t.kept)) || (mode === "restore" && isGone(t))).length;
     return {
         mode, ok: !reason && done === targets.length, done, targets, hags, reason, quiet,
         refused: targets.some(t => !!t.error && REFUSED_ERROR_RE.test(t.error)),
@@ -295,13 +319,14 @@ function summarize(mode: GpuPriorityMode, targets: GpuPriorityTarget[], hags: Gp
 
 /** As linhas do helper → o que aconteceu com cada processo. */
 function readAnswer(wanted: { pid: number; role: Role; }[], answer: HelperAnswer) {
-    const targets = wanted.map(({ pid, role }): GpuPriorityTarget => ({ pid, role, before: null, after: null, error: null }));
+    const targets = wanted.map(({ pid, role }): GpuPriorityTarget => ({ pid, role, before: null, after: null, kept: false, error: null }));
     const byPid = new Map(targets.map(t => [t.pid, t]));
     let hags: GpuPriorityReport["hags"] = null;
     let { reason } = answer;
     for (const line of answer.lines) {
         const hagsLine = HAGS_RE.exec(line);
         const ok = OK_RE.exec(line);
+        const kept = KEEP_RE.exec(line);
         const failed = TARGET_ERROR_RE.exec(line);
         const general = GENERAL_ERROR_RE.exec(line);
         if (hagsLine) {
@@ -309,6 +334,9 @@ function readAnswer(wanted: { pid: number; role: Role; }[], answer: HelperAnswer
         } else if (ok) {
             const t = byPid.get(Number(ok[1]));
             if (t) [t.before, t.after] = [ok[2], ok[3]];
+        } else if (kept) {
+            const t = byPid.get(Number(kept[1]));
+            if (t) [t.before, t.after, t.kept] = [kept[2], kept[2], true];
         } else if (failed) {
             const t = byPid.get(Number(failed[3]));
             if (t) t.error = `${failed[1]} ${failed[2]}${failed[4] ? ` ${failed[4]}` : ""}`.slice(0, 200);
@@ -322,9 +350,10 @@ function readAnswer(wanted: { pid: number; role: Role; }[], answer: HelperAnswer
 }
 
 /**
- * Volta estes processos para a classe de antes (um helper por classe). Sai de `raised` o que voltou e o que ja terminou;
- * o resto (antivirus atrasando, sem resposta a tempo, acesso negado de passagem) fica para a proxima tentativa: o proximo
- * "restore", o proximo "high" ou o inicio do plugin. quiet = nada mudou e as falhas ja tinham sido ditas.
+ * Volta estes processos para a classe de antes (um helper por classe), so se ainda estiverem em HIGH. Sai de `raised` o
+ * que voltou, o que ja nao estava em HIGH (outro mudou a classe: fica como esta) e o que ja terminou; o resto (antivirus
+ * atrasando, sem resposta a tempo, acesso negado de passagem) fica para a proxima tentativa: o proximo "restore", o
+ * proximo "high" ou o inicio do plugin. quiet = nada mudou e as falhas ja tinham sido ditas.
  */
 async function restoreEntries(entries: [number, Raised][]) {
     const groups = new Map<string, { pid: number; role: Role; }[]>();
@@ -335,7 +364,7 @@ async function restoreEntries(entries: [number, Raised][]) {
     let reason: string | null = null;
     let news = false;
     for (const [before, wanted] of groups) {
-        const answer = problem ? { lines: [], code: null, reason: problem } : await runHelper(wanted.map(t => t.pid), before.toLowerCase());
+        const answer = problem ? { lines: [], code: null, reason: problem } : await runHelper(wanted.map(t => t.pid), before.toLowerCase(), IF_STILL_HIGH);
         const read = readAnswer(wanted, answer);
         for (const t of read.targets) {
             // sem entrada: o processo da GPU caiu enquanto o helper rodava (onChildProcessGone ja o tirou)
@@ -363,12 +392,15 @@ async function raise(): Promise<GpuPriorityReport> {
     const stale = [...raised].filter(([pid]) => !wanted.some(t => t.pid === pid));
     if (stale.length) await restoreEntries(stale);
     const problem = helperProblem();
-    const answer = problem ? { lines: [], code: null, reason: problem } : await runHelper(wanted.map(t => t.pid), "high");
+    const answer = problem ? { lines: [], code: null, reason: problem } : await runHelper(wanted.map(t => t.pid), "high", RAISE_ONLY);
     const read = readAnswer(wanted, answer);
+    untouched.clear();
     for (const t of read.targets) {
-        if (t.after !== HIGH) continue;
         const entry = raised.get(t.pid);
-        // ja lembrado (a volta falhou antes, ou trocou de fonte): continua voltando para a classe de antes de tudo
+        // ja estava em HIGH ou acima sem o Telinha (o REALTIME do Discord): fica como esta e nunca volta; a volta so o cita
+        if (t.kept && !entry) untouched.set(t.pid, { ...t });
+        if (t.after !== HIGH) continue;
+        // ja lembrado (a volta falhou antes, ou o processo da GPU reiniciou): continua voltando para a classe de antes de tudo
         if (entry) entry.failed = false;
         else if (t.before && BELOW_HIGH.has(t.before)) raised.set(t.pid, { before: t.before, role: t.role, failed: false });
     }
@@ -378,7 +410,9 @@ async function raise(): Promise<GpuPriorityReport> {
 async function restore(): Promise<GpuPriorityReport> {
     active = false;
     const read = await restoreEntries([...raised]);
-    return summarize("restore", read.targets, read.hags, read.reason, read.quiet);
+    const left = [...untouched.values()];
+    untouched.clear();
+    return summarize("restore", [...read.targets, ...left], read.hags, read.reason, read.quiet);
 }
 
 /**
@@ -387,8 +421,11 @@ async function restore(): Promise<GpuPriorityReport> {
  */
 function onChildProcessGone(_event: unknown, details: { type?: string; } | undefined) {
     if (details?.type !== "GPU" || !active) return;
-    const old = [...raised].filter(([, entry]) => entry.role === "GPU").map(([pid]) => pid);
-    for (const pid of old) raised.delete(pid);
+    const old = [...raised, ...untouched].filter(([, entry]) => entry.role === "GPU").map(([pid]) => pid);
+    for (const pid of old) {
+        raised.delete(pid);
+        untouched.delete(pid);
+    }
     const goneAt = Date.now();
     const at = new Date(goneAt).toISOString().slice(11, 19);
     let tries = 0;
@@ -404,7 +441,8 @@ function onChildProcessGone(_event: unknown, details: { type?: string; } | undef
             }
             const report = await raise();
             const now = report.targets.find(t => t.pid === gpu.pid);
-            notes.push(`o processo da GPU do Discord reiniciou às ${at} UTC (${old.join(", ") || "?"} → ${gpu.pid}): ${now?.after === HIGH ? "alta de novo" : `não subiu de novo (${now?.error ?? report.reason})`}`);
+            const outcome = now?.kept ? `já estava ${now.after}` : now?.after === HIGH ? "alta de novo" : `não subiu de novo (${now?.error ?? report.reason})`;
+            notes.push(`o processo da GPU do Discord reiniciou às ${at} UTC (${old.join(", ") || "?"} → ${gpu.pid}): ${outcome}`);
         }), GPU_RESTART_DELAY_MS);
         timer.unref?.();
     };
@@ -420,8 +458,9 @@ function watchGpuProcess() {
 }
 
 /**
- * "high": o Discord (principal + GPU) em HIGH na placa de video; "restore": volta o que o "high" mudou (sem nada a voltar,
- * nao roda o helper; o que falhou antes e tentado de novo). Um pedido por vez. Nunca rejeita.
+ * "high": o Discord (principal + GPU) em HIGH na placa de video, so quem esta abaixo (nunca abaixa um REALTIME); "restore":
+ * volta o que o "high" mudou (sem nada a voltar, nao roda o helper; o que falhou antes e tentado de novo). Um pedido por
+ * vez. Nunca rejeita.
  */
 export function setGpuPriorityMain(mode: GpuPriorityMode): Promise<GpuPriorityReport> {
     return enqueue(async () => {
@@ -435,6 +474,7 @@ export function setGpuPriorityMain(mode: GpuPriorityMode): Promise<GpuPriorityRe
 /** So para testes: esquece o que foi subido, e o ouvinte do processo da GPU e instalado de novo no proximo "high". */
 export function resetGpuPriorityForTests() {
     raised.clear();
+    untouched.clear();
     notes.length = 0;
     active = false;
     watchingGpu = false;
