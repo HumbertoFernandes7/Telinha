@@ -137,19 +137,19 @@ function addVideoBitrate(lines: string[], startKbps: number, maxKbps: number): s
     return touched.length ? `${params} em ${[...new Set(touched)].join("/")}` : null;
 }
 
-/** Opus estereo a ate 128 kbps (o padrao do Chromium e mono ~32 kbps, ruim para jogo/musica). */
+/** Opus estereo a ate 192 kbps (o padrao do Chromium e mono ~32 kbps, ruim para jogo/musica). */
 function addOpusStereo(lines: string[]): string | null {
     const opus = parseRtpmaps(lines).find(m => /^opus$/i.test(m.name));
     if (!opus) return null;
     const idx = fmtpIndex(lines, opus.pt);
-    const params = "stereo=1;sprop-stereo=1;maxaveragebitrate=128000";
+    const params = "stereo=1;sprop-stereo=1;maxaveragebitrate=192000";
     if (idx >= 0) {
         if (/stereo=/.test(lines[idx])) return null;
         lines[idx] += `;${params}`;
     } else {
         lines.splice(opus.line + 1, 0, `a=fmtp:${opus.pt} ${params}`);
     }
-    return "opus estéreo 128 kbps";
+    return "opus estéreo 192 kbps";
 }
 
 /** Aplica o plano (codec e opus nas m-sections em que enviamos; banda em todas as de video). Lanca em SDP inesperado (quem chama cai para o original). */
