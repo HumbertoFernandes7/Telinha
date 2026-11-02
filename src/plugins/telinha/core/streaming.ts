@@ -36,6 +36,7 @@ import {
 import { blockOf, getPc, type LocalCapture, peerLabel, publish, rt, setLastError } from "./context";
 import { isIdentityConfigured } from "./identity/config";
 import { type ApprovalInput, identityRequiresApproval } from "./identity/policy";
+import { currentLiveWeight, liveWeightTick, startLiveWeight, stopLiveWeight } from "./liveWeight";
 import { errorText, log, logThrottled, notePrivateTitle } from "./log";
 import { getNative } from "./nativeApi";
 import { containPeerConnection, isContained, type SendPlan } from "./peerConnection";
@@ -406,6 +407,8 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
         if (sizeNote) log.info(sizeNote);
         // o modo da captura (live com jogo pesado, core/captureBoost.ts): para comparar com e sem pelo "fonte N" do envio
         noteCaptureStarted();
+        // o peso da live (placa de video e processador do Discord e do jogo, core/liveWeight.ts): so mede
+        void startLiveWeight(local.source.id);
         sendPresence();
         const waiting = deferredJoins ?? [];
         deferredJoins = null;
@@ -443,6 +446,7 @@ function startExtras(local: LocalCapture, video: MediaStreamTrack) {
         // a "Captura pela placa de vídeo" vale nesta partida do Discord: o captureEndedText so tem texto nesse caso
         // (core/captureBoost.ts, a mesma condicao do "Modo da captura: pela placa de vídeo")
         gpuCapture: () => captureEndedText(local.info.kind) != null,
+        liveWeight: currentLiveWeight,
         changed: () => {
             if (rt.local !== local) return;
             local.autoQuality = quality.state;
@@ -554,6 +558,7 @@ export function stopStreaming(reason = "parada pelo usuário") {
     stopCapture(local, reason);
     // "Prioridade da captura na placa de vídeo": o Discord volta para a classe que tinha (core/captureBoost.ts)
     noteCaptureStopped();
+    stopLiveWeight();
     endOfStreamGuards();
     sendPresence();
     publish();
@@ -1676,6 +1681,7 @@ export function tick() {
     syncQualityLock(local);
     if (extras?.local === local) checkCaptureSize(extras);
     if (++tickCount % 2 === 0) void qualityOf(local)?.evaluate();
+    liveWeightTick();
     for (const peerId of local.viewers) {
         const send = sends.get(peerId);
         // depois de logar o codec real, so o envio que esta de fato em H.264 continua sendo conferido (o Chromium pode

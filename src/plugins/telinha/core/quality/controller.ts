@@ -34,6 +34,7 @@
 // pela placa de video (deps.gpuCapture), o tempo inclui esperar o quadro atras do jogo: o limite medido so desce o degrau
 // com os encoders ficando para tras (GPU_KEEP_UP).
 
+import type { LiveWeight } from "@plugins/telinha/core/liveWeight";
 import { log, logThrottled } from "@plugins/telinha/core/log";
 import { guardStatsLog, type SenderLevels, SenderLog } from "@plugins/telinha/core/statsLog";
 import type { AutoQualityState, AutoQualityViewer, PeerId, Quality, QualityLevel, QualityReason } from "@plugins/telinha/types";
@@ -67,6 +68,11 @@ export interface QualityDeps {
      * o tempo por quadro dos encoders da placa inclui a espera pelo quadro capturado (GPU_KEEP_UP). Ausente = nao vale.
      */
     gpuCapture?(): boolean;
+    /**
+     * O peso da live (core/liveWeight.ts): a placa de video e o processador usados pelo Discord e pelo jogo, da ultima
+     * leitura (~10 s). SO MEDICAO: nenhuma decisao usa ainda (para provar otimizacoes com numeros). Ausente / null = sem.
+     */
+    liveWeight?(): LiveWeight | null;
     /** o snapshot publicado (state) mudou */
     changed(): void;
 }

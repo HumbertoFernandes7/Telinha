@@ -16,6 +16,7 @@ import { startSession, stopSession } from "./actions";
 import { captureBoostDiagnostics, refreshGpuCapture, startCaptureBoost } from "./core/captureBoost";
 import { setDiagnosticsSource } from "./core/diagShare";
 import { localIdentityDiagnostics } from "./core/identity";
+import { liveWeightDiagnostics } from "./core/liveWeight";
 import { peerIdentityDiagnostics } from "./core/session";
 import { stuckEncoderDiagnostics } from "./core/stuckEncoder";
 import { refreshUpdateLog, refreshUpdateStatus, startUpdateChecks, stopUpdateChecks, updateDiagnostics } from "./core/update";
@@ -50,7 +51,7 @@ function identityDiagnostics(): string {
  */
 const diagnostics = {
     refresh: () => Promise.all([refreshUpdateStatus(), refreshUpdateLog(), refreshGpuCapture()]).catch(() => null),
-    format: () => `${formatDiagnostics()}\n${updateDiagnostics()}\n${identityDiagnostics()}\n${stuckEncoderDiagnostics()}\n${captureBoostDiagnostics()}\n\n${formatVoiceTagDiagnostics()}`
+    format: () => `${formatDiagnostics()}\n${updateDiagnostics()}\n${identityDiagnostics()}\n${stuckEncoderDiagnostics()}\n${captureBoostDiagnostics()}\n${liveWeightDiagnostics()}\n\n${formatVoiceTagDiagnostics()}`
 };
 
 function copyDiagnostics() {
