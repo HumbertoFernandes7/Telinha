@@ -133,6 +133,15 @@ export const COPY_UNANSWERED_POLLS = 3;
  */
 export const COPY_FLOW_MIN_FRAMES = 8;
 export const COPY_FLOW_POLLS = 2;
+/**
+ * Taxa: a copia que entrega pouco ao envio custa mais que o rollback que evita (no ar, o gerador chegou a aceitar so 34 a 66%
+ * dos quadros e os amigos viam 18 a 39 fps). Numa janela de COPY_RATE_POLLS respostas (~6 s), se o gerador aceitou menos que
+ * COPY_RATE_MIN dos quadros que o Worker leu: onFail. COPY_RATE_MIN_FRAMES e o minimo de quadros lidos na janela, para a tela
+ * parada (quase nenhum quadro) nunca contar.
+ */
+export const COPY_RATE_MIN = 0.8;
+export const COPY_RATE_POLLS = 3;
+export const COPY_RATE_MIN_FRAMES = 60;
 /** Uma linha de custo no log a cada este tempo. */
 export const COPY_LOG_MS = 30_000;
 const POLL_MS = 2000;
@@ -312,6 +321,24 @@ export async function startCaptureCopy(source: MediaStreamTrack, env: CaptureCop
             fail(`os quadros não saem da cópia: ${src - flow.src} quadros da captura sem nenhum chegar aos envios`);
     };
 
+    /** taxa: as ultimas COPY_RATE_POLLS + 1 respostas (contadores do Worker e a hora em que chegaram) */
+    let rate: { frames: number; written: number; at: number; }[] = [];
+    const watchRate = (s: CaptureCopyStats) => {
+        const cur = { frames: s.frames, written: s.written ?? 0, at: performance.now() };
+        const last = rate[rate.length - 1];
+        // um contador que volta (Worker reiniciado) invalida a janela
+        if (last && (cur.frames < last.frames || cur.written < last.written)) rate = [];
+        rate.push(cur);
+        if (rate.length > COPY_RATE_POLLS + 1) rate.shift();
+        if (rate.length <= COPY_RATE_POLLS) return;
+        const first = rate[0];
+        const df = cur.frames - first.frames;
+        const dw = cur.written - first.written;
+        if (df < COPY_RATE_MIN_FRAMES || dw / df >= COPY_RATE_MIN) return;
+        const secs = Math.round((cur.at - first.at) / 1000);
+        fail(`a cópia entrega só ${Math.round(dw / df * 100)}% dos quadros ao envio (${dw} de ${df} em ${secs} s)`);
+    };
+
     const fail = (reason: string) => {
         if (stopped || failed) return;
         failed = reason;
@@ -352,6 +379,8 @@ export async function startCaptureCopy(source: MediaStreamTrack, env: CaptureCop
         void askStats().then(s => {
             if (!s || stopped) return;
             watchFlow(s);
+            if (stopped) return;
+            watchRate(s);
             if (stopped) return;
             const now = performance.now();
             if (!logged) logged = { stats: s, at: now };
