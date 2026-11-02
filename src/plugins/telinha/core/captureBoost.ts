@@ -12,7 +12,7 @@
 // quadro na placa de video. So vale a partir da proxima partida do Discord: a opcao e gravada pelo main
 // (core/captureBoostMain.ts) num arquivo que o loader do add-on le antes do app ficar pronto. Windows 11 24H2 ou mais novo.
 //
-// "Prioridade da captura na placa de vídeo" (settings.ts → gpuPriority): enquanto transmite, o processo principal do
+// "Prioridade da captura na placa de vídeo" (settings.ts → gpuPriorityMode): enquanto transmite, o processo principal do
 // Discord (a captura e a copia de cada quadro) e o da GPU (conversao e codificacao) sobem para a classe HIGH da placa de
 // video, para nao esperar atras do jogo; quem ja esta em HIGH ou acima (o REALTIME que o Discord da ao processo da GPU)
 // fica como esta: o Telinha nunca abaixa. Vale do inicio ao fim de cada transmissao (core/streaming.ts →
@@ -145,7 +145,34 @@ function gpuCaptureDiagnostics(st: GpuCaptureStatus | null): string {
 
 // #region prioridade na placa de video
 
-const gpuPriorityOn = () => settings.store.gpuPriority === true;
+/** O modo escolhido; valor desconhecido (ou ausente) conta como desligada. */
+export function gpuPriorityModeSetting(): "off" | "high" | "realtime" {
+    const v: unknown = settings.store.gpuPriorityMode;
+    return v === "high" || v === "realtime" ? v : "off";
+}
+
+// ate o passo S6, "realtime" se comporta exatamente como "high"
+const gpuPriorityOn = () => gpuPriorityModeSetting() !== "off";
+
+/** O que ficou salvo da opcao antiga gpuPriority (liga/desliga) e o que ela vira em gpuPriorityMode. */
+export interface StoredGpuPrioritySettings {
+    /** opcao antiga: true = ligada */
+    gpuPriority?: unknown;
+    /** opcao nova: "off" | "high" | "realtime" */
+    gpuPriorityMode?: unknown;
+}
+
+/**
+ * Migracao da opcao booleana gpuPriority para gpuPriorityMode. `mode` = o valor a gravar (null = nao mexer);
+ * `dropOld` = apagar a chave antiga. Uma escolha nova ja gravada (valida) sempre vence.
+ */
+export function migrateGpuPrioritySetting(stored: StoredGpuPrioritySettings | null | undefined): { mode: "high" | null; dropOld: boolean; } {
+    const s = stored ?? {};
+    const hasOld = Object.prototype.hasOwnProperty.call(s, "gpuPriority");
+    const hasNew = s.gpuPriorityMode === "off" || s.gpuPriorityMode === "high" || s.gpuPriorityMode === "realtime";
+    if (hasNew) return { mode: null, dropOld: hasOld };
+    return { mode: s.gpuPriority === true ? "high" : null, dropOld: hasOld };
+}
 const hasPriorityNative = () => typeof getNativeOrNull()?.setGpuPriority === "function";
 
 function isPriorityReport(v: unknown): v is GpuPriorityReport {
