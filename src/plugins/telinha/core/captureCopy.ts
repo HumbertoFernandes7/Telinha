@@ -131,8 +131,8 @@ function browserEnv(): CaptureCopyEnv {
         Worker: g.Worker,
         MediaStreamTrackProcessor: g.MediaStreamTrackProcessor,
         MediaStreamTrackGenerator: g.MediaStreamTrackGenerator,
-        createObjectURL: typeof URL.createObjectURL === "function" ? b => URL.createObjectURL(b) : undefined,
-        revokeObjectURL: typeof URL.revokeObjectURL === "function" ? u => URL.revokeObjectURL(u) : undefined,
+        createObjectURL: typeof URL.createObjectURL === "function" ? URL.createObjectURL.bind(URL) : undefined,
+        revokeObjectURL: typeof URL.revokeObjectURL === "function" ? URL.revokeObjectURL.bind(URL) : undefined,
         RTCPeerConnection: g.RTCPeerConnection
     };
 }

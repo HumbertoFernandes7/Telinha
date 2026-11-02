@@ -251,3 +251,71 @@ describe("cópia na hora: linha de custo", () => {
         assert.equal(captureCopyDiagnostics(), null);
     });
 });
+
+describe("cópia na hora: bordas", () => {
+    test("um Worker que lança em tudo depois de ligar nunca derruba quem chama", async t => {
+        const clock = useFakeClock(t);
+        const fake = fakeCopyEnv();
+        const copy = (await startCaptureCopy(videoTrack() as unknown as MediaStreamTrack, fake.env))!;
+        const w = fake.worker;
+        w.postMessage = () => { throw new Error("morto"); };
+        w.terminate = () => { throw new Error("morto"); };
+        fake.generators[0].stop = () => { throw new Error("morto"); };
+        copy.refresh();
+        assert.equal(await copy.stats(), null);
+        copy.stop();
+        assert.equal(await copy.stats(), null, "parado: a última leitura (nenhuma)");
+        await clock.tickAsync(1500);
+    });
+
+    test("sem quadro de 1 s se a RTCPeerConnection recusar a faixa: um aviso, a cópia liga", async () => {
+        const fake = fakeCopyEnv();
+        const since = logMark();
+        const env = { ...fake.env, RTCPeerConnection: class { addTrack() { throw new Error("InvalidStateError: x"); } close() { } } as never };
+        const copy = await startCaptureCopy(videoTrack() as unknown as MediaStreamTrack, env);
+        assert.ok(copy);
+        assert.ok(since().includes("warn: Captura pela placa: sem o quadro de 1 s numa tela parada (Error: InvalidStateError: x)"));
+        copy.stop();
+    });
+
+    test("textos padrão: init falhou sem motivo, erro do Worker sem mensagem", async () => {
+        const a = fakeCopyEnv();
+        a.script = (w, d) => { if (d?.op === "init") w.emit({ type: "failed" }); };
+        const since = logMark();
+        assert.equal(await startCaptureCopy(videoTrack() as unknown as MediaStreamTrack, a.env), null);
+        assert.match(since()[0], /indisponível \(falhou\)/);
+
+        const b = fakeCopyEnv({ hello: false });
+        const pending = startCaptureCopy(videoTrack() as unknown as MediaStreamTrack, b.env);
+        await flush();
+        b.worker.fail("");
+        assert.equal(await pending, null);
+        assert.match(captureCopyDiagnostics()!, /o Worker não carregou \(CSP\?\)/);
+
+        const c = fakeCopyEnv();
+        const copy = (await startCaptureCopy(videoTrack() as unknown as MediaStreamTrack, c.env))!;
+        const reasons: string[] = [];
+        copy.onFail(r => reasons.push(r));
+        c.worker.emit(null);
+        c.worker.emit({ type: "ended" });
+        c.worker.fail("");
+        assert.deepEqual(reasons, ["o Worker caiu: erro"]);
+        assert.equal(captureCopyDiagnostics(), "cópia na hora: WebGPU (nvidia ampere), parou: o Worker caiu: erro");
+    });
+
+    test("diagnóstico com contadores zerados e sem placa; linha com método desconhecido", async () => {
+        const fake = fakeCopyEnv({ method: "canvas2d", adapter: null });
+        const copy = (await startCaptureCopy(videoTrack() as unknown as MediaStreamTrack, fake.env))!;
+        await copy.stats();
+        assert.equal(captureCopyDiagnostics(), "cópia na hora: canvas 2D; desde o início: nenhum quadro");
+        copy.stop();
+        assert.equal(copyStatsLine(null, { ...zeroStats(null), frames: 10, copied: 10, copyMs: 1, gpuMs: 10, gpuN: 10, gpuMax: 2 }, 1),
+            "Cópia na hora (?): 10 quadros em 1 s · 0,10 ms/quadro no Worker · placa termina a cópia em 1,00 ms (máx. 2,00) · nenhum descartado");
+    });
+
+    test("sem navegador falso: no Node não há Worker", async () => {
+        resetCaptureCopyForTests();
+        assert.equal(await startCaptureCopy(videoTrack() as unknown as MediaStreamTrack), null);
+        assert.equal(captureCopyDiagnostics(), "cópia na hora: indisponível na última transmissão (sem Worker)");
+    });
+});
