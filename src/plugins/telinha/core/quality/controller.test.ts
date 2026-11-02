@@ -15,8 +15,8 @@ import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 
 import { useFakeClock } from "@test/fakes/clock";
-import { EncoderSim, installWebRtc, type WebRtcEnv } from "@test/fakes/webrtc";
-import { EVAL_MS, GpuSim, logsDuring, measuredFrameMs, type QualityHarness, qualityHarness, qualityLines } from "@test/helpers/wpb-quality";
+import { type EncoderRates, EncoderSim, installWebRtc, type WebRtcEnv } from "@test/fakes/webrtc";
+import { EVAL_MS, GpuSim, logsDuring, measuredFrameMs, NVENC_IMPLEMENTATION, type QualityHarness, qualityHarness, qualityLines } from "@test/helpers/wpb-quality";
 
 import { BW_GRACE_MS } from "./levels";
 
@@ -319,4 +319,93 @@ describe("qualidade automatica: limite da placa de video (encoder por hardware)"
         assert.deepEqual(levels(h, 8), Array(8).fill("1080p60"));
         assert.deepEqual(qualityLines(again), []);
     });
+});
+
+// Captura pela placa de video (WebRtcAllowWgcUsingTexture, deps.gpuCapture): o tempo por quadro do encoder inclui esperar o
+// quadro capturado atras do jogo. Log de 02/11 (God of War, 2 espectadores em 1080p30): mediana de 29,8 ms por quadro,
+// acima do limite, com os dois encoders codificando os ~29 fps da fonte inteiros; os dois desceram para 720p30 a toa.
+describe("qualidade automatica: limite da placa de video com a captura pela placa de video", () => {
+    let rtc: WebRtcEnv;
+    before(() => {
+        rtc = installWebRtc({ hardwareConcurrency: 8 });
+    });
+    after(() => rtc.restore());
+
+    const SOURCE_FPS = 29.5;
+    /** Um encoder NVENC a 29,8 ms por quadro codificando `fps` dos 29,5 da fonte, com `rates` por cima. */
+    const nvenc = (fps: number, rates: Partial<EncoderRates> = {}) => new EncoderSim({
+        mimeType: "video/H264", implementation: NVENC_IMPLEMENTATION, powerEfficient: true, fps, sourceFps: SOURCE_FPS, encodeBusy: 29.8 * fps / 1000, ...rates
+    });
+
+    /** Os 2 espectadores de 02/11 (L e S) em 1080p30, prontos em 0 s. */
+    async function twoViewers(t: Parameters<typeof useFakeClock>[0], gpuCapture: boolean | undefined, sims: { L: EncoderSim; S: EncoderSim; }) {
+        const clock = useFakeClock(t);
+        const h = qualityHarness(clock, sims, { ceiling: "1080p30", ...(gpuCapture === undefined ? {} : { gpuCapture: () => gpuCapture }) });
+        await h.join("L", true);
+        await h.join("S", true);
+        return h;
+    }
+
+    // o limite: 0,8 x o intervalo entre quadros da fonte (1000 / 29,5 = 33,9 ms) = 27,1 ms
+    const OLD_DOWN = "Qualidade automática: 1080p 30 fps → 720p 30 fps para os 2 espectadores (placa de vídeo: mediana de 29.8 ms por quadro em 2 encoders da placa, o limite é 27.1 ms); nova subida só após 10 s estável";
+
+    test("ligada, os encoders acompanhando a fonte (29,5 de 29,5 fps): fica em 1080p30, e o log diz por que (uma linha a cada 5 min)", async t => {
+        const h = await twoViewers(t, true, { L: nvenc(SOURCE_FPS), S: nvenc(SOURCE_FPS) });
+        const lines = await logsDuring(() => h.runUntil(600_000));
+        assert.deepEqual(qualityLines(lines), []);
+        assert.deepEqual([h.controller.levelFor("L"), h.controller.levelFor("S")], ["1080p30", "1080p30"]);
+        assert.deepEqual(h.applied.map(a => a.level), ["1080p30", "1080p30"]);
+        const latency = lines.filter(l => l.startsWith("Placa de vídeo:"));
+        assert.equal(latency.length, 2, "aos 6 s e 5 min depois");
+        assert.equal(latency[0], "Placa de vídeo: mediana de 29.8 ms por quadro em 2 encoders da placa, o limite é 27.1 ms, mas os encoders acompanham a fonte "
+            + "(codificando 100% dos quadros esperados): com a captura pela placa de vídeo é espera atrás do jogo, a qualidade fica");
+    });
+
+    test("ligada, os encoders ficando para tras (24 de 29,5 fps, 81%): desce em 2 janelas, e o motivo diz quanto codificam", async t => {
+        const h = await twoViewers(t, true, { L: nvenc(24), S: nvenc(24) });
+        await h.runUntil(6000);
+        assert.equal(h.controller.levelFor("L"), "1080p30", "uma janela nao basta");
+        const lines = await logsDuring(() => h.runUntil(8000));
+        assert.deepEqual(qualityLines(lines), [
+            "Qualidade automática: 1080p 30 fps → 720p 30 fps para os 2 espectadores (placa de vídeo: mediana de 29.8 ms por quadro em 2 encoders da placa, "
+            + "o limite é 27.1 ms; codificando 81% dos quadros esperados); nova subida só após 10 s estável"
+        ]);
+        assert.equal(h.controller.state?.reason, "gpu");
+    });
+
+    // fonte a 60 fps num degrau de 30: o esperado e o fps do degrau (30 de 30 acompanha; contra os 60 da fonte seria 50%)
+    for (const [fps, level] of [[30, "1080p30"], [26, "720p30"]] as const) {
+        test(`ligada, a fonte acima do degrau (60 fps num degrau de 30): ${fps} de 30 fps ${fps === 30 ? "acompanha" : "fica para tras (87%)"}`, async t => {
+            const sim = () => nvenc(fps, { sourceFps: 60 });
+            const h = await twoViewers(t, true, { L: sim(), S: sim() });
+            await h.runUntil(60_000);
+            assert.equal(h.controller.levelFor("L"), level);
+        });
+    }
+
+    test("ligada: quem a propria rede limita (descarta quadros para caber na banda) nao conta como a placa ficando para tras", async t => {
+        // L com 700 kbps estimados (o degrau pede 2500): o WebRTC codifica 8 de 29,5 fps; S acompanha a fonte
+        const h = await twoViewers(t, true, { L: nvenc(8, { availableKbps: 700, kbps: 650 }), S: nvenc(SOURCE_FPS) });
+        const lines = await logsDuring(() => h.runUntil(120_000));
+        assert.ok(!qualityLines(lines).some(l => l.includes("placa de vídeo")), "a placa de video nao desceu ninguem");
+        assert.equal(h.controller.levelFor("S"), "1080p30");
+        assert.deepEqual(h.controller.state?.viewers.L, { level: "720p30", reason: "bandwidth" }, "L desce pela banda dele");
+    });
+
+    test("ligada, todos limitados pela propria rede: sem encoder para medir, a placa nao desce", async t => {
+        const starved = { availableKbps: 700, kbps: 650 };
+        const h = await twoViewers(t, true, { L: nvenc(8, starved), S: nvenc(8, starved) });
+        const lines = await logsDuring(() => h.runUntil(8000));
+        assert.deepEqual(qualityLines(lines), []);
+        assert.match(lines.find(l => l.startsWith("Placa de vídeo:")) ?? "", /\(sem encoder para medir fora os limitados pela rede\)/);
+    });
+
+    for (const gpuCapture of [false, undefined]) {
+        test(`${gpuCapture === false ? "desligada" : "sem a opcao nas dependencias"}: o limite de sempre, mesmo com os encoders acompanhando`, async t => {
+            const h = await twoViewers(t, gpuCapture, { L: nvenc(SOURCE_FPS), S: nvenc(SOURCE_FPS) });
+            const lines = await logsDuring(() => h.runUntil(8000));
+            assert.deepEqual(qualityLines(lines), [OLD_DOWN]);
+            assert.ok(!lines.some(l => l.startsWith("Placa de vídeo:")));
+        });
+    }
 });
