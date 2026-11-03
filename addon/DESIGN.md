@@ -4,7 +4,7 @@
 > hooks (seções 1 a 6) continua valendo; o resto é histórico. O estado atual está em [`PAYLOAD.md`](PAYLOAD.md) (layout,
 > instalador, atualização automática, recursos do Chromium ligados pelo loader). O plugin de teste `TelinhaAddonHello` foi
 > removido: os testes usam o plugin Telinha real. Teste no Discord real: [`REAL-TEST.md`](REAL-TEST.md). Código atual:
-> `addon/loader`, `addon/installer`, `addon/build/build-addon.mjs` (`pnpm build:addon`), `addon/test`.
+> `addon/loader`, `addon/installer`, `addon/build/build-addon.mjs` (`pnpm build:addon`), `addon/test`, `installer/` (Go).
 
 ## Resumo (pt-BR)
 

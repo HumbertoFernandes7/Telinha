@@ -19,9 +19,10 @@ O Telinha é um plugin para o [Vencord](https://github.com/Vendicated/Vencord) (
 - **Peer-to-peer (P2P):** o vídeo vai direto de um PC para o outro, via WebRTC.
 - **Gratuito e sem servidor nosso:** não existe backend do Telinha. Ninguém paga nada e nada passa por nós.
 - **Até 2K (1440p) a 60 fps:** escolha a resolução (720p, 1080p ou 2K) e o fps (30 ou 60), como no Discord. 2K precisa de uma tela 2K; numa menor, vai no tamanho dela. (A captura no Windows moderno é limitada a cerca de 60 fps.)
-- **Som da janela:** ao transmitir uma janela, o som daquele aplicativo vai junto (só dele, não do resto do PC). O som vai em estéreo, até 192 kbps.
+- **Som da janela:** ao transmitir uma janela, o som daquele aplicativo vai junto (só dele, não do resto do PC).
 - **Som da tela inteira:** ao transmitir a tela inteira, vai todo o som do PC, **menos o do Discord** (seus amigos não ouvem a própria voz de volta). Exige Windows 10 versão 2004 ou superior.
-- **Codec automático:** H.264 pela placa de vídeo quando os dois lados têm (no perfil High, mais nítido, quando as duas placas fazem); senão, VP9. Em **"Formato de vídeo (codec)"** dá para fixar H.265 ou AV1, que só funcionam com a placa de vídeo dos dois lados (o AV1 pede uma placa nova de quem transmite e reiniciar o Discord).
+- **Som em estéreo:** em toda transmissão o som vai em estéreo, até 192 kbps.
+- **Codec automático:** H.264 pela placa de vídeo quando os dois lados têm (no perfil High, mais nítido, quando as duas placas fazem); senão, VP9. Em **"Formato de vídeo (codec)"** dá para fixar H.265 ou AV1, que só funcionam com a placa de vídeo dos dois lados (o AV1 precisa de uma placa recente em quem transmite e de reiniciar o Discord).
 
 ## Como funciona
 
@@ -167,7 +168,7 @@ Porque o vídeo não passa pelo Discord nem por nenhum servidor: ele vai direto 
 Sim. Funciona com a aceleração de hardware do Discord ligada ou desligada. Desligada, usa mais CPU. O codec é escolhido automaticamente: H.264 pela placa de vídeo quando os dois lados têm (High quando as duas placas fazem), senão VP9. H.265 e AV1 só vão se você fixar em **"Formato de vídeo (codec)"**.
 
 **Por que o Telinha passou a usar VP9 no meu PC?**
-Se a placa de vídeo travar codificando H.264, o Telinha lembra disso e passa a usar VP9 neste PC (a transmissão não cai). A página do plugin mostra "A placa de vídeo travou com H.264 neste PC…" e um botão para testar a placa de novo, por exemplo depois de atualizar o driver.
+Se a placa de vídeo travar codificando H.264, o Telinha avisa e, daí em diante, o automático usa VP9 neste PC (se travar no meio de uma transmissão, é preciso reiniciar o Discord para transmitir de novo). A página do plugin mostra "A placa de vídeo travou com H.264 neste PC…" e um botão para testar a placa de novo, por exemplo depois de atualizar o driver.
 
 **Dá ban?**
 Mods de cliente **violam os Termos de Serviço do Discord**, então o uso é **por sua conta e risco**. Não temos conhecimento de bans por plugins que não fazem nada abusivo, mas não há garantia nenhuma.
