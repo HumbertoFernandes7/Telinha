@@ -28,12 +28,12 @@ import { OTHER_ID, pluginSettings, resetVencordFakes } from "@test/fakes/vencord
 import { type Call, friendArrives, goLive, joinCall } from "@test/helpers/wpc-session";
 import { OptionType } from "@utils/types";
 
-import { migrateAccessSettings, migrateQualitySettings, settings } from "./settings";
+import { migrateAccessSettings, migrateGpuPrioritySettings, migrateQualitySettings, settings } from "./settings";
 
 // defaultQuality ("Qualidade padrão", ate a v0.3.x) virou defaultResolution + defaultFps: migrateQualitySettings
 const STORED_KEYS = [
     "groupPassword", "rejectOutsiders", "defaultAccess", "requireVerifiedIdentity", "defaultResolution", "defaultFps", "autoQuality", "jitterCushion",
-    "shareAudioByDefault", "playSounds", "codec", "codecStatus", "autoUpdate", "shareDiagnostics", "gpuCapture", "gpuPriority", "captureBoostStatus"
+    "shareAudioByDefault", "playSounds", "codec", "codecStatus", "autoUpdate", "shareDiagnostics", "gpuCapture", "gpuPriorityMode", "captureBoostStatus"
 ];
 
 describe("as opcoes", () => {
@@ -61,7 +61,7 @@ describe("as opcoes", () => {
             autoUpdate: true,
             shareDiagnostics: false,
             gpuCapture: false,
-            gpuPriority: false
+            gpuPriorityMode: "off"
         });
     });
 
@@ -272,6 +272,64 @@ describe("migracao de 'Qualidade padrão' (ate a v0.3.x) para 'Resolução padr�
         migrateQualitySettings();
         assert.equal(warned.mock.callCount(), 1);
         assert.match(String(warned.mock.calls[0].arguments[0]), /migração de "Qualidade padrão" falhou/);
+    });
+});
+
+describe("migracao de 'Prioridade da captura na placa de vídeo' (liga/desliga) para o seletor", () => {
+    function onDisk(values: Record<string, unknown>) {
+        pluginSettings.load(values, { lazy: true });
+    }
+
+    beforeEach(() => {
+        resetVencordFakes();
+    });
+
+    test("ligada vira Alta e a chave antiga FICA (um downgrade ainda a le); o resto fica como estava", () => {
+        onDisk({ gpuPriority: true, groupPassword: "x" });
+        migrateGpuPrioritySettings();
+        assert.equal(settings.plain.gpuPriorityMode, "high");
+        assert.equal((settings.plain as Record<string, unknown>).gpuPriority, true);
+        assert.equal(settings.plain.groupPassword, "x");
+    });
+
+    test("desligada: nada muda, a chave antiga fica (vale o padrao, Desligada)", () => {
+        onDisk({ gpuPriority: false });
+        migrateGpuPrioritySettings();
+        assert.equal((settings.plain as Record<string, unknown>).gpuPriority, false);
+        assert.equal("gpuPriorityMode" in settings.plain, false);
+        assert.equal(settings.store.gpuPriorityMode, "off");
+    });
+
+    test("quem ja escolheu no seletor mantem a escolha; rodar de novo nao desfaz", () => {
+        onDisk({ gpuPriority: true, gpuPriorityMode: "realtime" });
+        migrateGpuPrioritySettings();
+        assert.equal(settings.plain.gpuPriorityMode, "realtime");
+        assert.equal((settings.plain as Record<string, unknown>).gpuPriority, true);
+        migrateGpuPrioritySettings();
+        assert.equal(settings.plain.gpuPriorityMode, "realtime");
+        assert.equal((settings.plain as Record<string, unknown>).gpuPriority, true);
+    });
+
+    test("configuracao limpa: nada muda", () => {
+        onDisk({});
+        migrateGpuPrioritySettings();
+        assert.deepEqual(Object.keys(settings.plain), []);
+    });
+
+    test("nunca lanca: sem configuracoes carregadas nao ha o que migrar; uma falha vira so um aviso no console", t => {
+        const warn = t.mock.method(console, "warn", () => { });
+        t.mock.getter(settings, "plain", () => undefined as never);
+        migrateGpuPrioritySettings();
+        assert.equal(warn.mock.callCount(), 0);
+        t.mock.restoreAll();
+
+        const warned = t.mock.method(console, "warn", () => { });
+        t.mock.getter(settings, "plain", () => {
+            throw new Error("Cannot access settings before plugin is initialized");
+        });
+        migrateGpuPrioritySettings();
+        assert.equal(warned.mock.callCount(), 1);
+        assert.match(String(warned.mock.calls[0].arguments[0]), /migração de "Prioridade da captura na placa de vídeo" falhou/);
     });
 });
 

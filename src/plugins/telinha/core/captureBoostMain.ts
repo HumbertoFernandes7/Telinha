@@ -19,14 +19,28 @@
 // a tela e copia cada quadro) e o da GPU (onde converte e codifica) sobem para a classe HIGH do agendador da placa de
 // video, pelo telinha-audio.exe --gpu-priority --raise (D3DKMTSetProcessSchedulingPriorityClass). Funciona sem
 // administrador (medido em 01/11/2026 no Windows 11, nivel de integridade medio: HIGH num outro processo do mesmo usuario
-// e aceito). O Telinha nunca pede REALTIME (com o HAGS ligado pode travar o encoder NVENC; o helper recusa) e nunca
-// abaixa: o processo da GPU do Discord pode ja estar em REALTIME, posto pelo proprio Discord, e fica assim (02/11/2026,
-// RTX 3070: baixado para HIGH, o NVENC foi de ~7 ms para ~400 ms por quadro com um jogo pesado). Quando o Windows recusa,
-// so fica no log e na pagina do plugin ("não foi possível (precisa de administrador)"); nunca pede elevacao.
+// e aceito). O modo "high" nunca pede REALTIME e nunca abaixa: o processo da GPU do Discord pode ja estar em REALTIME,
+// posto pelo proprio Discord, e fica assim (02/11/2026, RTX 3070: baixado para HIGH, o NVENC foi de ~7 ms para ~400 ms por
+// quadro com um jogo pesado). Quando o Windows recusa, so fica no log e na pagina do plugin ("não foi possível (precisa de
+// administrador)"); nunca pede elevacao.
+//
+// O modo "realtime" ("Tempo real (teste)") tem duas fases: 1) tudo o que o "high" faz; 2) so nos processos que ficaram em
+// HIGH, outra chamada com --class realtime --raise --allow-realtime (o helper so aceita REALTIME com essa chave). Como vem
+// por cima do HIGH, uma recusa do Windows (sem administrador) ou um Windows que mantem HIGH deixa o processo em HIGH, nunca
+// em NORMAL; fica no relatorio (realtimeRefused). O processo que ja estava em REALTIME (o do Discord) nao e tocado. Cada
+// processo guarda a classe em que o Telinha o deixou (Raised.current): o "high" depois de um "realtime" desce so esses, de
+// REALTIME para HIGH (--if-class realtime: se outro mudou a classe, fica), e a volta (restore) parte da classe atual.
+// O REALTIME tem uma rede de seguranca que sobrevive a queda do Discord: o main grava, na mesma pasta do capture-flags.json, o
+// gpu-priority.json (arquivo temporario + rename) com "armed" (o pid que ligou o REALTIME, gravado ANTES da 2a fase e apagado
+// quando nada mais esta em REALTIME ou o processo sai normalmente) e "blocked" (por que o REALTIME esta desligado neste PC).
+// Na 1a leitura de cada partida, um "armed" com outro pid quer dizer que o Discord morreu com o REALTIME ligado: vira
+// "blocked", e o "realtime" fica em HIGH ate alguem desbloquear (setGpuRealtimeBlocked(null)). A queda do processo da GPU com
+// o REALTIME ligado tambem bloqueia. Risco conhecido: o pid de outro Discord vivo (Canary, PTB) que divida a pasta conta como queda.
+//
 // Ao parar a transmissao volta so o que o Telinha subiu, para a classe que tinha (normalmente NORMAL), e so se ainda
-// estiver em HIGH (--if-class high: se outro mudou a classe depois, fica): o ganho so importa durante a captura, e o
-// Discord em HIGH depois disso so disputaria a placa com o jogo (a interface, e o video de quem voce assiste) sem ganho
-// nenhum. A classe tambem some quando o Discord fecha.
+// estiver na classe em que o Telinha o deixou (--if-class: se outro mudou a classe depois, fica): o ganho so importa durante
+// a captura, e o Discord em HIGH depois disso so disputaria a placa com o jogo (a interface, e o video de quem voce assiste)
+// sem ganho nenhum. A classe tambem some quando o Discord fecha.
 //
 // Por que estes dois processos (conferido no codigo do Chromium 152, branch 7977): o getDisplayMedia nao passa pelo
 // processo utilitario "Video Capture", que so atende cameras (VideoCaptureProviderSwitcher manda para ele so o
@@ -40,7 +54,7 @@ import { type ChildProcessByStdio, spawn } from "child_process";
 import { app } from "electron";
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
 import { release } from "os";
-import { isAbsolute } from "path";
+import { dirname, isAbsolute, join } from "path";
 import type { Readable } from "stream";
 
 import { helperPath, SCREEN_AUDIO_HELPER, spawnErrorReason } from "./audio/screenAudioMain";
@@ -167,8 +181,11 @@ export function setGpuCaptureMain(on: boolean): GpuCaptureStatus {
 
 // #region prioridade na placa de video
 
-/** "high": inicio da transmissao; "restore": o que o "high" subiu volta para a classe que tinha. */
-export type GpuPriorityMode = "high" | "restore";
+/**
+ * "high": inicio da transmissao (e desce do REALTIME que o Telinha pos); "realtime": HIGH e, nos que ficaram em HIGH, REALTIME
+ * (so com --allow-realtime); "restore": o que o Telinha subiu volta para a classe que tinha.
+ */
+export type GpuPriorityMode = "high" | "realtime" | "restore";
 
 /** Um processo do Discord e o que o helper fez nele. */
 export interface GpuPriorityTarget {
@@ -205,8 +222,17 @@ export interface GpuPriorityReport {
     raised: number;
     /** uma volta que falhou de novo do mesmo jeito: ja foi dita uma vez, nao precisa de outra linha no log */
     quiet: boolean;
+    /**
+     * a classe em que terminaram os processos que o Telinha controla (os que nao ficaram "como estavam", e os que ele mesmo
+     * pos em REALTIME antes): REALTIME so se todos chegaram la; null = misturado, com erro, ou nada (na volta, sempre null)
+     */
+    level: "HIGH" | "REALTIME" | null;
+    /** no "realtime": o Windows recusou o REALTIME (acesso/privilegio) ou aceitou a chamada e manteve outra classe */
+    realtimeRefused: boolean;
     /** o que o main fez sozinho desde o ultimo relatorio (o processo da GPU reiniciou...), para o log */
     notes: string[];
+    /** por que o REALTIME esta desligado neste PC (gpu-priority.json: o encoder parou, a GPU caiu, o Discord morreu em REALTIME); null = liberado */
+    realtimeBlocked: string | null;
 }
 
 type Role = GpuPriorityTarget["role"];
@@ -222,6 +248,8 @@ interface HelperAnswer {
 interface Raised {
     /** a classe de antes, para onde ele volta */
     before: string;
+    /** a classe em que o Telinha o deixou (so HIGH ou REALTIME): a volta so muda quem ainda esta nela */
+    current: "HIGH" | "REALTIME";
     role: Role;
     /** a ultima volta falhou (e ja foi dita no log) */
     failed: boolean;
@@ -236,12 +264,19 @@ const GPU_RESTART_TRIES = 3;
 /** o processo novo pode nascer um pouco antes de o evento chegar ao JS */
 const GPU_RESTART_SLACK_MS = 5000;
 const HIGH = "HIGH";
+const REALTIME = "REALTIME";
 /** as classes abaixo de HIGH: so estas sao lembradas para voltar (um processo ja em HIGH ou acima fica como estava) */
 const BELOW_HIGH = new Set(["IDLE", "BELOW_NORMAL", "NORMAL", "ABOVE_NORMAL"]);
 /** a subida nunca abaixa: o helper so muda quem esta abaixo de HIGH (REALTIME e HIGH ficam, com uma linha "keep") */
 const RAISE_ONLY = ["--raise"];
-/** a volta so muda quem ainda esta na classe que o Telinha pos (se o Discord mudou depois, fica) */
-const IF_STILL_HIGH = ["--if-class", "high"];
+/** a 2a fase do "realtime": so sobe quem esta abaixo de REALTIME, e o helper so o aceita com --allow-realtime */
+const RAISE_REALTIME = ["--raise", "--allow-realtime"];
+/** a volta (e a descida do REALTIME) so muda quem ainda esta na classe que o Telinha pos (se o Discord mudou depois, fica) */
+const ifStill = (cls: string) => ["--if-class", cls.toLowerCase()];
+/** o Windows aceitou a chamada do REALTIME e manteve outra classe (a classe vem depois do texto) */
+const CLAMPED_ERROR = "o Windows manteve";
+const OLD_HELPER = "o ajudante do Telinha é de uma versão antiga";
+const OLD_HELPER_REALTIME = "o ajudante do Telinha é de uma versão antiga (sem o tempo real)";
 const HAGS_RE = /^hags (on|off|unknown)$/;
 const OK_RE = /^ok pid=(\d+) before=(\S+) after=(\S+)$/;
 const KEEP_RE = /^keep pid=(\d+) class=(\S+)$/;
@@ -263,6 +298,164 @@ const notes: string[] = [];
 /** um pedido por vez ao helper: "high", "restore" e a GPU que reiniciou nunca se cruzam */
 let queue: Promise<unknown> = Promise.resolve();
 let watchingGpu = false;
+
+// #region tempo real: bloqueio e marcador (gpu-priority.json, na pasta do capture-flags.json)
+
+/** O que o native gpuRealtimeStatus devolve: `available` = da para tentar o REALTIME agora; `blocked` = o motivo do bloqueio; `reason` = o resto (sem loader, nao gravou). */
+export interface GpuRealtimeStatus {
+    available: boolean;
+    blocked: string | null;
+    reason: string | null;
+}
+
+interface RealtimeFile {
+    blocked: { at: number; why: string; } | null;
+    armed: { pid: number; at: number; } | null;
+}
+
+const NO_LOADER_REALTIME = "só com o Telinha instalado pelo TelinhaInstaller";
+const REALTIME_TEXT_MAX = 300;
+
+/** o gpu-priority.json lido (ou vazio) uma vez por partida do Discord; `file` = de onde (null = sem loader, so na memoria) */
+let realtimeMemo: { file: string | null; state: RealtimeFile; } | null = null;
+/** a ultima gravacao do gpu-priority.json falhou (em pt-BR) */
+let realtimeSaveError: string | null = null;
+let realtimeExitHookInstalled = false;
+
+function realtimeFile(): string | null {
+    const capture = loaderCapture();
+    return capture ? join(dirname(capture.file), "gpu-priority.json") : null;
+}
+
+/** Ausente, quebrado ou com campos estranhos = vazio. */
+function readRealtimeFile(file: string): RealtimeFile {
+    try {
+        const raw = JSON.parse(readFileSync(file, "utf8"));
+        const { blocked, armed } = raw ?? {};
+        return {
+            blocked: blocked && typeof blocked.why === "string" && blocked.why && Number.isFinite(blocked.at) ? { at: blocked.at, why: blocked.why.slice(0, REALTIME_TEXT_MAX) } : null,
+            armed: armed && Number.isInteger(armed.pid) && Number.isFinite(armed.at) ? { pid: armed.pid, at: armed.at } : null
+        };
+    } catch {
+        return { blocked: null, armed: null };
+    }
+}
+
+const two = (n: number) => String(n).padStart(2, "0");
+const whenText = (ms: number) => {
+    const d = new Date(ms);
+    return `${two(d.getDate())}/${two(d.getMonth() + 1)} ${two(d.getHours())}:${two(d.getMinutes())}`;
+};
+
+/** Grava o estado da memoria (sincrono, tmp + rename, como o writeCaptureFlags). Nunca lanca: devolve o erro em pt-BR. Sem loader nao grava nada. */
+function saveRealtime(): string | null {
+    const memo = realtimeMemo;
+    if (!memo?.file) return null;
+    const tmp = `${memo.file}.${process.pid}.tmp`;
+    try {
+        writeFileSync(tmp, JSON.stringify({ format: 1, blocked: memo.state.blocked, armed: memo.state.armed }) + "\n");
+        renameSync(tmp, memo.file);
+        realtimeSaveError = null;
+        return null;
+    } catch (e) {
+        try {
+            rmSync(tmp, { force: true });
+        } catch { }
+        realtimeSaveError = `não consegui salvar o estado do tempo real (${e instanceof Error ? e.message : String(e)})`.slice(0, REALTIME_TEXT_MAX);
+        return realtimeSaveError;
+    }
+}
+
+/**
+ * O estado do tempo real, lido uma vez por partida. Um "armed" de outro pid: o Discord anterior morreu com o REALTIME ligado
+ * (travou ou foi fechado a forca): vira bloqueio, e o marcador e limpo.
+ */
+function realtimeState(): RealtimeFile {
+    const file = realtimeFile();
+    if (realtimeMemo && realtimeMemo.file === file) return realtimeMemo.state;
+    const state: RealtimeFile = file ? readRealtimeFile(file) : { blocked: null, armed: null };
+    realtimeMemo = { file, state };
+    if (state.armed && state.armed.pid !== process.pid) {
+        // a hora e a de quando o REALTIME foi ligado: a queda em si ninguem viu
+        state.blocked = { at: Date.now(), why: `o Discord fechou sem sair do tempo real (travou ou foi fechado à força) em ${whenText(state.armed.at)}` };
+        state.armed = null;
+        saveRealtime();
+    }
+    return state;
+}
+
+/** Saida normal do Discord: o marcador sai (so uma queda o deixa para a proxima partida). */
+function onProcessExit() {
+    const memo = realtimeMemo;
+    if (!memo || memo.state.armed?.pid !== process.pid) return;
+    memo.state.armed = null;
+    saveRealtime();
+}
+
+/**
+ * Liga o marcador (ANTES de pedir o REALTIME) ou o apaga. Devolve o erro de gravacao: sem o marcador gravado nao ha rede de
+ * seguranca, entao quem liga nao pede o REALTIME.
+ */
+function armRealtime(on: boolean): string | null {
+    const state = realtimeState();
+    if (on) {
+        if (state.armed?.pid === process.pid) return null;
+        state.armed = { pid: process.pid, at: Date.now() };
+        const error = saveRealtime();
+        if (error) {
+            state.armed = null;
+            return error;
+        }
+        if (!realtimeExitHookInstalled) {
+            realtimeExitHookInstalled = true;
+            process.once("exit", onProcessExit);
+        }
+        return null;
+    }
+    if (!state.armed) return null;
+    state.armed = null;
+    return saveRealtime();
+}
+
+/** Nada mais em REALTIME por causa do Telinha: o marcador sai. */
+function syncArmed() {
+    if (![...raised.values()].some(entry => entry.current === REALTIME)) armRealtime(false);
+}
+
+/** Desliga o REALTIME neste PC (grava; o "realtime" fica em HIGH). Devolve o erro de gravacao, se houve. */
+export function blockRealtime(why: string): string | null {
+    realtimeState().blocked = { at: Date.now(), why: why.trim().slice(0, REALTIME_TEXT_MAX) || "motivo não informado" };
+    return saveRealtime();
+}
+
+export function unblockRealtime(): string | null {
+    realtimeState().blocked = null;
+    return saveRealtime();
+}
+
+const blockedWhy = () => realtimeState().blocked?.why ?? null;
+
+/** Por que o "realtime" nao pode pedir REALTIME agora (sem o loader da pasta, ou bloqueado); null = pode. */
+function realtimeGate(): string | null {
+    if (!realtimeFile()) return NO_LOADER_REALTIME;
+    const why = blockedWhy();
+    return why ? `tempo real desligado neste PC: ${why}` : null;
+}
+
+export function gpuRealtimeStatusMain(): GpuRealtimeStatus {
+    const blocked = blockedWhy();
+    const hasFile = !!realtimeFile();
+    return { available: hasFile && !blocked && !realtimeSaveError, blocked, reason: hasFile ? realtimeSaveError : NO_LOADER_REALTIME };
+}
+
+/** Um texto bloqueia, null libera (a nova escolha de "Tempo real (teste)" na pagina); qualquer outro valor do IPC e ignorado. */
+export function setGpuRealtimeBlockedMain(why: unknown): GpuRealtimeStatus {
+    if (why === null) unblockRealtime();
+    else if (typeof why === "string") blockRealtime(why);
+    return gpuRealtimeStatusMain();
+}
+
+// #endregion
 
 /** Na fila, depois do que ja estava nela. `job` nunca rejeita (o helper que falha vira um relatorio), entao a fila nunca trava. */
 function enqueue<T>(job: () => Promise<T>): Promise<T> {
@@ -290,7 +483,7 @@ function helperProblem(): string | null {
 const toLines = (output: string) => output.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
 
 /**
- * Roda `telinha-audio.exe --gpu-priority <pids> --class <cls> <condicao>` (RAISE_ONLY ou IF_STILL_HIGH) e junta as linhas
+ * Roda `telinha-audio.exe --gpu-priority <pids> --class <cls> <condicao>` (RAISE_ONLY, RAISE_REALTIME ou ifStill(...)) e junta as linhas
  * (stdout e stderr). Sem resposta a tempo, mata o helper e fica com o que ele ja tinha dito (um "ok pid=" ja escrito
  * valeu). Nunca rejeita.
  */
@@ -336,13 +529,28 @@ const isGone = (t: GpuPriorityTarget) => !!t.error && GONE_ERROR_RE.test(t.error
 function summarize(mode: GpuPriorityMode, targets: GpuPriorityTarget[], hags: GpuPriorityReport["hags"], reason: string | null, quiet = false): GpuPriorityReport {
     // na subida, quem ja estava em HIGH ou acima (kept) ficou como pedido; na volta, o processo que ja terminou nao tem o
     // que voltar: conta como feito
-    const done = targets.filter(t => (!t.error && t.after && (mode !== "high" || t.after === HIGH || t.kept)) || (mode === "restore" && isGone(t))).length;
+    // no "realtime", so conta quem esta em REALTIME (o que o Telinha pos, ou o que o Discord ja tinha posto)
+    const reached = (t: GpuPriorityTarget) => (mode === "high" ? t.after === HIGH || t.kept : mode === "realtime" ? t.after === REALTIME : true);
+    const done = targets.filter(t => (!t.error && t.after && reached(t)) || (mode === "restore" && isGone(t))).length;
     return {
         mode, ok: !reason && done === targets.length, done, targets, hags, reason, quiet,
         refused: targets.some(t => !!t.error && REFUSED_ERROR_RE.test(t.error)),
         raised: raised.size,
-        notes: []
+        notes: [],
+        level: levelOf(mode, targets),
+        realtimeRefused: false,
+        realtimeBlocked: blockedWhy()
     };
+}
+
+/** GpuPriorityReport.level: `kept` com REALTIME que e do proprio Telinha (ele o pos antes) conta como dele */
+function levelOf(mode: GpuPriorityMode, targets: GpuPriorityTarget[]): GpuPriorityReport["level"] {
+    if (mode === "restore") return null;
+    const own = targets.filter(t => !t.kept || (t.after === REALTIME && raised.get(t.pid)?.current === REALTIME));
+    if (!own.length || own.some(t => !!t.error || !t.after)) return null;
+    if (own.every(t => t.after === REALTIME)) return REALTIME;
+    if (own.every(t => t.after === HIGH)) return HIGH;
+    return null;
 }
 
 /** As linhas do helper → o que aconteceu com cada processo. */
@@ -369,7 +577,7 @@ function readAnswer(wanted: { pid: number; role: Role; }[], answer: HelperAnswer
             const t = byPid.get(Number(failed[3]));
             if (t) t.error = `${failed[1]} ${failed[2]}${failed[4] ? ` ${failed[4]}` : ""}`.slice(0, 200);
         } else if (general) {
-            reason ??= general[1] === "usage" ? "o ajudante do Telinha é de uma versão antiga" : `o Windows não tem a função (${general[2]})`;
+            reason ??= general[1] === "usage" ? OLD_HELPER : `o Windows não tem a função (${general[2]})`;
         }
     }
     if (!reason && answer.code !== 0 && answer.code !== 6) reason = `o ajudante do Telinha fechou com o código ${answer.code}`;
@@ -384,15 +592,21 @@ function readAnswer(wanted: { pid: number; role: Role; }[], answer: HelperAnswer
  * proximo "high" ou o inicio do plugin. quiet = nada mudou e as falhas ja tinham sido ditas.
  */
 async function restoreEntries(entries: [number, Raised][]) {
-    const groups = new Map<string, { pid: number; role: Role; }[]>();
-    for (const [pid, { before, role }] of entries) groups.set(before, [...(groups.get(before) ?? []), { pid, role }]);
+    // um helper por par (classe de antes, classe atual): a volta so muda quem ainda esta na classe em que o Telinha o deixou
+    const groups = new Map<string, { before: string; current: Raised["current"]; wanted: { pid: number; role: Role; }[]; }>();
+    for (const [pid, { before, current, role }] of entries) {
+        const key = `${before}|${current}`;
+        const group = groups.get(key) ?? { before, current, wanted: [] };
+        group.wanted.push({ pid, role });
+        groups.set(key, group);
+    }
     const problem = groups.size ? helperProblem() : null;
     const targets: GpuPriorityTarget[] = [];
     let hags: GpuPriorityReport["hags"] = null;
     let reason: string | null = null;
     let news = false;
-    for (const [before, wanted] of groups) {
-        const answer = problem ? { lines: [], code: null, reason: problem } : await runHelper(wanted.map(t => t.pid), before.toLowerCase(), IF_STILL_HIGH);
+    for (const { before, current, wanted } of groups.values()) {
+        const answer = problem ? { lines: [], code: null, reason: problem } : await runHelper(wanted.map(t => t.pid), before.toLowerCase(), ifStill(current));
         const read = readAnswer(wanted, answer);
         for (const t of read.targets) {
             // sem entrada: o processo da GPU caiu enquanto o helper rodava (onChildProcessGone ja o tirou)
@@ -412,7 +626,39 @@ async function restoreEntries(entries: [number, Raised][]) {
     return { targets, hags, reason, quiet: !news };
 }
 
-async function raise(): Promise<GpuPriorityReport> {
+/**
+ * Desce de REALTIME para HIGH o que o Telinha pos em REALTIME (so se ainda estiver la: --if-class realtime). Quem mudou a
+ * classe por fora ("keep") ou ja terminou sai da lista; o que falhou fica (a proxima descida ou a volta tenta de novo).
+ * null = nada em REALTIME.
+ */
+async function stepDown() {
+    const wanted = [...raised].filter(([, entry]) => entry.current === REALTIME).map(([pid, { role }]) => ({ pid, role }));
+    if (!wanted.length) {
+        syncArmed();
+        return null;
+    }
+    const problem = helperProblem();
+    const answer = problem ? { lines: [], code: null, reason: problem } : await runHelper(wanted.map(t => t.pid), "high", ifStill(REALTIME));
+    const read = readAnswer(wanted, answer);
+    for (const t of read.targets) {
+        const entry = raised.get(t.pid);
+        // sem entrada: o processo da GPU caiu enquanto o helper rodava (onChildProcessGone ja o tirou)
+        if (!entry) continue;
+        if (!t.error && t.after === HIGH && !t.kept) {
+            entry.current = HIGH;
+            entry.failed = false;
+        } else if (t.kept || isGone(t)) {
+            raised.delete(t.pid);
+        } else {
+            entry.failed = true;
+        }
+    }
+    syncArmed();
+    return read;
+}
+
+/** `keepRealtime`: a 1a fase do "realtime" nao desce o que o Telinha ja pos em REALTIME. */
+async function raise(keepRealtime = false): Promise<GpuPriorityReport> {
     active = true;
     watchGpuProcess();
     const wanted = discordTargets();
@@ -428,16 +674,81 @@ async function raise(): Promise<GpuPriorityReport> {
         // ja estava em HIGH ou acima sem o Telinha (o REALTIME do Discord): fica como esta e nunca volta; a volta so o cita
         if (t.kept && !entry) untouched.set(t.pid, { ...t });
         if (t.after !== HIGH) continue;
-        // ja lembrado (a volta falhou antes, ou o processo da GPU reiniciou): continua voltando para a classe de antes de tudo
-        if (entry) entry.failed = false;
-        else if (t.before && BELOW_HIGH.has(t.before)) raised.set(t.pid, { before: t.before, role: t.role, failed: false });
+        // ja lembrado (a volta falhou antes, ou o processo da GPU reiniciou): continua voltando para a classe de antes de tudo;
+        // se estava em REALTIME e o helper o achou em HIGH (outro o baixou), a classe atual e HIGH
+        if (entry) {
+            entry.failed = false;
+            entry.current = HIGH;
+        }
+        else if (t.before && BELOW_HIGH.has(t.before)) raised.set(t.pid, { before: t.before, current: HIGH, role: t.role, failed: false });
     }
-    return summarize("high", read.targets, read.hags, read.reason);
+    let { hags, reason } = read;
+    // o "high" tambem significa "volta do REALTIME": desce o que o Telinha pos la, e o relatorio mostra REALTIME→HIGH
+    const down = keepRealtime ? null : await stepDown();
+    if (down) {
+        for (const d of down.targets) {
+            const i = read.targets.findIndex(t => t.pid === d.pid);
+            if (i < 0) continue;
+            if (!d.error && d.after === HIGH && !d.kept) read.targets[i] = d;
+            else if (raised.has(d.pid)) read.targets[i] = { ...read.targets[i], error: d.error ?? down.reason ?? "não desceu do tempo real" };
+        }
+        hags ??= down.hags;
+        reason ??= down.reason;
+    }
+    return summarize("high", read.targets, hags, reason);
+}
+
+/**
+ * "realtime", em duas fases: 1) o "high" (sem descer o REALTIME que o Telinha ja pos); 2) REALTIME so nos que ficaram em HIGH
+ * (por nos ou por outro), com --raise --allow-realtime: por cima do HIGH, entao uma recusa deixa HIGH. Nunca num pid fora de
+ * discordTargets(), e nunca sem --raise.
+ */
+async function raiseRealtime(): Promise<GpuPriorityReport> {
+    const first = await raise(true);
+    const eligible = first.targets.filter(t => !t.error && t.after === HIGH);
+    if (first.reason || !eligible.length) return summarize("realtime", first.targets, first.hags, first.reason);
+
+    // sem o loader (sem pasta para o marcador) ou bloqueado: fica em HIGH
+    const gate = realtimeGate();
+    if (gate) return summarize("realtime", first.targets, first.hags, gate);
+    // o marcador vai para o disco ANTES do REALTIME: se o Discord travar com ele ligado, a proxima partida sabe
+    const armError = armRealtime(true);
+    if (armError) return summarize("realtime", first.targets, first.hags, `tempo real não ligado: ${armError}`);
+
+    const answer = await runHelper(eligible.map(t => t.pid), "realtime", RAISE_REALTIME);
+    const read = readAnswer(eligible, answer);
+    const reason = read.reason === OLD_HELPER ? OLD_HELPER_REALTIME : read.reason;
+    let refusedOrClamped = false;
+    for (const t of read.targets) {
+        if (t.error) {
+            refusedOrClamped ||= REFUSED_ERROR_RE.test(t.error);
+        } else if (t.after === REALTIME) {
+            const entry = raised.get(t.pid);
+            if (t.kept) continue; // outro o pos em REALTIME entre as duas fases: nao e do Telinha
+            if (entry) {
+                entry.current = REALTIME;
+            } else if (t.before) {
+                // ja estava em HIGH por outro: o restore o devolve a HIGH, a classe que tinha
+                raised.set(t.pid, { before: t.before, current: REALTIME, role: t.role, failed: false });
+                untouched.delete(t.pid);
+            }
+        } else if (t.after) {
+            // o Windows aceitou a chamada e manteve HIGH (ou outra classe)
+            t.error = `${CLAMPED_ERROR} ${t.after}`;
+            refusedOrClamped = true;
+        }
+    }
+    syncArmed(); // recusado ou mantido em HIGH: nada em REALTIME, o marcador sai
+    const merged = first.targets.map(t => read.targets.find(r => r.pid === t.pid) ?? t);
+    const report = summarize("realtime", merged, read.hags ?? first.hags, reason);
+    report.realtimeRefused = refusedOrClamped;
+    return report;
 }
 
 async function restore(): Promise<GpuPriorityReport> {
     active = false;
     const read = await restoreEntries([...raised]);
+    syncArmed();
     const left = [...untouched.values()];
     untouched.clear();
     return summarize("restore", [...read.targets, ...left], read.hags, read.reason, read.quiet);
@@ -450,10 +761,14 @@ async function restore(): Promise<GpuPriorityReport> {
 function onChildProcessGone(_event: unknown, details: { type?: string; } | undefined) {
     if (details?.type !== "GPU" || !active) return;
     const old = [...raised, ...untouched].filter(([, entry]) => entry.role === "GPU").map(([pid]) => pid);
+    const hadRealtime = [...raised.values()].some(entry => entry.role === "GPU" && entry.current === REALTIME);
     for (const pid of old) {
         raised.delete(pid);
         untouched.delete(pid);
     }
+    // a GPU caiu com o REALTIME do Telinha ligado: nao se repete neste PC (o novo processo so sobe para HIGH)
+    if (hadRealtime) blockRealtime("o processo da GPU do Discord caiu com o tempo real ligado");
+    syncArmed();
     const goneAt = Date.now();
     const at = new Date(goneAt).toISOString().slice(11, 19);
     let tries = 0;
@@ -486,13 +801,13 @@ function watchGpuProcess() {
 }
 
 /**
- * "high": o Discord (principal + GPU) em HIGH na placa de video, so quem esta abaixo (nunca abaixa um REALTIME); "restore":
- * volta o que o "high" mudou (sem nada a voltar, nao roda o helper; o que falhou antes e tentado de novo). Um pedido por
- * vez. Nunca rejeita.
+ * "high": o Discord (principal + GPU) em HIGH na placa de video, so quem esta abaixo (nunca abaixa um REALTIME que nao e do
+ * Telinha; o que ele pos em REALTIME desce para HIGH); "realtime": HIGH e, por cima, REALTIME; "restore": volta o que o Telinha
+ * mudou (sem nada a voltar, nao roda o helper; o que falhou antes e tentado de novo). Um pedido por vez. Nunca rejeita.
  */
 export function setGpuPriorityMain(mode: GpuPriorityMode): Promise<GpuPriorityReport> {
     return enqueue(async () => {
-        const report = await (mode === "high" ? raise() : restore());
+        const report = await (mode === "high" ? raise() : mode === "realtime" ? raiseRealtime() : restore());
         // so aqui: o "high" que o main faz sozinho (a GPU que reiniciou) nao consome as notas
         report.notes = notes.splice(0);
         return report;
@@ -507,6 +822,10 @@ export function resetGpuPriorityForTests() {
     active = false;
     watchingGpu = false;
     queue = Promise.resolve();
+    realtimeMemo = null;
+    realtimeSaveError = null;
+    process.off("exit", onProcessExit);
+    realtimeExitHookInstalled = false;
 }
 
 // #endregion

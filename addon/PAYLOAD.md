@@ -340,9 +340,15 @@ comes from `app.getAppMetrics()`. These are the two processes that do the captur
 `getDisplayMedia` capture runs in the browser process (`InProcessVideoCaptureProvider` → `DesktopCaptureDevice` on its
 `desktopCaptureThread`, where WGC creates its own D3D11 device and copies each frame), and the GPU process converts and
 encodes it. The "Video Capture" utility process only serves cameras (`DEVICE_VIDEO_CAPTURE`), so it is not a target. The
-helper calls `D3DKMTSetProcessSchedulingPriorityClass`, accepts only processes in its caller's own process tree, refuses
-REALTIME, and exits. With `--raise` it never lowers a class: a process already at HIGH or above is left alone and
-reported as `keep pid=<pid> class=<CLASS>`. Discord's GPU process can already be at REALTIME (set by Discord itself).
+helper calls `D3DKMTSetProcessSchedulingPriorityClass`, accepts only processes in its caller's own process tree, and
+exits. It refuses `--class realtime` unless `--allow-realtime` is also given (version 4; `--allow-realtime` is refused
+with any other class). REALTIME is for the plugin's experimental "Tempo real (teste)" option: with HAGS on it may hang
+NVENC, and Discord itself reaches it through a LocalSystem service (`DiscordSystemHelper`), so without admin rights
+Windows probably refuses (`0xC0000061` / `0xC0000022`) or accepts the call and keeps a lower class (`ok ... before=HIGH
+after=HIGH`). The helper never enables any privilege. The plugin uses it in two phases: first `--class high --raise`,
+then `--class realtime --raise --allow-realtime` on the processes that ended at HIGH, so a refusal leaves HIGH in place
+and never drops to NORMAL; the step down is `--class high --if-class realtime`. With `--raise` it never lowers a class: a process already at HIGH
+or above is left alone and reported as `keep pid=<pid> class=<CLASS>`. Discord's GPU process can already be at REALTIME (set by Discord itself).
 Lowering it to HIGH made NVENC go from ~7 ms to ~400 ms per frame under a heavy game (RTX 3070, HAGS on, 02/11/2026).
 When the stream stops, only the processes the plugin raised go back to the class they had before, with `--if-class
 high`: a process whose class someone else changed in the meantime is left alone (`keep`). The log line lists every

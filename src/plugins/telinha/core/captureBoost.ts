@@ -12,7 +12,7 @@
 // quadro na placa de video. So vale a partir da proxima partida do Discord: a opcao e gravada pelo main
 // (core/captureBoostMain.ts) num arquivo que o loader do add-on le antes do app ficar pronto. Windows 11 24H2 ou mais novo.
 //
-// "Prioridade da captura na placa de vídeo" (settings.ts → gpuPriority): enquanto transmite, o processo principal do
+// "Prioridade da captura na placa de vídeo" (settings.ts → gpuPriorityMode): enquanto transmite, o processo principal do
 // Discord (a captura e a copia de cada quadro) e o da GPU (conversao e codificacao) sobem para a classe HIGH da placa de
 // video, para nao esperar atras do jogo; quem ja esta em HIGH ou acima (o REALTIME que o Discord da ao processo da GPU)
 // fica como esta: o Telinha nunca abaixa. Vale do inicio ao fim de cada transmissao (core/streaming.ts →
@@ -29,6 +29,7 @@ import { settings } from "@plugins/telinha/settings";
 import type { GpuCaptureStatus, GpuPriorityReport, GpuPriorityTarget } from "./captureBoostMain";
 import { captureCopyDiagnostics } from "./captureCopy";
 import { rt } from "./context";
+import { pendingRealtimeStop, realtimeTestActive, recoverDiscordGpuBoost, startRealtimeTest, stopRealtimeTest } from "./discordGpuBoost";
 import { errorText, log } from "./log";
 import { getNativeOrNull } from "./nativeApi";
 
@@ -41,6 +42,8 @@ let gpuCapture: GpuCaptureStatus | null = null;
 let lastRaise: GpuPriorityReport | null = null;
 /** A prioridade foi pedida para a transmissao atual e ainda nao voltou ao normal. */
 let priorityActive = false;
+/** Numero da subida da prioridade (cada transmissao ganha o seu): uma volta de uma transmissao antiga nao mexe na nova. */
+let priorityRun = 0;
 const listeners = new Set<() => void>();
 
 function changed() {
@@ -145,7 +148,33 @@ function gpuCaptureDiagnostics(st: GpuCaptureStatus | null): string {
 
 // #region prioridade na placa de video
 
-const gpuPriorityOn = () => settings.store.gpuPriority === true;
+/** O modo escolhido; valor desconhecido (ou ausente) conta como desligada. */
+export function gpuPriorityModeSetting(): "off" | "high" | "realtime" {
+    const v: unknown = settings.store.gpuPriorityMode;
+    return v === "high" || v === "realtime" ? v : "off";
+}
+
+// ate o passo S6, "realtime" se comporta exatamente como "high"
+const gpuPriorityOn = () => gpuPriorityModeSetting() !== "off";
+
+/** O que ficou salvo da opcao antiga gpuPriority (liga/desliga) e o que ela vira em gpuPriorityMode. */
+export interface StoredGpuPrioritySettings {
+    /** opcao antiga: true = ligada */
+    gpuPriority?: unknown;
+    /** opcao nova: "off" | "high" | "realtime" */
+    gpuPriorityMode?: unknown;
+}
+
+/**
+ * Migracao da opcao booleana gpuPriority para gpuPriorityMode. `mode` = o valor a gravar (null = nao mexer). A chave antiga
+ * NAO e apagada (uma versao anterior do Telinha ainda a le): so deixa de ser lida quando gpuPriorityMode ja existe (valido).
+ */
+export function migrateGpuPrioritySetting(stored: StoredGpuPrioritySettings | null | undefined): { mode: "high" | null; } {
+    const s = stored ?? {};
+    const hasNew = s.gpuPriorityMode === "off" || s.gpuPriorityMode === "high" || s.gpuPriorityMode === "realtime";
+    if (hasNew) return { mode: null };
+    return { mode: s.gpuPriority === true ? "high" : null };
+}
 const hasPriorityNative = () => typeof getNativeOrNull()?.setGpuPriority === "function";
 
 function isPriorityReport(v: unknown): v is GpuPriorityReport {
@@ -228,6 +257,7 @@ function logRestore(r: GpuPriorityReport | null, why: string) {
 }
 
 async function raisePriority(): Promise<void> {
+    const run = ++priorityRun;
     priorityActive = true;
     changed();
     const report = await askPriority("high");
@@ -235,12 +265,50 @@ async function raisePriority(): Promise<void> {
     lastRaise = report;
     changed();
     logPriority(report, raiseOutcome(report));
+    // so em "Tempo real (teste)": o experimento do GPU boost do proprio Discord (core/discordGpuBoost.ts); a releitura das
+    // classes e o mesmo "high" (nunca abaixa e so sobe quem esta abaixo de HIGH, entao na pratica so le). A transmissao pode
+    // ter acabado (ou o modo mudado, ou outra comecado) enquanto o "high" voltava: so vale se esta ainda e a mesma
+    if (gpuPriorityModeSetting() === "realtime" && priorityActive && priorityRun === run) startRealtimeTest(report, () => askPriority("high"));
+}
+
+/**
+ * O fim da transmissao (ou da opcao): marca o fim na hora, desfaz o pedido ao Discord (se ha) e so depois volta a prioridade
+ * ao normal (o false do Discord deixa NORMAL: o desfazer pede o "high" de novo antes do "restore").
+ */
+async function endPriority(why: string): Promise<void> {
+    const run = priorityRun;
+    const wasActive = priorityActive;
+    // na hora, antes de esperar o Discord: um inicio novo durante o desfazer comeca do zero (nao ve a transmissao antiga)
+    priorityActive = false;
+    changed();
+    await stopRealtimeTest();
+    await waitRealtimeUndo();
+    // outra transmissao ja pediu a prioridade: a volta desta nao pode abaixar as classes dela
+    if (!wasActive || priorityRun !== run) return;
+    logRestore(await askPriority("restore"), why);
+}
+
+/**
+ * Espera o desfazer do Discord que ainda roda (a troca para "Alta" no ar, ou um fim anterior): a volta so pode rodar depois
+ * dele, senao acha REALTIME/NORMAL em vez de HIGH e o "high" final do desfazer deixa o Discord em HIGH para sempre. Sem
+ * desfazer em andamento nao espera nada. Nunca lanca.
+ */
+async function waitRealtimeUndo(): Promise<void> {
+    const undo = pendingRealtimeStop();
+    if (!undo) return;
+    try {
+        await undo;
+    } catch { /* o desfazer ja loga o proprio erro */ }
 }
 
 async function restorePriority(why: string): Promise<void> {
     if (!priorityActive) return;
+    const run = priorityRun;
     priorityActive = false;
     changed();
+    await waitRealtimeUndo();
+    // outra transmissao ja pediu a prioridade durante a espera: a volta desta nao pode abaixar as classes dela
+    if (priorityRun !== run) return;
     logRestore(await askPriority("restore"), why);
 }
 
@@ -255,7 +323,9 @@ function priorityModeText(): string {
 export function onGpuPrioritySettingChanged(): void {
     const on = gpuPriorityOn();
     log.info(`${GPU_PRIORITY} ${on ? "ligada" : "desligada"} nas configurações${on && !rt.local ? ": vale na próxima transmissão" : ""}`);
-    if (!on) void restorePriority("opção desligada");
+    // o teste do tempo real so vale no modo "realtime": ao sair dele, o NORMAL volta
+    if (!on) void (realtimeTestActive() ? endPriority("opção desligada") : restorePriority("opção desligada"));
+    else if (gpuPriorityModeSetting() !== "realtime" && realtimeTestActive()) void stopRealtimeTest();
     else if (rt.local && hasPriorityNative() && !priorityActive) void raisePriority();
     changed();
 }
@@ -294,7 +364,9 @@ export async function startCaptureBoost(): Promise<void> {
     if (st?.loader && st.saved !== on) await saveGpuCapture(on);
     if (on || st?.requested) log.info(`Modo da captura nesta partida do Discord: ${captureModeText(gpuCapture)}`);
     // o renderer recarregou no meio de uma transmissao, ou uma volta falhou antes: o main ainda tem o Discord em HIGH e tenta
-    // de novo (sem nada a voltar, nao faz nada)
+    // de novo (sem nada a voltar, nao faz nada). Antes, o que o teste do tempo real pediu ao Discord e ficou ligado depois de um
+    // reload do renderer (core/discordGpuBoost.ts): desfaz, e o "restore" leva para a classe de antes
+    if (hasPriorityNative()) await recoverDiscordGpuBoost(() => askPriority("high"));
     logRestore(await askPriority("restore"), "início do Telinha");
 }
 
@@ -337,7 +409,7 @@ export function noteCaptureStarted(): void {
 
 /** A transmissao acabou (core/streaming.ts → stopStreaming): a prioridade volta ao que era. */
 export function noteCaptureStopped(): void {
-    void restorePriority("transmissão encerrada");
+    void (realtimeTestActive() ? endPriority("transmissão encerrada") : restorePriority("transmissão encerrada"));
 }
 
 /** As linhas da pagina do plugin, logo abaixo das opcoes. */
@@ -367,5 +439,6 @@ export function resetCaptureBoostForTests() {
     gpuCapture = null;
     lastRaise = null;
     priorityActive = false;
+    priorityRun = 0;
     listeners.clear();
 }

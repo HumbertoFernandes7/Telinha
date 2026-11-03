@@ -21,7 +21,7 @@ import { liveWeightDiagnostics } from "./core/liveWeight";
 import { peerIdentityDiagnostics } from "./core/session";
 import { stuckEncoderDiagnostics } from "./core/stuckEncoder";
 import { refreshUpdateLog, refreshUpdateStatus, startUpdateChecks, stopUpdateChecks, updateDiagnostics } from "./core/update";
-import { migrateAccessSettings, migrateQualitySettings, settings } from "./settings";
+import { migrateAccessSettings, migrateGpuPrioritySettings, migrateQualitySettings, settings } from "./settings";
 import { formatDiagnostics } from "./store";
 import { callViewPatches, renderCallTileStream, stopCallView } from "./ui/callView";
 import { runAction } from "./ui/common";
@@ -134,6 +134,8 @@ export default definePlugin({
         migrateAccessSettings();
         // ate a v0.3.x: "Qualidade padrão" vira "Resolução padrão" + "FPS padrão"
         migrateQualitySettings();
+        // "Prioridade da captura na placa de vídeo": o liga/desliga virou Desligada / Alta / Tempo real (teste)
+        migrateGpuPrioritySettings();
         // "Compartilhar diagnóstico": a friend who asks gets the same text as "Copiar diagnóstico"
         setDiagnosticsSource(diagnostics);
         startNotices();

@@ -71,7 +71,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "telinha-audio 3";
+constexpr const char* kVersion = "telinha-audio 4";
 constexpr UINT32 kRate = 48000;
 constexpr UINT16 kChannels = 2;
 constexpr REFERENCE_TIME kBufferHns = 1000000;   // 100 ms de buffer no WASAPI (a latencia e o periodo, ~10 ms)
@@ -573,8 +573,10 @@ int ListSessions() {
 // video; vale ate o processo terminar, entao este modo so ajusta e sai. O Telinha usa no processo principal do Discord
 // (onde o Chromium copia cada quadro da captura da tela) e no processo da GPU (onde converte e codifica) enquanto
 // transmite, para a captura nao esperar atras de um jogo que usa a placa toda.
-// Nunca REALTIME: com o agendamento por hardware (HAGS) ligado, REALTIME pode travar o encoder NVENC (o OBS e o Sunshine
-// usam HIGH nesse caso), e sem administrador o Windows recusa. Medido em 01/11/2026 (Windows 11 build 26300, sem
+// REALTIME so com --allow-realtime (a opcao "Tempo real (teste)" do plugin): com o agendamento por hardware (HAGS) ligado
+// ele pode travar o encoder NVENC (o OBS e o Sunshine usam HIGH nesse caso). O Discord chega la por um servico do Windows
+// (LocalSystem); sem administrador o Windows provavelmente recusa (0xC0000061 / 0xC0000022) ou mantem uma classe mais baixa.
+// O helper nunca liga nenhum privilegio. Medido em 01/11/2026 (Windows 11 build 26300, sem
 // administrador, nivel de integridade medio, HAGS ligado): HIGH num outro processo do mesmo usuario funciona com um handle
 // PROCESS_SET_INFORMATION; com so PROCESS_QUERY_LIMITED_INFORMATION ou PROCESS_SET_LIMITED_INFORMATION o Windows responde
 // 0xC0000022 (acesso negado) ate para ler a classe.
@@ -642,12 +644,12 @@ std::string GpuClassName(INT value) {
     return "CLASS" + std::to_string(value);
 }
 
-/** Nome da classe (maiusculas ou minusculas) -> valor. REALTIME nunca. */
+/** Nome da classe (maiusculas ou minusculas) -> valor. REALTIME so com --allow-realtime, conferido no wmain. */
 bool ParseGpuClass(const wchar_t* text, INT& out) {
     static const struct {
         const wchar_t* name;
         INT value;
-    } kAllowed[] = { { L"idle", 0 }, { L"below_normal", 1 }, { L"normal", 2 }, { L"above_normal", 3 }, { L"high", kGpuClassHigh } };
+    } kAllowed[] = { { L"idle", 0 }, { L"below_normal", 1 }, { L"normal", 2 }, { L"above_normal", 3 }, { L"high", kGpuClassHigh }, { L"realtime", kGpuClassRealtime } };
     if (!text) return false;
     for (const auto& allowed : kAllowed) {
         if (!_wcsicmp(text, allowed.name)) {
@@ -830,7 +832,7 @@ int RunGpuPriority(const std::vector<DWORD>& pids, INT cls, const GpuCondition& 
 
 int Usage() {
     Line("error usage 0x80070057 uso: telinha-audio.exe (--exclude <pid> | --include <pid>) [--parent <pid>] [--seconds <n>] | --probe | --sessions"
-         " | --gpu-priority <pid[,pid...]> --class <high|above_normal|normal|below_normal|idle> [--raise | --if-class <classe>] | --version");
+         " | --gpu-priority <pid[,pid...]> --class <realtime|high|above_normal|normal|below_normal|idle> [--raise | --if-class <classe>] [--allow-realtime] | --version");
     return 2;
 }
 
@@ -842,6 +844,7 @@ int wmain(int argc, wchar_t** argv) {
     std::vector<DWORD> gpuPids;
     INT gpuClass = -1;
     GpuCondition gpuWhen;
+    bool allowRealtime = false;
 
     for (int i = 1; i < argc; i++) {
         const wchar_t* a = argv[i];
@@ -867,11 +870,10 @@ int wmain(int argc, wchar_t** argv) {
             i++;
         } else if (!wcscmp(a, L"--gpu-priority") && gpuPids.empty() && ParsePidList(v, gpuPids)) {
             i++;
-        } else if (!wcscmp(a, L"--class") && v && !_wcsicmp(v, L"realtime")) {
-            Line("error usage 0x80070057 --class realtime nao e permitido (pode travar o encoder da placa de video com o HAGS ligado)");
-            return 2;
         } else if (!wcscmp(a, L"--class") && gpuClass < 0 && ParseGpuClass(v, gpuClass)) {
             i++;
+        } else if (!wcscmp(a, L"--allow-realtime") && !allowRealtime) {
+            allowRealtime = true;
         } else if (!wcscmp(a, L"--raise") && !gpuWhen.raiseOnly) {
             gpuWhen.raiseOnly = true;
         } else if (!wcscmp(a, L"--if-class") && gpuWhen.ifClass < 0 && ParseGpuClass(v, gpuWhen.ifClass)) {
@@ -886,6 +888,12 @@ int wmain(int argc, wchar_t** argv) {
     // --raise e --if-class: so com o --gpu-priority, e um ou outro
     const bool conditional = gpuWhen.raiseOnly || gpuWhen.ifClass >= 0;
     if (conditional && (!gpu || (gpuWhen.raiseOnly && gpuWhen.ifClass >= 0))) return Usage();
+    // REALTIME so com --allow-realtime, e --allow-realtime so com --class realtime
+    if (gpuClass == kGpuClassRealtime && !allowRealtime) {
+        Line("error usage 0x80070057 --class realtime nao e permitido sem --allow-realtime (pode travar o encoder da placa de video com o HAGS ligado)");
+        return 2;
+    }
+    if (allowRealtime && gpuClass != kGpuClassRealtime) return Usage();
     // so a placa de video: sem audio, sem COM e sem exigir o Windows 10 2004
     if (gpu) return RunGpuPriority(gpuPids, gpuClass, gpuWhen);
 

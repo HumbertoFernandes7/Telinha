@@ -19,7 +19,7 @@ import { cl } from "./common";
 
 export function CaptureBoostStatus() {
     // re-renderiza quando as opcoes mudam e quando o main responde
-    settings.use(["gpuCapture", "gpuPriority"]);
+    settings.use(["gpuCapture", "gpuPriorityMode"]);
     const [, setVersion] = useState(0);
     useEffect(() => {
         const off = subscribeCaptureBoost(() => setVersion(v => v + 1));
