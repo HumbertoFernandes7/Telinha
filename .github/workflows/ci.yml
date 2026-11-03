@@ -84,12 +84,12 @@ jobs:
       shippable: ${{ steps.plan.outputs.shippable }}
     steps:
       # the tags: the release plan compares with the last vX.Y.Z tag
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
 
@@ -169,7 +169,7 @@ jobs:
       installer_sha256: ${{ steps.assets.outputs.installer_sha256 }}
     steps:
       # the whole history and the tags: the release plan compares with the last vX.Y.Z tag
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -196,7 +196,7 @@ jobs:
           { echo "## Fast path"; echo; echo "$msg"; } >> "$GITHUB_STEP_SUMMARY"
 
       # package.json "engines" only says node >=22 (no .nvmrc): use the current LTS.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
 
@@ -207,9 +207,9 @@ jobs:
         run: node scripts/release.mjs plan --github-output "$GITHUB_OUTPUT" --github-env "$GITHUB_ENV" --summary "$GITHUB_STEP_SUMMARY"
 
       # pnpm version from package.json "packageManager".
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: installer/go.mod
           cache-dependency-path: installer/go.sum
@@ -222,7 +222,7 @@ jobs:
 
       - name: Restore the pnpm store
         id: pnpm-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'vencord.json') }}
@@ -233,7 +233,7 @@ jobs:
       # fetch and the Vencord build and only installs Vencord's dependencies.
       - name: Restore .vencord (sources and official build)
         id: vencord-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/vencord-src
           key: vencord-${{ runner.os }}-${{ hashFiles('vencord.json', 'scripts/bootstrap.mjs', 'scripts/vencord.mjs') }}
@@ -255,7 +255,7 @@ jobs:
 
       - name: Save the pnpm store
         if: steps.pnpm-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: ${{ steps.pnpm-cache.outputs.cache-primary-key }}
@@ -270,7 +270,7 @@ jobs:
 
       - name: Save .vencord
         if: steps.vencord-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/vencord-src
           key: ${{ steps.vencord-cache.outputs.cache-primary-key }}
@@ -280,7 +280,7 @@ jobs:
       # change to it, build.cmd included, is a new key and a rebuild. Both copies build:addon looks at are saved together.
       - name: Restore the audio helper
         id: helper-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             native-audio/bin/telinha-audio.exe
@@ -294,7 +294,7 @@ jobs:
 
       - name: Save the audio helper
         if: steps.helper-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             native-audio/bin/telinha-audio.exe
@@ -401,7 +401,7 @@ jobs:
 
       - name: Upload the release files
         if: steps.assets.outcome == 'success'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-files
           path: ${{ runner.temp }}/release-assets/
@@ -454,7 +454,7 @@ jobs:
 
       - name: Upload coverage/
         if: ${{ !cancelled() && env.FULL == 'true' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage
           path: coverage/
@@ -485,7 +485,7 @@ jobs:
             | tee "$RUNNER_TEMP/marker/tree.txt"
 
       - name: Upload ci-passed-${{ needs.check.outputs.tree }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ci-passed-${{ needs.check.outputs.tree }}
           path: ${{ runner.temp }}/marker/tree.txt
@@ -502,6 +502,9 @@ jobs:
     if: needs.check.outputs.release == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # a real publish runs in the `release` environment, which only accepts main (Settings → Environments); a manual
+    # run (draft or none) uses `dry-run`, open to any branch
+    environment: ${{ github.event_name == 'push' && 'release' || 'dry-run' }}
     # the only job that can write: it creates the tag and the release (pull-requests: the notes read the merged PR)
     permissions:
       contents: write
@@ -517,17 +520,17 @@ jobs:
       MODE: ${{ github.event_name == 'push' && 'publish' || (inputs.draft && 'draft' || 'none') }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
 
       # outside the checkout: TelinhaInstaller.exe, Telinha-addon-<commit>.zip and its .sha256
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-files
           path: ${{ runner.temp }}/release-files
