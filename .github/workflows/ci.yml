@@ -18,6 +18,13 @@
 #     below coverage-floor.json (the last gate, so a drop does not hide the build and update test failures)
 # Nothing here touches a real Discord: every test runs on fake trees under %TEMP%.
 #
+# A tree that already passed is not checked again. The "passed" job, which runs only when every gate of "check" passed,
+# uploads the artifact ci-passed-<tree> (<tree>: git rev-parse HEAD^{tree} of the checkout that was tested; for a pull
+# request, GitHub's merge commit: what develop/main hold after the merge). The "gate" job, first, looks that name up:
+# found (in a run of this workflow from this repository, not a fork, not expired), "check" is skipped. The tree holds
+# this file too, so the marker says "this exact content passed the gates this exact content defines"; anything else
+# (a new commit, a squash that changes content, a hotfix on main, an expired marker) is a new tree and a full run.
+#
 # Releases (docs/releases.md): on a push to main whose plan ships, the installer, add-on zip and .sha256 built and
 # tested above go to the "release" job (the only one that can write), which writes the notes, checks the whole release
 # with the add-on's updater and publishes GitHub release vX.Y.Z (tag on this commit, marked latest). A manual run
@@ -36,6 +43,10 @@ on:
         description: "Dry run: also create a DRAFT release with the files and notes (never a public one; delete it afterwards)"
         type: boolean
         default: true
+      reuse_passed_tree:
+        description: "Skip the gates when this exact tree already passed them (ci-passed-<tree> marker), as a push to main does"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -52,11 +63,96 @@ defaults:
     shell: bash
 
 jobs:
+  # ---------------------------------------------------------------------------------------------- gate
+  # Did this exact tree already pass every gate? Every doubt (no marker, a marker from a fork or another workflow, the
+  # API unreachable, a manual run without reuse_passed_tree) answers "no", which is a full run.
+  gate:
+    name: Tree already passed?
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      tree: ${{ steps.lookup.outputs.tree }}
+      passed: ${{ steps.lookup.outputs.passed }}
+      marker_run: ${{ steps.lookup.outputs.marker_run }}
+      shippable: ${{ steps.plan.outputs.shippable }}
+    steps:
+      # the tags: the release plan compares with the last vX.Y.Z tag
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      # only "shippable" is used here (check runs this same plan again, for the version it builds as)
+      - name: Release plan
+        id: plan
+        run: node scripts/release.mjs plan --github-output "$GITHUB_OUTPUT"
+
+      - name: Look up this tree's ci-passed marker
+        id: lookup
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_ID: ${{ github.repository_id }}
+          EVENT: ${{ github.event_name }}
+          REUSE: ${{ inputs.reuse_passed_tree }}
+        run: |
+          tree=$(git rev-parse 'HEAD^{tree}')
+          passed=false
+          marker_run=
+          if [ "$EVENT" = workflow_dispatch ] && [ "$REUSE" != true ]; then
+            why="a manual run without reuse_passed_tree runs every gate"
+          else
+            # runs of this repository (head_repository_id: a fork's pull request run has the fork's), not expired
+            runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=ci-passed-$tree&per_page=100" --jq \
+              "[.artifacts[] | select(.name == \"ci-passed-$tree\") | select(.expired | not)
+                | select(.workflow_run.repository_id == $REPO_ID and .workflow_run.head_repository_id == $REPO_ID)
+                | .workflow_run.id] | unique | .[]") \
+              || { echo "::warning::could not list the artifacts: every gate runs"; runs=; }
+            why="no ci-passed-$tree marker from a run of this workflow in this repository"
+            # ... and of this workflow (its own path), not of another one
+            for run in $runs; do
+              who=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run" --jq '.path + " " + (.head_repository.id | tostring)') || continue
+              if [ "$who" = ".github/workflows/ci.yml $REPO_ID" ]; then
+                passed=true
+                marker_run=$run
+                why="ci-passed-$tree was uploaded by run $run, after every gate passed"
+                break
+              fi
+            done
+          fi
+          echo "tree $tree: passed=$passed ($why)"
+          {
+            echo "tree=$tree"
+            echo "passed=$passed"
+            echo "marker_run=$marker_run"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Tree already passed?"
+            echo
+            echo "Tree \`$tree\`: **$passed** ($why)."
+            [ -z "$marker_run" ] || echo "Marker run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$marker_run"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------------------------- check
+  # Every gate, unless this tree already passed them. A run that releases (a push to main that ships, a manual run)
+  # always builds the files it ships.
   check:
     name: pnpm check + installer (Windows)
+    needs: gate
+    if: >-
+      needs.gate.outputs.passed != 'true'
+      || (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.gate.outputs.shippable == 'true')
+      || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 45
     outputs:
+      tree: ${{ steps.tree.outputs.tree }}
       version: ${{ steps.plan.outputs.version }}
       last_tag: ${{ steps.plan.outputs.last_tag }}
       release: ${{ steps.assets.outcome == 'success' }}
@@ -70,6 +166,11 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      # the tree this job tests: the "passed" job names its marker after it
+      - name: Tree
+        id: tree
+        run: echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
 
       # package.json "engines" only says node >=22 (no .nvmrc): use the current LTS.
       - uses: actions/setup-node@v7
@@ -320,6 +421,38 @@ jobs:
           name: coverage
           path: coverage/
           if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------- passed
+  # The evidence the gate job looks for: only when check ran every gate (not skipped by a marker) and all passed, on the
+  # tree the gate job looked up. A cancelled or failed check uploads nothing.
+  passed:
+    name: Mark the tree as passed
+    needs: [gate, check]
+    if: needs.gate.outputs.passed != 'true' && needs.check.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Write the marker
+        env:
+          GATE_TREE: ${{ needs.gate.outputs.tree }}
+          CHECK_TREE: ${{ needs.check.outputs.tree }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ -z "$CHECK_TREE" ] || [ "$CHECK_TREE" != "$GATE_TREE" ]; then
+            echo "::error::check tested tree '$CHECK_TREE', the gate looked up '$GATE_TREE': no marker"
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/marker"
+          printf 'tree=%s\nsha=%s\nref=%s\nevent=%s\nrun=%s\n' "$CHECK_TREE" "$GITHUB_SHA" "$GITHUB_REF" "$EVENT" "$GITHUB_RUN_ID" \
+            | tee "$RUNNER_TEMP/marker/tree.txt"
+
+      - name: Upload ci-passed-${{ needs.check.outputs.tree }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-passed-${{ needs.check.outputs.tree }}
+          path: ${{ runner.temp }}/marker/tree.txt
+          if-no-files-found: error
+          retention-days: 90
 
   # ---------------------------------------------------------------------------------------------- release
   # Runs only after every gate of `check` passed, with the files `check` built and tested (never rebuilt: two builds
