@@ -8,6 +8,9 @@
 // another monitor); if the pop-out does not render within MOUNT_TIMEOUT_MS, it falls back to a draggable floating
 // panel inside Discord (openViewer(peerId, { inApp: true }) opens that panel right away, without the pop-out).
 // Closing the window/panel (by any means) calls unwatch(peerId) exactly once.
+// The third kind is the "janelinha" (mode "pip"): a small frame that keeps playing the SAME session after the user leaves
+// the call screen. openPip/dockPip never call watch/unwatch: opening reuses the session that is already running, docking
+// (a tile of the friend mounted again) hands it back to the tile. Only its X (or the session ending) unwatches.
 
 import ErrorBoundary from "@components/ErrorBoundary";
 import { unwatch, watch } from "@plugins/telinha/actions";
@@ -20,6 +23,8 @@ import type { Root } from "react-dom/client";
 
 import { cl, errorText, findPeer, logger, peerName, runAction } from "./common";
 import { CloseIcon } from "./icons";
+import { initialPipPos, type Pos, type Rect } from "./pipGeometry";
+import { PipViewer } from "./PipViewer";
 import { ViewerContent, ViewerMode } from "./ViewerContent";
 
 // Discord's desktop app only lets window.open() through for frame names starting with "DISCORD_"
@@ -37,6 +42,10 @@ interface ViewerRecord {
     /** Switching pop-out → floating: the pop-out closing must not end the session */
     switching: boolean;
     closed: boolean;
+    /** Janelinha: clique nela (volta para a call); quem chamou openPip fornece */
+    onReturn?: () => void;
+    /** Janelinha: em que lugar da pilha (0 = o canto) ela abriu; o menor lugar livre vale para a proxima */
+    pipSlot?: number;
     mountTimer?: ReturnType<typeof setTimeout>;
     floating?: { root: Root; el: HTMLDivElement; };
 }
@@ -44,6 +53,8 @@ interface ViewerRecord {
 const viewers = new Map<PeerId, ViewerRecord>();
 let storeListening = false;
 let floatingCount = 0;
+/** Onde a janelinha foi largada pela ultima vez (so memoria: some no reload) */
+let lastPipPos: Pos | null = null;
 
 let popoutWindowComponent: ComponentType<any> | null | undefined;
 
@@ -110,15 +121,15 @@ function removeStoreListener() {
     storeListening = false;
 }
 
-/** Ends a viewer: unwatch once, then close whatever window/panel is still showing it */
-function finalize(rec: ViewerRecord, reason: string) {
+/** Ends a viewer: unwatch once (unless `keepSession`: the session goes on elsewhere), then close whatever window/panel is still showing it */
+function finalize(rec: ViewerRecord, reason: string, keepSession = false) {
     if (rec.closed) return;
     rec.closed = true;
     if (rec.mountTimer) clearTimeout(rec.mountTimer);
     if (viewers.get(rec.peerId) === rec) viewers.delete(rec.peerId);
 
     logger.info(`Visualizador de ${rec.peerId} encerrado (${reason})`);
-    runAction("unwatch", () => unwatch(rec.peerId), msg => logger.warn("unwatch falhou", msg));
+    if (!keepSession) runAction("unwatch", () => unwatch(rec.peerId), msg => logger.warn("unwatch falhou", msg));
 
     if (rec.mode === "popout") closePopout(rec.key);
     unmountFloating(rec);
@@ -150,7 +161,7 @@ function contentProps(rec: ViewerRecord, mode: ViewerMode) {
         },
         onUnmounted() {
             if (rec.closed || rec.mode !== mode) return;
-            if (mode === "floating") {
+            if (mode === "floating" || mode === "pip") {
                 finalize(rec, "painel desmontado");
                 return;
             }
@@ -308,6 +319,84 @@ export function openViewer(peerId: PeerId, opts: { inApp?: boolean; } = {}) {
     rec.mountTimer = setTimeout(() => {
         if (!rec.closed && !rec.mounted && rec.mode === "popout") fallBack(`o player não montou em ${MOUNT_TIMEOUT_MS / 1000} s`);
     }, MOUNT_TIMEOUT_MS);
+}
+
+/** Retangulos do PiP do proprio Discord (palpite: classes que os temas usam), para a janelinha nao ficar em cima */
+function discordPipRects(): Rect[] {
+    const rects: Rect[] = [];
+    try {
+        for (const el of document.querySelectorAll('[class*="pictureInPictureWindow"]')) {
+            const { left, top, right, bottom } = el.getBoundingClientRect();
+            rects.push({ left, top, right, bottom });
+        }
+    } catch { }
+    return rects;
+}
+
+/**
+ * Saiu da tela da call: a MESMA sessao continua na janelinha (nao chama watch: nada de reconectar).
+ * false se ja ha um visualizador desse amigo (a janela dele continua dona)
+ */
+export function openPip(peerId: PeerId, opts: { onReturn(): void; }): boolean {
+    const existing = viewers.get(peerId);
+    if (existing && !existing.closed) return false;
+
+    // O menor lugar da pilha que nenhuma janelinha aberta ocupa (fechar a de baixo nao joga a nova em cima da de cima)
+    const used = new Set<number>();
+    for (const v of viewers.values()) if (v.mode === "pip") used.add(v.pipSlot as number);
+    let index = 0;
+    while (used.has(index)) index++;
+
+    const peer = findPeer(getState(), peerId);
+    const rec: ViewerRecord = {
+        peerId,
+        key: popoutKey(peerId),
+        title: peerName(peer),
+        mode: "pip",
+        mounted: false,
+        sawOpen: false,
+        switching: false,
+        closed: false,
+        onReturn: opts.onReturn,
+        pipSlot: index
+    };
+    viewers.set(peerId, rec);
+
+    const initial = initialPipPos({
+        winW: window.innerWidth,
+        winH: window.innerHeight,
+        index,
+        remembered: index === 0 ? lastPipPos : null,
+        avoid: discordPipRects()
+    });
+
+    const el = document.createElement("div");
+    document.body.appendChild(el);
+
+    const root = createRoot(el);
+    rec.floating = { root, el };
+    root.render(
+        <ErrorBoundary onError={({ error }) => logger.error("A janelinha quebrou", error)}>
+            <PipViewer
+                peerId={peerId}
+                title={rec.title}
+                initial={initial}
+                content={contentProps(rec, "pip")}
+                onReturn={opts.onReturn}
+                onClose={why => finalize(rec, why)}
+                onMoved={p => void (lastPipPos = p)}
+            />
+        </ErrorBoundary>
+    );
+    return true;
+}
+
+/** Uma tile do amigo montou: tira a janelinha SEM parar de assistir (a tile volta a ser dona). false se nao havia */
+export function dockPip(peerId: PeerId): boolean {
+    const rec = viewers.get(peerId);
+    if (!rec || rec.closed || rec.mode !== "pip") return false;
+    finalize(rec, "voltou para a call", true);
+    return true;
 }
 
 export function closeViewer(peerId: PeerId) {
