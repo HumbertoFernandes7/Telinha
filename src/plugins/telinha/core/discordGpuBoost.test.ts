@@ -1087,13 +1087,16 @@ describe("na transmissao (core/captureBoost.ts)", () => {
         assert.deepEqual(boost, []);
     });
 
-    test("o teste comecou durante a leitura do main: o inicio do plugin nao desfaz nada (fica para a proxima vez)", async t => {
+    test("o teste comecou durante a leitura do main: nao desfaz nada, mas o que a queda deixou no main continua la com o do teste novo", async t => {
         const clock = useFakeClock(t);
         let release!: () => void;
         const gate = new Promise<void>(r => (release = r));
+        // o Discord D (pid 9999) ficou em REALTIME numa queda anterior; o teste novo sobe outros pids (1234 e 5678)
         installMain();
-        main = [{ pid: 1234, role: "Discord", classBefore: "NORMAL", at: 1 }];
-        installFakeNative({ readGpuBoostRecord: () => gate.then(() => main), writeGpuBoostRecord: async () => [] });
+        main = [{ pid: 9999, role: "Discord", classBefore: "NORMAL", at: 1 }];
+        // o main responde na hora da pergunta (a foto de antes do teste novo gravar), mas a resposta so chega ao renderer depois
+        installMain({ readGpuBoostRecord: () => { const snapshot = main; return gate.then(() => snapshot); } });
+        main = [{ pid: 9999, role: "Discord", classBefore: "NORMAL", at: 1 }];
         discordOk();
         pluginSettings.load({ gpuPriorityMode: "realtime" });
         const recovering = startCaptureBoost();
@@ -1103,9 +1106,62 @@ describe("na transmissao (core/captureBoost.ts)", () => {
         release();
         await clock.tickAsync(10);
         await recovering;
-        assert.ok(boost.some(([, on]) => on), "o teste da transmissao nova pediu o REALTIME");
-        assert.ok(!boost.some(([, on]) => !on), "ninguem desfez nada");
-        assert.equal(main.length, 1);
+        assert.deepEqual(boost, [[1234, true], [5678, true]], "so o teste da transmissao nova pediu algo; ninguem desfez nada");
+        assert.deepEqual(main.map(e => e.pid).sort((x, y) => x - y), [1234, 5678, 9999], "o main guarda o da queda e os do teste novo");
+        // o proximo inicio do plugin ainda consegue desfazer o do pid 9999
+        assert.deepEqual(saved().map(e => e.pid).sort((x, y) => x - y), [1234, 5678, 9999]);
+    });
+
+    test("o inicio do plugin durante um desfazer ainda rodando espera por ele (o false nao cai em dobro no mesmo pid)", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        installMain();
+        let release!: () => void;
+        const gate = new Promise<void>(r => (release = r));
+        discordOk((_pid, on) => (on ? true : gate.then(() => true)));
+        noteCaptureStarted();
+        await clock.tickAsync(REREAD_DELAY_MS + 10);
+        assert.equal(main.length, 2);
+        // o fim da transmissao comeca a desfazer (o false do 1o pid ainda nao respondeu) e o plugin reinicia no meio
+        noteCaptureStopped();
+        await clock.tickAsync(10);
+        assert.deepEqual(boost.filter(([, on]) => !on), [[1234, false]]);
+        const recovering = startCaptureBoost();
+        await clock.tickAsync(50);
+        assert.deepEqual(boost.filter(([, on]) => !on), [[1234, false]], "a recuperacao esperou, nao pediu o false de novo");
+        release();
+        await clock.tickAsync(REREAD_DELAY_MS + 50);
+        await recovering;
+        assert.deepEqual(boost.filter(([, on]) => !on), [[1234, false], [5678, false]], "cada pid levou um false so");
+        assert.deepEqual(main, []);
+    });
+
+    test("o aviso de falha ao gravar no main sai uma vez por sequencia de falhas e volta depois de uma gravacao que deu certo", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        let fail = true;
+        installMain({
+            writeGpuBoostRecord: async (list: unknown[]) => {
+                if (fail) throw new Error("disco cheio");
+                main = list as any[];
+                return list;
+            }
+        });
+        discordOk();
+        const warns = () => getEventLog().slice(base).filter(e => /não consegui gravar o registro/.test(e.msg)).length;
+        noteCaptureStarted();
+        await clock.tickAsync(10);
+        // duas gravacoes (uma por pid), as duas falharam: um aviso
+        assert.equal(warns(), 1);
+        fail = false;
+        noteCaptureStopped();
+        await clock.tickAsync(REREAD_DELAY_MS + 10);
+        assert.deepEqual(main, []);
+        // outra sequencia de falhas: avisa de novo
+        fail = true;
+        noteCaptureStarted();
+        await clock.tickAsync(10);
+        assert.equal(warns(), 2);
     });
 
     // #endregion

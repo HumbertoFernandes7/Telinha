@@ -295,6 +295,7 @@ function pushToMain(list: SavedBoost[]) {
     pushChain = pushChain.then(async () => {
         try {
             await native.writeGpuBoostRecord(list);
+            pushWarned = false;
         } catch (e) {
             if (pushWarned) return;
             pushWarned = true;
@@ -506,12 +507,20 @@ export function stopRealtimeTest(opts: DiscordGpuBoostOptions = {}): Promise<voi
  */
 export async function recoverDiscordGpuBoost(ask: () => Promise<GpuPriorityReport | null>, opts: DiscordGpuBoostOptions = {}): Promise<void> {
     try {
+        // um desfazer ainda rodando (plugin desligado e ligado no meio da transmissao): espera, para nao pedir o false em dobro
+        const stopPending = pendingRealtimeStop();
+        if (stopPending) await stopPending.catch(() => undefined);
         if (run) return;
         // o main primeiro (sobrevive a uma queda do renderer); depois a copia deste renderer e o sessionStorage (so um reload, ou
         // a parte nativa sem o registro). Um mesmo pid vale uma vez
         const fromMain = await readFromMain();
-        if (run) return;
         const saved = mergeByPid(fromMain, current(), readSaved());
+        if (run) {
+            // um teste novo comecou enquanto o main respondia: nao desfaz nada (o teste e dele), mas o que a queda deixou no main
+            // entra na copia daqui. Sem isso o saveAdd do teste novo mandaria so a entrada dele ao main e apagaria a do crash
+            if (saved.length) persist(saved);
+            return;
+        }
         if (!saved.length) return;
         persist(saved);
         const out = await undoBoost(saved, ask, opts, false);
