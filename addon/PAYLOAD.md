@@ -114,6 +114,9 @@ must not rename files: `main.js` resolves its siblings by these names.
                        appendDiagLog, core/diagLogMain.ts): the previous session's tail for a friend who asks for the
                        diagnostics; rotates to renderer.log.1 at 100 KiB; both deleted (clearDiagLog) when the
                        option is turned off
+    gpu-priority.json <- the helper's REALTIME-mode lock ("blocked", "armed"), next to capture-flags.json
+                       (core/captureBoostMain.ts); only the helper's REALTIME mode writes it, and the plugin no longer
+                       uses that mode since "Tempo real" moved to Discord's GPU boost (0.4.0)
     capture-flags.json <- Chromium features the user turned on in the plugin, for the NEXT Discord start (section 6.1);
                        written by the plugin's natives (native.ts setGpuCapture), read by main.js; absent = all off
 ```
@@ -250,7 +253,7 @@ installer's Repair/Install replaced our stub with its own (kind `vencord-stub` a
 
 | Situation | Result |
 |---|---|
-| normal | Vencord + Telinha. `main.log`: `boot`, `loaded {"version":…,"commit":…,"rendererHooked":true,"ipcMapHooked":true,"natives":15,…,"errors":0}`, then `CSP: added 8 sources (chained)` and `renderer served {"metaPatched":true,…}` |
+| normal | Vencord + Telinha. `main.log`: `boot`, `loaded {"version":…,"commit":…,"rendererHooked":true,"ipcMapHooked":true,"natives":24,…,"errors":0}` (`natives` = the exports of the plugin's `native.ts`; see `PLUGIN_NATIVES` in `addon/test/common.mjs`), then `CSP: added 8 sources (chained)` and `renderer served {"metaPatched":true,…}` |
 | `%APPDATA%\Telinha\addon\` missing | stub requires Vencord directly: plain Vencord |
 | `main.js` throws while loading | stub logs `[Telinha] loader failed` to stderr and requires Vencord: plain Vencord |
 | `addon.json` broken / unreadable | logged; no hooks installed; plain Vencord |
@@ -342,12 +345,19 @@ comes from `app.getAppMetrics()`. These are the two processes that do the captur
 encodes it. The "Video Capture" utility process only serves cameras (`DEVICE_VIDEO_CAPTURE`), so it is not a target. The
 helper calls `D3DKMTSetProcessSchedulingPriorityClass`, accepts only processes in its caller's own process tree, and
 exits. It refuses `--class realtime` unless `--allow-realtime` is also given (version 4; `--allow-realtime` is refused
-with any other class). REALTIME is for the plugin's "Tempo real" option (the default): with HAGS on it may hang
-NVENC, and Discord itself reaches it through a LocalSystem service (`DiscordSystemHelper`), so without admin rights
-Windows probably refuses (`0xC0000061` / `0xC0000022`) or accepts the call and keeps a lower class (`ok ... before=HIGH
-after=HIGH`). The helper never enables any privilege. The plugin uses it in two phases: first `--class high --raise`,
-then `--class realtime --raise --allow-realtime` on the processes that ended at HIGH, so a refusal leaves HIGH in place
-and never drops to NORMAL; the step down is `--class high --if-class realtime`. With `--raise` it never lowers a class: a process already at HIGH
+with any other class). The helper also accepts `--class realtime` with `--allow-realtime` (main-side mode `"realtime"` in
+`captureBoostMain.ts`), but the plugin no longer uses it. The helper never enables any privilege. **"Tempo real"** (the
+default since 0.4.0) asks **Discord itself**: after the `high` step, the renderer calls
+`discord_utils.setGPUBoostEnabledByPid(pid, true)` (`DiscordNative.nativeModules.requireModule`, `core/discordGpuBoost.ts`),
+the same path as Discord's own GPU boost, which goes through Discord's `DiscordSystemHelper` service, so no admin rights
+are needed. Only the processes the `high` step raised are asked for; one already at REALTIME (Discord's GPU process) is
+never touched, and the classes are read again ~2 s later. `setGPUBoostEnabledByPid(pid, false)` leaves NORMAL, not the
+previous class, so undoing sends `false` and then `high` again before the usual restore. What was asked for is recorded
+in the main process (`core/discordGpuBoostMain.ts`, natives `readGpuBoostRecord` / `writeGpuBoostRecord`, at most 16
+entries), which outlives a renderer reload or crash; at the next plugin start `recoverDiscordGpuBoost` undoes what is
+left. Every call has a timeout (3 s for the module, 5 s for the request) and never throws: a failure is only logged and
+the stream goes on at HIGH.
+Back to the helper: with `--raise` it never lowers a class: a process already at HIGH
 or above is left alone and reported as `keep pid=<pid> class=<CLASS>`. Discord's GPU process can already be at REALTIME (set by Discord itself).
 Lowering it to HIGH made NVENC go from ~7 ms to ~400 ms per frame under a heavy game (RTX 3070, HAGS on, 02/11/2026).
 When the stream stops, only the processes the plugin raised go back to the class they had before, with `--if-class
@@ -359,7 +369,7 @@ for a process that exited, and `tree` for a pid that now belongs to a process ou
 this with a second snapshot taken while it holds the process handles, so a recycled pid is never touched. If Discord's
 GPU process restarts mid-stream (`app` `child-process-gone`, type `GPU`), its old pid is dropped and the new GPU process
 is raised as soon as `getAppMetrics()` shows it. The renderer gets a note about it with the next report.
-Without admin rights this works on most PCs. It was checked on Windows 11 build 26300 (medium integrity, HAGS on, a
+For the `high` step, without admin rights this works on most PCs. It was checked on Windows 11 build 26300 (medium integrity, HAGS on, a
 `PROCESS_SET_INFORMATION` handle) against a normal child process of the same user, not against Discord's sandboxed GPU
 process, and the line under the option says whether it worked. If Windows refuses, the plugin only logs it and shows
 "não foi possível: o Windows recusou (talvez precise de administrador)". It never asks for elevation.
