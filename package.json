@@ -27,7 +27,8 @@
         "build:helper": "native-audio\\build.cmd --copy-to-dist",
         "build:addon": "node addon/build/build-addon.mjs",
         "build:installer": "installer\\build.cmd",
-        "check": "pnpm typecheck && pnpm lint && pnpm lint-styles && pnpm test:unit && pnpm build:addon && pnpm test:addon"
+        "check:static": "pnpm typecheck && pnpm lint && pnpm lint-styles",
+        "check": "pnpm check:static && pnpm test:unit && pnpm build:addon && pnpm test:addon"
     },
     "dependencies": {
         "trystero": "0.26.0"
