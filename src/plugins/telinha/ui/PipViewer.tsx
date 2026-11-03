@@ -73,13 +73,11 @@ export function PipViewer({ peerId, title, initial, content, onReturn, onClose, 
         return () => window.removeEventListener("resize", onResize);
     }, []);
 
-    // A sessao existia e sumiu (saiu da call de voz, o core largou): nao ha o que mostrar. Avisa uma vez so
-    const sawSession = useRef(false);
+    // Sem sessao (nunca houve: caiu antes do primeiro render, o createRoot e assincrono; ou sumiu depois: saiu da call de
+    // voz, o core largou) nao ha o que mostrar. Avisa uma vez so
     const goneNotified = useRef(false);
     useEffect(() => {
-        if (session) {
-            sawSession.current = true;
-        } else if (sawSession.current && !goneNotified.current) {
+        if (!session && !goneNotified.current) {
             goneNotified.current = true;
             cb.current.onClose("a sessão acabou");
         }
@@ -93,6 +91,8 @@ export function PipViewer({ peerId, title, initial, content, onReturn, onClose, 
     }, [status]);
 
     const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+        // So o botao principal clica/arrasta: o direito (menu) e o do meio nao navegam
+        if (e.button !== 0) return;
         if ((e.target as HTMLElement).closest("button, input")) return;
         drag.current = { startX: e.clientX, startY: e.clientY, from: posRef.current, moved: false };
         e.currentTarget.setPointerCapture(e.pointerId);

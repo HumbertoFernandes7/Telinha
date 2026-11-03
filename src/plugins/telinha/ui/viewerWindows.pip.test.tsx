@@ -25,7 +25,7 @@ import { captureStream } from "@test/fakes/webrtc";
 import { startStreamer, type Streamer } from "@test/helpers/wpe-core";
 import { animations, installAnimate } from "@test/helpers/wpe-dom";
 
-import { PIP_GAP, PIP_HEIGHT, PIP_MARGIN_BOTTOM, PIP_MARGIN_RIGHT, PIP_WIDTH } from "./pipGeometry";
+import { overlaps, PIP_GAP, PIP_HEIGHT, PIP_MARGIN_BOTTOM, PIP_MARGIN_RIGHT, PIP_WIDTH } from "./pipGeometry";
 import { closeAllViewers, dockPip, isViewerOpen, openPip, openViewer } from "./viewerWindows";
 
 const PEER = "peerA";
@@ -290,5 +290,35 @@ describe("janelinha (openPip / dockPip) com o nucleo de verdade", () => {
         assert.equal(left(pips()[0]), dropped.x);
         assert.equal(top(pips()[0]), dropped.y);
         assert.equal(stops(streamer), 0, "nunca parou de assistir");
+    });
+
+    // Depois do teste acima: a posicao lembrada (modulo) ja existe; este leva as janelinhas aos lugares que quer
+    test("arrastou a de cima para o canto, fechou a de baixo: a nova nao abre em cima dela", async () => {
+        const rect = (el: HTMLElement) => ({ left: left(el), top: top(el), right: left(el) + PIP_WIDTH, bottom: top(el) + PIP_HEIGHT });
+        const dragTo = (el: HTMLElement, x: number, y: number) => {
+            fireEvent.pointerDown(el, { clientX: 100, clientY: 100, pointerId: 1 });
+            fireEvent.pointerMove(el, { clientX: 100 + x - left(el), clientY: 100 + y - top(el), pointerId: 1 });
+            fireEvent.pointerUp(el, { pointerId: 1 });
+        };
+        await watching(PEER);
+        await watching(PEER_B);
+        assert.equal(open(PEER), true);
+        assert.equal(open(PEER_B), true);
+        await settle();
+        const lower = pips().find(p => p.getAttribute("aria-label") === "amigo")!;
+        const upper = pips().find(p => p.getAttribute("aria-label") === "outro")!;
+        dragTo(lower, slotX(), slotY(0));
+        dragTo(upper, slotX(), slotY(0) - 60);
+
+        fireEvent.click(lower.querySelector<HTMLElement>('button[aria-label="Parar de assistir"]')!);
+        act(() => clock.tick(0));
+        await settle();
+        await watching(PEER);
+        assert.equal(open(PEER), true);
+        await settle();
+        const fresh = pips().find(p => p.getAttribute("aria-label") === "amigo")!;
+        const stay = pips().find(p => p.getAttribute("aria-label") === "outro")!;
+        assert.equal(pips().length, 2);
+        assert.ok(!overlaps({ x: left(fresh), y: top(fresh) }, rect(stay)), "a nova nao cobre a que ficou");
     });
 });

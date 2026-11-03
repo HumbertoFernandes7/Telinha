@@ -70,8 +70,8 @@ async function mount(initial: Pos = INITIAL) {
 const left = (el: HTMLElement) => parseFloat(el.style.left);
 const top = (el: HTMLElement) => parseFloat(el.style.top);
 
-function press(el: HTMLElement, x: number, y: number, pointerId = 1) {
-    fireEvent.pointerDown(el, { clientX: x, clientY: y, pointerId });
+function press(el: HTMLElement, x: number, y: number, pointerId = 1, button = 0) {
+    fireEvent.pointerDown(el, { clientX: x, clientY: y, pointerId, button });
 }
 
 function moveTo(el: HTMLElement, x: number, y: number, pointerId = 1) {
@@ -206,6 +206,20 @@ describe("PipViewer", () => {
             assert.deepEqual(spies.moved, []);
         });
 
+        test("botao direito ou do meio nao volta para a call nem arrasta", async () => {
+            show(session());
+            const { pip, spies } = await mount();
+            for (const button of [1, 2]) {
+                press(pip, 250, 200, 1, button);
+                moveTo(pip, 400, 300);
+                release(pip);
+            }
+            assert.equal(spies.returned, 0);
+            assert.deepEqual(spies.moved, []);
+            assert.equal(left(pip), INITIAL.x);
+            assert.equal(top(pip), INITIAL.y);
+        });
+
         test("apertar no X nao inicia arraste nem conta como clique na imagem", async () => {
             show(session());
             const { pip, spies } = await mount();
@@ -297,10 +311,15 @@ describe("PipViewer", () => {
             assert.deepEqual(spies.closed, ["a sessão acabou"], "sumir de novo nao avisa outra vez");
         });
 
-        test("sem nunca ter visto a sessao nao fecha (o chamador so abre com sessao ativa)", async () => {
+        test("sem sessao ja no primeiro render (caiu antes de montar): fecha com \"a sessão acabou\", uma vez so", async () => {
             show(null);
             const { spies } = await mount();
-            assert.deepEqual(spies.closed, []);
+            assert.deepEqual(spies.closed, ["a sessão acabou"]);
+            show(session());
+            await settle();
+            show(null);
+            await settle();
+            assert.deepEqual(spies.closed, ["a sessão acabou"]);
         });
     });
 

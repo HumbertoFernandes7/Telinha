@@ -23,7 +23,7 @@ import type { Root } from "react-dom/client";
 
 import { cl, errorText, findPeer, logger, peerName, runAction } from "./common";
 import { CloseIcon } from "./icons";
-import { initialPipPos, type Pos, type Rect } from "./pipGeometry";
+import { initialPipPos, overlaps, PIP_HEIGHT, PIP_WIDTH, type Pos, type Rect } from "./pipGeometry";
 import { PipViewer } from "./PipViewer";
 import { ViewerContent, ViewerMode } from "./ViewerContent";
 
@@ -46,6 +46,8 @@ interface ViewerRecord {
     onReturn?: () => void;
     /** Janelinha: em que lugar da pilha (0 = o canto) ela abriu; o menor lugar livre vale para a proxima */
     pipSlot?: number;
+    /** Janelinha: onde ela esta agora (onde abriu ou foi largada); as proximas desviam dela */
+    pipPos?: Pos;
     mountTimer?: ReturnType<typeof setTimeout>;
     floating?: { root: Root; el: HTMLDivElement; };
 }
@@ -362,13 +364,22 @@ export function openPip(peerId: PeerId, opts: { onReturn(): void; }): boolean {
     };
     viewers.set(peerId, rec);
 
+    // Onde as outras janelinhas abertas estao: a nova nunca nasce em cima de uma delas
+    const open: Rect[] = [];
+    for (const v of viewers.values()) {
+        if (v === rec || v.mode !== "pip" || !v.pipPos) continue;
+        open.push({ left: v.pipPos.x, top: v.pipPos.y, right: v.pipPos.x + PIP_WIDTH, bottom: v.pipPos.y + PIP_HEIGHT });
+    }
+    // O lugar lembrado so vale se estiver livre (o usuario pode ter arrastado outra janelinha para la)
+    const remembered = index === 0 && lastPipPos && !open.some(r => overlaps(lastPipPos as Pos, r)) ? lastPipPos : null;
     const initial = initialPipPos({
         winW: window.innerWidth,
         winH: window.innerHeight,
         index,
-        remembered: index === 0 ? lastPipPos : null,
-        avoid: discordPipRects()
+        remembered,
+        avoid: [...discordPipRects(), ...open]
     });
+    rec.pipPos = initial;
 
     const el = document.createElement("div");
     document.body.appendChild(el);
@@ -384,7 +395,10 @@ export function openPip(peerId: PeerId, opts: { onReturn(): void; }): boolean {
                 content={contentProps(rec, "pip")}
                 onReturn={opts.onReturn}
                 onClose={why => finalize(rec, why)}
-                onMoved={p => void (lastPipPos = p)}
+                onMoved={p => {
+                    lastPipPos = p;
+                    rec.pipPos = p;
+                }}
             />
         </ErrorBoundary>
     );

@@ -35,7 +35,8 @@ export function clampPip(pos: Pos, winW: number, winH: number): Pos {
     return { x: clampAxis(pos.x, PIP_WIDTH, winW), y: clampAxis(pos.y, PIP_HEIGHT, winH) };
 }
 
-function overlaps(pos: Pos, r: Rect): boolean {
+/** A janelinha em `pos` cobre ao menos um pedaco de `r` */
+export function overlaps(pos: Pos, r: Rect): boolean {
     return pos.x < r.right && pos.x + PIP_WIDTH > r.left && pos.y < r.bottom && pos.y + PIP_HEIGHT > r.top;
 }
 
