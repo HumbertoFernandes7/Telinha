@@ -1,7 +1,7 @@
 {
     "name": "telinha",
     "private": true,
-    "version": "0.3.0",
+    "version": "0.4.0",
     "description": "Stream your screen to friends in the same Discord voice channel, peer to peer, and watch inside Discord (Vencord plugin, add-on loader and Windows installer)",
     "homepage": "https://github.com/HumbertoFernandes7/Telinha#readme",
     "repository": {
@@ -27,7 +27,8 @@
         "build:helper": "native-audio\\build.cmd --copy-to-dist",
         "build:addon": "node addon/build/build-addon.mjs",
         "build:installer": "installer\\build.cmd",
-        "check": "pnpm typecheck && pnpm lint && pnpm lint-styles && pnpm test:unit && pnpm build:addon && pnpm test:addon"
+        "check:static": "pnpm typecheck && pnpm lint && pnpm lint-styles",
+        "check": "pnpm check:static && pnpm test:unit && pnpm build:addon && pnpm test:addon"
     },
     "dependencies": {
         "trystero": "0.26.0"

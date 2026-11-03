@@ -102,9 +102,9 @@ describe("autorizar o Telinha no Discord (nucleo de verdade)", () => {
 
         render(<IdentitySection />);
         assert.equal(statusLine(), "Identidade no Discord: carregando…");
-        assert.equal(document.querySelector(".vc-telinha-identity-status"), null, "carregando nao tem explicacao");
+        assert.ok(!document.querySelector(".vc-telinha-identity-status"), "carregando nao tem explicacao");
         assert.equal(authorizeButton().disabled, true);
-        assert.equal(screen.queryByRole("button", { name: "Desvincular" }), null);
+        assert.ok(!screen.queryByRole("button", { name: "Desvincular" }), "nao deveria existir: botao 'Desvincular'");
     });
 
     test("nunca autorizou: a barra pede a autorizacao e as configuracoes explicam o que muda", async () => {
@@ -122,7 +122,7 @@ describe("autorizar o Telinha no Discord (nucleo de verdade)", () => {
         assert.equal(statusLine(), "Identidade no Discord: não autorizado");
         screen.getByText(/Seus amigos veem você como "não verificado" e, se eles exigirem identidade verificada, precisam permitir/);
         assert.equal(authorizeButton().disabled, false);
-        assert.equal(screen.queryByRole("button", { name: "Desvincular" }), null);
+        assert.ok(!screen.queryByRole("button", { name: "Desvincular" }), "nao deveria existir: botao 'Desvincular'");
     });
 
     test("autorizando: a tela espera o Discord; fechar a janela dele volta ao inicio sem reclamar", async () => {
@@ -144,7 +144,7 @@ describe("autorizar o Telinha no Discord (nucleo de verdade)", () => {
         render(<IdentityBanner />);
         fireEvent.click(screen.getByRole("button", { name: "Autorizar" }));
         await until(() => getLocalIdentity().status === "authorizing");
-        assert.equal(screen.queryByRole("status"), null, "enquanto o Discord pergunta, o aviso da barra some");
+        assert.ok(!screen.queryByRole("status"), "enquanto o Discord pergunta, o aviso da barra some");
         await authorizeModalProps();
         act(() => modals.close(modals.top()!.key));
         await until(() => getLocalIdentity().status === "unauthorized");
@@ -195,8 +195,8 @@ describe("autorizar o Telinha no Discord (nucleo de verdade)", () => {
         assert.equal(statusLine(), "Identidade no Discord: autorizado");
         screen.getByText(/Seus amigos com o Telinha conseguem confirmar que é você \(selo "verificado"\)\. A autorização se renova sozinha\./);
         screen.getByText(/Desvincular apaga a autorização só deste PC\. Para tirar também do Discord: Configurações de usuário → Apps autorizados → Telinha\./);
-        assert.equal(screen.queryByRole("status"), null, "sem aviso na barra");
-        assert.equal(screen.queryByRole("button", { name: "Autorizar o Telinha no Discord" }), null);
+        assert.ok(!screen.queryByRole("status"), "sem aviso na barra");
+        assert.ok(!screen.queryByRole("button", { name: "Autorizar o Telinha no Discord" }), "nao deveria existir: botao 'Autorizar o Telinha no Discord'");
 
         const [request] = discord.tokenRequests;
         assert.equal(request.grant_type, "authorization_code");
@@ -213,7 +213,7 @@ describe("autorizar o Telinha no Discord (nucleo de verdade)", () => {
         assert.equal(statusLine(), "Identidade no Discord: autorização vencida");
         screen.getByText("Ela se renova sozinha quando você entrar numa call. Se preferir, autorize de novo agora.");
         assert.equal(authorizeButton().disabled, false);
-        assert.equal(screen.queryByRole("button", { name: "Desvincular" }), null);
+        assert.ok(!screen.queryByRole("button", { name: "Desvincular" }), "nao deveria existir: botao 'Desvincular'");
     });
 
     test("Desvincular que falha: avisa, a tela continua autorizada e o botao volta a funcionar", async t => {

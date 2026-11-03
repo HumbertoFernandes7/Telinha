@@ -6,28 +6,31 @@
 
 // A tile da call com o nucleo de verdade por tras (sala, amigo transmitindo, pedido de assistir, senha, janela do
 // visualizador): clicar e conferir o que o nucleo mandou pela sala (room.sentOn("watch")) e o que o transmissor
-// responde. Os estados e controles isolados estao em CallTileStream.test.tsx.
+// responde. A cena da janelinha (sair da tela da call, a mesma sessao seguir tocando, voltar para a tile) tambem e daqui:
+// em nenhum passo o nucleo pode mandar um segundo "start" nem um "stop". Os estados e controles isolados estao em
+// CallTileStream.test.tsx.
 // Rodar:  pnpm test:file src/plugins/telinha/ui/callView/CallTileStream.core.test.tsx
 
 import assert from "node:assert/strict";
-import { after, afterEach, before, beforeEach, describe, test } from "node:test";
+import { after, afterEach, before, beforeEach, describe, test, type TestContext } from "node:test";
 
 import { unwatch } from "@plugins/telinha/actions";
 import { buildHello, STREAM_KIND_SCREEN } from "@plugins/telinha/protocol";
-import { getState } from "@plugins/telinha/store";
+import { getEventLog, getState } from "@plugins/telinha/store";
+import { PIP_ENDED_CLOSE_MS } from "@plugins/telinha/ui/PipViewer";
 import { closeAllViewers, isViewerOpen } from "@plugins/telinha/ui/viewerWindows";
 import { getVolume, setVolume } from "@plugins/telinha/ui/volumes";
 import { useFakeClock } from "@test/fakes/clock";
 import { media, resetMedia, resizeObservers } from "@test/fakes/dom";
 import { act, cleanup, fireEvent, render, screen, settle, waitFor, within } from "@test/fakes/render";
-import { caughtErrors, FRIEND_ID, loggerLines, PopoutActions, PopoutWindowStore, toasts } from "@test/fakes/vencord";
+import { caughtErrors, ChannelRouter, FluxDispatcher, FRIEND_ID, joinVoice, loggerLines, PopoutActions, PopoutWindowStore, SelectedChannelStore, toasts, VOICE_CHANNEL_ID } from "@test/fakes/vencord";
 import { captureStream, type FakeRTCPeerConnection, type FakeRTCRtpTransceiver, videoReceiverStats } from "@test/fakes/webrtc";
 import { NONCE, startStreamer, type Streamer } from "@test/helpers/wpe-core";
 import { animations, assertAbsent, installAnimate } from "@test/helpers/wpe-dom";
 import type { ReactNode } from "react";
 
 import { CallTileStream } from "./CallTileStream";
-import { isTileOwned, resetTileState, setLocalPreviewHidden } from "./tileState";
+import { isTileOwned, PIP_DELAY_MS, resetTileState, setLocalPreviewHidden } from "./tileState";
 
 const POPOUT_KEY = `DISCORD_TELINHA_VIEWER_${FRIEND_ID}`;
 
@@ -307,6 +310,172 @@ describe("CallTileStream com o nucleo de verdade", () => {
             fireEvent.click(screen.getByRole("button", { name: "Parar de assistir" }));
             await settle();
             assert.ok(within(container).getByRole("button", { name: "Assistir a transmissão de amigo pelo Telinha" }), "a sessao acabou: volta a etiqueta");
+        });
+    });
+    describe("saiu da tela da call: janelinha", () => {
+        let clock: ReturnType<typeof useFakeClock>;
+        let incoming: MediaStream;
+
+        beforeEach(t => {
+            clock = useFakeClock(t as TestContext);
+            SelectedChannelStore.setChannel(VOICE_CHANNEL_ID); // a tela principal e a da call
+        });
+
+        afterEach(() => {
+            act(() => closeAllViewers());
+            act(() => clock.tick(0)); // o desmonte da janelinha e um setTimeout(0)
+            SelectedChannelStore.setChannel(null);
+        });
+
+        const pips = () => Array.from(document.body.querySelectorAll<HTMLElement>(".vc-telinha-pip"));
+        const pipVideo = () => document.body.querySelector<HTMLVideoElement>(".vc-telinha-pip video");
+        const stops = () => streamer.watchMessages().filter(m => m.op === "stop").length;
+        const noRestart = () => assert.deepEqual(streamer.watchMessages(), [{ op: "start" }], "um start so, nenhum stop");
+        const leaveCallScreen = () => SelectedChannelStore.setChannel("text-channel");
+
+        /** Assistindo na tile, com o stream chegando; devolve a tile (ainda montada) */
+        async function watchingInTile(audio: boolean) {
+            streamer.announce({ streaming: true, hasAudio: audio });
+            const view = await startWatching();
+            incoming = screenStream(audio);
+            streamer.room.emitStream(streamer.peerId, incoming, { kind: STREAM_KIND_SCREEN });
+            await settle();
+            return view;
+        }
+
+        /** Sai da tela da call com a tile desmontando: depois de PIP_DELAY_MS a janelinha esta na tela */
+        async function toPip(view: { unmount(): void; }) {
+            leaveCallScreen();
+            act(() => view.unmount());
+            act(() => clock.tick(PIP_DELAY_MS));
+            await settle();
+        }
+
+        const press = (el: HTMLElement) => {
+            fireEvent.pointerDown(el, { clientX: 100, clientY: 100, pointerId: 1 });
+            fireEvent.pointerUp(el, { pointerId: 1 });
+        };
+
+        test("sai da tela da call: a MESMA sessao segue na janelinha, com som e volume, sem reconectar", async () => {
+            setVolume(FRIEND_ID, { volume: 0.4, muted: false });
+            const view = await watchingInTile(true);
+            const before = getEventLog().length;
+
+            await toPip(view);
+            assert.equal(pips().length, 1);
+            const v = pipVideo()!;
+            assert.ok(v.srcObject === incoming, "o mesmo MediaStream que a tile tocava");
+            assert.equal(v.muted, false);
+            assert.equal(v.volume, 0.4);
+            noRestart();
+            const after = getEventLog().slice(before).map(e => e.msg);
+            assert.equal(after.some(m => /Parou de assistir|pedido enviado/.test(m)), false, "nenhum stop nem novo pedido no diagnostico");
+            assert.ok(after.some(m => /Saiu da tela da call/.test(m)));
+            assert.ok(getState().viewing[streamer.peerId]?.stream === incoming);
+        });
+
+        test("clicar na janelinha abre a call e destaca a tile do amigo; ela fica ate a tile montar", async () => {
+            const view = await watchingInTile(true);
+            await toPip(view);
+
+            press(pips()[0]);
+            assert.equal(ChannelRouter.transitions.at(-1), VOICE_CHANNEL_ID);
+            const selects = FluxDispatcher.dispatched.filter(a => a.type === "CHANNEL_RTC_SELECT_PARTICIPANT");
+            assert.deepEqual(selects.map(a => a.id), [FRIEND_ID]);
+            assert.equal(pips().length, 1, "ainda nao ha tile: a janelinha fica");
+            noRestart();
+        });
+
+        test("a tile monta de novo: a janelinha sai e a tile toca o mesmo stream, com som, sem esperar o relogio de 1,5 s", async () => {
+            setVolume(FRIEND_ID, { volume: 0.4, muted: false });
+            const view = await watchingInTile(true);
+            await toPip(view);
+
+            const again = render(<CallTileStream userId={FRIEND_ID} />);
+            act(() => clock.tick(0));
+            await settle();
+            assert.equal(pips().length, 0, "a janelinha saiu");
+            assert.equal(isViewerOpen(streamer.peerId), false);
+            assert.equal(isTileOwned(streamer.peerId), true);
+            const v = tile(again.container).querySelector("video")!;
+            assert.ok(v.srcObject === incoming);
+            assert.equal(v.muted, false, "a tile ja toca (nenhum poll de 1,5 s)");
+            assert.equal(v.volume, 0.4);
+            noRestart();
+            assert.ok(getEventLog().some(e => /Voltou para a call/.test(e.msg)));
+        });
+
+        test("sai de novo e aperta o X: para de assistir (um unico stop) e a sessao some", async () => {
+            const view = await watchingInTile(false);
+            await toPip(view);
+            const again = render(<CallTileStream userId={FRIEND_ID} />);
+            act(() => clock.tick(0));
+            await settle();
+            await toPip(again);
+            assert.equal(pips().length, 1, "o ciclo funciona mais de uma vez");
+
+            fireEvent.click(screen.getByRole("button", { name: "Parar de assistir" }));
+            await settle();
+            act(() => clock.tick(0));
+            assert.equal(stops(), 1);
+            assert.equal(pips().length, 0);
+            assert.equal(getState().viewing[streamer.peerId], undefined);
+        });
+
+        test("o amigo para de transmitir com a janelinha na tela: avisa e some sozinha depois de 4 s", async () => {
+            const view = await watchingInTile(false);
+            await toPip(view);
+
+            streamer.announce({ streaming: false });
+            await settle();
+            assert.ok(within(pips()[0]).getByText("A transmissão terminou"));
+            act(() => clock.tick(PIP_ENDED_CLOSE_MS - 1));
+            assert.equal(pips().length, 1);
+            act(() => clock.tick(1));
+            await settle();
+            act(() => clock.tick(0));
+            assert.equal(pips().length, 0);
+            assert.equal(getState().viewing[streamer.peerId], undefined, "o unwatch final e inofensivo");
+        });
+
+        test("\"Abrir em janela\" e depois sair da tela da call: nenhuma janelinha, a janela segue dona da sessao", async () => {
+            const view = await watchingInTile(false);
+            fireEvent.mouseMove(tile(view.container));
+            fireEvent.click(screen.getByRole("button", { name: "Abrir em janela" }));
+            await settle();
+            assert.equal(PopoutActions.opened.length, 1);
+
+            leaveCallScreen();
+            act(() => view.unmount());
+            act(() => clock.tick(10_000));
+            await settle();
+            assert.equal(pips().length, 0);
+            assert.equal(isViewerOpen(streamer.peerId), true);
+            assert.ok(getState().viewing[streamer.peerId]);
+            noRestart();
+        });
+
+        test("sair da call de voz com a janelinha na tela: ela fecha junto com a sessao", async () => {
+            const view = await watchingInTile(false);
+            await toPip(view);
+            assert.equal(pips().length, 1);
+
+            try {
+                await act(async () => {
+                    joinVoice(null);
+                });
+                await settle();
+                act(() => clock.tick(10));
+                await settle();
+                act(() => clock.tick(0));
+                assert.equal(pips().length, 0);
+                assert.equal(getState().viewing[streamer.peerId], undefined);
+            } finally {
+                await act(async () => {
+                    joinVoice(VOICE_CHANNEL_ID, { users: [FRIEND_ID] });
+                });
+                await settle();
+            }
         });
     });
 });

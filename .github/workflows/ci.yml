@@ -5,15 +5,29 @@
 #     version or the last vX.Y.Z tag + 1 patch, whichever is greater) and whether it ships (product files changed
 #     since that tag); in the job summary
 #   - pnpm bootstrap: the official Vencord pinned in vencord.json, fetched and built into .vencord/
-#   - pnpm build:helper: native-audio\telinha-audio.exe (MSVC), which build:addon packs into the payload
-#   - pnpm check: typecheck, lint, stylelint, unit tests, build:addon + smoke, test:addon (fake Discord/GitHub trees,
-#     and run-release-test.mjs: the notes template + the zip just built through the updater's own checks)
-#   - pnpm test:coverage (when the script exists): coverage of every *.test.ts(x), uploaded as the "coverage" artifact
+#   - pnpm build:helper: native-audio\bin\telinha-audio.exe (MSVC), which build:addon packs into the payload; cached
+#     under the hash of native-audio/** (a hit is the same exe: same sources), rebuilt on any change there
+#   - pnpm check:static: typecheck, lint, stylelint
+#   - pnpm build:addon + smoke, then pnpm test:coverage: the unit tests and test:addon (fake Discord/GitHub trees, and
+#     run-release-test.mjs: the notes template + the zip just built through the updater's own checks), each run once,
+#     under coverage of every *.test.ts(x), uploaded as the "coverage" artifact (what `pnpm check` runs locally,
+#     without the coverage)
 #   - installer/: go vet, go test -cover, the version resource stamped with TELINHA_VERSION, installer\build.cmd (both
 #     builds must then say that version), then the update test's group G against that build
 #   - coverage floor: scripts/check-coverage.mjs fails the job when TypeScript coverage or a Go package's coverage is
 #     below coverage-floor.json (the last gate, so a drop does not hide the build and update test failures)
 # Nothing here touches a real Discord: every test runs on fake trees under %TEMP%.
+#
+# A tree that already passed is not checked again. The "passed" job, which runs only when every gate of "check" passed,
+# uploads the artifact ci-passed-<tree> (<tree>: git rev-parse HEAD^{tree} of the checkout that was tested; for a pull
+# request, GitHub's merge commit: what develop/main hold after the merge). The "gate" job, first, looks that name up:
+# found (in a run of this workflow from this repository, not a fork, not expired), "check" is skipped. The tree holds
+# this file too, so the marker says "this exact content passed the gates this exact content defines"; anything else
+# (a new commit, a squash that changes content, a hotfix on main, an expired marker) is a new tree and a full run.
+# A run that releases (a push to main that ships, a manual run with reuse_passed_tree) on a tree that passed takes the
+# fast path: it skips the pure gates (static checks, test:coverage, go vet/test, coverage floor) but still builds and
+# tests what it ships, from this commit: build:addon + smoke, run-release-test.mjs, the installer and its version,
+# group G of the update test. The release job is the same either way.
 #
 # Releases (docs/releases.md): on a push to main whose plan ships, the installer, add-on zip and .sha256 built and
 # tested above go to the "release" job (the only one that can write), which writes the notes, checks the whole release
@@ -33,6 +47,10 @@ on:
         description: "Dry run: also create a DRAFT release with the files and notes (never a public one; delete it afterwards)"
         type: boolean
         default: true
+      reuse_passed_tree:
+        description: "Skip the gates when this exact tree already passed them (ci-passed-<tree> marker), as a push to main does"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -49,11 +67,99 @@ defaults:
     shell: bash
 
 jobs:
+  # ---------------------------------------------------------------------------------------------- gate
+  # Did this exact tree already pass every gate? Every doubt (no marker, a marker from a fork or another workflow, the
+  # API unreachable, a manual run without reuse_passed_tree) answers "no", which is a full run.
+  gate:
+    name: Tree already passed?
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      tree: ${{ steps.lookup.outputs.tree }}
+      passed: ${{ steps.lookup.outputs.passed }}
+      marker_run: ${{ steps.lookup.outputs.marker_run }}
+      shippable: ${{ steps.plan.outputs.shippable }}
+    steps:
+      # the tags: the release plan compares with the last vX.Y.Z tag
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      # only "shippable" is used here (check runs this same plan again, for the version it builds as)
+      - name: Release plan
+        id: plan
+        run: node scripts/release.mjs plan --github-output "$GITHUB_OUTPUT"
+
+      - name: Look up this tree's ci-passed marker
+        id: lookup
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_ID: ${{ github.repository_id }}
+          EVENT: ${{ github.event_name }}
+          REUSE: ${{ inputs.reuse_passed_tree }}
+        run: |
+          tree=$(git rev-parse 'HEAD^{tree}')
+          passed=false
+          marker_run=
+          if [ "$EVENT" = workflow_dispatch ] && [ "$REUSE" != true ]; then
+            why="a manual run without reuse_passed_tree runs every gate"
+          else
+            # runs of this repository (head_repository_id: a fork's pull request run has the fork's), not expired
+            runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=ci-passed-$tree&per_page=100" --jq \
+              "[.artifacts[] | select(.name == \"ci-passed-$tree\") | select(.expired | not)
+                | select(.workflow_run.repository_id == $REPO_ID and .workflow_run.head_repository_id == $REPO_ID)
+                | .workflow_run.id] | unique | .[]") \
+              || { echo "::warning::could not list the artifacts: every gate runs"; runs=; }
+            why="no ci-passed-$tree marker from a run of this workflow in this repository"
+            # ... and of this workflow (its own path), not of another one
+            for run in $runs; do
+              who=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run" --jq '.path + " " + (.head_repository.id | tostring)') || continue
+              if [ "$who" = ".github/workflows/ci.yml $REPO_ID" ]; then
+                passed=true
+                marker_run=$run
+                why="ci-passed-$tree was uploaded by run $run, after every gate passed"
+                break
+              fi
+            done
+          fi
+          echo "tree $tree: passed=$passed ($why)"
+          {
+            echo "tree=$tree"
+            echo "passed=$passed"
+            echo "marker_run=$marker_run"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Tree already passed?"
+            echo
+            echo "Tree \`$tree\`: **$passed** ($why)."
+            [ -z "$marker_run" ] || echo "Marker run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$marker_run"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------------------------- check
+  # Every gate, unless this tree already passed them. A run that releases (a push to main that ships, a manual run)
+  # always builds and tests the files it ships; when the tree passed (FULL=false) it skips only the pure gates.
   check:
     name: pnpm check + installer (Windows)
+    needs: gate
+    if: >-
+      needs.gate.outputs.passed != 'true'
+      || (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.gate.outputs.shippable == 'true')
+      || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 45
+    env:
+      # false: the fast path (the gates already passed on this exact tree, see the gate job)
+      FULL: ${{ needs.gate.outputs.passed != 'true' }}
     outputs:
+      tree: ${{ steps.tree.outputs.tree }}
       version: ${{ steps.plan.outputs.version }}
       last_tag: ${{ steps.plan.outputs.last_tag }}
       release: ${{ steps.assets.outcome == 'success' }}
@@ -67,6 +173,27 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      # the tree this job tests: the "passed" job names its marker after it
+      - name: Tree
+        id: tree
+        run: echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+
+      # The fast path rests on the marker the gate job found for ITS checkout: this one must be the same tree.
+      - name: Gates already passed on this tree (fast path)
+        if: env.FULL != 'true'
+        env:
+          GATE_TREE: ${{ needs.gate.outputs.tree }}
+          TREE: ${{ steps.tree.outputs.tree }}
+          MARKER_RUN: ${{ needs.gate.outputs.marker_run }}
+        run: |
+          if [ -z "$GATE_TREE" ] || [ -z "$MARKER_RUN" ] || [ "$TREE" != "$GATE_TREE" ]; then
+            echo "::error::this checkout is tree '$TREE', the gate found a marker for '$GATE_TREE' (run '$MARKER_RUN')"
+            exit 1
+          fi
+          msg="Fast path: every gate passed on tree \`$TREE\` in $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$MARKER_RUN; this run skips them and builds and tests the shipped files."
+          echo "$msg"
+          { echo "## Fast path"; echo; echo "$msg"; } >> "$GITHUB_STEP_SUMMARY"
 
       # package.json "engines" only says node >=22 (no .nvmrc): use the current LTS.
       - uses: actions/setup-node@v7
@@ -148,25 +275,63 @@ jobs:
           path: ${{ runner.temp }}/vencord-src
           key: ${{ steps.vencord-cache.outputs.cache-primary-key }}
 
+      # The MSVC helper is a pure function of native-audio/** (sources, resource, tests and build.cmd, whose cl/link
+      # flags include /Brepro: no timestamp in the PE), so the exe is cached under the hash of that whole folder: any
+      # change to it, build.cmd included, is a new key and a rebuild. Both copies build:addon looks at are saved together.
+      - name: Restore the audio helper
+        id: helper-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            native-audio/bin/telinha-audio.exe
+            dist/telinha-audio.exe
+          key: helper-${{ runner.os }}-${{ hashFiles('native-audio/**') }}
+
       # native-audio\build.cmd finds MSVC itself (vswhere + vcvars64), which the Windows runner image ships.
       - name: Build the audio helper (MSVC)
+        if: steps.helper-cache.outputs.cache-hit != 'true'
         run: pnpm build:helper
+
+      - name: Save the audio helper
+        if: steps.helper-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            native-audio/bin/telinha-audio.exe
+            dist/telinha-audio.exe
+          key: ${{ steps.helper-cache.outputs.cache-primary-key }}
+
+      # Built or restored, both copies must be there and identical: build:addon packs this exe into the payload.
+      - name: Audio helper (cache ${{ steps.helper-cache.outputs.cache-hit == 'true' && 'hit' || 'miss' }})
+        run: |
+          sha256sum native-audio/bin/telinha-audio.exe dist/telinha-audio.exe
+          cmp native-audio/bin/telinha-audio.exe dist/telinha-audio.exe
 
       # ------------------------------------------------------------------ gates
       # build:addon makes dist/addon/Telinha-addon-<commit>.zip as TELINHA_VERSION, from the clean checkout (a changed
       # or untracked file would name it <commit>-dirty, which the release job refuses).
-      - name: pnpm check
-        run: pnpm check
+      # The pure gates (no shipped file comes out of them) carry `if: env.FULL == 'true'`; every other step always runs.
+      - name: Static checks (typecheck, lint, stylelint)
+        if: env.FULL == 'true'
+        run: pnpm check:static
 
-      - name: Coverage (pnpm test:coverage)
-        run: pnpm run --if-present test:coverage 2>&1 | tee "$RUNNER_TEMP/js-coverage.txt"
+      - name: Build the add-on + smoke
+        run: pnpm build:addon
+
+      # The unit and add-on tests, once: test:coverage runs test:unit and test:addon itself, under coverage, and exits
+      # with their exit code. No --if-present: a deleted script must fail here, not skip every test.
+      - name: Unit and add-on tests with coverage (pnpm test:coverage)
+        if: env.FULL == 'true'
+        run: pnpm test:coverage 2>&1 | tee "$RUNNER_TEMP/js-coverage.txt"
 
       - name: go vet
+        if: env.FULL == 'true'
         working-directory: installer
         run: go vet ./...
 
       # -count=1: setup-go restores the build cache, which would otherwise replay earlier results as "(cached)".
       - name: go test -cover
+        if: env.FULL == 'true'
         working-directory: installer
         run: go test -count=1 -cover ./... 2>&1 | tee "$RUNNER_TEMP/go-test.txt"
 
@@ -192,7 +357,15 @@ jobs:
             exit 1
           }
 
-      # pnpm check skipped group G (no installer yet): re-run the update test against the build above.
+      # Fast path only (test:coverage, skipped there, runs it otherwise): the notes template + the zip just built (and
+      # the installer just built, for its hash) through the updater's own checks. A missing zip would only "skip".
+      - name: Release test with the built files (fast path)
+        if: env.FULL != 'true'
+        run: |
+          node addon/test/run-release-test.mjs 2>&1 | tee "$RUNNER_TEMP/release-test.txt"
+          if grep -q '^R skipped' "$RUNNER_TEMP/release-test.txt"; then echo "::error::run-release-test.mjs skipped"; exit 1; fi
+
+      # the add-on tests above skipped group G (no installer yet): re-run the update test against the build above.
       - name: Update test with the built installer (group G)
         run: |
           node addon/test/run-update-test.mjs --installer dist/installer/TelinhaInstaller-cli.exe 2>&1 | tee "$RUNNER_TEMP/update-test.txt"
@@ -201,12 +374,14 @@ jobs:
       # The ratchet: coverage may not fall below coverage-floor.json (raise it with `pnpm coverage:ratchet`). Last, so a
       # drop does not hide the failures above; its table goes into the job summary below.
       - name: Coverage floor (coverage-floor.json)
+        if: env.FULL == 'true'
         run: node scripts/check-coverage.mjs check --go "$RUNNER_TEMP/go-test.txt" --summary "$RUNNER_TEMP/coverage-floor.md"
 
       # ------------------------------------------------------------------ release files
-      # Only after every gate passed, and only when something will be released: a push to main that ships, or a manual
-      # dry run. The files that passed the gates above, byte for byte; their hashes go to the release job through the
-      # job outputs (not through the artifact), which checks them again before publishing.
+      # Only after every gate passed (above, or on this exact tree for the fast path), and only when something will be
+      # released: a push to main that ships, or a manual dry run. The files built and tested above, byte for byte; their
+      # hashes go to the release job through the job outputs (not through the artifact), which checks them again before
+      # publishing.
       - name: Stage the release files
         id: assets
         if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.plan.outputs.shippable == 'true') || github.event_name == 'workflow_dispatch' }}
@@ -235,7 +410,7 @@ jobs:
 
       # ------------------------------------------------------------------ reports
       - name: Coverage summary
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && env.FULL == 'true' }}
         run: |
           {
             echo "## Coverage"
@@ -278,16 +453,49 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload coverage/
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && env.FULL == 'true' }}
         uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: coverage/
           if-no-files-found: ignore
 
+  # ---------------------------------------------------------------------------------------------- passed
+  # The evidence the gate job looks for: only when check ran every gate (not skipped by a marker) and all passed, on the
+  # tree the gate job looked up. A cancelled or failed check uploads nothing.
+  passed:
+    name: Mark the tree as passed
+    needs: [gate, check]
+    if: needs.gate.outputs.passed != 'true' && needs.check.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Write the marker
+        env:
+          GATE_TREE: ${{ needs.gate.outputs.tree }}
+          CHECK_TREE: ${{ needs.check.outputs.tree }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ -z "$CHECK_TREE" ] || [ "$CHECK_TREE" != "$GATE_TREE" ]; then
+            echo "::error::check tested tree '$CHECK_TREE', the gate looked up '$GATE_TREE': no marker"
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/marker"
+          printf 'tree=%s\nsha=%s\nref=%s\nevent=%s\nrun=%s\n' "$CHECK_TREE" "$GITHUB_SHA" "$GITHUB_REF" "$EVENT" "$GITHUB_RUN_ID" \
+            | tee "$RUNNER_TEMP/marker/tree.txt"
+
+      - name: Upload ci-passed-${{ needs.check.outputs.tree }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-passed-${{ needs.check.outputs.tree }}
+          path: ${{ runner.temp }}/marker/tree.txt
+          if-no-files-found: error
+          retention-days: 90
+
   # ---------------------------------------------------------------------------------------------- release
-  # Runs only after every gate of `check` passed, with the files `check` built and tested (never rebuilt: two builds
-  # differ in their timestamps). Linux is enough: it only checks, writes notes and calls the GitHub API.
+  # Runs only after every gate of `check` passed (or, on the fast path, after they passed on this exact tree and check
+  # built and tested the files), with the files `check` built and tested (never rebuilt: two builds differ in their
+  # timestamps). Linux is enough: it only checks, writes notes and calls the GitHub API.
   release:
     name: Release (GitHub)
     needs: check

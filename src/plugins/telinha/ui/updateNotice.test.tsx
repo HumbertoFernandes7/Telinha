@@ -121,8 +121,8 @@ describe("pronta, mas nao entrou ao reiniciar (o loader diz por que)", () => {
         assert.equal(n.body, "Não deu pra trocar de versão: outro Discord estava aberto quando este abriu (Discord PTB).");
         render(n.richBody as ReactElement);
         assert.ok(screen.getByText("Não deu pra trocar de versão: outro Discord estava aberto quando este abriu (Discord PTB). Feche todos os Discords, inclusive pelo ícone perto do relógio (botão direito → Sair do Discord), e abra de novo."));
-        assert.equal(screen.queryByText(/entra sozinha/), null);
-        assert.equal(screen.queryByRole("button", { name: "Reiniciar agora" }), null, "reiniciar so este Discord nao resolve");
+        assert.ok(!screen.queryByText(/entra sozinha/), "nao deveria existir: texto /entra sozinha/");
+        assert.ok(!screen.queryByRole("button", { name: "Reiniciar agora" }), "reiniciar so este Discord nao resolve");
         assert.ok(screen.getByRole("button", { name: "Fechei os outros, reiniciar" }));
         assert.ok(screen.getByRole("button", { name: "Depois" }));
     });

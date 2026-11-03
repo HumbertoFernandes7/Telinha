@@ -63,7 +63,7 @@ describe("pagina do plugin: Compartilhar diagnóstico", () => {
         render(<DiagShareSection />);
         assert.ok(screen.getByText("Compartilhar diagnóstico"));
         assert.ok(screen.getByText("Ninguém na call está com esta opção ligada agora."));
-        assert.deepEqual(switches(), []);
+        assert.equal(switches().length, 0, "nenhum interruptor deveria existir");
     });
 
     test("um 'Receber diagnóstico' so para quem esta com a opcao, verificado, admitido e no canal de voz (uma vez por pessoa)", () => {
@@ -78,7 +78,7 @@ describe("pagina do plugin: Compartilhar diagnóstico", () => {
         render(<DiagShareSection />);
         assert.deepEqual(switches().map(s => s.closest("label")?.textContent), ["Receber diagnóstico de amigo"]);
         assert.equal(switches()[0].checked, false);
-        assert.equal(screen.queryByText(/^Enviando diagnóstico/), null, "ninguem recebendo o seu: sem a linha");
+        assert.ok(!screen.queryByText(/^Enviando diagnóstico/), "ninguem recebendo o seu: sem a linha");
     });
 
     test("pedido e recebendo: o botao ligado diz o que esta acontecendo", () => {
@@ -95,7 +95,7 @@ describe("pagina do plugin: Compartilhar diagnóstico", () => {
         show([], { sendingTo: ["amigo", "outro"], requested: [], receivingFrom: [] });
         render(<DiagShareSection />);
         assert.ok(screen.getByText("Enviando diagnóstico para amigo, outro"));
-        assert.equal(screen.queryByRole("dialog"), null);
+        assert.ok(!screen.queryByRole("dialog"), "nao deveria existir: elemento com papel 'dialog'");
     });
 
     test("o botao liga e desliga o pedido no nucleo", () => {

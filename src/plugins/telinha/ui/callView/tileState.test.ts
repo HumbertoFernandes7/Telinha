@@ -5,8 +5,9 @@
  */
 
 // Testes do estado compartilhado das tiles da call (ui/callView/tileState.ts): quem e dono da sessao "Assistir na
-// call", quem toca o audio, a graca de 4 s ao desmontar, a tile esperada pela etiqueta da lista de voz (sem tile, painel
-// flutuante) e a previa da propria transmissao (o volume por usuario e de ui/volumes.ts).
+// call", quem toca o audio, a graca de 4 s ao desmontar, a janelinha (PiP) que assume a mesma sessao ao sair da tela da
+// call e a devolve para a tile ao voltar, a tile esperada pela etiqueta da lista de voz (sem tile, painel flutuante) e a
+// previa da propria transmissao (o volume por usuario e de ui/volumes.ts).
 // O nucleo e o de verdade (sem sala: watch() falha e publica o erro, unwatch() limpa a sessao).
 // Rodar:  pnpm test:file src/plugins/telinha/ui/callView/tileState.test.ts
 
@@ -14,15 +15,16 @@ import "@test/fakes/dom";
 
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { afterEach, beforeEach, describe, test } from "node:test";
+import { afterEach, beforeEach, describe, test, type TestContext } from "node:test";
 
 import { unwatch } from "@plugins/telinha/actions";
 import { rt } from "@plugins/telinha/core/context";
-import { getState, resetState } from "@plugins/telinha/store";
+import { getEventLog, getState, resetState, setState } from "@plugins/telinha/store";
 import { closeAllViewers, isViewerOpen, openViewer } from "@plugins/telinha/ui/viewerWindows";
 import { useFakeClock } from "@test/fakes/clock";
-import { act, cleanup, renderHook, settle } from "@test/fakes/render";
-import { loggerLines, PopoutActions, resetVencordFakes, toasts } from "@test/fakes/vencord";
+import { act, cleanup, fireEvent, renderHook, settle } from "@test/fakes/render";
+import { ChannelRouter, loggerLines, PopoutActions, resetVencordFakes, SelectedChannelStore, toasts, VOICE_CHANNEL_ID } from "@test/fakes/vencord";
+import { installAnimate } from "@test/helpers/wpe-dom";
 
 import {
     expectTile,
@@ -30,6 +32,7 @@ import {
     isLocalPreviewHidden,
     isTileOwned,
     NO_TILE_FALLBACK_MS,
+    PIP_DELAY_MS,
     registerTile,
     releaseToWindow,
     resetTileState,
@@ -41,6 +44,8 @@ import {
 } from "./tileState";
 
 const PEER = "peerA";
+const UNMOUNT_GRACE = 4000;
+const pips = () => Array.from(document.body.querySelectorAll<HTMLElement>(".vc-telinha-pip"));
 const panels = () => Array.from(document.body.querySelectorAll<HTMLElement>(".vc-telinha-floating"));
 
 describe("tileState", () => {
@@ -283,6 +288,195 @@ describe("tileState", () => {
             clock.tick(4000);
             const logs = loggerLines.filter(l => /Nenhuma tile mostra/.test(String(l.args[0])));
             assert.equal(logs.length, 1);
+        });
+    });
+
+    describe("saiu da tela da call: a mesma sessao segue na janelinha; voltou: a tile retoma", () => {
+        let logFrom = 0;
+        const inLog = (re: RegExp) => getEventLog().slice(logFrom).some(e => re.test(e.msg));
+        let restoreAnimate: () => void;
+        let clock: ReturnType<typeof useFakeClock>;
+
+        beforeEach(t => {
+            clock = useFakeClock(t as TestContext);
+            logFrom = getEventLog().length;
+            restoreAnimate = installAnimate();
+        });
+
+        afterEach(() => {
+            cleanup();
+            act(() => closeAllViewers());
+            act(() => clock.tick(0)); // o desmonte das janelinhas e um setTimeout(0)
+            restoreAnimate();
+            assert.equal(pips().length, 0, "nenhuma janelinha sobrou na tela");
+        });
+
+        /** Uma tile mostrando a transmissao: pediu pela tile e a sessao esta tocando (o nucleo, sem sala, daria erro) */
+        async function watching() {
+            const token = registerTile(PEER);
+            startTileWatch(PEER);
+            await settle();
+            act(() => setState({ ...getState(), viewing: { [PEER]: { peerId: PEER, status: "playing", stream: null } } }));
+            return token;
+        }
+
+        const awayFromCall = () => {
+            SelectedChannelStore.setVoiceChannel(VOICE_CHANNEL_ID);
+            SelectedChannelStore.setChannel("text-channel");
+        };
+        const onCallScreen = () => {
+            SelectedChannelStore.setVoiceChannel(VOICE_CHANNEL_ID);
+            SelectedChannelStore.setChannel(VOICE_CHANNEL_ID);
+        };
+
+        test("fora da tela da call com a sessao ativa: aos 200 ms a janelinha assume, sem parar de assistir", async () => {
+            const token = await watching();
+            awayFromCall();
+
+            unregisterTile(PEER, token);
+            act(() => clock.tick(PIP_DELAY_MS - 1));
+            assert.equal(pips().length, 0, "ainda nao");
+            assert.equal(isTileOwned(PEER), true);
+
+            act(() => clock.tick(1));
+            assert.equal(pips().length, 1);
+            assert.equal(isTileOwned(PEER), false);
+            assert.equal(isViewerOpen(PEER), true);
+            assert.equal(getState().viewing[PEER]?.status, "playing", "a sessao continua");
+            assert.equal(inLog(/Saiu da tela da call: .* segue na janelinha \(sem reconectar\)/), true);
+            assert.equal(loggerLines.some(l => /Nenhuma tile mostra/.test(String(l.args[0]))), false);
+        });
+
+        test("ainda na tela da call (a tile sumiu sozinha): so ao fim da graca de 4 s a janelinha assume", async () => {
+            const token = await watching();
+            onCallScreen();
+
+            unregisterTile(PEER, token);
+            act(() => clock.tick(UNMOUNT_GRACE - 1));
+            assert.equal(pips().length, 0);
+            assert.equal(isTileOwned(PEER), true);
+            act(() => clock.tick(1));
+            assert.equal(pips().length, 1);
+            assert.equal(isTileOwned(PEER), false);
+            assert.equal(inLog(/Saiu da tela da call/), true);
+        });
+
+        test("a tile remonta aos 150 ms ou na segunda fase: nada de janelinha", async () => {
+            const token = await watching();
+            awayFromCall();
+            unregisterTile(PEER, token);
+            act(() => clock.tick(150));
+            const again = registerTile(PEER);
+            act(() => clock.tick(10_000));
+            assert.equal(pips().length, 0);
+            assert.equal(isTileOwned(PEER), true);
+
+            onCallScreen();
+            unregisterTile(PEER, again);
+            act(() => clock.tick(PIP_DELAY_MS)); // a segunda fase comecou
+            const last = registerTile(PEER);
+            act(() => clock.tick(10_000));
+            assert.equal(pips().length, 0);
+            assert.equal(isTileOwned(PEER), true);
+            unregisterTile(PEER, last);
+        });
+
+        test("na segunda fase o usuario parou de assistir pela tile: nada acontece no fim", async () => {
+            const token = await watching();
+            onCallScreen();
+            unregisterTile(PEER, token);
+            act(() => clock.tick(PIP_DELAY_MS));
+            stopTileWatch(PEER);
+            act(() => clock.tick(10_000));
+            assert.equal(pips().length, 0);
+            assert.equal(loggerLines.some(l => /Nenhuma tile mostra/.test(String(l.args[0]))), false);
+        });
+
+        test("saiu da call de voz antes de disparar: para de assistir, sem janelinha", async () => {
+            const token = await watching();
+            awayFromCall();
+            unregisterTile(PEER, token);
+            SelectedChannelStore.setVoiceChannel(null);
+            act(() => clock.tick(UNMOUNT_GRACE));
+            assert.equal(pips().length, 0);
+            assert.ok(loggerLines.some(l => /Nenhuma tile mostra mais peerA/.test(String(l.args[0]))));
+            await settle();
+            assert.equal(getState().viewing[PEER], undefined);
+        });
+
+        test("sessao encerrada: segue o caminho de sempre (para de assistir)", async () => {
+            const token = await watching();
+            act(() => setState({ ...getState(), viewing: { [PEER]: { peerId: PEER, status: "ended", stream: null } } }));
+            awayFromCall();
+            unregisterTile(PEER, token);
+            act(() => clock.tick(UNMOUNT_GRACE));
+            assert.equal(pips().length, 0);
+            assert.ok(loggerLines.some(l => /Nenhuma tile mostra mais peerA/.test(String(l.args[0]))));
+        });
+
+        test("uma tile monta com a janelinha aberta: ela sai, a tile volta a ser dona da MESMA sessao; e o ciclo se repete", async () => {
+            const token = await watching();
+            awayFromCall();
+            unregisterTile(PEER, token);
+            act(() => clock.tick(PIP_DELAY_MS));
+            assert.equal(pips().length, 1);
+            const sessionBefore = getState().viewing[PEER];
+
+            let tile!: symbol;
+            act(() => void (tile = registerTile(PEER)));
+            act(() => clock.tick(0)); // a janelinha sai da tela num setTimeout(0)
+            assert.equal(pips().length, 0);
+            assert.equal(isViewerOpen(PEER), false);
+            assert.equal(isTileOwned(PEER), true);
+            assert.equal(getState().viewing[PEER], sessionBefore, "a mesma sessao, nada de pedir de novo");
+            assert.equal(inLog(/Voltou para a call: .* de volta na tile \(sem reconectar\)/), true);
+
+            unregisterTile(PEER, tile);
+            act(() => clock.tick(PIP_DELAY_MS));
+            assert.equal(pips().length, 1, "saiu de novo: a janelinha volta");
+        });
+
+        test("uma tile monta com uma janela do visualizador aberta: a janela fica e a tile nao assume", async () => {
+            openViewer(PEER);
+            await settle();
+            const tile = registerTile(PEER);
+            act(() => clock.tick(0));
+            assert.equal(isViewerOpen(PEER), true);
+            assert.equal(isTileOwned(PEER), false);
+            assert.equal(inLog(/Voltou para a call/), false);
+            assert.equal(PopoutActions.closed.length, 0);
+            unregisterTile(PEER, tile);
+        });
+
+        test("clicar na janelinha leva de volta para a tela da call", async () => {
+            const token = await watching();
+            awayFromCall();
+            unregisterTile(PEER, token);
+            act(() => clock.tick(PIP_DELAY_MS));
+
+            const [pip] = pips();
+            fireEvent.pointerDown(pip, { clientX: 100, clientY: 100, pointerId: 1 });
+            fireEvent.pointerUp(pip, { pointerId: 1 });
+            assert.equal(ChannelRouter.transitions.at(-1), VOICE_CHANNEL_ID);
+            assert.equal(pips().length, 1, "so sai quando a tile monta");
+        });
+
+        test("plugin parado durante a espera (fase 1 ou 2): nenhuma janelinha aparece depois", async () => {
+            const token = await watching();
+            awayFromCall();
+            unregisterTile(PEER, token);
+            act(() => resetTileState());
+            act(() => clock.tick(10_000));
+            assert.equal(pips().length, 0);
+
+            onCallScreen();
+            startTileWatch(PEER);
+            const second = registerTile(PEER);
+            unregisterTile(PEER, second);
+            act(() => clock.tick(PIP_DELAY_MS));
+            act(() => resetTileState());
+            act(() => clock.tick(10_000));
+            assert.equal(pips().length, 0);
         });
     });
 

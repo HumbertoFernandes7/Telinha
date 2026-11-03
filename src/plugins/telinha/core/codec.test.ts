@@ -14,7 +14,7 @@ import { describe, test } from "node:test";
 
 import {
     applyCodecPreferences, chooseCodec, type CodecDecision, describeLocalCaps, type EncoderReport, getLocalCaps, h264Candidates, h264HwAcceptsSize,
-    isSoftwareH264, isTransientSoftwareH264, type LocalCodecCaps, measureLocalCaps, noteH264Fallback, pickNegotiatedCodec, probeLocalCaps,
+    isForeignEncoder, isOffHardwareAv1, isOffHardwareH265, isSoftwareH264, isTransientSoftwareH264, type LocalCodecCaps, measureLocalCaps, noteH264Fallback, pickNegotiatedCodec, probeLocalCaps,
     setH264HighProbeOk, softwareFallback, sortCodecs, whyNoHigh
 } from "./codec";
 import { h264ProfileLevelId, h264Rank, mungeRemoteSdp } from "./sdp";
@@ -382,6 +382,35 @@ describe("checagem do encoder no ar", () => {
         assert.equal(isSoftwareH264({ ...OPENH264, framesEncoded: 0 }), false, "encoder ainda sem quadros");
         assert.equal(isSoftwareH264({ mimeType: "video/H264", framesEncoded: 30 }), false, "sem captura no ar o Chromium nao expoe os campos");
         assert.equal(isSoftwareH264({ ...OPENH264, mimeType: "video/VP9", implementation: "libvpx" }), false);
+    });
+
+    test("encoder de outro codec no relatorio do H.264 (libaom do AV1 de antes da troca): nunca e o H.264 caindo para software", () => {
+        const local = caps();
+        for (const implementation of ["libaom", "SVT-AV1", "rav1e", "libvpx", "MediaFoundationVideoEncodeAccelerator (NVIDIA AV1 Encoder MFT)", "MediaFoundationVideoEncodeAccelerator (NVIDIA HEVC Encoder MFT)"]) {
+            const stale: EncoderReport = { mimeType: "video/H264", implementation, powerEfficient: false, framesEncoded: 30 };
+            assert.equal(isForeignEncoder(stale), true, implementation);
+            assert.equal(isSoftwareH264(stale), false, implementation);
+            assert.equal(isSoftwareH264({ ...stale, powerEfficient: undefined }), false, `${implementation}, sem powerEfficientEncoder`);
+            assert.equal(softwareFallback(stale, false, HW, "auto", local), null, implementation);
+            assert.equal(softwareFallback({ ...stale, width: 1920, height: 1080 }, false, HW, "auto", local), null, `${implementation}, com tamanho`);
+        }
+        // o encoder certo do codec continua valendo, e nome sem familia (ExternalEncoder) nao descarta nada
+        assert.equal(isForeignEncoder(OPENH264), false);
+        assert.equal(isForeignEncoder(NVIDIA), false);
+        assert.equal(isForeignEncoder({ mimeType: "video/H264", implementation: "ExternalEncoder" }), false);
+        assert.equal(isForeignEncoder({ mimeType: "video/H264" }), false);
+        assert.equal(isForeignEncoder({ mimeType: "video/AV1", implementation: "libaom" }), false);
+        assert.equal(isForeignEncoder({ mimeType: "video/VP9", implementation: "libvpx" }), false);
+        assert.equal(isForeignEncoder({ mimeType: "video/AV1", implementation: "OpenH264" }), true);
+        // nomes colados (o fabricante junto do codec): AMDav1Encoder e do AV1, nao do H.264
+        assert.equal(isForeignEncoder({ mimeType: "video/H264", implementation: "MediaFoundationVideoEncodeAccelerator (AMDav1Encoder)" }), true);
+        assert.equal(isForeignEncoder({ mimeType: "video/AV1", implementation: "MediaFoundationVideoEncodeAccelerator (AMDav1Encoder)" }), false);
+        assert.equal(isSoftwareH264({ mimeType: "video/H264", implementation: "ExternalEncoder", powerEfficient: false, framesEncoded: 30 }), true, "sem familia no nome: vale o powerEfficientEncoder");
+        // o mesmo no AV1 e no H.265: o OpenH264 de antes nao e o AV1/H.265 saindo da placa
+        assert.equal(isOffHardwareAv1({ mimeType: "video/AV1", implementation: "OpenH264", powerEfficient: false, framesEncoded: 30 }), false);
+        assert.equal(isOffHardwareAv1({ mimeType: "video/AV1", implementation: "libaom", powerEfficient: false, framesEncoded: 30 }), true);
+        assert.equal(isOffHardwareH265({ mimeType: "video/H265", implementation: "libaom", powerEfficient: false, framesEncoded: 30 }), false);
+        assert.equal(isOffHardwareH265({ mimeType: "video/H265", powerEfficient: false, framesEncoded: 30 }), true);
     });
 
     test("softwareFallback: H.264 por software → VP9, uma vez por espectador", () => {

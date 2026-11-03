@@ -63,7 +63,7 @@ describe("sem Client ID no build", () => {
     test("Todos da call: a explicacao nao fala de identidade verificada (nao existe neste build)", () => {
         render(<Picker log={[]} />);
         screen.getByText("Quem está no seu canal de voz assiste direto.");
-        assert.equal(screen.queryByText(/identidade verificada/), null);
+        assert.ok(!screen.queryByText(/identidade verificada/), "nao deveria existir: texto /identidade verificada/");
     });
 
     test("o padrao das configuracoes Só meus amigos vira Só quem eu aprovar", () => {

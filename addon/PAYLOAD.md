@@ -274,8 +274,8 @@ the fork build's case: next to `patcher.js`).
 ### 6.1 Capture flags (`capture-flags.json`)
 
 Chromium only takes features from the command line before `app` is ready, so an option that needs one is saved for the
-next Discord start. Today there are two. "Captura pela placa de vídeo" (the plugin's `gpuCapture` setting, experimental,
-off by default) turns on Chromium's `WebRtcAllowWgcUsingTexture`, and "AV1" pinned in "Formato de vídeo" (the `codec`
+next Discord start. Today there are two. "Captura pela placa de vídeo" (the plugin's `gpuCapture` setting, on by default since 0.4.0;
+an explicit off is kept) turns on Chromium's `WebRtcAllowWgcUsingTexture`, and "AV1" pinned in "Formato de vídeo" (the `codec`
 setting) turns on `WebRtcAV1HWEncode` (below). Chromium's WGC screen capturer then keeps each frame on
 the GPU instead of copying it to the CPU with a blocking `Map`, which waits behind a game that uses the whole GPU (with
 Chromium's 50 % rule on top, the capture fell to ~10 fps). WGC screen capture, and this path, only exist on Windows 11
@@ -333,8 +333,8 @@ pinned AV1 falls back to "Automático" with a reason. Decoding needs nothing: `W
 - No Windows build gate: whether the GPU has an AV1 encoder MFT (RTX 40/50, Radeon RX 7000+, Intel Arc) is the probe's
   job (`encodingInfo` and a WebCodecs `VideoEncoder` in `prefer-hardware`).
 
-The other option of the same group, "Prioridade da captura na placa de vídeo" (`gpuPriority`, experimental, off by
-default), needs no restart and no file. While a stream is live, the plugin's natives (`core/captureBoostMain.ts`) run
+The other option of the same group, "Prioridade da captura na placa de vídeo" (`gpuPriorityMode`, "Tempo real" by
+default since 0.4.0), needs no restart and no file. While a stream is live, the plugin's natives (`core/captureBoostMain.ts`) run
 `telinha-audio.exe --gpu-priority <Discord main pid>,<GPU process pid> --class high --raise` once. The GPU process pid
 comes from `app.getAppMetrics()`. These are the two processes that do the capture work: in Chromium 152 a
 `getDisplayMedia` capture runs in the browser process (`InProcessVideoCaptureProvider` → `DesktopCaptureDevice` on its
@@ -342,7 +342,7 @@ comes from `app.getAppMetrics()`. These are the two processes that do the captur
 encodes it. The "Video Capture" utility process only serves cameras (`DEVICE_VIDEO_CAPTURE`), so it is not a target. The
 helper calls `D3DKMTSetProcessSchedulingPriorityClass`, accepts only processes in its caller's own process tree, and
 exits. It refuses `--class realtime` unless `--allow-realtime` is also given (version 4; `--allow-realtime` is refused
-with any other class). REALTIME is for the plugin's experimental "Tempo real (teste)" option: with HAGS on it may hang
+with any other class). REALTIME is for the plugin's "Tempo real" option (the default): with HAGS on it may hang
 NVENC, and Discord itself reaches it through a LocalSystem service (`DiscordSystemHelper`), so without admin rights
 Windows probably refuses (`0xC0000061` / `0xC0000022`) or accepts the call and keeps a lower class (`ok ... before=HIGH
 after=HIGH`). The helper never enables any privilege. The plugin uses it in two phases: first `--class high --raise`,

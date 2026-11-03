@@ -74,8 +74,8 @@ describe("ViewersModal (so com o estado do Telinha)", () => {
             const modal = await openViewers();
             assert.equal(modal.title(), "Quem está assistindo");
             assert.match(modal.text(), /Você não está transmitindo pelo Telinha agora\./);
-            assert.equal(modal.maybeButton("Trocar tela ou janela"), null);
-            assert.deepEqual(sections(), []);
+            assert.ok(!modal.maybeButton("Trocar tela ou janela"), "nao deveria existir: botao");
+            assert.equal(sections().length, 0, "nenhuma secao deveria existir");
             modal.click("Fechar");
             assert.equal(modals.list().length, 0);
         });
@@ -112,7 +112,7 @@ describe("ViewersModal (so com o estado do Telinha)", () => {
             const [row] = rowsIn(section("Assistindo agora"));
             assert.equal(nameOf(row), "Alguém");
             assert.equal(metaOf(row), "Saiu da sala · Conexão: verificando…");
-            assert.equal(row.querySelector(".vc-telinha-id-badge"), null);
+            assert.ok(!row.querySelector(".vc-telinha-id-badge"), "nao deveria existir: elemento '.vc-telinha-id-badge'");
         });
 
         test("o nome anunciado so aparece quando difere do nome da conta do Discord (uma conexao falsa pode escolher outro nome)", async () => {
@@ -155,7 +155,7 @@ describe("ViewersModal (so com o estado do Telinha)", () => {
         act(() => setState({ ...EMPTY, local: mine(), identityAlerts: undefined, blocked: undefined }));
         await openViewers();
         assert.deepEqual(sections().map(sectionTitle), ["Assistindo agora"]);
-        assert.deepEqual(alerts(), []);
+        assert.equal(alerts().length, 0, "nenhum alerta deveria existir");
     });
 
     describe("Trocar tela ou janela", () => {
@@ -200,7 +200,7 @@ describe("ViewersModal (so com o estado do Telinha)", () => {
         test("sem pedidos, a secao nem aparece", async () => {
             show({ local: mine() });
             await openViewers();
-            assert.equal(section("Pedindo para assistir"), undefined);
+            assert.ok(!section("Pedindo para assistir"), "nao deveria existir: secao");
         });
 
         test("Permitir e Recusar de um pedido que ja expirou: avisa que expirou e nao muda nada", async () => {
@@ -243,7 +243,7 @@ describe("ViewersModal (so com o estado do Telinha)", () => {
         test("uma conexao duplicada que ja assiste fica so em Assistindo agora", async () => {
             show({ local: mine({ viewers: ["peerA"] }), peers: [peer({ duplicateIdentity: true })] });
             await openViewers();
-            assert.equal(section(/suspeitas/), undefined);
+            assert.ok(!section(/suspeitas/), "nao deveria existir: secao");
         });
 
         test("Expulsar de uma conexao que ja nao esta na call: avisa e nao muda nada", async () => {
@@ -406,7 +406,7 @@ describe("ViewersModal com o nucleo de verdade", () => {
         await settle();
 
         assert.deepEqual(toasts, [{ text: "beto não vai assistir esta transmissão", variant: "success" }]);
-        assert.equal(section("Pedindo para assistir"), undefined, "nenhum pedido sobrou");
+        assert.ok(!section("Pedindo para assistir"), "nenhum pedido sobrou");
         assert.deepEqual(removedRows().map(nameOf), ["beto"]);
         assert.deepEqual(removedRows().map(metaOf), ["Recusado até esta transmissão acabar"]);
         const decline = scene.room.sentOn("watch", "peerB").at(-1)?.data;
@@ -434,7 +434,7 @@ describe("ViewersModal com o nucleo de verdade", () => {
         assert.deepEqual(removedRows().map(nameOf), ["beto"]);
         fireEvent.click(within(removed("beto")).getByRole("button", { name: "Liberar" }));
         await settle();
-        assert.equal(section("Removidos"), undefined);
+        assert.ok(!section("Removidos"), "nao deveria existir: secao");
         assert.deepEqual(getState().blocked, []);
 
         // quem foi liberado volta a poder pedir: o pedido espera o Permitir de novo

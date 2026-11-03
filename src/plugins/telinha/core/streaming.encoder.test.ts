@@ -173,6 +173,34 @@ describe("checagem do encoder H.264 no ar (tick)", () => {
         assert.equal(sendPlanFor(next.peerId)?.codec, "h264");
     });
 
+    test("log de 02/11: o 1o relatorio do H.264 traz o libaom (AV1 de antes da troca) sem tamanho: nao e queda, nao marca o High e o H.264 da placa segue", async () => {
+        const HIGH_FMTP = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=64001f";
+        const stale = (encoderImplementation: string, over: Parameters<typeof videoSenderStats>[0] = {}) => videoSenderStats({
+            mimeType: "video/H264", codecFmtp: HIGH_FMTP, encoderImplementation, powerEfficientEncoder: false, framesEncoded: 30,
+            omit: ["frameWidth", "frameHeight"], ...over
+        });
+        const counted = getLocalCaps().h264HwEncode;
+        for (const [name, implementation] of [["libaom", "libaom"], ["svt", "SVT-AV1"], ["libvpx", "libvpx"], ["nvav1", "MediaFoundationVideoEncodeAccelerator (NVIDIA AV1 Encoder MFT)"]] as const) {
+            const v = await watcher(name, { stats: stale(implementation) });
+            const since = logMark();
+            await seconds(rig, 3);
+            assert.deepEqual(about(since(), v), [], `${implementation}: sem veredito, sem log`);
+            assert.equal(v.sender.encoding.codec, undefined, `${implementation}: continua em H.264`);
+            assert.equal(sendPlanFor(v.peerId)?.codec, "h264");
+            // o libaom com tamanho (o AV1 ja codificando quadros de verdade) tambem nao e o H.264
+            v.sender.stats = stale(implementation, { omit: [], frameWidth: 1920, frameHeight: 1080 });
+            await seconds(rig, 3);
+            assert.deepEqual(about(since(), v), [], `${implementation}: com tamanho, o mesmo`);
+            // as proximas estatisticas trazem o H.264 da NVIDIA (o Baseline da decisao): segue como sempre
+            v.sender.stats = gpuStats({ codecFmtp: "packetization-mode=1;profile-level-id=42001f" });
+            await seconds(rig, 2);
+            assert.deepEqual(about(since(), v), [`Codificando para ${v.label}: video/H264 perfil 42001f (${NVENC}, hardware)`]);
+            assert.equal(v.sender.encoding.codec, undefined);
+        }
+        assert.equal(getLocalCaps().h264HwEncode, counted, "nenhuma queda contada");
+        assert.equal(getLocalCaps().h264HwEncode, true);
+    });
+
     test("OpenH264 logo depois de a janela mudar de tamanho: so loga; passado o tempo de reaplicar, e queda: troca para VP9 sem reconectar", async () => {
         const v = early.resize;
         const track = rt.local!.stream.getVideoTracks()[0] as FakeMediaStreamTrack;

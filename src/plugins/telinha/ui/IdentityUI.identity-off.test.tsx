@@ -38,7 +38,7 @@ describe("sem Client ID no build", () => {
 
         const section = render(<IdentitySection />);
         assert.equal(section.container.innerHTML, "");
-        assert.equal(screen.queryByRole("button"), null);
+        assert.ok(!screen.queryByRole("button"), "nao deveria existir: elemento com papel 'button'");
     });
 
     test("'Compartilhar diagnóstico' (precisa de identidade verificada) fica escondido e a secao nao desenha nada", () => {

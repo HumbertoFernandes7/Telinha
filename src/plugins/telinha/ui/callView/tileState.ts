@@ -8,8 +8,10 @@
 // quando a primeira tile monta.
 //
 // - "Assistir na call": quem pediu pela tile e dono da sessao (tileOwned). Se todas as tiles daquele amigo somem
-//   (saiu da tela da call) e nenhuma janela do visualizador esta aberta, paramos de assistir depois de um tempo de
-//   graca (o Discord remonta tiles ao trocar de layout/foco; nao queremos derrubar o stream nisso).
+//   (saiu da tela da call) e nenhuma janela do visualizador esta aberta, a MESMA sessao passa para a janelinha (PiP,
+//   sem reconectar): 200 ms depois se a tela principal ja mostra outro canal, senao ao fim da graca de 4 s (o Discord
+//   remonta tiles ao trocar de layout/foco; nao queremos tirar o stream nisso). Voltou para a call (uma tile monta):
+//   a janelinha sai e a tile retoma a mesma sessao. Sessao encerrada, ou fora da call de voz: para de assistir.
 // - Audio: com o mesmo stream em varias tiles (ex.: call no pop-out do Discord e na janela principal), so a primeira
 //   tile montada toca o som; janela do visualizador aberta = o som fica so na janela.
 // - O volume por usuario do Discord nao fica aqui: e um so para a tile e para a janela do visualizador (ui/volumes.ts).
@@ -17,13 +19,19 @@
 //   montar logo (expectTile), a sessao vai para o painel flutuante dentro do Discord.
 
 import { unwatch, watch } from "@plugins/telinha/actions";
+import { peerLabel } from "@plugins/telinha/core/context";
+import { log } from "@plugins/telinha/core/log";
 import { getState, subscribe as subscribeState } from "@plugins/telinha/store";
 import type { PeerId } from "@plugins/telinha/types";
 import { logger, runAction } from "@plugins/telinha/ui/common";
-import { closeViewer, isViewerOpen, openViewer } from "@plugins/telinha/ui/viewerWindows";
+import { closeViewer, dockPip, isViewerOpen, openPip, openViewer } from "@plugins/telinha/ui/viewerWindows";
 import { React, showToast } from "@webpack/common";
 
+import { isActiveSession, isAwayFromCallScreen, returnToCall, voiceChannelId } from "./callNav";
+
 const UNMOUNT_GRACE_MS = 4000;
+/** Sumiu a ultima tile e a tela principal ja mostra outro canal: a janelinha abre depois disso (sem esperar a graca) */
+export const PIP_DELAY_MS = 200;
 /** Quanto a etiqueta espera a tile do amigo aparecer na tela da call antes de cair no painel flutuante */
 export const NO_TILE_FALLBACK_MS = 3000;
 
@@ -35,6 +43,7 @@ interface Owned {
 const tileOwned = new Map<PeerId, Owned>();
 const mounts = new Map<PeerId, symbol[]>();
 const graceTimers = new Map<PeerId, ReturnType<typeof setTimeout>>();
+const pipTimers = new Map<PeerId, ReturnType<typeof setTimeout>>();
 const noTileTimers = new Map<PeerId, ReturnType<typeof setTimeout>>();
 
 let version = 0;
@@ -133,15 +142,34 @@ export function registerTile(peerId: PeerId): symbol {
     list.push(token);
     mounts.set(peerId, list);
 
-    for (const timers of [graceTimers, noTileTimers]) {
+    for (const timers of [graceTimers, pipTimers, noTileTimers]) {
         const timer = timers.get(peerId);
         if (timer) {
             clearTimeout(timer);
             timers.delete(peerId);
         }
     }
+    if (dockPip(peerId)) {
+        // a tile volta a ser dona da mesma sessao (a janelinha saiu sem unwatch)
+        tileOwned.set(peerId, { sawSession: !!getState().viewing[peerId] });
+        log.info(`Voltou para a call: ${peerLabel(peerId)} de volta na tile (sem reconectar)`);
+    }
     emit();
     return token;
+}
+
+/** Fim da espera: a sessao ativa vai para a janelinha; senao (acabou, ou saiu da call de voz) para de assistir */
+function handOff(peerId: PeerId) {
+    tileOwned.delete(peerId);
+    emit();
+    if (isViewerOpen(peerId)) return;
+    if (isActiveSession(getState().viewing[peerId]) && voiceChannelId()) {
+        log.info(`Saiu da tela da call: ${peerLabel(peerId)} segue na janelinha (sem reconectar)`);
+        openPip(peerId, { onReturn: () => void returnToCall(peerId) });
+        return;
+    }
+    logger.info(`Nenhuma tile mostra mais ${peerId}: parando de assistir`);
+    runAction("unwatch", () => unwatch(peerId), msg => logger.warn("unwatch falhou", msg));
 }
 
 export function unregisterTile(peerId: PeerId, token: symbol) {
@@ -151,14 +179,23 @@ export function unregisterTile(peerId: PeerId, token: symbol) {
     emit();
 
     if (list.length || !tileOwned.has(peerId) || graceTimers.has(peerId)) return;
+    // fase 1 (PIP_DELAY_MS): se a tela principal ja mostra outro canal, e saida da tela da call: vai logo para a
+    // janelinha. Fase 2 (fim da graca, os dois timers saem juntos e um cancela o outro): remontagem de layout do Discord
+    // ja teria voltado; decide do mesmo jeito
     graceTimers.set(peerId, setTimeout(() => {
+        clearTimeout(pipTimers.get(peerId));
         graceTimers.delete(peerId);
+        pipTimers.delete(peerId);
         if (mounts.has(peerId) || !tileOwned.has(peerId)) return;
-        tileOwned.delete(peerId);
-        if (isViewerOpen(peerId)) return;
-        logger.info(`Nenhuma tile mostra mais ${peerId}: parando de assistir`);
-        runAction("unwatch", () => unwatch(peerId), msg => logger.warn("unwatch falhou", msg));
+        handOff(peerId);
     }, UNMOUNT_GRACE_MS));
+    pipTimers.set(peerId, setTimeout(() => {
+        pipTimers.delete(peerId);
+        if (mounts.has(peerId) || !tileOwned.has(peerId) || !isAwayFromCallScreen()) return;
+        clearTimeout(graceTimers.get(peerId));
+        graceTimers.delete(peerId);
+        handOff(peerId);
+    }, PIP_DELAY_MS));
 }
 
 /** A primeira tile montada daquele amigo e a que toca o audio */
@@ -180,8 +217,9 @@ export function setLocalPreviewHidden(hidden: boolean) {
 
 /** Plugin parado: esquece tudo (stopSession ja encerrou as sessoes) */
 export function resetTileState() {
-    for (const t of [...graceTimers.values(), ...noTileTimers.values()]) clearTimeout(t);
+    for (const t of [...graceTimers.values(), ...pipTimers.values(), ...noTileTimers.values()]) clearTimeout(t);
     graceTimers.clear();
+    pipTimers.clear();
     noTileTimers.clear();
     tileOwned.clear();
     unsubscribeState?.();
