@@ -19,6 +19,7 @@ import {
     setGpuRealtimeBlockedMain
 } from "./core/captureBoostMain";
 import { appendDiagLogMain, clearDiagLogMain, readDiagLogMain } from "./core/diagLogMain";
+import { type GpuBoostRecordEntry, readGpuBoostRecordMain, writeGpuBoostRecordMain } from "./core/discordGpuBoostMain";
 import { type LiveWeightReport, type LiveWeightStart, readLiveWeightMain, startLiveWeightMain, stopLiveWeightMain } from "./core/liveWeightMain";
 import { getWindowProcessInfo } from "./nativeWindowPid";
 import { RELAY_URLS } from "./protocol";
@@ -341,6 +342,19 @@ export function gpuRealtimeStatus(_: IpcMainInvokeEvent): GpuRealtimeStatus {
 /** Um texto desliga o REALTIME neste PC (fica em HIGH); null liga de novo (o usuario escolheu "Tempo real" outra vez). */
 export function setGpuRealtimeBlocked(_: IpcMainInvokeEvent, why: string | null): GpuRealtimeStatus {
     return setGpuRealtimeBlockedMain(why);
+}
+
+/**
+ * O que o Telinha pediu ao Discord em "Tempo real" (core/discordGpuBoost.ts): fica aqui no main, que sobrevive a uma queda do
+ * renderer (o sessionStorage nao), para o inicio do plugin desfazer o que ficou ligado.
+ */
+export function readGpuBoostRecord(_: IpcMainInvokeEvent): GpuBoostRecordEntry[] {
+    return readGpuBoostRecordMain();
+}
+
+/** Troca o registro inteiro; entradas mal formadas sao descartadas e o que ficou volta. */
+export function writeGpuBoostRecord(_: IpcMainInvokeEvent, list: unknown): GpuBoostRecordEntry[] {
+    return writeGpuBoostRecordMain(list);
 }
 
 // #endregion

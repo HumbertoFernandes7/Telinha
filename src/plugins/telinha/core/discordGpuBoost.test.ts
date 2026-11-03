@@ -309,6 +309,12 @@ describe("na transmissao (core/captureBoost.ts)", () => {
             removeItem: (k: string) => void session.delete(k)
         };
         reread = () => report({ targets: [targets("HIGH")[0], { ...targets("HIGH")[1], before: "HIGH", after: "REALTIME", kept: true }] });
+        installFakeNative();
+    });
+
+    /** a parte nativa de mentira; `extra` poe (ou troca) funcoes, como o registro do main (readGpuBoostRecord/writeGpuBoostRecord) */
+    function installFakeNative(extra: Record<string, AnyFn> = {}) {
+        env?.restore();
         let first = true;
         env = installNative({
             setGpuPriority: async (mode: string) => {
@@ -320,9 +326,10 @@ describe("na transmissao (core/captureBoost.ts)", () => {
                     return report();
                 }
                 return reread();
-            }
+            },
+            ...extra
         });
-    });
+    }
 
     afterEach(() => {
         env?.restore();
@@ -896,6 +903,209 @@ describe("na transmissao (core/captureBoost.ts)", () => {
         await startCaptureBoost();
         assert.equal(saved().length, 1);
         assert.match(testLines().at(-1)!, /falhou em Discord 1234 \(tento de novo no próximo início\)$/);
+    });
+
+
+    // #region registro no main (sobrevive a uma queda do renderer)
+
+    /** o main de mentira: guarda o que o renderer mandou, como o native.ts (processo main) de verdade; sobrevive ao "reload" e a "queda" */
+    let main: any[];
+    function installMain(extra: Record<string, AnyFn> = {}) {
+        main = [];
+        installFakeNative({
+            readGpuBoostRecord: async () => main,
+            writeGpuBoostRecord: async (list: unknown[]) => {
+                main = list;
+                return list;
+            },
+            ...extra
+        });
+    }
+    /** o renderer cai: um processo novo, sem sessionStorage nem estado dos modulos; so o main continua */
+    const crash = () => {
+        reload();
+        session.clear();
+    };
+
+    test("o pedido tambem vai para o main (a lista inteira); o fim limpa os dois", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        installMain();
+        discordOk();
+        noteCaptureStarted();
+        await clock.tickAsync(10);
+        assert.deepEqual(main.map(e => [e.pid, e.role, e.classBefore, typeof e.at]), [[1234, "Discord", "NORMAL", "number"], [5678, "GPU", "NORMAL", "number"]]);
+        assert.equal(saved().length, 2);
+        noteCaptureStopped();
+        await clock.tickAsync(REREAD_DELAY_MS + 10);
+        assert.deepEqual(main, []);
+        assert.equal(session.has(SAVED_KEY), false);
+    });
+
+    test("queda do renderer no meio do teste: sem sessionStorage, o inicio do plugin desfaz pelo registro do main", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        installMain();
+        discordOk();
+        noteCaptureStarted();
+        await clock.tickAsync(REREAD_DELAY_MS + 10);
+        assert.equal(main.length, 2);
+        crash();
+        assert.equal(session.size, 0);
+        base = getEventLog().length;
+        await startCaptureBoost();
+        assert.deepEqual(events, ["native:high", "boost:1234:false", "boost:5678:false", "native:high", "native:restore"]);
+        assert.deepEqual(main, []);
+        assert.equal(session.has(SAVED_KEY), false);
+        assert.deepEqual(testLines(), [`${P}: o Telinha recarregou com o tempo real pedido: desfeito em Discord 1234, GPU do Discord 5678`]);
+    });
+
+    test("o main e o sessionStorage se somam por pid (o main manda quando os dois tem o mesmo)", async () => {
+        installMain();
+        main = [{ pid: 1234, role: "Discord", classBefore: "NORMAL", at: 1 }];
+        session.set(SAVED_KEY, JSON.stringify([
+            { pid: 1234, role: "Discord", classBefore: "BELOW_NORMAL", at: 2 },
+            { pid: 5678, role: "GPU", classBefore: "NORMAL", at: 3 }
+        ]));
+        discordOk();
+        await startCaptureBoost();
+        assert.deepEqual(boost, [[1234, false], [5678, false]]);
+        assert.deepEqual(main, []);
+        assert.equal(session.has(SAVED_KEY), false);
+    });
+
+    test("o false que falha deixa o pid no main e no sessionStorage para a proxima vez", async () => {
+        installMain();
+        main = [{ pid: 1234, role: "Discord", classBefore: "NORMAL", at: 1 }];
+        discordOk(() => {
+            throw new Error("recusou");
+        });
+        await startCaptureBoost();
+        assert.deepEqual(main, [{ pid: 1234, role: "Discord", classBefore: "NORMAL", at: 1 }]);
+        assert.equal(saved().length, 1);
+        assert.match(testLines().at(-1)!, /falhou em Discord 1234 \(tento de novo no próximo início\)$/);
+    });
+
+    test("sem conseguir conferir os processos (parte nativa muda): o registro do main continua, e o sessionStorage tambem", async () => {
+        installMain({ setGpuPriority: async () => null });
+        main = [{ pid: 1234, role: "Discord", classBefore: "NORMAL", at: 1 }];
+        discordOk();
+        await startCaptureBoost();
+        assert.deepEqual(boost, []);
+        assert.equal(main.length, 1);
+        assert.equal(saved().length, 1);
+    });
+
+    test("main sem o registro (helper antigo): so o sessionStorage, como antes", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        // o padrao do beforeEach: a parte nativa nao tem readGpuBoostRecord/writeGpuBoostRecord
+        discordOk();
+        noteCaptureStarted();
+        await clock.tickAsync(REREAD_DELAY_MS + 10);
+        assert.equal(saved().length, 2);
+        assert.ok(!env!.calls.some(c => c.name.endsWith("GpuBoostRecord")));
+        reload();
+        await startCaptureBoost();
+        assert.deepEqual(events, ["native:high", "boost:1234:false", "boost:5678:false", "native:high", "native:restore"]);
+        assert.equal(session.has(SAVED_KEY), false);
+    });
+
+    test("main que falha: um aviso so para as gravacoes, e a leitura cai para o sessionStorage", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        installMain({
+            writeGpuBoostRecord: async () => {
+                throw new Error("ipc caiu");
+            },
+            readGpuBoostRecord: async () => {
+                throw new Error("ipc caiu de novo");
+            }
+        });
+        discordOk();
+        noteCaptureStarted();
+        await clock.tickAsync(10);
+        noteCaptureStopped();
+        await clock.tickAsync(REREAD_DELAY_MS + 10);
+        const writeWarns = testLines().filter(l => l.includes("gravar o registro no processo main"));
+        assert.equal(writeWarns.length, 1);
+        assert.match(writeWarns[0], /ipc caiu\)/);
+        // a leitura: o main nao responde, mas o sessionStorage ainda desfaz
+        session.set(SAVED_KEY, JSON.stringify([{ pid: 1234, role: "Discord", classBefore: "NORMAL", at: 1 }]));
+        reload();
+        base = getEventLog().length;
+        await startCaptureBoost();
+        assert.deepEqual(boost, [[1234, false]]);
+        assert.ok(testLines().some(l => l.includes("ler o registro do processo main (Error: ipc caiu de novo)")));
+        assert.equal(session.has(SAVED_KEY), false);
+    });
+
+    test("as gravacoes no main saem na ordem, mesmo com a primeira lenta", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        const order: string[] = [];
+        installMain({
+            writeGpuBoostRecord: async (list: Array<{ pid: number; }>) => {
+                const label = list.map(e => e.pid).join(",") || "vazio";
+                order.push(`inicio:${label}`);
+                if (order.length === 1) await new Promise(r => setTimeout(r, 500));
+                order.push(`fim:${label}`);
+                return list;
+            }
+        });
+        discordOk();
+        noteCaptureStarted();
+        await clock.tickAsync(10);
+        assert.deepEqual(order, ["inicio:1234"]);
+        await clock.tickAsync(600);
+        assert.deepEqual(order, ["inicio:1234", "fim:1234", "inicio:1234,5678", "fim:1234,5678"]);
+        noteCaptureStopped();
+        await clock.tickAsync(REREAD_DELAY_MS + 10);
+        assert.deepEqual(order.slice(4).filter(l => l.startsWith("inicio")), ["inicio:vazio"]);
+        // cada inicio so depois do fim do anterior
+        for (let i = 0; i < order.length; i += 2) assert.ok(order[i].startsWith("inicio") && order[i + 1].startsWith("fim"));
+    });
+
+    test("sem sessionStorage no renderer (so o main) e com respostas que nao sao lista: o main ainda desfaz, o resto e ignorado", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        installMain();
+        discordOk();
+        delete g.sessionStorage;
+        noteCaptureStarted();
+        await clock.tickAsync(REREAD_DELAY_MS + 10);
+        assert.equal(main.length, 2);
+        crash();
+        await startCaptureBoost();
+        assert.deepEqual(boost, [[1234, false], [5678, false]]);
+        assert.deepEqual(main, []);
+        // o main devolve lixo que nao e lista e o sessionStorage tem um objeto: nada a desfazer
+        boost.length = 0;
+        installMain({ readGpuBoostRecord: async () => ({ pid: 1234 }) });
+        g.sessionStorage = { getItem: () => "{}", setItem: () => undefined, removeItem: () => undefined };
+        await startCaptureBoost();
+        assert.deepEqual(boost, []);
+    });
+
+    test("o teste comecou durante a leitura do main: o inicio do plugin nao desfaz nada (fica para a proxima vez)", async t => {
+        const clock = useFakeClock(t);
+        let release!: () => void;
+        const gate = new Promise<void>(r => (release = r));
+        installMain();
+        main = [{ pid: 1234, role: "Discord", classBefore: "NORMAL", at: 1 }];
+        installFakeNative({ readGpuBoostRecord: () => gate.then(() => main), writeGpuBoostRecord: async () => [] });
+        discordOk();
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        const recovering = startCaptureBoost();
+        await clock.tickAsync(10);
+        noteCaptureStarted();
+        await clock.tickAsync(10);
+        release();
+        await clock.tickAsync(10);
+        await recovering;
+        assert.ok(boost.some(([, on]) => on), "o teste da transmissao nova pediu o REALTIME");
+        assert.ok(!boost.some(([, on]) => !on), "ninguem desfez nada");
+        assert.equal(main.length, 1);
     });
 
     // #endregion
