@@ -7,7 +7,9 @@
 import { definePluginSettings } from "@api/Settings";
 import { migrateAccessSetting } from "@plugins/telinha/core/access";
 import { onAv1SettingChanged } from "@plugins/telinha/core/av1Flag";
-import { migrateGpuPrioritySetting, onGpuCaptureSettingChanged, onGpuPrioritySettingChanged } from "@plugins/telinha/core/captureBoost";
+import {
+    GPU_CAPTURE_MARKER, GPU_PRIORITY_MARKER, migrateGpuCaptureSetting, migrateGpuPrioritySetting, onGpuCaptureSettingChanged, onGpuPrioritySettingChanged
+} from "@plugins/telinha/core/captureBoost";
 import { onShareDiagnosticsChanged } from "@plugins/telinha/core/diagShare";
 import { isIdentityConfigured } from "@plugins/telinha/core/identity/config";
 import { migrateQualitySetting } from "@plugins/telinha/core/quality/choice";
@@ -156,24 +158,24 @@ export const settings = definePluginSettings({
         hidden: () => !isIdentityConfigured(),
         onChange: () => onShareDiagnosticsChanged()
     },
-    // core/captureBoost.ts: a live com um jogo que usa a placa de video toda (experimental, desligado por padrao)
+    // core/captureBoost.ts: a live com um jogo que usa a placa de video toda (ligada por padrao; migrateGpuCaptureSettings liga uma vez para quem ja usava)
     gpuCapture: {
         type: OptionType.BOOLEAN,
-        displayName: "Captura pela placa de vídeo (experimental; Windows 11 atualizado; reinicie o Discord)",
+        displayName: "Captura pela placa de vídeo (Windows 11 atualizado; reinicie o Discord)",
         description: "Deixa a live mais fluida quando um jogo usa a placa de vídeo toda: a imagem da tela fica na placa de vídeo, sem passar pelo processador. Se a placa de vídeo reiniciar, a transmissão para; é só transmitir de novo.",
-        default: false,
+        default: true,
         onChange: () => void onGpuCaptureSettingChanged()
     },
-    // substitui a opcao booleana gpuPriority (migrada em migrateGpuPrioritySettings: true → "high"); a chave e nova porque
+    // substitui a opcao booleana gpuPriority (migrada em migrateGpuPrioritySettings: true → "realtime"; "Tempo real" e o padrao); a chave e nova porque
     // um true salvo nao e um valor valido do seletor
     gpuPriorityMode: {
         type: OptionType.SELECT,
-        displayName: "Prioridade da captura na placa de vídeo (experimental)",
-        description: "Deixa a live mais fluida quando um jogo usa a placa de vídeo toda. Alta: enquanto você transmite, a captura passa na frente na fila da placa de vídeo. Tempo real (teste): alta, e quando um jogo pesado ocupa a placa, a captura passa na frente de tudo (o jogo pode perder alguns fps); se a placa travar, volta sozinho para alta e lembra neste PC.",
+        displayName: "Prioridade da captura na placa de vídeo",
+        description: "Tempo real: enquanto você transmite, o Telinha pede ao serviço do Discord a prioridade máxima na placa de vídeo, como o Discord original, para a live não travar mesmo com o jogo usando a placa toda (o jogo pode perder alguns fps). Alta: um nível mais fraco. Desligada: deixa tudo como o Windows faz.",
         options: [
-            { label: "Desligada", value: "off", default: true },
+            { label: "Desligada", value: "off" },
             { label: "Alta", value: "high" },
-            { label: "Tempo real (teste)", value: "realtime" }
+            { label: "Tempo real", value: "realtime", default: true }
         ],
         onChange: () => onGpuPrioritySettingChanged()
     },
@@ -222,17 +224,37 @@ export function migrateQualitySettings(): void {
 }
 
 /**
- * A opcao booleana "Prioridade da captura na placa de vídeo" (gpuPriority: true) virou o seletor gpuPriorityMode:
- * true → "Alta". A chave antiga fica como esta (uma versao anterior do Telinha ainda a le); so deixa de ser lida quando
- * gpuPriorityMode existe. Chamado no start() do plugin. Nunca lanca.
+ * "Tempo real" virou o padrao da "Prioridade da captura na placa de vídeo". Uma unica vez (marcador gpuPriorityRealtimeDefault
+ * em settings.plain), "Alta" salva (ou o antigo liga/desliga gpuPriority: true) vira "Tempo real"; "Desligada" salva fica
+ * (foi escolha). A chave antiga fica como esta (uma versao anterior do Telinha ainda a le). Depois do marcador, o que o
+ * usuario escolher fica. Chamado no start() do plugin. Nunca lanca.
  */
 export function migrateGpuPrioritySettings(): void {
     try {
         const plain = settings.plain as Record<string, unknown> | undefined;
         if (!plain) return;
-        const { mode } = migrateGpuPrioritySetting(plain);
+        const { mode, markDone } = migrateGpuPrioritySetting(plain);
         if (mode) settings.store.gpuPriorityMode = mode;
+        if (markDone) plain[GPU_PRIORITY_MARKER] = true;
     } catch (e) {
         console.warn("[Telinha] migração de \"Prioridade da captura na placa de vídeo\" falhou", e);
+    }
+}
+
+/**
+ * "Captura pela placa de vídeo" virou ligada por padrao. Uma unica vez (marcador gpuCaptureDefaultOn em settings.plain),
+ * liga para todo mundo (muita gente a desligou so por causa do problema antigo da copia dos quadros); depois, a escolha
+ * fica. Chamado no start() do plugin, antes do startCaptureBoost, que grava o arquivo do loader com o valor de agora.
+ * Nunca lanca.
+ */
+export function migrateGpuCaptureSettings(): void {
+    try {
+        const plain = settings.plain as Record<string, unknown> | undefined;
+        if (!plain) return;
+        const { on, markDone } = migrateGpuCaptureSetting(plain);
+        if (on) settings.store.gpuCapture = true;
+        if (markDone) plain[GPU_CAPTURE_MARKER] = true;
+    } catch (e) {
+        console.warn("[Telinha] migração de \"Captura pela placa de vídeo\" falhou", e);
     }
 }
