@@ -402,6 +402,9 @@ describe("checagem do encoder no ar", () => {
         assert.equal(isForeignEncoder({ mimeType: "video/AV1", implementation: "libaom" }), false);
         assert.equal(isForeignEncoder({ mimeType: "video/VP9", implementation: "libvpx" }), false);
         assert.equal(isForeignEncoder({ mimeType: "video/AV1", implementation: "OpenH264" }), true);
+        // nomes colados (o fabricante junto do codec): AMDav1Encoder e do AV1, nao do H.264
+        assert.equal(isForeignEncoder({ mimeType: "video/H264", implementation: "MediaFoundationVideoEncodeAccelerator (AMDav1Encoder)" }), true);
+        assert.equal(isForeignEncoder({ mimeType: "video/AV1", implementation: "MediaFoundationVideoEncodeAccelerator (AMDav1Encoder)" }), false);
         assert.equal(isSoftwareH264({ mimeType: "video/H264", implementation: "ExternalEncoder", powerEfficient: false, framesEncoded: 30 }), true, "sem familia no nome: vale o powerEfficientEncoder");
         // o mesmo no AV1 e no H.265: o OpenH264 de antes nao e o AV1/H.265 saindo da placa
         assert.equal(isOffHardwareAv1({ mimeType: "video/AV1", implementation: "OpenH264", powerEfficient: false, framesEncoded: 30 }), false);

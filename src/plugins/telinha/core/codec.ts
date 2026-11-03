@@ -676,7 +676,8 @@ export type CodecFamily = "h264" | "h265" | "av1" | "vpx";
  */
 export function encoderFamilyOf(implementation: string | undefined): CodecFamily | undefined {
     const name = implementation ?? "";
-    if (/libaom|svt-?av1|rav1e|dav1d|\bav1\b/i.test(name)) return "av1";
+    // "av1" solto no meio: nomes colados como "AMDav1Encoder" (sem \b dos dois lados)
+    if (/libaom|svt-?av1|rav1e|dav1d|av1/i.test(name)) return "av1";
     if (/libvpx|\bvp[89]\b/i.test(name)) return "vpx";
     if (/hevc|h\.?265/i.test(name)) return "h265";
     if (/openh264|h\.?264|\bavc\b/i.test(name)) return "h264";

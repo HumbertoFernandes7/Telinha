@@ -149,6 +149,11 @@ interface ViewerSend {
      * E ele que leva a culpa quando o envio trava ou cai (blameOf), nao o que a decisao pediu
      */
     inUse?: { mime: string; profile: string | null; };
+    /**
+     * desde quando as estatisticas trazem, sem parar, o encoder de OUTRO codec (isForeignEncoder; so com a conexao no ar):
+     * passado H264_STALL_MS o relatorio deixa de ser "de passagem" (checkForeign). Limpo quando um relatorio certo chega
+     */
+    foreignSince?: number;
     /** decisao H.265/AV1: as estatisticas ja mostraram ele no ar (checkHwOnly: sair dele depois = ele falhou) */
     hwOnlySeen?: boolean;
 }
@@ -1464,10 +1469,12 @@ function videoLeaving(encoded: number, sent: SentCounters) {
  * Sem contador de quadros da captura, nao age (nao da para separar do caso sem captura). Se os quadros saem e quem nao
  * decodifica e o espectador, ele pede VP9 (viewing.ts → askForVp9; aqui, onCodecRequest).
  */
-function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: EncoderReport, frames: number | null, sent: SentCounters) {
+function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: EncoderReport, frames: number | null, sent: SentCounters, foreign = false) {
     if (send.stuck || send.fellBack || send.sending || !HW_SEND_MIME.test(enc.mimeType)) return;
     const encoded = enc.framesEncoded ?? 0;
-    if (videoLeaving(encoded, sent)) {
+    // encoder de outro codec no relatorio (foreign, checkForeign): os contadores sao do encoder de antes, nao dizem se ESTE
+    // video sai (sending nao se decide por eles); a janela segue andando
+    if (!foreign && videoLeaving(encoded, sent)) {
         send.sending = true;
         send.stall = undefined;
         syncQualityLock(local);
@@ -1520,6 +1527,13 @@ function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: 
     counts.push(enc.implementation ? `encoder ${enc.implementation}` : "encoder não informado pelo Chromium");
     counts.push(enc.width && enc.height ? `${enc.width}x${enc.height}` : "tamanho desconhecido");
     const why = `${what}, com a conexão no ar e a captura entregando quadros (${counts.join(", ")})`;
+    // o relatorio e do encoder de OUTRO codec (checkForeign): o encoder certo nem apareceu, nada diz qual codec ou perfil
+    // falhou. Sem fallBack, sem noteHighFailed/noteHwOnlyFailed e sem marcar nada: so contem (a troca de codec de um encoder
+    // da placa que nao subiu travaria o Discord) e avisa
+    if (foreign) {
+        containStuck(peerId, local, send, `${why}, e as estatísticas só traziam o encoder de outro codec`, false);
+        return;
+    }
     // o encoder no ar e o OpenH264 (software): nao e a placa, e trocar o codec de um encoder de software e seguro (como a
     // queda do checkEncoder). So o da placa, ou um encoder que o Chromium nao informa, fica contido e marca a placa.
     if (hwOnly && (enc.powerEfficient === false || (hwOnly === "av1" && /libaom|svt|rav1e/i.test(enc.implementation ?? "")))) {
@@ -1548,6 +1562,32 @@ function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: 
 }
 
 /**
+ * O relatorio das estatisticas traz o encoder de OUTRO codec (isForeignEncoder; tick). De passagem, e so o getStats lendo o
+ * codec e o encoder em momentos diferentes (libaom do AV1 de antes da troca): nada e conferido, ninguem leva a culpa. Mas um
+ * encoder da placa que trava ao subir (a AMD dos logs de 31/10) pode nunca publicar o nome dele, e o libaom ficaria em todo
+ * relatorio: sem limite, o travamento nunca seria contido (um "Parar transmissão" depois congela o Discord) e o envio nunca
+ * sairia de "comecando" (send.sending: a barra trava a qualidade para sempre). Por isso:
+ * - a janela do checkStall segue andando (foreign: o veredito dela vai direto para containStuck, nunca fallBack nem culpa);
+ * - passados H264_STALL_MS de relatorios de outro codec seguidos (send.foreignSince, so com a conexao no ar, como a janela
+ *   do checkStall: antes disso o WebRTC segura os quadros), o envio e tratado como travado: containStuck, sem culpar o
+ *   H.264, o High nem o codec (o encoder certo nunca apareceu: nada diz qual falhou).
+ * Um envio que ja sai (send.sending) nunca e contido por isto. O send.inUse (o codec do codecId) ja foi atualizado antes.
+ */
+function checkForeign(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: EncoderReport, frames: number | null, sent: SentCounters) {
+    if (send.stuck || send.fellBack || send.sending || !HW_SEND_MIME.test(enc.mimeType)) return;
+    const now = performance.now();
+    if (getPc(peerId)?.connectionState !== "connected") send.foreignSince = undefined;
+    else send.foreignSince ??= now;
+    checkStall(peerId, local, send, enc, frames, sent, true);
+    if (send.stuck || send.foreignSince == null || now - send.foreignSince < H264_STALL_MS) return;
+    const secs = Math.round((now - send.foreignSince) / 1000);
+    const hwOnly = hwOnlyOfMime(enc.mimeType);
+    const name = hwOnly ? HW_ONLY_LABEL[hwOnly] : "H.264";
+    containStuck(peerId, local, send, `As estatísticas do envio para ${peerLabel(peerId)} trouxeram só o encoder de outro codec (${enc.implementation}) por ${secs} s, `
+        + `sem o encoder do ${name} aparecer`, false);
+}
+
+/**
  * A placa de video travou neste envio (checkStall: o video nunca saiu do PC). Ate a v0.2.8 o envio trocava para VP9 aqui
  * (setParameters com o codec): o Chromium destroi o envio para trocar o codec e espera o encoder travado para sempre na
  * thread WebRTC_W_and_N, que todas as conexoes do Discord usam (as conexoes caem ~10 s depois e a proxima chamada
@@ -1560,9 +1600,10 @@ function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: 
  *   renegociacao pedida pelo outro lado usa o plano congelado;
  * - o H.264 automatico desliga agora para o resto da sessao e o PC lembra (stuckEncoder.ts → noteStuckEncoder);
  * - quem transmite ve o aviso na barra (STUCK_NOTICE) e quem assiste recebe { op: "stuck" } (protocol.ts, passo 10).
- * Codec fixado em H.264: tambem (o perigo e o mesmo), so o aviso muda. `why`: a frase do problema, sem ponto.
+ * Codec fixado em H.264: tambem (o perigo e o mesmo), so o aviso muda. `why`: a frase do problema, sem ponto. `blame` false
+ * (o encoder nunca foi identificado: checkForeign, checkStall com foreign): contem e avisa, mas nada do codec fica marcado.
  */
-function containStuck(peerId: PeerId, local: LocalCapture, send: ViewerSend, why: string) {
+function containStuck(peerId: PeerId, local: LocalCapture, send: ViewerSend, why: string, blame = true) {
     const label = peerLabel(peerId);
     send.stuck = true;
     send.stall = undefined;
@@ -1573,14 +1614,15 @@ function containStuck(peerId: PeerId, local: LocalCapture, send: ViewerSend, why
     const pinned = settings.store.codec === "h264";
     // a culpa e do codec de fato no ar (blameOf). High: o Baseline passou na sonda dele; depois de reiniciar, vai o
     // Baseline. H.265/AV1: nada do H.264 fica marcado; depois de reiniciar, vai o H.264
-    const blame = blameOf(send);
-    const high = blame.kind === "high" ? blame.profile : null;
-    const hwOnly = blame.kind === "h265" || blame.kind === "av1" ? blame.kind : null;
-    noteStuckEncoder(high, hwOnly);
+    const culprit = blame ? blameOf(send) : null;
+    const high = culprit?.kind === "high" ? culprit.profile : null;
+    const hwOnly = culprit?.kind === "h265" || culprit?.kind === "av1" ? culprit.kind : null;
+    if (blame) noteStuckEncoder(high, hwOnly);
     const what = hwOnly ? HW_ONLY_LABEL[hwOnly] : `H.264${high ? ` High (perfil ${high})` : ""}`;
     log.warn(`${why}: a placa de vídeo travou com ${what}. O envio para ${label} fica como está até o Discord reiniciar (trocar o codec, `
         + "parar ou fechar a conexão travaria o Discord inteiro). "
-        + (hwOnly ? `O ${what} fica desligado neste PC até o driver, o Chromium ou a placa mudarem (o H.264 não leva a culpa); nesta sessão, o automático vai em VP9.`
+        + (!blame ? "O encoder nunca foi identificado: nada fica marcado neste PC (o H.264 e o High não levam a culpa)."
+            : hwOnly ? `O ${what} fica desligado neste PC até o driver, o Chromium ou a placa mudarem (o H.264 não leva a culpa); nesta sessão, o automático vai em VP9.`
             : high ? "O High fica desligado neste PC até o driver, o Chromium ou a placa mudarem; nesta sessão, o automático vai em VP9."
                 : "O H.264 automático fica desligado neste PC até o driver, o Chromium ou a placa mudarem."));
     setLastError(hwOnly === "h265" ? STUCK_NOTICE_H265 : hwOnly === "av1" ? STUCK_NOTICE_AV1 : high ? STUCK_NOTICE_HIGH : pinned ? STUCK_NOTICE_PINNED : STUCK_NOTICE);
@@ -1910,14 +1952,20 @@ export function tick() {
                 mimeType: codec, implementation: out.encoderImplementation, powerEfficient: out.powerEfficientEncoder, framesEncoded: out.framesEncoded,
                 width: out.frameWidth, height: out.frameHeight, limitation: out.qualityLimitationReason
             };
-            // o codec (codecId) e o encoder sao lidos em momentos diferentes: logo depois da troca de preferencia o relatorio
-            // pode trazer o H.264 com o encoder do codec de antes (libaom do AV1, sem tamanho). Nao diz nada do codec no ar:
-            // sem veredito, sem log, sem culpa; tenta de novo nas proximas estatisticas (isForeignEncoder)
-            if (isForeignEncoder(enc)) return;
             const fmtp = String(codecStat?.sdpFmtpLine ?? "");
-            // H.264: o perfil negociado de fato (o fmtp do codec em uso), para conferir o High no ar e culpar o certo (blameOf)
+            // H.264: o perfil negociado de fato (o fmtp do codec em uso), para conferir o High no ar e culpar o certo (blameOf).
+            // O codec (e o fmtp) vem do codecId, que e confiavel mesmo quando o encoder do relatorio nao e (abaixo): atualiza sempre
             const profile = /^video\/h264$/i.test(codec) ? h264ProfileLevelId(fmtp) : null;
             send.inUse = { mime: codec, profile };
+            // o codec (codecId) e o encoder sao lidos em momentos diferentes: logo depois da troca de preferencia o relatorio
+            // pode trazer o H.264 com o encoder do codec de antes (libaom do AV1, sem tamanho). Nao diz nada do codec no ar:
+            // sem veredito, sem log, sem culpa; tenta de novo nas proximas estatisticas (isForeignEncoder). Mas so por um tempo
+            // (checkForeign): um encoder da placa que trava ao subir pode nunca publicar o nome dele
+            if (isForeignEncoder(enc)) {
+                checkForeign(peerId, local, send, enc, frames, { frames: counter(out.framesSent), bytes: counter(out.bytesSent) });
+                return;
+            }
+            send.foreignSince = undefined;
             // decisao H.265/AV1: o codec de fato no ar (o outro lado sem ele, o WebRTC trocou sozinho, o libaom) vem antes do log
             checkHwOnly(peerId, local, send, enc);
             if (send.fellBack && !isHwOnlyCodec(send.decision.codec) && hwOnlyOfMime(codec)) return;
