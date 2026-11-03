@@ -20,11 +20,14 @@
 //   - ATENCAO: setGPUBoostEnabledByPid(pid, false) NAO e um "desfazer": o Discord poe NORMAL, nao a classe de antes. Por isso
 //     o desfazer confere que o pid ainda e o mesmo processo do Discord, manda false (vai a NORMAL) e pede o "high" do Telinha
 //     de novo (volta a HIGH; o "restore" do fim da transmissao leva para a classe que o Telinha encontrou).
-//   - recoverDiscordGpuBoost: o que foi pedido fica em sessionStorage; se o renderer recarregar no meio, o inicio do plugin desfaz.
+//   - recoverDiscordGpuBoost: o que foi pedido fica registrado no processo main (sobrevive a um reload E a uma queda do renderer);
+//     o sessionStorage so guarda uma copia, para quando a parte nativa nao tem o registro. Se o renderer recarregar ou cair no
+//     meio, o inicio do plugin desfaz.
 // Nada aqui mexe em codec, copia ou controlador, nem roda em "Desligada" ou "Alta".
 
 import type { GpuPriorityReport, GpuPriorityTarget } from "./captureBoostMain";
 import { errorText, log } from "./log";
+import { getNativeOrNull } from "./nativeApi";
 
 const MODULE_NAME = "discord_utils";
 const FUNCTION_NAME = "setGPUBoostEnabledByPid";
@@ -177,7 +180,7 @@ export function resultText(result: unknown): string {
 
 // #region orquestracao da transmissao
 
-/** onde ficam os processos pedidos (sobrevive a um reload do renderer, some ao fechar o Discord) */
+/** onde fica a copia dos processos pedidos no renderer (sobrevive a um reload, nao a uma queda; a fonte e o registro do main) */
 const STORAGE_KEY = "telinha.discordGpuBoost";
 /** as classes abaixo de HIGH (as unicas de onde o Telinha sobe) */
 const BELOW_HIGH = new Set(["IDLE", "BELOW_NORMAL", "NORMAL", "ABOVE_NORMAL"]);
@@ -242,7 +245,7 @@ export function realtimeTestActive(): boolean {
 /** So o que o Telinha subiu (a classe de antes era abaixo de HIGH, e agora e HIGH) entra no teste. */
 const isOurs = (t: BoostTarget) => !t.kept && t.was === "HIGH" && BELOW_HIGH.has(t.classBefore);
 
-// #region o que foi pedido, em sessionStorage
+// #region o que foi pedido: o registro do main, com copia no renderer e em sessionStorage
 
 interface StorageLike {
     getItem(key: string): string | null;
@@ -252,14 +255,16 @@ interface StorageLike {
 
 const sessionStore = () => (globalThis as { sessionStorage?: StorageLike; }).sessionStorage;
 
+/** So as entradas bem formadas (o que vem do sessionStorage ou do main nao e confiavel). */
+const validSaved = (list: unknown): SavedBoost[] => (Array.isArray(list)
+    ? list.filter((e): e is SavedBoost => !!e && typeof e === "object" && Number.isInteger(e.pid) && e.pid > 0
+        && (e.role === "Discord" || e.role === "GPU") && typeof e.classBefore === "string" && typeof e.at === "number")
+    : []);
+
 function readSaved(): SavedBoost[] {
     try {
         const raw = sessionStore()?.getItem(STORAGE_KEY);
-        if (!raw) return [];
-        const list: unknown = JSON.parse(raw);
-        if (!Array.isArray(list)) return [];
-        return list.filter((e): e is SavedBoost => !!e && typeof e === "object" && Number.isInteger(e.pid) && e.pid > 0
-            && (e.role === "Discord" || e.role === "GPU") && typeof e.classBefore === "string" && typeof e.at === "number");
+        return raw ? validSaved(JSON.parse(raw)) : [];
     } catch {
         return [];
     }
@@ -274,8 +279,57 @@ function writeSaved(list: SavedBoost[]) {
     } catch { /* sem sessionStorage: so nao ha como desfazer depois de um reload */ }
 }
 
-const saveAdd = (entry: SavedBoost) => writeSaved([...readSaved().filter(e => e.pid !== entry.pid), entry]);
-const saveRemove = (pids: number[]) => writeSaved(readSaved().filter(e => !pids.includes(e.pid)));
+/** A copia do registro neste renderer (null: ainda nao carregada; o sessionStorage de um reload entra na 1a vez que alguem precisa dela). */
+let mirror: SavedBoost[] | null = null;
+/** os envios ao main, um depois do outro: um envio antigo nunca chega depois de um novo */
+let pushChain: Promise<void> = Promise.resolve();
+/** o aviso de "nao gravou no main" sai uma vez so (um por falha seguida nao enche o log) */
+let pushWarned = false;
+
+const current = () => (mirror ??= readSaved());
+
+/** Manda o registro inteiro ao main (a foto de agora, na ordem dos pedidos). Sem a funcao nativa (helper antigo): nada. Nunca lanca. */
+function pushToMain(list: SavedBoost[]) {
+    const native = getNativeOrNull();
+    if (typeof native?.writeGpuBoostRecord !== "function") return;
+    pushChain = pushChain.then(async () => {
+        try {
+            await native.writeGpuBoostRecord(list);
+            pushWarned = false;
+        } catch (e) {
+            if (pushWarned) return;
+            pushWarned = true;
+            log.warn(`${PREFIX}: não consegui gravar o registro no processo main (${errorText(e)}); se o renderer cair agora, o tempo real pode ficar ligado até o Discord reiniciar`);
+        }
+    });
+}
+
+function persist(list: SavedBoost[]) {
+    mirror = list;
+    writeSaved(list);
+    pushToMain(list);
+}
+
+/** O registro do main (vazio sem a funcao nativa ou se ela falhar). Nunca lanca. */
+async function readFromMain(): Promise<SavedBoost[]> {
+    const native = getNativeOrNull();
+    if (typeof native?.readGpuBoostRecord !== "function") return [];
+    try {
+        return validSaved(await native.readGpuBoostRecord());
+    } catch (e) {
+        log.warn(`${PREFIX}: não consegui ler o registro do processo main (${errorText(e)}); uso só a cópia deste renderer`);
+        return [];
+    }
+}
+
+const mergeByPid = (...lists: SavedBoost[][]): SavedBoost[] => {
+    const byPid = new Map<number, SavedBoost>();
+    for (const e of lists.flat()) if (!byPid.has(e.pid)) byPid.set(e.pid, e);
+    return [...byPid.values()];
+};
+
+const saveAdd = (entry: SavedBoost) => persist([...current().filter(e => e.pid !== entry.pid), entry]);
+const saveRemove = (pids: number[]) => persist(current().filter(e => !pids.includes(e.pid)));
 
 // #endregion
 
@@ -447,15 +501,28 @@ export function stopRealtimeTest(opts: DiscordGpuBoostOptions = {}): Promise<voi
 }
 
 /**
- * Inicio do plugin: o renderer recarregou no meio de um teste (o REALTIME do Discord continua ligado e o Telinha perdeu a
- * conta). Desfaz o que ficou em sessionStorage nos pids que ainda sao do Discord e limpa a lista. `ask` e o "high" do main;
+ * Inicio do plugin: o renderer recarregou ou caiu no meio de um teste (o REALTIME do Discord continua ligado e o Telinha perdeu a
+ * conta). Desfaz o que ficou no registro (main, ou sessionStorage de reserva) nos pids que ainda sao do Discord e limpa a lista. `ask` e o "high" do main;
  * o "restore" logo depois (core/captureBoost.ts) leva para a classe de antes. Uma linha no log. Nunca lanca.
  */
 export async function recoverDiscordGpuBoost(ask: () => Promise<GpuPriorityReport | null>, opts: DiscordGpuBoostOptions = {}): Promise<void> {
     try {
+        // um desfazer ainda rodando (plugin desligado e ligado no meio da transmissao): espera, para nao pedir o false em dobro
+        const stopPending = pendingRealtimeStop();
+        if (stopPending) await stopPending.catch(() => undefined);
         if (run) return;
-        const saved = readSaved();
+        // o main primeiro (sobrevive a uma queda do renderer); depois a copia deste renderer e o sessionStorage (so um reload, ou
+        // a parte nativa sem o registro). Um mesmo pid vale uma vez
+        const fromMain = await readFromMain();
+        const saved = mergeByPid(fromMain, current(), readSaved());
+        if (run) {
+            // um teste novo comecou enquanto o main respondia: nao desfaz nada (o teste e dele), mas o que a queda deixou no main
+            // entra na copia daqui. Sem isso o saveAdd do teste novo mandaria so a entrada dele ao main e apagaria a do crash
+            if (saved.length) persist(saved);
+            return;
+        }
         if (!saved.length) return;
+        persist(saved);
         const out = await undoBoost(saved, ask, opts, false);
         if (out.unchecked) {
             log.warn(`${PREFIX}: o Telinha recarregou com o tempo real pedido em ${saved.length} processo(s), mas não deu para conferir os processos do Discord; tento de novo no próximo início`);
@@ -476,6 +543,9 @@ export function resetDiscordGpuBoostForTests() {
     run = null;
     pendingStop = Promise.resolve();
     stopping = false;
+    mirror = null;
+    pushChain = Promise.resolve();
+    pushWarned = false;
 }
 
 // #endregion
