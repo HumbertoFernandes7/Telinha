@@ -702,6 +702,122 @@ describe("na transmissao (core/captureBoost.ts)", () => {
 
     // #endregion
 
+    // #region o desfazer ainda rodando quando a volta chega
+
+    /**
+     * O Discord e o main de mentira, com a classe de cada processo: o false do Discord leva a NORMAL (e demora), o true a REALTIME;
+     * o "high" sobe quem esta abaixo de HIGH (guardando a classe de antes) e desce o REALTIME do Telinha; o "restore" volta quem
+     * ainda esta em HIGH para a classe de antes e larga a entrada (como o main de verdade).
+     */
+    function statefulWorld() {
+        const cls: Record<number, string> = { 1234: "NORMAL", 5678: "NORMAL" };
+        const entries = new Map<number, { before: string; current: string; }>();
+        const role = (pid: number) => (pid === 1234 ? "Discord" : "GPU") as "Discord" | "GPU";
+        withModule(moduleWith((pid: number, enabled: boolean) => {
+            boost.push([pid, enabled]);
+            events.push(`boost:${pid}:${enabled}`);
+            return new Promise<boolean>(resolve => setTimeout(() => {
+                cls[pid] = enabled ? "REALTIME" : "NORMAL";
+                resolve(true);
+            }, 30));
+        }));
+        env!.restore();
+        env = installNative({
+            setGpuPriority: async (mode: string) => {
+                events.push(`native:${mode}`);
+                const list = [1234, 5678].map((pid): GpuPriorityReport["targets"][number] => {
+                    const was = cls[pid];
+                    const entry = entries.get(pid);
+                    if (mode === "restore") {
+                        if (entry && cls[pid] === entry.current) cls[pid] = entry.before;
+                        entries.delete(pid);
+                        return { pid, role: role(pid), before: was, after: cls[pid], kept: false, error: null };
+                    }
+                    if (entry && was === "REALTIME") {
+                        cls[pid] = "HIGH";
+                        entry.current = "HIGH";
+                    } else if (BELOW.has(was)) {
+                        cls[pid] = "HIGH";
+                        if (entry) entry.current = "HIGH";
+                        else entries.set(pid, { before: was, current: "HIGH" });
+                    } else if (!entry) {
+                        return { pid, role: role(pid), before: was, after: was, kept: true, error: null };
+                    }
+                    return { pid, role: role(pid), before: entry?.before ?? was, after: cls[pid], kept: false, error: null };
+                });
+                return report({ mode: mode as GpuPriorityReport["mode"], targets: list });
+            }
+        });
+        return { cls };
+    }
+    const BELOW = new Set(["IDLE", "BELOW_NORMAL", "NORMAL", "ABOVE_NORMAL"]);
+
+    test("Tempo real -> Alta e o fim da transmissao logo depois: a volta espera o desfazer, e o processo termina na classe de antes (NORMAL)", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        const world = statefulWorld();
+        noteCaptureStarted();
+        await clock.tickAsync(REREAD_DELAY_MS + 200);
+        assert.deepEqual(boost, [[1234, true], [5678, true]]);
+        events.length = 0;
+        pluginSettings.set("gpuPriorityMode", "high"); // o desfazer comeca (sem esperar)
+        await clock.tickAsync(10);
+        noteCaptureStopped(); // o desfazer ainda esta no false
+        await clock.tickAsync(500);
+        assert.deepEqual([world.cls[1234], world.cls[5678]], ["NORMAL", "NORMAL"]);
+        // o restore so vem depois do ultimo "high" do desfazer
+        assert.equal(events.at(-1), "native:restore");
+        assert.equal(events.filter(e => e === "native:restore").length, 1);
+        assert.ok(events.lastIndexOf("native:high") < events.indexOf("native:restore"));
+        assert.ok(events.indexOf("boost:5678:false") < events.indexOf("native:restore"));
+    });
+
+    test("Tempo real -> opcao desligada logo depois da troca para Alta: tambem termina em NORMAL", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        const world = statefulWorld();
+        noteCaptureStarted();
+        await clock.tickAsync(REREAD_DELAY_MS + 200);
+        pluginSettings.set("gpuPriorityMode", "high");
+        await clock.tickAsync(10);
+        pluginSettings.set("gpuPriorityMode", "off");
+        await clock.tickAsync(500);
+        assert.deepEqual([world.cls[1234], world.cls[5678]], ["NORMAL", "NORMAL"]);
+        assert.equal(events.at(-1), "native:restore");
+    });
+
+    test("parar, comecar e parar de novo em seguida: a volta espera o desfazer da primeira, e termina em NORMAL", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        const world = statefulWorld();
+        noteCaptureStarted();
+        await clock.tickAsync(REREAD_DELAY_MS + 200);
+        noteCaptureStopped(); // desfazer da 1a
+        noteCaptureStarted(); // 2a transmissao: o "high" ainda nao voltou
+        noteCaptureStopped(); // acaba antes de o teste da 2a comecar
+        await clock.tickAsync(REREAD_DELAY_MS + 500);
+        assert.deepEqual([world.cls[1234], world.cls[5678]], ["NORMAL", "NORMAL"]);
+        assert.equal(events.at(-1), "native:restore");
+        assert.ok(events.indexOf("boost:5678:false") < events.lastIndexOf("native:restore"));
+    });
+
+    test("transmissao nova durante a espera da volta: a volta da antiga nao abaixa a nova", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        const world = statefulWorld();
+        noteCaptureStarted();
+        await clock.tickAsync(REREAD_DELAY_MS + 200);
+        pluginSettings.set("gpuPriorityMode", "high");
+        await clock.tickAsync(10);
+        noteCaptureStopped(); // espera o desfazer
+        noteCaptureStarted(); // a nova pede a prioridade durante a espera
+        await clock.tickAsync(500);
+        assert.ok(!events.includes("native:restore"));
+        assert.deepEqual([world.cls[1234], world.cls[5678]], ["HIGH", "HIGH"]);
+    });
+
+    // #endregion
+
     // #region reload do renderer
 
     /** o renderer recarrega: o estado dos modulos some, o sessionStorage e o main continuam */

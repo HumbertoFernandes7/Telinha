@@ -219,9 +219,20 @@ interface TestRun {
 let run: TestRun | null = null;
 /** O desfazer da transmissao anterior: o teste da proxima so comeca depois dele (o false nunca cai por cima do true novo). */
 let pendingStop: Promise<void> = Promise.resolve();
+/** o desfazer esta rodando agora (pendingStop ainda nao terminou) */
+let stopping = false;
 
 const roleText = (t: { role: Role; }) => (t.role === "GPU" ? "GPU do Discord" : "Discord");
 const who = (t: ProcessRef) => `${roleText(t)} ${t.pid}`;
+
+/**
+ * O desfazer que ainda esta rodando (null: nenhum). A volta da prioridade (core/captureBoost.ts) espera por ele: se rodasse
+ * junto, acharia REALTIME/NORMAL em vez de HIGH, o main largaria a entrada e o 2o "high" do desfazer criaria outra, e o
+ * Discord ficaria em HIGH depois da transmissao. Nunca rejeita.
+ */
+export function pendingRealtimeStop(): Promise<void> | null {
+    return stopping ? pendingStop : null;
+}
 
 /** O teste esta valendo nesta transmissao (o fim precisa desfazer). */
 export function realtimeTestActive(): boolean {
@@ -428,6 +439,10 @@ export function stopRealtimeTest(opts: DiscordGpuBoostOptions = {}): Promise<voi
         }
     })();
     pendingStop = work;
+    stopping = true;
+    void work.then(() => {
+        if (pendingStop === work) stopping = false;
+    });
     return work;
 }
 
@@ -460,6 +475,7 @@ export async function recoverDiscordGpuBoost(ask: () => Promise<GpuPriorityRepor
 export function resetDiscordGpuBoostForTests() {
     run = null;
     pendingStop = Promise.resolve();
+    stopping = false;
 }
 
 // #endregion

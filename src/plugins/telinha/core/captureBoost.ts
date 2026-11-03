@@ -29,7 +29,7 @@ import { settings } from "@plugins/telinha/settings";
 import type { GpuCaptureStatus, GpuPriorityReport, GpuPriorityTarget } from "./captureBoostMain";
 import { captureCopyDiagnostics } from "./captureCopy";
 import { rt } from "./context";
-import { realtimeTestActive, recoverDiscordGpuBoost, startRealtimeTest, stopRealtimeTest } from "./discordGpuBoost";
+import { pendingRealtimeStop, realtimeTestActive, recoverDiscordGpuBoost, startRealtimeTest, stopRealtimeTest } from "./discordGpuBoost";
 import { errorText, log } from "./log";
 import { getNativeOrNull } from "./nativeApi";
 
@@ -282,15 +282,33 @@ async function endPriority(why: string): Promise<void> {
     priorityActive = false;
     changed();
     await stopRealtimeTest();
+    await waitRealtimeUndo();
     // outra transmissao ja pediu a prioridade: a volta desta nao pode abaixar as classes dela
     if (!wasActive || priorityRun !== run) return;
     logRestore(await askPriority("restore"), why);
 }
 
+/**
+ * Espera o desfazer do Discord que ainda roda (a troca para "Alta" no ar, ou um fim anterior): a volta so pode rodar depois
+ * dele, senao acha REALTIME/NORMAL em vez de HIGH e o "high" final do desfazer deixa o Discord em HIGH para sempre. Sem
+ * desfazer em andamento nao espera nada. Nunca lanca.
+ */
+async function waitRealtimeUndo(): Promise<void> {
+    const undo = pendingRealtimeStop();
+    if (!undo) return;
+    try {
+        await undo;
+    } catch { /* o desfazer ja loga o proprio erro */ }
+}
+
 async function restorePriority(why: string): Promise<void> {
     if (!priorityActive) return;
+    const run = priorityRun;
     priorityActive = false;
     changed();
+    await waitRealtimeUndo();
+    // outra transmissao ja pediu a prioridade durante a espera: a volta desta nao pode abaixar as classes dela
+    if (priorityRun !== run) return;
     logRestore(await askPriority("restore"), why);
 }
 
