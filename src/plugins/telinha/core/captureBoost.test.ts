@@ -526,17 +526,17 @@ describe("a opcao de prioridade: modo e migracao", () => {
         }
     });
 
-    test("migrateGpuPrioritySetting: true vira alta; false so apaga a chave antiga; escolha nova valida vence; lixo nao conta", () => {
-        assert.deepEqual(migrateGpuPrioritySetting({ gpuPriority: true }), { mode: "high", dropOld: true });
-        assert.deepEqual(migrateGpuPrioritySetting({ gpuPriority: false }), { mode: null, dropOld: true });
-        assert.deepEqual(migrateGpuPrioritySetting({}), { mode: null, dropOld: false });
-        assert.deepEqual(migrateGpuPrioritySetting(undefined), { mode: null, dropOld: false });
-        assert.deepEqual(migrateGpuPrioritySetting(null), { mode: null, dropOld: false });
+    test("migrateGpuPrioritySetting: true vira alta; false nao faz nada (a chave antiga nunca e apagada); escolha nova valida vence; lixo nao conta", () => {
+        assert.deepEqual(migrateGpuPrioritySetting({ gpuPriority: true }), { mode: "high" });
+        assert.deepEqual(migrateGpuPrioritySetting({ gpuPriority: false }), { mode: null });
+        assert.deepEqual(migrateGpuPrioritySetting({}), { mode: null });
+        assert.deepEqual(migrateGpuPrioritySetting(undefined), { mode: null });
+        assert.deepEqual(migrateGpuPrioritySetting(null), { mode: null });
         for (const mode of ["off", "high", "realtime"]) {
-            assert.deepEqual(migrateGpuPrioritySetting({ gpuPriority: true, gpuPriorityMode: mode }), { mode: null, dropOld: true });
-            assert.deepEqual(migrateGpuPrioritySetting({ gpuPriorityMode: mode }), { mode: null, dropOld: false });
+            assert.deepEqual(migrateGpuPrioritySetting({ gpuPriority: true, gpuPriorityMode: mode }), { mode: null });
+            assert.deepEqual(migrateGpuPrioritySetting({ gpuPriorityMode: mode }), { mode: null });
         }
-        assert.deepEqual(migrateGpuPrioritySetting({ gpuPriority: true, gpuPriorityMode: "tempo real" }), { mode: "high", dropOld: true });
-        assert.deepEqual(migrateGpuPrioritySetting({ gpuPriority: "true" }), { mode: null, dropOld: true });
+        assert.deepEqual(migrateGpuPrioritySetting({ gpuPriority: true, gpuPriorityMode: "tempo real" }), { mode: "high" });
+        assert.deepEqual(migrateGpuPrioritySetting({ gpuPriority: "true" }), { mode: null });
     });
 });

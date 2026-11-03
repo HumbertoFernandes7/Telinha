@@ -223,15 +223,14 @@ export function migrateQualitySettings(): void {
 
 /**
  * A opcao booleana "Prioridade da captura na placa de vídeo" (gpuPriority: true) virou o seletor gpuPriorityMode:
- * true → "Alta"; a chave antiga sai. Chamado no start() do plugin. Nunca lanca.
+ * true → "Alta". A chave antiga fica como esta (uma versao anterior do Telinha ainda a le); so deixa de ser lida quando
+ * gpuPriorityMode existe. Chamado no start() do plugin. Nunca lanca.
  */
 export function migrateGpuPrioritySettings(): void {
     try {
         const plain = settings.plain as Record<string, unknown> | undefined;
         if (!plain) return;
-        const { mode, dropOld } = migrateGpuPrioritySetting(plain);
-        // apagar primeiro: a gravacao abaixo salva o objeto inteiro (ja sem a chave antiga)
-        if (dropOld) delete plain.gpuPriority;
+        const { mode } = migrateGpuPrioritySetting(plain);
         if (mode) settings.store.gpuPriorityMode = mode;
     } catch (e) {
         console.warn("[Telinha] migração de \"Prioridade da captura na placa de vídeo\" falhou", e);

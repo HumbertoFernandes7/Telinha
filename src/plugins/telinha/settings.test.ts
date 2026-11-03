@@ -284,18 +284,18 @@ describe("migracao de 'Prioridade da captura na placa de vídeo' (liga/desliga) 
         resetVencordFakes();
     });
 
-    test("ligada vira Alta e a chave antiga some; o resto fica como estava", () => {
+    test("ligada vira Alta e a chave antiga FICA (um downgrade ainda a le); o resto fica como estava", () => {
         onDisk({ gpuPriority: true, groupPassword: "x" });
         migrateGpuPrioritySettings();
         assert.equal(settings.plain.gpuPriorityMode, "high");
-        assert.equal("gpuPriority" in settings.plain, false);
+        assert.equal((settings.plain as Record<string, unknown>).gpuPriority, true);
         assert.equal(settings.plain.groupPassword, "x");
     });
 
-    test("desligada: so some a chave antiga (vale o padrao, Desligada)", () => {
+    test("desligada: nada muda, a chave antiga fica (vale o padrao, Desligada)", () => {
         onDisk({ gpuPriority: false });
         migrateGpuPrioritySettings();
-        assert.equal("gpuPriority" in settings.plain, false);
+        assert.equal((settings.plain as Record<string, unknown>).gpuPriority, false);
         assert.equal("gpuPriorityMode" in settings.plain, false);
         assert.equal(settings.store.gpuPriorityMode, "off");
     });
@@ -304,9 +304,10 @@ describe("migracao de 'Prioridade da captura na placa de vídeo' (liga/desliga) 
         onDisk({ gpuPriority: true, gpuPriorityMode: "realtime" });
         migrateGpuPrioritySettings();
         assert.equal(settings.plain.gpuPriorityMode, "realtime");
-        assert.equal("gpuPriority" in settings.plain, false);
+        assert.equal((settings.plain as Record<string, unknown>).gpuPriority, true);
         migrateGpuPrioritySettings();
         assert.equal(settings.plain.gpuPriorityMode, "realtime");
+        assert.equal((settings.plain as Record<string, unknown>).gpuPriority, true);
     });
 
     test("configuracao limpa: nada muda", () => {

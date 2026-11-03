@@ -7,7 +7,9 @@
 // Testes do experimento do GPU boost do proprio Discord (core/discordGpuBoost.ts) com um DiscordNative de mentira: o modulo
 // ausente, o requireModule que lanca / devolve direto / devolve Promise, a funcao ausente, as respostas da funcao (retorno,
 // Promise, rejeicao, excecao, prazo, callback) e a ligacao com a transmissao (core/captureBoost.ts): so em "Tempo real",
-// true no inicio e false no fim para os dois processos, sem pedido em dobro.
+// true no inicio e false no fim so para os processos que o Telinha subiu (nunca um que ja estava em REALTIME), o "high" de novo
+// depois do false (o false do Discord poe NORMAL), a conferencia dos pids no fim, a corrida de fim/inicio, a troca de modo no
+// meio da transmissao e o desfazer depois de um reload do renderer (sessionStorage), sem pedido em dobro.
 // Rodar:  pnpm test:file src/plugins/telinha/core/discordGpuBoost.test.ts  (todos: pnpm test:unit)
 
 import assert from "node:assert/strict";
@@ -18,12 +20,12 @@ import { useFakeClock } from "@test/fakes/clock";
 import { installNative, type NativeEnv } from "@test/fakes/native";
 import { pluginSettings, resetVencordFakes } from "@test/fakes/vencord";
 
-import { noteCaptureStarted, noteCaptureStopped, resetCaptureBoostForTests } from "./captureBoost";
+import { noteCaptureStarted, noteCaptureStopped, resetCaptureBoostForTests, startCaptureBoost } from "./captureBoost";
 import type { GpuPriorityReport } from "./captureBoostMain";
 import { BOOST_TIMEOUT_MS, PROBE_TIMEOUT_MS, probeDiscordGpuBoost, REREAD_DELAY_MS, resetDiscordGpuBoostForTests, resultText, setDiscordGpuBoost } from "./discordGpuBoost";
 
 type AnyFn = (...args: any[]) => any;
-const g = globalThis as { DiscordNative?: unknown; };
+const g = globalThis as { DiscordNative?: unknown; sessionStorage?: unknown; };
 const never = () => new Promise<never>(() => { /* nunca responde */ });
 
 /** Um DiscordNative de mentira cujo requireModule devolve `answer` (ou lanca, se for uma funcao que lanca). */
@@ -272,13 +274,20 @@ describe("na transmissao (core/captureBoost.ts)", () => {
     let env: NativeEnv | null = null;
     let boost: Array<[number, boolean]>;
     let priorityCalls: string[];
+    /** tudo na ordem em que aconteceu: "boost:pid:true|false" (Discord) e "native:high|restore" (parte nativa) */
+    let events: string[];
     /** a classe que o "high" releitura devolve (o Discord ja mexeu nela) */
     let reread: () => GpuPriorityReport;
+    /** o sessionStorage de mentira (sobrevive ao "reload" dos testes: so o estado dos modulos e zerado) */
+    let session: Map<string, string>;
+    const SAVED_KEY = "telinha.discordGpuBoost";
+    const saved = (): Array<{ pid: number; role: string; classBefore: string; at: number; }> => JSON.parse(session.get(SAVED_KEY) ?? "[]");
 
     /** o modulo do Discord de mentira: guarda cada pedido (pid, enabled) */
     function discordOk(fn: AnyFn = () => true) {
         withModule(moduleWith((pid: number, enabled: boolean) => {
             boost.push([pid, enabled]);
+            events.push(`boost:${pid}:${enabled}`);
             return fn(pid, enabled);
         }));
     }
@@ -291,11 +300,19 @@ describe("na transmissao (core/captureBoost.ts)", () => {
         base = getEventLog().length;
         boost = [];
         priorityCalls = [];
+        events = [];
+        session = new Map();
+        g.sessionStorage = {
+            getItem: (k: string) => session.get(k) ?? null,
+            setItem: (k: string, v: string) => void session.set(k, v),
+            removeItem: (k: string) => void session.delete(k)
+        };
         reread = () => report({ targets: [targets("HIGH")[0], { ...targets("HIGH")[1], before: "HIGH", after: "REALTIME", kept: true }] });
         let first = true;
         env = installNative({
             setGpuPriority: async (mode: string) => {
                 priorityCalls.push(mode);
+                events.push(`native:${mode}`);
                 if (mode === "restore") return restored();
                 if (first) {
                     first = false;
@@ -310,6 +327,7 @@ describe("na transmissao (core/captureBoost.ts)", () => {
         env?.restore();
         env = null;
         resetDiscordGpuBoostForTests();
+        delete g.sessionStorage;
     });
 
     test("tempo real: pede true para os dois processos, relê as classes ~2 s depois, e false no fim", async t => {
@@ -337,8 +355,10 @@ describe("na transmissao (core/captureBoost.ts)", () => {
             `${P}: Discord 1234 → volta ao normal aceita (0 ms; resposta: true)`,
             `${P}: GPU do Discord 5678 → volta ao normal aceita (0 ms; resposta: true)`
         ]);
-        // o NORMAL do Discord vem antes de a prioridade do Telinha voltar
-        assert.deepEqual(priorityCalls, ["high", "high", "restore"]);
+        // confere os pids, o NORMAL do Discord, o "high" de novo (o false deixa NORMAL) e so entao o "restore" do Telinha
+        assert.deepEqual(priorityCalls, ["high", "high", "high", "high", "restore"]);
+        assert.deepEqual(events.slice(-5), ["native:high", "boost:1234:false", "boost:5678:false", "native:high", "native:restore"]);
+        assert.equal(session.has(SAVED_KEY), false);
     });
 
     test("trocar de fonte (inicio em dobro) e parar em dobro: nao repete os pedidos", async t => {
@@ -367,7 +387,7 @@ describe("na transmissao (core/captureBoost.ts)", () => {
         noteCaptureStopped();
         await clock.tickAsync(REREAD_DELAY_MS + 100);
         assert.deepEqual(boost, [[1234, true], [5678, true], [1234, false], [5678, false]]);
-        assert.deepEqual(priorityCalls, ["high", "restore"]);
+        assert.deepEqual(priorityCalls, ["high", "high", "high", "restore"]);
         assert.ok(!testLines().some(m => m.includes("continua") || m.includes("agora")));
     });
 
@@ -449,6 +469,319 @@ describe("na transmissao (core/captureBoost.ts)", () => {
         assert.deepEqual(boost, []);
         assert.deepEqual(testLines(), [`${P}: nenhum processo do Discord com classe conhecida; nada foi pedido`]);
     });
+
+    // #region o que o Telinha nao subiu nunca e tocado
+
+    test("quem ja estava em REALTIME (ou HIGH) por conta do Discord nunca e tocado, nem no inicio nem no fim", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        discordOk();
+        env!.restore();
+        const gpuRealtime = { pid: 5678, role: "GPU" as const, before: "REALTIME", after: "REALTIME", kept: true, error: null };
+        env = installNative({
+            setGpuPriority: async (mode: string) => {
+                events.push(`native:${mode}`);
+                return mode === "restore" ? restored() : report({ targets: [targets("HIGH")[0], gpuRealtime] });
+            }
+        });
+        noteCaptureStarted();
+        await clock.tickAsync(REREAD_DELAY_MS + 10);
+        assert.deepEqual(boost, [[1234, true]]);
+        assert.ok(testLines().includes(`${P}: GPU do Discord 5678 → já estava REALTIME; não pedi nada`));
+        // a releitura so fala de quem foi pedido
+        assert.ok(!testLines().some(m => m.startsWith(`${P}: GPU do Discord 5678 → agora`) || m.startsWith(`${P}: GPU do Discord 5678 → continua`)));
+        assert.deepEqual(saved().map(e => e.pid), [1234]);
+        noteCaptureStopped();
+        await clock.tickAsync(10);
+        assert.deepEqual(boost, [[1234, true], [1234, false]]);
+
+        // o Discord deu HIGH ao processo (kept em HIGH): tambem nao e tocado
+        events.length = boost.length = 0;
+        env!.restore();
+        env = installNative({
+            setGpuPriority: async (mode: string) => (mode === "restore" ? restored() : report({ targets: [{ ...targets("HIGH")[0], before: "HIGH", kept: true }, targets("HIGH")[1]] }))
+        });
+        noteCaptureStarted();
+        await clock.tickAsync(REREAD_DELAY_MS + 10);
+        assert.deepEqual(boost, [[5678, true]]);
+        noteCaptureStopped();
+        await clock.tickAsync(10);
+        assert.deepEqual(boost, [[5678, true], [5678, false]]);
+    });
+
+    test("todos ja em REALTIME: nada pedido, e o fim nao pede nada", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        discordOk();
+        env!.restore();
+        const allRealtime = targets("REALTIME").map(x => ({ ...x, before: "REALTIME", kept: true }));
+        env = installNative({ setGpuPriority: async (mode: string) => (mode === "restore" ? restored() : report({ targets: allRealtime })) });
+        noteCaptureStarted();
+        await clock.tickAsync(REREAD_DELAY_MS + 10);
+        assert.deepEqual(boost, []);
+        assert.ok(testLines().includes(`${P}: nenhum processo estava em HIGH por conta do Telinha; nada foi pedido`));
+        noteCaptureStopped();
+        await clock.tickAsync(10);
+        assert.deepEqual(boost, []);
+    });
+
+    // #endregion
+
+    // #region o false do Discord poe NORMAL: o Telinha pede o "high" de novo
+
+    test("trocar de Tempo real para Alta no meio da transmissao: false, e o high de novo (HIGH, nunca NORMAL); o fim so restaura", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        discordOk();
+        noteCaptureStarted();
+        await clock.tickAsync(REREAD_DELAY_MS + 10);
+        events.length = 0;
+        pluginSettings.set("gpuPriorityMode", "high");
+        await clock.tickAsync(10);
+        assert.deepEqual(events, ["native:high", "boost:1234:false", "boost:5678:false", "native:high"]);
+        assert.equal(session.has(SAVED_KEY), false);
+        // o teste acabou: o fim da transmissao nao pede mais nada ao Discord, so a volta do Telinha
+        events.length = 0;
+        noteCaptureStopped();
+        await clock.tickAsync(10);
+        assert.deepEqual(events, ["native:restore"]);
+    });
+
+    test("o pedido grava {pid, classBefore, at} em sessionStorage; o fim apaga", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        discordOk();
+        noteCaptureStarted();
+        await clock.tickAsync(10);
+        assert.deepEqual(saved().map(e => [e.pid, e.role, e.classBefore, typeof e.at]), [[1234, "Discord", "NORMAL", "number"], [5678, "GPU", "NORMAL", "number"]]);
+        noteCaptureStopped();
+        await clock.tickAsync(REREAD_DELAY_MS + 10);
+        assert.equal(session.has(SAVED_KEY), false);
+    });
+
+    test("o pedido que falhou nao e gravado, mas o fim ainda manda o false (o Discord pode ter aplicado)", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        discordOk(() => {
+            throw new Error("recusou");
+        });
+        noteCaptureStarted();
+        await clock.tickAsync(10);
+        assert.equal(session.has(SAVED_KEY), false);
+        noteCaptureStopped();
+        await clock.tickAsync(REREAD_DELAY_MS + 10);
+        assert.deepEqual(boost.filter(([, on]) => !on), [[1234, false], [5678, false]]);
+    });
+
+    // #endregion
+
+    // #region pid que mudou
+
+    test("o processo da GPU reiniciou (pid novo): o pid antigo nao leva o false, e o log diz", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        discordOk();
+        noteCaptureStarted();
+        await clock.tickAsync(REREAD_DELAY_MS + 10);
+        reread = () => report({ targets: [targets("HIGH")[0], { pid: 9999, role: "GPU", before: "NORMAL", after: "HIGH", kept: false, error: null }] });
+        noteCaptureStopped();
+        await clock.tickAsync(10);
+        assert.deepEqual(boost, [[1234, true], [5678, true], [1234, false]]);
+        assert.ok(testLines().includes(`${P}: GPU do Discord 5678 → o processo mudou (reiniciou?); não desfiz nada nesse pid`));
+        assert.equal(session.has(SAVED_KEY), false);
+    });
+
+    test("o pid existe mas ja e de outro papel, ou o helper diz 'tree': tambem nao leva o false", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        discordOk();
+        noteCaptureStarted();
+        await clock.tickAsync(REREAD_DELAY_MS + 10);
+        reread = () => report({
+            targets: [
+                { pid: 1234, role: "GPU", before: "NORMAL", after: "HIGH", kept: false, error: null },
+                { pid: 5678, role: "GPU", before: null, after: null, kept: false, error: "tree pid 5678 fora da arvore do Discord" }
+            ]
+        });
+        noteCaptureStopped();
+        await clock.tickAsync(10);
+        assert.deepEqual(boost, [[1234, true], [5678, true]]);
+    });
+
+    test("sem resposta da parte nativa no fim: nao manda false (nao da para conferir) e o pedido continua salvo", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        discordOk();
+        env!.restore();
+        let answered = 0;
+        env = installNative({ setGpuPriority: async (mode: string) => (mode === "restore" ? restored() : ++answered <= 2 ? report() : null) });
+        noteCaptureStarted();
+        await clock.tickAsync(REREAD_DELAY_MS + 10);
+        noteCaptureStopped();
+        await clock.tickAsync(10);
+        assert.deepEqual(boost, [[1234, true], [5678, true]]);
+        assert.equal(saved().length, 2);
+    });
+
+    // #endregion
+
+    // #region corridas
+
+    test("corrida: a transmissao acaba enquanto o 'high' ainda nao voltou: o teste nao comeca", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        discordOk();
+        env!.restore();
+        let open!: () => void;
+        const gate = new Promise<void>(resolve => (open = resolve));
+        env = installNative({
+            setGpuPriority: async (mode: string) => {
+                events.push(`native:${mode}`);
+                if (mode === "restore") return restored();
+                await gate;
+                return report();
+            }
+        });
+        noteCaptureStarted();
+        noteCaptureStopped();
+        open();
+        await clock.tickAsync(REREAD_DELAY_MS + 100);
+        assert.deepEqual(boost, []);
+        assert.deepEqual(testLines(), []);
+    });
+
+    test("corrida: uma transmissao nova durante o desfazer da antiga espera ele, e a volta da antiga nao abaixa a nova", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        discordOk();
+        env!.restore();
+        let open!: () => void;
+        const gate = new Promise<void>(resolve => (open = resolve));
+        let highs = 0;
+        env = installNative({
+            setGpuPriority: async (mode: string) => {
+                events.push(`native:${mode}`);
+                if (mode === "restore") return restored();
+                // o 3o "high" e a conferencia dos pids do fim da transmissao antiga: fica parado ate soltar
+                if (++highs === 3) await gate;
+                return report();
+            }
+        });
+        noteCaptureStarted(); // A
+        await clock.tickAsync(REREAD_DELAY_MS + 10);
+        assert.deepEqual(boost, [[1234, true], [5678, true]]);
+        noteCaptureStopped(); // A acaba: o desfazer fica esperando a conferencia
+        await clock.tickAsync(10);
+        noteCaptureStarted(); // B comeca durante o desfazer de A
+        await clock.tickAsync(10);
+        // B ainda nao pediu nada ao Discord, e A ainda nao mandou o false
+        assert.deepEqual(boost, [[1234, true], [5678, true]]);
+        open();
+        await clock.tickAsync(REREAD_DELAY_MS + 100);
+        // o false de A vem inteiro antes do true de B, e A nao restaura (a prioridade e de B agora)
+        assert.deepEqual(boost, [[1234, true], [5678, true], [1234, false], [5678, false], [1234, true], [5678, true]]);
+        assert.ok(!events.includes("native:restore"));
+        // depois do false de A, o "high" de novo; so entao B pede o REALTIME
+        const lastFalse = events.indexOf("boost:5678:false");
+        assert.equal(events[lastFalse + 1], "native:high");
+        assert.ok(events.indexOf("boost:1234:true", lastFalse) > lastFalse + 1);
+    });
+
+    test("corrida: fim em dobro durante o desfazer nao repete o false", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        discordOk();
+        noteCaptureStarted();
+        await clock.tickAsync(REREAD_DELAY_MS + 10);
+        noteCaptureStopped();
+        noteCaptureStopped();
+        await clock.tickAsync(10);
+        assert.deepEqual(boost.filter(([, on]) => !on), [[1234, false], [5678, false]]);
+        assert.equal(events.filter(e => e === "native:restore").length, 1);
+    });
+
+    // #endregion
+
+    // #region reload do renderer
+
+    /** o renderer recarrega: o estado dos modulos some, o sessionStorage e o main continuam */
+    const reload = () => {
+        resetCaptureBoostForTests();
+        resetDiscordGpuBoostForTests();
+        events.length = boost.length = 0;
+        priorityCalls.length = 0;
+    };
+
+    test("reload no meio do teste: o inicio do plugin desfaz (false, high de novo, restore) e limpa a lista; uma linha no log", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        discordOk();
+        noteCaptureStarted();
+        await clock.tickAsync(REREAD_DELAY_MS + 10);
+        assert.equal(saved().length, 2);
+        reload();
+        base = getEventLog().length;
+        await startCaptureBoost();
+        assert.deepEqual(events, ["native:high", "boost:1234:false", "boost:5678:false", "native:high", "native:restore"]);
+        assert.equal(session.has(SAVED_KEY), false);
+        assert.deepEqual(testLines(), [`${P}: o Telinha recarregou com o tempo real pedido: desfeito em Discord 1234, GPU do Discord 5678`]);
+    });
+
+    test("reload: so desfaz o pid que ainda e do Discord (o outro ja era outro processo) e diz isso", async t => {
+        const clock = useFakeClock(t);
+        pluginSettings.load({ gpuPriorityMode: "realtime" });
+        discordOk();
+        noteCaptureStarted();
+        await clock.tickAsync(REREAD_DELAY_MS + 10);
+        reload();
+        base = getEventLog().length;
+        env!.restore();
+        env = installNative({
+            setGpuPriority: async (mode: string) => {
+                events.push(`native:${mode}`);
+                return mode === "restore" ? restored() : report({ targets: [targets("HIGH")[0]] });
+            }
+        });
+        await startCaptureBoost();
+        assert.deepEqual(boost, [[1234, false]]);
+        assert.equal(session.has(SAVED_KEY), false);
+        assert.equal(testLines().length, 1);
+        assert.match(testLines()[0], /desfeito em Discord 1234; pulei GPU do Discord 5678 \(já não é o mesmo processo do Discord\)$/);
+    });
+
+    test("reload: sem nada salvo (ou lixo no sessionStorage) o inicio nao toca o Discord; sem resposta da parte nativa fica salvo", async t => {
+        const clock = useFakeClock(t);
+        discordOk();
+        await startCaptureBoost();
+        assert.deepEqual(boost, []);
+        assert.deepEqual(priorityCalls, ["restore"]);
+        session.set(SAVED_KEY, "isto nao e json");
+        await startCaptureBoost();
+        session.set(SAVED_KEY, JSON.stringify([{ pid: "x" }, null, { pid: 5, role: "Outro", classBefore: "NORMAL", at: 1 }]));
+        await startCaptureBoost();
+        assert.deepEqual(boost, []);
+
+        session.set(SAVED_KEY, JSON.stringify([{ pid: 1234, role: "Discord", classBefore: "NORMAL", at: 1 }]));
+        env!.restore();
+        env = installNative({ setGpuPriority: async () => null });
+        await startCaptureBoost();
+        await clock.tickAsync(10);
+        assert.deepEqual(boost, []);
+        assert.equal(saved().length, 1);
+        assert.match(testLines().at(-1)!, /não deu para conferir os processos do Discord; tento de novo no próximo início/);
+    });
+
+    test("reload: o false que falha deixa o pid salvo para a proxima vez", async () => {
+        session.set(SAVED_KEY, JSON.stringify([{ pid: 1234, role: "Discord", classBefore: "NORMAL", at: 1 }]));
+        discordOk(() => {
+            throw new Error("recusou");
+        });
+        await startCaptureBoost();
+        assert.equal(saved().length, 1);
+        assert.match(testLines().at(-1)!, /falhou em Discord 1234 \(tento de novo no próximo início\)$/);
+    });
+
+    // #endregion
 });
 
 // #endregion
