@@ -176,16 +176,18 @@ export const GPU_PRIORITY_MARKER = "gpuPriorityRealtimeDefault";
 /**
  * Migracao da prioridade: "Tempo real" virou o padrao. `mode` = o valor a gravar (null = nao mexer); `markDone` = gravar o
  * marcador (a troca so acontece uma vez: depois dele, "Alta" e "Desligada" escolhidas ficam). Antes do marcador: "Alta"
- * salva (vinda da opcao antiga ligada/desligada) vira "Tempo real"; "Desligada" salva fica (foi escolha); o booleano antigo
- * ligado vira "Tempo real"; nada salvo vale o padrao; valor desconhecido vale o padrao. A chave antiga NAO e apagada (uma versao
- * anterior do Telinha ainda a le).
+ * salva (vinda da opcao antiga ligada/desligada) vira "Tempo real"; "Desligada" salva tambem vira "Tempo real": na 0.3.9 o
+ * padrao era "Desligada" e o Vencord grava o padrao quando a opcao e lida, entao o "off" salvo e so o padrao de entao, nao
+ * uma escolha; o booleano antigo ligado vira "Tempo real"; nada salvo vale o padrao; valor desconhecido vale o padrao. A
+ * chave antiga NAO e apagada (uma versao anterior do Telinha ainda a le).
  */
 export function migrateGpuPrioritySetting(stored: StoredGpuPrioritySettings | null | undefined): { mode: "realtime" | null; markDone: boolean; } {
     const s = stored ?? {};
     if (s.gpuPriorityRealtimeDefault === true) return { mode: null, markDone: false };
     const mode = s.gpuPriorityMode;
-    if (mode === "off" || mode === "realtime") return { mode: null, markDone: true };
-    if (mode === "high") return { mode: "realtime", markDone: true };
+    if (mode === "realtime") return { mode: null, markDone: true };
+    // "off" e "high" salvos antes do marcador: o "off" e o padrao da 0.3.9 gravado pelo Vencord, nao uma escolha
+    if (mode === "off" || mode === "high") return { mode: "realtime", markDone: true };
     if (mode === undefined) return { mode: s.gpuPriority === true ? "realtime" : null, markDone: true };
     // valor desconhecido salvo: volta ao padrao
     return { mode: "realtime", markDone: true };

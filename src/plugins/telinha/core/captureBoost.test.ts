@@ -567,9 +567,10 @@ describe("a opcao de prioridade: modo e migracao", () => {
         assert.deepEqual(migrateGpuPrioritySetting(undefined), { mode: null, markDone: true });
         assert.deepEqual(migrateGpuPrioritySetting(null), { mode: null, markDone: true });
         assert.deepEqual(migrateGpuPrioritySetting({ gpuPriority: "true" }), { mode: null, markDone: true });
-        // salvo antes do marcador: Alta vira Tempo real; Desligada (escolha) e Tempo real ficam
+        // salvo antes do marcador: Alta e Desligada (o padrao da 0.3.9 gravado pelo Vencord) viram Tempo real; Tempo real fica
         assert.deepEqual(migrateGpuPrioritySetting({ gpuPriorityMode: "high" }), { mode: "realtime", markDone: true });
-        assert.deepEqual(migrateGpuPrioritySetting({ gpuPriority: true, gpuPriorityMode: "off" }), { mode: null, markDone: true });
+        assert.deepEqual(migrateGpuPrioritySetting({ gpuPriority: true, gpuPriorityMode: "off" }), { mode: "realtime", markDone: true });
+        assert.deepEqual(migrateGpuPrioritySetting({ gpuPriorityMode: "off" }), { mode: "realtime", markDone: true });
         assert.deepEqual(migrateGpuPrioritySetting({ gpuPriorityMode: "realtime" }), { mode: null, markDone: true });
         // lixo salvo: padrao
         for (const junk of ["tempo real", true, 1, null]) {

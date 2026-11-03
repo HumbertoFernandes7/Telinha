@@ -319,11 +319,16 @@ describe("migracao de 'Prioridade da captura na placa de vídeo' (liga/desliga) 
         assert.equal(settings.plain.gpuPriorityMode, "high");
     });
 
-    test("'Desligada' salva fica desligada (foi escolha), antes e depois do marcador", () => {
+    test("'Desligada' salva antes do marcador vira Tempo real (na 0.3.9 era o padrao, gravado pelo Vencord, nao uma escolha); depois do marcador, quem desliga fica desligado", () => {
         onDisk({ gpuPriorityMode: "off" });
         migrateGpuPrioritySettings();
-        assert.equal(settings.plain.gpuPriorityMode, "off");
+        assert.equal(settings.plain.gpuPriorityMode, "realtime");
         assert.equal(raw()[PRIORITY_MARKER], true);
+        // o usuario desliga depois: o marcador ja existe e a escolha fica (mesmo rodando de novo)
+        settings.store.gpuPriorityMode = "off";
+        migrateGpuPrioritySettings();
+        assert.equal(settings.plain.gpuPriorityMode, "off");
+        onDisk({ gpuPriorityMode: "off", [PRIORITY_MARKER]: true });
         migrateGpuPrioritySettings();
         assert.equal(settings.plain.gpuPriorityMode, "off");
     });

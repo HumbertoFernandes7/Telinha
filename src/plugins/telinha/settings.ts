@@ -225,8 +225,8 @@ export function migrateQualitySettings(): void {
 
 /**
  * "Tempo real" virou o padrao da "Prioridade da captura na placa de vídeo". Uma unica vez (marcador gpuPriorityRealtimeDefault
- * em settings.plain), "Alta" salva (ou o antigo liga/desliga gpuPriority: true) vira "Tempo real"; "Desligada" salva fica
- * (foi escolha). A chave antiga fica como esta (uma versao anterior do Telinha ainda a le). Depois do marcador, o que o
+ * em settings.plain), "Alta" salva, "Desligada" salva (na 0.3.9 o padrao era "Desligada" e o Vencord o gravou ao ler a
+ * opcao: nao era escolha) e o antigo liga/desliga gpuPriority: true viram "Tempo real". A chave antiga fica como esta (uma versao anterior do Telinha ainda a le). Depois do marcador, o que o
  * usuario escolher fica. Chamado no start() do plugin. Nunca lanca.
  */
 export function migrateGpuPrioritySettings(): void {
