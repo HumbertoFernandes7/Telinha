@@ -6,9 +6,11 @@
 #     since that tag); in the job summary
 #   - pnpm bootstrap: the official Vencord pinned in vencord.json, fetched and built into .vencord/
 #   - pnpm build:helper: native-audio\telinha-audio.exe (MSVC), which build:addon packs into the payload
-#   - pnpm check: typecheck, lint, stylelint, unit tests, build:addon + smoke, test:addon (fake Discord/GitHub trees,
-#     and run-release-test.mjs: the notes template + the zip just built through the updater's own checks)
-#   - pnpm test:coverage (when the script exists): coverage of every *.test.ts(x), uploaded as the "coverage" artifact
+#   - pnpm check:static: typecheck, lint, stylelint
+#   - pnpm build:addon + smoke, then pnpm test:coverage: the unit tests and test:addon (fake Discord/GitHub trees, and
+#     run-release-test.mjs: the notes template + the zip just built through the updater's own checks), each run once,
+#     under coverage of every *.test.ts(x), uploaded as the "coverage" artifact (what `pnpm check` runs locally,
+#     without the coverage)
 #   - installer/: go vet, go test -cover, the version resource stamped with TELINHA_VERSION, installer\build.cmd (both
 #     builds must then say that version), then the update test's group G against that build
 #   - coverage floor: scripts/check-coverage.mjs fails the job when TypeScript coverage or a Go package's coverage is
@@ -155,11 +157,16 @@ jobs:
       # ------------------------------------------------------------------ gates
       # build:addon makes dist/addon/Telinha-addon-<commit>.zip as TELINHA_VERSION, from the clean checkout (a changed
       # or untracked file would name it <commit>-dirty, which the release job refuses).
-      - name: pnpm check
-        run: pnpm check
+      - name: Static checks (typecheck, lint, stylelint)
+        run: pnpm check:static
 
-      - name: Coverage (pnpm test:coverage)
-        run: pnpm run --if-present test:coverage 2>&1 | tee "$RUNNER_TEMP/js-coverage.txt"
+      - name: Build the add-on + smoke
+        run: pnpm build:addon
+
+      # The unit and add-on tests, once: test:coverage runs test:unit and test:addon itself, under coverage, and exits
+      # with their exit code. No --if-present: a deleted script must fail here, not skip every test.
+      - name: Unit and add-on tests with coverage (pnpm test:coverage)
+        run: pnpm test:coverage 2>&1 | tee "$RUNNER_TEMP/js-coverage.txt"
 
       - name: go vet
         working-directory: installer
@@ -192,7 +199,7 @@ jobs:
             exit 1
           }
 
-      # pnpm check skipped group G (no installer yet): re-run the update test against the build above.
+      # the add-on tests above skipped group G (no installer yet): re-run the update test against the build above.
       - name: Update test with the built installer (group G)
         run: |
           node addon/test/run-update-test.mjs --installer dist/installer/TelinhaInstaller-cli.exe 2>&1 | tee "$RUNNER_TEMP/update-test.txt"
