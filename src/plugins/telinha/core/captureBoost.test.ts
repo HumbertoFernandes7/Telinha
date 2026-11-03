@@ -403,13 +403,15 @@ describe("prioridade da captura na placa de video", () => {
         assert.deepEqual(priorityCalls(), ["high", "restore"]);
     });
 
-    test("tempo real (teste): nesta etapa pede HIGH como a alta, e o log diz o modo", async () => {
+    test("tempo real (teste): pede HIGH como a alta, e o log diz o modo (mais o experimento do Discord)", async () => {
         pluginSettings.load({ gpuPriorityMode: "realtime" });
         nativeWith();
         noteCaptureStarted();
         await flush();
         assert.deepEqual(priorityCalls(), ["high"]);
-        assert.equal(messages().at(-1), `${P}: alta — Discord 1234 NORMAL→HIGH, GPU do Discord 5678 NORMAL→HIGH; HAGS ligado`);
+        assert.ok(messages().includes(`${P}: alta — Discord 1234 NORMAL→HIGH, GPU do Discord 5678 NORMAL→HIGH; HAGS ligado`));
+        // e o experimento do Discord (core/discordGpuBoost.ts) diz que nao ha o que pedir (sem o DiscordNative do Discord)
+        assert.match(messages().at(-1)!, /^Teste do tempo real pelo Discord: discord_utils indisponível/);
     });
 
     test("sem a funcao na parte nativa: nada pedido, e a pagina e o log dizem", async () => {

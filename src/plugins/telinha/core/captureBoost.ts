@@ -29,6 +29,7 @@ import { settings } from "@plugins/telinha/settings";
 import type { GpuCaptureStatus, GpuPriorityReport, GpuPriorityTarget } from "./captureBoostMain";
 import { captureCopyDiagnostics } from "./captureCopy";
 import { rt } from "./context";
+import { realtimeTestActive, startRealtimeTest, stopRealtimeTest } from "./discordGpuBoost";
 import { errorText, log } from "./log";
 import { getNativeOrNull } from "./nativeApi";
 
@@ -262,6 +263,15 @@ async function raisePriority(): Promise<void> {
     lastRaise = report;
     changed();
     logPriority(report, raiseOutcome(report));
+    // so em "Tempo real (teste)": o experimento do GPU boost do proprio Discord (core/discordGpuBoost.ts); a releitura das
+    // classes e o mesmo "high" (nunca abaixa e so sobe quem esta abaixo de HIGH, entao na pratica so le)
+    if (gpuPriorityModeSetting() === "realtime") startRealtimeTest(report, () => askPriority("high"));
+}
+
+/** O fim da transmissao (ou da opcao): desfaz o pedido ao Discord (se ha) e so depois volta a prioridade ao normal. */
+async function endPriority(why: string): Promise<void> {
+    await stopRealtimeTest();
+    await restorePriority(why);
 }
 
 async function restorePriority(why: string): Promise<void> {
@@ -282,7 +292,9 @@ function priorityModeText(): string {
 export function onGpuPrioritySettingChanged(): void {
     const on = gpuPriorityOn();
     log.info(`${GPU_PRIORITY} ${on ? "ligada" : "desligada"} nas configurações${on && !rt.local ? ": vale na próxima transmissão" : ""}`);
-    if (!on) void restorePriority("opção desligada");
+    // o teste do tempo real so vale no modo "realtime": ao sair dele, o NORMAL volta
+    if (!on) void (realtimeTestActive() ? endPriority("opção desligada") : restorePriority("opção desligada"));
+    else if (gpuPriorityModeSetting() !== "realtime" && realtimeTestActive()) void stopRealtimeTest();
     else if (rt.local && hasPriorityNative() && !priorityActive) void raisePriority();
     changed();
 }
@@ -364,7 +376,7 @@ export function noteCaptureStarted(): void {
 
 /** A transmissao acabou (core/streaming.ts → stopStreaming): a prioridade volta ao que era. */
 export function noteCaptureStopped(): void {
-    void restorePriority("transmissão encerrada");
+    void (realtimeTestActive() ? endPriority("transmissão encerrada") : restorePriority("transmissão encerrada"));
 }
 
 /** As linhas da pagina do plugin, logo abaixo das opcoes. */
