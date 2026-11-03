@@ -25,7 +25,7 @@ import { getLocalCaps } from "./codec";
 import { isContained } from "./peerConnection";
 import { STATS_LINE_RE } from "./statsLog";
 import { H264_STALL_MS, QUALITY_LOCK_STARTING, QUALITY_LOCK_STUCK, qualityChangeBlocked, sendPlanFor, SENT_MIN_BYTES, startStreaming, stopStreaming } from "./streaming";
-import { STUCK_NOTICE, stuckRecord } from "./stuckEncoder";
+import { stuckNoticeUnknown, stuckRecord } from "./stuckEncoder";
 
 const NVENC = "MediaFoundationVideoEncodeAccelerator (NVIDIA H.264 Encoder MFT)";
 
@@ -116,7 +116,9 @@ describe("encoder de outro codec no relatorio por tempo demais (checkForeign)", 
         await seconds(rig, 4);
         assert.ok(isContained(v.pc as unknown as RTCPeerConnection), "contido");
         assert.deepEqual(repliesTo(rig.room, v.peerId).filter(m => m.op === "stuck"), [{ op: "stuck" }], "quem assiste foi avisado uma vez");
-        assert.equal(rt.lastError, STUCK_NOTICE);
+        assert.equal(rt.lastError, stuckNoticeUnknown(v.label));
+        assert.match(rt.lastError ?? "", /^A transmissão para sempre \(\w+\) travou ao começar\./);
+        assert.ok(!/H\.264|VP9/.test(rt.lastError ?? ""), "o aviso nao culpa nenhum codec");
         assert.equal(qualityChangeBlocked(), QUALITY_LOCK_STUCK, "nao esta mais \"comecando\": so o travado, ate o Discord reiniciar");
         // sem culpa: o codec nunca mudou, nada foi marcado e o H.264 automatico segue ligado
         assert.equal(v.sender.encoding.codec, undefined, "nunca trocou o codec");
@@ -129,11 +131,30 @@ describe("encoder de outro codec no relatorio por tempo demais (checkForeign)", 
         assert.equal(lines.length, 1, lines.join("\n"));
         assert.match(lines[0], /trouxeram só o encoder de outro codec \(libaom\) por \d+ s/);
         assert.match(lines[0], /nada fica marcado neste PC/);
+        assert.match(lines[0], /travou com H\.264\./, "o codec de fato no ar");
         assert.ok(!lines[0].includes("trocando para"), "nunca fallBack");
 
         // contido: o tick nao le mais esse envio
         const reads = v.sender.getStatsCalls;
         await seconds(rig, 5);
         assert.equal(v.sender.getStatsCalls, reads);
+    });
+
+    test("foreign com o video saindo (bytes andando) por 30 s: nunca contido, nada marcado", async () => {
+        const v = await watcher("fluindo");
+        const stats = foreignStats();
+        v.sender.stats = stats;
+        const since = logMark();
+        for (let i = 0; i < 30; i++) {
+            stats[0].bytesSent = (stats[0].bytesSent as number) + 50_000;
+            stats[0].framesSent = ((stats[0].framesSent as number | undefined) ?? 0) + 30;
+            await seconds(rig, 1);
+        }
+        assert.equal(isContained(v.pc as unknown as RTCPeerConnection), false, "o video sai: nada contido");
+        assert.deepEqual(repliesTo(rig.room, v.peerId).filter(m => m.op === "stuck"), []);
+        assert.deepEqual(about(since(), v), []);
+        assert.equal(stuckRecord(), null, "nada marcado");
+        assert.equal(sendPlanFor(v.peerId)?.codec, "h264");
+        assert.equal(getLocalCaps().h264HwEncode, true);
     });
 });

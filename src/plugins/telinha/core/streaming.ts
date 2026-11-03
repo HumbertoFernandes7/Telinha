@@ -50,7 +50,7 @@ import { encodingFor, LEVELS, levelText, scaledSize } from "./quality/levels";
 import { isHardwareEncoder } from "./quality/stats";
 import { h264ProfileLevelId, type HwOnlyCodec, isH264High, isHwOnlyCodec, sameH264Profile } from "./sdp";
 import {
-    noteHighFailed, noteHwOnlyFailed, noteStreamStarting, noteStuckEncoder, onStreamStopped, STUCK_NOTICE, STUCK_NOTICE_AV1, STUCK_NOTICE_H265, STUCK_NOTICE_HIGH, STUCK_NOTICE_PINNED
+    noteHighFailed, noteHwOnlyFailed, noteStreamStarting, noteStuckEncoder, onStreamStopped, STUCK_NOTICE, STUCK_NOTICE_AV1, STUCK_NOTICE_H265, STUCK_NOTICE_HIGH, STUCK_NOTICE_PINNED, stuckNoticeUnknown
 } from "./stuckEncoder";
 
 export interface QualityProfile {
@@ -154,6 +154,8 @@ interface ViewerSend {
      * passado H264_STALL_MS o relatorio deixa de ser "de passagem" (checkForeign). Limpo quando um relatorio certo chega
      */
     foreignSince?: number;
+    /** o que o checkForeign viu sair por ultimo (bytesSent, sem ele framesSent): se anda, o video esta saindo e foreignSince recomeca */
+    foreignOut?: number | null;
     /** decisao H.265/AV1: as estatisticas ja mostraram ele no ar (checkHwOnly: sair dele depois = ele falhou) */
     hwOnlySeen?: boolean;
 }
@@ -1576,8 +1578,16 @@ function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: 
 function checkForeign(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: EncoderReport, frames: number | null, sent: SentCounters) {
     if (send.stuck || send.fellBack || send.sending || !HW_SEND_MIME.test(enc.mimeType)) return;
     const now = performance.now();
-    if (getPc(peerId)?.connectionState !== "connected") send.foreignSince = undefined;
-    else send.foreignSince ??= now;
+    const sentNow = sent.bytes ?? sent.frames;
+    if (getPc(peerId)?.connectionState !== "connected") {
+        send.foreignSince = undefined;
+        send.foreignOut = undefined;
+    } else if (send.foreignSince == null || sentNow !== send.foreignOut) {
+        // o mesmo sinal de "video saindo" do checkStall (o bytesSent/framesSent anda): com o video fluindo o nome de outro codec
+        // e so o getStats atrasado, nunca contem; so conta o tempo em que NADA sai
+        send.foreignSince = now;
+        send.foreignOut = sentNow;
+    }
     checkStall(peerId, local, send, enc, frames, sent, true);
     if (send.stuck || send.foreignSince == null || now - send.foreignSince < H264_STALL_MS) return;
     const secs = Math.round((now - send.foreignSince) / 1000);
@@ -1618,15 +1628,23 @@ function containStuck(peerId: PeerId, local: LocalCapture, send: ViewerSend, why
     const high = culprit?.kind === "high" ? culprit.profile : null;
     const hwOnly = culprit?.kind === "h265" || culprit?.kind === "av1" ? culprit.kind : null;
     if (blame) noteStuckEncoder(high, hwOnly);
-    const what = hwOnly ? HW_ONLY_LABEL[hwOnly] : `H.264${high ? ` High (perfil ${high})` : ""}`;
+    const what = blame ? (hwOnly ? HW_ONLY_LABEL[hwOnly] : `H.264${high ? ` High (perfil ${high})` : ""}`) : codecLabelOf(send);
     log.warn(`${why}: a placa de vídeo travou com ${what}. O envio para ${label} fica como está até o Discord reiniciar (trocar o codec, `
         + "parar ou fechar a conexão travaria o Discord inteiro). "
         + (!blame ? "O encoder nunca foi identificado: nada fica marcado neste PC (o H.264 e o High não levam a culpa)."
             : hwOnly ? `O ${what} fica desligado neste PC até o driver, o Chromium ou a placa mudarem (o H.264 não leva a culpa); nesta sessão, o automático vai em VP9.`
             : high ? "O High fica desligado neste PC até o driver, o Chromium ou a placa mudarem; nesta sessão, o automático vai em VP9."
                 : "O H.264 automático fica desligado neste PC até o driver, o Chromium ou a placa mudarem."));
-    setLastError(hwOnly === "h265" ? STUCK_NOTICE_H265 : hwOnly === "av1" ? STUCK_NOTICE_AV1 : high ? STUCK_NOTICE_HIGH : pinned ? STUCK_NOTICE_PINNED : STUCK_NOTICE);
+    setLastError(!blame ? stuckNoticeUnknown(label) : hwOnly === "h265" ? STUCK_NOTICE_H265 : hwOnly === "av1" ? STUCK_NOTICE_AV1 : high ? STUCK_NOTICE_HIGH : pinned ? STUCK_NOTICE_PINNED : STUCK_NOTICE);
     reply(peerId, { op: "stuck" });
+}
+
+/** O nome do codec de fato no ar neste envio (send.inUse, do codecId; sem leitura ainda, o que a decisao pediu). */
+function codecLabelOf(send: ViewerSend) {
+    const mime = (send.inUse?.mime ?? `video/${send.decision.codec}`).toLowerCase();
+    const hwOnly = hwOnlyOfMime(mime);
+    if (hwOnly) return HW_ONLY_LABEL[hwOnly];
+    return mime === "video/h264" ? "H.264" : mime.replace(/^video\//, "").toUpperCase();
 }
 
 /**
@@ -1966,6 +1984,7 @@ export function tick() {
                 return;
             }
             send.foreignSince = undefined;
+            send.foreignOut = undefined;
             // decisao H.265/AV1: o codec de fato no ar (o outro lado sem ele, o WebRTC trocou sozinho, o libaom) vem antes do log
             checkHwOnly(peerId, local, send, enc);
             if (send.fellBack && !isHwOnlyCodec(send.decision.codec) && hwOnlyOfMime(codec)) return;

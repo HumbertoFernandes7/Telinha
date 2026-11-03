@@ -149,6 +149,9 @@ export const STUCK_NOTICE_H265 = "A placa de vídeo travou com H.265. Para não 
 /** O aviso quando o envio que travou era em AV1: na proxima vez vai o H.264 de sempre, sem o AV1. */
 export const STUCK_NOTICE_AV1 = "A placa de vídeo travou com AV1. Para não travar o Discord, o Telinha não mexe mais nesta transmissão. "
     + "Reinicie o Discord (feche por completo e abra de novo) para transmitir de novo: da próxima vez vai sem o AV1.";
+/** O aviso quando o envio travou ao comecar sem o encoder ser identificado (nada fica marcado): nao culpa codec nenhum. */
+export const stuckNoticeUnknown = (label: string) => `A transmissão para ${label} travou ao começar. Para não travar o Discord, o Telinha não mexe mais nela. `
+    + "Reinicie o Discord (feche por completo e abra de novo) para transmitir de novo.";
 /** O mesmo aviso com o codec fixado em H.264 nas configuracoes (ai o automatico nao vale). */
 export const STUCK_NOTICE_PINNED = "A placa de vídeo travou com H.264. Para não travar o Discord, o Telinha não mexe mais nesta transmissão. "
     + "Reinicie o Discord (feche por completo e abra de novo) para transmitir de novo. O formato de vídeo está fixado em H.264 nas configurações: escolha Automático para ir em VP9.";
