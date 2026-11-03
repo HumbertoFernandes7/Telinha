@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, test, type TestContext } from "node:test";
 
-import { gpuCaptureStatus, setGpuCapture, setGpuPriority } from "@plugins/telinha/native";
+import { gpuCaptureStatus, gpuRealtimeStatus, setGpuCapture, setGpuPriority, setGpuRealtimeBlocked } from "@plugins/telinha/native";
 import { mockSpawn } from "@test/fakes/childProcess";
 import { flushPromises, useFakeClock } from "@test/fakes/clock";
 import { app, ipcEvent } from "@test/fakes/electron";
@@ -154,6 +154,7 @@ describe("prioridade na placa de video (telinha-audio.exe --gpu-priority)", () =
 
     beforeEach(() => {
         resetGpuPriorityForTests();
+        loader(); // o tempo real so existe com o loader (a pasta do gpu-priority.json); os testes sem ele o tiram
         app.appMetrics = [{ pid: ME, type: "Browser" }, { pid: GPU, type: "GPU" }, { pid: 51_302, type: "Tab" }];
         app.getAppMetricsImpl = null;
         app.listeners = {};
@@ -204,7 +205,7 @@ describe("prioridade na placa de video (telinha-audio.exe --gpu-priority)", () =
         assert.deepEqual(procs.spawned[0].args, ["--gpu-priority", `${ME},${GPU}`, "--class", "high", "--raise"], "so sobe: nunca abaixa");
         assert.deepEqual(procs.spawned[0].options, { windowsHide: true, shell: false, stdio: ["ignore", "pipe", "pipe"] });
         const expected: GpuPriorityReport = {
-            mode: "high", ok: true, done: 2, hags: "on", reason: null, refused: false, raised: 2, quiet: false, notes: [], level: "HIGH", realtimeRefused: false,
+            mode: "high", ok: true, done: 2, hags: "on", reason: null, refused: false, raised: 2, quiet: false, notes: [], level: "HIGH", realtimeRefused: false, realtimeBlocked: null,
             targets: [target(ME, "Discord", "NORMAL", "HIGH"), target(GPU, "GPU", "NORMAL", "HIGH")]
         };
         assert.deepEqual(up, expected);
@@ -718,6 +719,208 @@ describe("prioridade na placa de video (telinha-audio.exe --gpu-priority)", () =
         });
     });
 
+    describe("tempo real: bloqueio e marcador (gpu-priority.json, ao lado do capture-flags.json)", () => {
+        const gp = () => join(dir, "gpu-priority.json");
+        const onDisk = () => JSON.parse(readFileSync(gp(), "utf8"));
+        const writeState = (state: unknown) => writeFileSync(gp(), JSON.stringify(state));
+        const DIED = (at: Date) => `o Discord fechou sem sair do tempo real (travou ou foi fechado à força) em ${String(at.getDate()).padStart(2, "0")}/${String(at.getMonth() + 1).padStart(2, "0")} ${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+        const realtimeCalls = (procs: { spawned: { args: string[]; }[]; }) => procs.spawned.filter(p => p.args.includes("--allow-realtime")).length;
+
+        test("o marcador vai para o disco ANTES do REALTIME, fica enquanto algo esta em REALTIME e sai na volta", async t => {
+            helperHost(t);
+            const answers = [
+                ["hags on", ok(ME, "NORMAL", "HIGH"), ok(GPU, "NORMAL", "HIGH")],
+                ["hags on", ok(ME, "HIGH", "REALTIME"), ok(GPU, "HIGH", "REALTIME")],
+                ["hags on", ok(ME, "REALTIME", "NORMAL"), ok(GPU, "REALTIME", "NORMAL")]
+            ];
+            let beforePhase2: unknown = "nunca";
+            mockSpawn(t, p => {
+                if (p.args.includes("--allow-realtime")) beforePhase2 = existsSync(gp()) ? onDisk() : null;
+                answer(p, { stdout: (answers.shift() ?? []).join("\n") + "\n", code: 0 });
+            });
+            assert.equal(existsSync(gp()), false, "nada e gravado antes de pedir o REALTIME");
+            const up = await setGpuPriorityMain("realtime");
+            assert.equal(up.level, "REALTIME");
+            const { armed } = beforePhase2 as { armed: { pid: number; at: number; }; };
+            assert.deepEqual([(beforePhase2 as { format: number; }).format, armed.pid, typeof armed.at, (beforePhase2 as { blocked: unknown; }).blocked], [1, ME, "number", null], "ja estava no disco quando o helper foi chamado");
+            assert.deepEqual(onDisk().armed, armed, "segue armado: ha processos em REALTIME");
+
+            const down = await setGpuPriorityMain("restore");
+            assert.equal(down.ok, true);
+            assert.deepEqual(onDisk(), { format: 1, blocked: null, armed: null });
+            assert.deepEqual(readdirSync(dir), ["gpu-priority.json"], "sem sobra de temporario");
+        });
+
+        test("o armado so e regravado uma vez por partida; a descida do high tambem limpa o marcador", async t => {
+            const clock = useFakeClock(t);
+            const procs = replies(t,
+                ["hags on", ok(ME, "NORMAL", "HIGH"), ok(GPU, "NORMAL", "HIGH")],
+                ["hags on", ok(ME, "HIGH", "REALTIME"), `error set 0xC0000022 pid=${GPU} acesso negado`],
+                ["hags on", keep(ME, "REALTIME"), keep(GPU, "HIGH")],
+                ["hags on", `error set 0xC0000022 pid=${GPU} acesso negado`],
+                ["hags on", keep(ME, "REALTIME"), keep(GPU, "HIGH")],
+                ["hags on", ok(ME, "REALTIME", "HIGH")]
+            );
+            await setGpuPriorityMain("realtime");
+            const first = onDisk().armed;
+            assert.equal(first.pid, ME);
+            clock.tick(5000);
+            await setGpuPriorityMain("realtime");
+            assert.deepEqual(onDisk().armed, first, "ja armado por este processo: nao regrava");
+            await setGpuPriorityMain("high");
+            assert.equal(procs.spawned.length, 6);
+            assert.deepEqual(onDisk(), { format: 1, blocked: null, armed: null });
+        });
+
+        test("o REALTIME recusado ou mantido em HIGH nao deixa o marcador, e recusar nao bloqueia o PC", async t => {
+            helperAnswers(t, { realtime: "refuse" });
+            const up = await setGpuPriorityMain("realtime");
+            assert.deepEqual([up.realtimeRefused, up.realtimeBlocked], [true, null]);
+            assert.deepEqual(onDisk(), { format: 1, blocked: null, armed: null });
+            assert.deepEqual(gpuRealtimeStatus(ipcEvent()), { available: true, blocked: null, reason: null });
+        });
+
+        test("outra partida do Discord achou o marcador armado (o Discord morreu com o REALTIME): bloqueia com o texto, limpa o marcador e fica em HIGH", async t => {
+            const procs = helperAnswers(t);
+            await setGpuPriorityMain("realtime");
+            assert.equal(onDisk().armed.pid, ME);
+            // o Discord morreu: a partida nova tem outro pid
+            const armedAt = new Date(2026, 10, 2, 21, 5);
+            writeState({ format: 1, blocked: null, armed: { pid: ME + 1, at: armedAt.getTime() } });
+            resetGpuPriorityForTests();
+            procs.classes.clear(); // o Discord novo nasce em NORMAL
+            procs.spawned.length = 0;
+
+            assert.deepEqual(gpuRealtimeStatus(ipcEvent()), { available: false, blocked: DIED(armedAt), reason: null });
+            assert.equal(DIED(armedAt).endsWith("em 02/11 21:05"), true);
+            const state = onDisk();
+            assert.deepEqual([state.armed, state.blocked.why, typeof state.blocked.at], [null, DIED(armedAt), "number"]);
+
+            const up = await setGpuPriorityMain("realtime");
+            assert.equal(realtimeCalls(procs), 0, "nem pede o REALTIME");
+            assert.deepEqual(up.targets.map(t => t.after), ["HIGH", "HIGH"]);
+            assert.deepEqual([up.level, up.ok, up.realtimeRefused, up.reason, up.realtimeBlocked], ["HIGH", false, false, `tempo real desligado neste PC: ${DIED(armedAt)}`, DIED(armedAt)]);
+            assert.deepEqual((await setGpuPriorityMain("high")).realtimeBlocked, DIED(armedAt), "todo relatorio traz o bloqueio");
+        });
+
+        test("um armado deste mesmo processo (a memoria foi esquecida) nao e queda", t => {
+            helperHost(t);
+            writeState({ format: 1, blocked: null, armed: { pid: ME, at: Date.now() } });
+            assert.deepEqual(gpuRealtimeStatus(ipcEvent()), { available: true, blocked: null, reason: null });
+            assert.equal(onDisk().armed.pid, ME);
+        });
+
+        test("o bloqueio fica no disco e vale na proxima partida; desbloquear (a escolha de novo na pagina) libera o REALTIME", async t => {
+            const procs = helperAnswers(t);
+            const blocked = setGpuRealtimeBlocked(ipcEvent(), "o encoder da placa de vídeo parou com o tempo real em 02/11 21:07");
+            assert.deepEqual(blocked, { available: false, blocked: "o encoder da placa de vídeo parou com o tempo real em 02/11 21:07", reason: null });
+            assert.deepEqual([onDisk().blocked.why, onDisk().armed], ["o encoder da placa de vídeo parou com o tempo real em 02/11 21:07", null]);
+
+            resetGpuPriorityForTests(); // outra partida: o arquivo manda
+            assert.equal(gpuRealtimeStatus(ipcEvent()).blocked, "o encoder da placa de vídeo parou com o tempo real em 02/11 21:07");
+            const stays = await setGpuPriorityMain("realtime");
+            assert.deepEqual([realtimeCalls(procs), stays.level, stays.reason], [0, "HIGH", "tempo real desligado neste PC: o encoder da placa de vídeo parou com o tempo real em 02/11 21:07"]);
+
+            assert.deepEqual(setGpuRealtimeBlocked(ipcEvent(), null), { available: true, blocked: null, reason: null });
+            assert.equal(onDisk().blocked, null);
+            const again = await setGpuPriorityMain("realtime");
+            assert.deepEqual([realtimeCalls(procs), again.level, again.reason, again.realtimeBlocked], [1, "REALTIME", null, null]);
+        });
+
+        test("setGpuRealtimeBlocked limpa o que vem do IPC: so texto bloqueia (cortado em 300), so null libera, texto vazio tem motivo", t => {
+            helperHost(t);
+            assert.equal(setGpuRealtimeBlocked(ipcEvent(), "x".repeat(500)).blocked?.length, 300);
+            assert.equal(setGpuRealtimeBlocked(ipcEvent(), 42 as never).blocked?.length, 300, "numero e ignorado");
+            assert.equal(setGpuRealtimeBlocked(ipcEvent(), undefined as never).blocked?.length, 300, "undefined tambem");
+            assert.equal(setGpuRealtimeBlocked(ipcEvent(), "   ").blocked, "motivo não informado");
+            assert.equal(setGpuRealtimeBlocked(ipcEvent(), null).blocked, null);
+        });
+
+        test("sem o loader (sem pasta): indisponivel, o realtime fica em HIGH e nada e gravado; o bloqueio vale so na memoria", async t => {
+            const procs = helperAnswers(t);
+            delete g.__TelinhaAddon;
+            const up = await setGpuPriorityMain("realtime");
+            assert.deepEqual([procs.spawned.length, up.level, up.ok, up.reason, up.realtimeBlocked], [1, "HIGH", false, "só com o Telinha instalado pelo TelinhaInstaller", null]);
+            assert.deepEqual(gpuRealtimeStatus(ipcEvent()), { available: false, blocked: null, reason: "só com o Telinha instalado pelo TelinhaInstaller" });
+            assert.equal(setGpuRealtimeBlocked(ipcEvent(), "x").blocked, "x");
+            assert.deepEqual(readdirSync(dir), [], "nada gravado em lugar nenhum");
+        });
+
+        test("arquivo ausente, quebrado ou com campos estranhos: le como vazio", t => {
+            helperHost(t);
+            const empty = { available: true, blocked: null, reason: null };
+            assert.deepEqual(gpuRealtimeStatus(ipcEvent()), empty, "ausente");
+            for (const junk of ["{ quebrado", "null", JSON.stringify({ blocked: { why: 5, at: 1 }, armed: { pid: "x", at: 1 } }), JSON.stringify({ blocked: { why: "", at: 1 }, armed: { pid: 1.5, at: 1 } }), JSON.stringify({ blocked: { why: "x" }, armed: { pid: 7 } })]) {
+                resetGpuPriorityForTests();
+                writeFileSync(gp(), junk);
+                assert.deepEqual(gpuRealtimeStatus(ipcEvent()), empty, junk);
+                assert.equal(readFileSync(gp(), "utf8"), junk, "so ler nao reescreve");
+            }
+            resetGpuPriorityForTests();
+            writeState({ format: 1, blocked: { at: 1, why: "y".repeat(400) }, armed: null });
+            assert.equal(gpuRealtimeStatus(ipcEvent()).blocked, "y".repeat(300));
+        });
+
+        test("nao deu para gravar (no lugar do arquivo ha uma pasta): nunca lanca, o REALTIME nao e pedido sem a rede de seguranca e o motivo vem em pt-BR", async t => {
+            const procs = helperAnswers(t);
+            mkdirSync(gp());
+            const up = await setGpuPriorityMain("realtime");
+            assert.match(up.reason ?? "", /^tempo real não ligado: não consegui salvar o estado do tempo real \(/);
+            assert.deepEqual([procs.spawned.length, up.level, up.ok, up.realtimeRefused], [1, "HIGH", false, false], "so a 1a fase");
+            assert.deepEqual(readdirSync(dir), ["gpu-priority.json"], "o temporario foi apagado");
+            const status = gpuRealtimeStatus(ipcEvent());
+            assert.deepEqual([status.available, status.blocked], [false, null]);
+            assert.match(status.reason ?? "", /^não consegui salvar o estado do tempo real \(/);
+
+            const blocked = setGpuRealtimeBlocked(ipcEvent(), "x");
+            assert.equal(blocked.blocked, "x", "a memoria bloqueia mesmo sem gravar");
+            assert.match(blocked.reason ?? "", /^não consegui salvar/);
+        });
+
+        test("um erro que nao e Error vira texto", t => {
+            helperHost(t);
+            t.mock.method(fs, "writeFileSync", () => {
+                throw "disco cheio";
+            });
+            t.mock.method(fs, "rmSync", () => {
+                throw new Error("EBUSY");
+            });
+            const status = setGpuRealtimeBlocked(ipcEvent(), "x");
+            t.mock.restoreAll();
+            assert.equal(status.reason, "não consegui salvar o estado do tempo real (disco cheio)");
+        });
+
+        test("a saida normal do processo apaga o marcador (so o de agora); uma queda o deixa para a proxima partida", async t => {
+            helperAnswers(t);
+            const hooks: (() => void)[] = [];
+            t.mock.method(process, "once", ((event: string, cb: () => void) => {
+                if (event === "exit") hooks.push(cb);
+                return process;
+            }) as never);
+            await setGpuPriorityMain("realtime");
+            assert.equal(hooks.length, 1);
+            assert.equal(onDisk().armed.pid, ME);
+            hooks[0]();
+            assert.deepEqual(onDisk(), { format: 1, blocked: null, armed: null });
+            hooks[0](); // nada armado: nada a fazer
+            resetGpuPriorityForTests();
+            hooks[0](); // sem estado na memoria: nada a fazer
+            assert.deepEqual(onDisk(), { format: 1, blocked: null, armed: null });
+        });
+
+        test("o gancho de saida e instalado uma vez, e o reset o tira", async t => {
+            helperAnswers(t);
+            const before = process.listenerCount("exit");
+            await setGpuPriorityMain("realtime");
+            assert.equal(process.listenerCount("exit"), before + 1);
+            await setGpuPriorityMain("restore");
+            await setGpuPriorityMain("realtime");
+            assert.equal(process.listenerCount("exit"), before + 1, "uma vez so");
+            resetGpuPriorityForTests();
+            assert.equal(process.listenerCount("exit"), before);
+        });
+    });
+
     describe("o processo da GPU do Discord reinicia no meio da transmissao", () => {
         const NEW_GPU = 60_002; // nao e multiplo de 4: nunca e o pid deste processo (no Windows os pids sao)
         const gone = (type = "GPU") => app.emit("child-process-gone", {}, { type, reason: "crashed", exitCode: 1 });
@@ -858,6 +1061,37 @@ describe("prioridade na placa de video (telinha-audio.exe --gpu-priority)", () =
             const down = await setGpuPriorityMain("restore");
             assert.match(down.notes[0], new RegExp(`\\(${GPU} → ${NEW_GPU}\\): alta de novo$`));
             assert.deepEqual(procs.spawned[4].args, ["--gpu-priority", `${ME},${NEW_GPU}`, "--class", "normal", "--if-class", "high"]);
+        });
+
+        test("o processo da GPU cai com o tempo real do Telinha ligado: o REALTIME fica desligado neste PC e o proximo realtime so chega a HIGH", async t => {
+            const clock = useFakeClock(t);
+            const procs = helperAnswers(t);
+            await setGpuPriorityMain("realtime");
+            app.appMetrics = [{ pid: ME, type: "Browser" }, { pid: NEW_GPU, type: "GPU" }];
+            gone();
+            procs.classes.delete(String(GPU));
+            await after(clock, 2000);
+            await after(clock, 0); // a descida do principal e a 2a chamada do helper
+            const why = "o processo da GPU do Discord caiu com o tempo real ligado";
+            assert.deepEqual(gpuRealtimeStatus(ipcEvent()), { available: false, blocked: why, reason: null });
+            assert.deepEqual(JSON.parse(readFileSync(join(dir, "gpu-priority.json"), "utf8")).blocked.why, why);
+            assert.equal(JSON.parse(readFileSync(join(dir, "gpu-priority.json"), "utf8")).armed, null, "o principal desceu para HIGH: nada mais em REALTIME");
+
+            const before = procs.spawned.length;
+            const up = await setGpuPriorityMain("realtime");
+            assert.equal(procs.spawned.slice(before).some(p => p.args.includes("--allow-realtime")), false);
+            assert.deepEqual(up.targets.map(t => t.after), ["HIGH", "HIGH"]);
+            assert.deepEqual([up.reason, up.realtimeBlocked], [`tempo real desligado neste PC: ${why}`, why]);
+        });
+
+        test("a GPU em REALTIME que o Discord pos (nao e do Telinha) cai: nao bloqueia", async t => {
+            const clock = useFakeClock(t);
+            helperAnswers(t, { before: pid => (pid === String(GPU) ? "REALTIME" : "NORMAL") });
+            await setGpuPriorityMain("realtime");
+            gone();
+            app.appMetrics = [{ pid: ME, type: "Browser" }, { pid: NEW_GPU, type: "GPU" }];
+            await after(clock, 2000);
+            assert.equal(gpuRealtimeStatus(ipcEvent()).blocked, null);
         });
 
         test("app.on que lanca: a prioridade funciona, so sem o ouvinte", async t => {

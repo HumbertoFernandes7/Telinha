@@ -261,7 +261,7 @@ describe("prioridade da captura na placa de video", () => {
     const gpuRealtime: GpuPriorityReport["targets"][number] = { pid: 5678, role: "GPU", before: "REALTIME", after: "REALTIME", kept: true, error: null };
     const NORMAL_TO_HIGH = "Discord NORMAL→HIGH, GPU do Discord NORMAL→HIGH";
     const report = (patch: Partial<GpuPriorityReport> = {}): GpuPriorityReport => ({
-        mode: "high", ok: true, done: 2, hags: "on", reason: null, refused: false, raised: 2, quiet: false, notes: [], level: "HIGH", realtimeRefused: false, targets: both("NORMAL", "HIGH"), ...patch
+        mode: "high", ok: true, done: 2, hags: "on", reason: null, refused: false, raised: 2, quiet: false, notes: [], level: "HIGH", realtimeRefused: false, realtimeBlocked: null, targets: both("NORMAL", "HIGH"), ...patch
     });
     const restored = (patch: Partial<GpuPriorityReport> = {}) => report({ mode: "restore", raised: 0, targets: both("HIGH", "NORMAL"), ...patch });
     const flush = () => new Promise(resolve => setImmediate(resolve));
