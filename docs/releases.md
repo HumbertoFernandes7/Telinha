@@ -111,7 +111,8 @@ A release is never created over an existing release or tag of the same version (
 **Repository locks (Settings):**
 - `main` takes changes only through a pull request with `pnpm check + installer (Windows)` green, and it can't be
   force-pushed or deleted. `develop` can't be force-pushed or deleted.
-- Only GitHub Actions can create, move or delete a `v*` tag.
+- A `v*` tag can't be moved or deleted by anyone. (Creation stays open: a personal repository can't give the GitHub
+  Actions app a bypass, and the release job creates the tag.)
 - Releases are immutable: once published, the files and the tag can't change. The title, notes and the
   pre-release flag still can, which is what the job uses to turn a bad release into a pre-release.
 - A publish runs in the `release` environment, which only accepts `main`. A manual run uses `dry-run`.
