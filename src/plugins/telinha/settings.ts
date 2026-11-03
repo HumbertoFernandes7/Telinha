@@ -234,8 +234,10 @@ export function migrateGpuPrioritySettings(): void {
         const plain = settings.plain as Record<string, unknown> | undefined;
         if (!plain) return;
         const { mode, markDone } = migrateGpuPrioritySetting(plain);
-        if (mode) settings.store.gpuPriorityMode = mode;
+        // o marcador primeiro: o Vencord salva na hora dentro da gravacao do store, e um onChange que lance (ou uma gravacao
+        // sem efeito) nao pode deixar o marcador sem salvar, senao a migracao rodaria de novo na proxima partida
         if (markDone) plain[GPU_PRIORITY_MARKER] = true;
+        if (mode) settings.store.gpuPriorityMode = mode;
     } catch (e) {
         console.warn("[Telinha] migração de \"Prioridade da captura na placa de vídeo\" falhou", e);
     }
@@ -252,8 +254,9 @@ export function migrateGpuCaptureSettings(): void {
         const plain = settings.plain as Record<string, unknown> | undefined;
         if (!plain) return;
         const { on, markDone } = migrateGpuCaptureSetting(plain);
-        if (on) settings.store.gpuCapture = true;
+        // o marcador primeiro (mesmo motivo da prioridade acima)
         if (markDone) plain[GPU_CAPTURE_MARKER] = true;
+        if (on) settings.store.gpuCapture = true;
     } catch (e) {
         console.warn("[Telinha] migração de \"Captura pela placa de vídeo\" falhou", e);
     }

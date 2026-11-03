@@ -344,6 +344,22 @@ describe("migracao de 'Prioridade da captura na placa de vídeo' (liga/desliga) 
         assert.equal(settings.store.gpuPriorityMode, "realtime");
     });
 
+    test("um onChange que lanca: o marcador ja esta salvo e a migracao nao roda de novo (a escolha seguinte fica)", t => {
+        const warn = t.mock.method(console, "warn", () => { });
+        t.mock.method(settings.def.gpuPriorityMode, "onChange", () => {
+            throw new Error("onChange falhou");
+        });
+        onDisk({ gpuPriorityMode: "high" });
+        migrateGpuPrioritySettings();
+        assert.equal(warn.mock.callCount(), 1);
+        assert.equal(raw()[PRIORITY_MARKER], true);
+        // o usuario escolhe Alta e reabre o Discord: o marcador vale, nada muda
+        raw().gpuPriorityMode = "high";
+        migrateGpuPrioritySettings();
+        assert.equal(settings.plain.gpuPriorityMode, "high");
+        assert.equal(warn.mock.callCount(), 1, "nao rodou de novo");
+    });
+
     test("valor desconhecido salvo volta ao padrao (Tempo real)", () => {
         onDisk({ gpuPriorityMode: "tempo real" });
         migrateGpuPrioritySettings();
@@ -483,6 +499,21 @@ describe("migracao de 'Captura pela placa de vídeo': ligada por padrao, uma vez
         settings.store.gpuCapture = false;
         migrateGpuCaptureSettings();
         assert.equal(settings.store.gpuCapture, false);
+    });
+
+    test("um onChange que lanca: o marcador ja esta salvo e a migracao nao roda de novo (a escolha seguinte fica)", t => {
+        const warn = t.mock.method(console, "warn", () => { });
+        t.mock.method(settings.def.gpuCapture, "onChange", () => {
+            throw new Error("onChange falhou");
+        });
+        pluginSettings.load({ gpuCapture: false }, { lazy: true });
+        migrateGpuCaptureSettings();
+        assert.equal(warn.mock.callCount(), 1);
+        assert.equal(raw()[MARKER], true);
+        raw().gpuCapture = false;
+        migrateGpuCaptureSettings();
+        assert.equal(settings.plain.gpuCapture, false);
+        assert.equal(warn.mock.callCount(), 1, "nao rodou de novo");
     });
 
     test("nunca lanca: sem configuracoes nao ha o que migrar; uma falha vira so um aviso no console", t => {
