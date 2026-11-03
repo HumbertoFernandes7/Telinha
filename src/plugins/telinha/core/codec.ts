@@ -666,13 +666,53 @@ export function h264HwAcceptsSize(width: number, height: number): boolean {
     return width % 2 === 0 && height % 2 === 0 && height >= H264_HW_MIN_HEIGHT;
 }
 
+/** Famílias de codec de um mimeType ou de um nome de encoder (encoderFamilyOf, mimeFamilyOf). */
+type CodecFamily = "h264" | "h265" | "av1" | "vpx";
+
+/**
+ * A familia de codec que um encoderImplementation do Chromium codifica, pelo nome: "OpenH264" e "... H.264 Encoder MFT"
+ * (h264), "... HEVC/H.265 ..." (h265), "libaom", "SVT-AV1", "rav1e" e "... AV1 Encoder ..." (av1), "libvpx" e "... VP9 ..."
+ * (vpx). undefined = o nome nao diz (ex.: "ExternalEncoder", "MediaFoundationVideoEncodeAccelerator" sem o fabricante).
+ */
+function encoderFamilyOf(implementation: string | undefined): CodecFamily | undefined {
+    const name = implementation ?? "";
+    // "av1" solto no meio: nomes colados como "AMDav1Encoder" (sem \b dos dois lados)
+    if (/libaom|svt-?av1|rav1e|dav1d|av1/i.test(name)) return "av1";
+    if (/libvpx|\bvp[89]\b/i.test(name)) return "vpx";
+    if (/hevc|h\.?265/i.test(name)) return "h265";
+    if (/openh264|h\.?264|\bavc\b/i.test(name)) return "h264";
+    return undefined;
+}
+
+/** A familia de codec de um mimeType ("video/H264" → h264). undefined = outro (ex.: rtx, red). */
+function mimeFamilyOf(mimeType: string): CodecFamily | undefined {
+    const m = /^video\/(h264|h265|hevc|av1|vp8|vp9)$/i.exec(mimeType)?.[1]?.toLowerCase();
+    if (!m) return undefined;
+    return m === "hevc" ? "h265" : m === "vp8" || m === "vp9" ? "vpx" : (m as CodecFamily);
+}
+
+/**
+ * O encoder do relatorio e de OUTRO codec que o mimeType dele? O getStats le o codec (codecId) e o encoder
+ * (encoderImplementation) em momentos diferentes: logo depois de a preferencia de codec valer, o outbound-rtp ja aponta
+ * para o H.264 negociado mas o encoder ainda e o do codec anterior (log de 02/11: libaom, o AV1 por software, sem tamanho
+ * e sem powerEfficientEncoder de H.264, 0,4 s depois da resposta). Esse relatorio nao diz nada do codec julgado: quem
+ * confere o encoder espera as proximas estatisticas (streaming.ts → tick, isSoftwareH264, isOffHardwareAv1). Sem nome
+ * conclusivo, ou com o mesmo codec, false.
+ */
+export function isForeignEncoder(r: EncoderReport): boolean {
+    const encoder = encoderFamilyOf(r.implementation);
+    const wanted = mimeFamilyOf(r.mimeType);
+    return !!encoder && !!wanted && encoder !== wanted;
+}
+
 /**
  * O envio esta em H.264 codificado por software? So com evidencia: o encoder ja produziu quadros e diz
  * powerEfficientEncoder false, ou (sem esse campo) se chama OpenH264. O Chromium so expoe os dois campos com uma
- * captura no ar; sem eles nao da para saber (false).
+ * captura no ar; sem eles nao da para saber (false). O encoder de outro codec (libaom do AV1 de antes da troca,
+ * isForeignEncoder) nunca e o H.264 caindo para software.
  */
 export function isSoftwareH264(r: EncoderReport): boolean {
-    if (!/^video\/h264$/i.test(r.mimeType) || (r.framesEncoded ?? 0) <= 0) return false;
+    if (!/^video\/h264$/i.test(r.mimeType) || (r.framesEncoded ?? 0) <= 0 || isForeignEncoder(r)) return false;
     if (typeof r.powerEfficient === "boolean") return !r.powerEfficient;
     return /openh264/i.test(r.implementation ?? "");
 }
@@ -700,7 +740,7 @@ export function isTransientSoftwareH264(r: EncoderReport): boolean {
  * para o proximo codec negociado (o H.264 reserva), e quem chama ve o mimeType mudar (streaming.ts → checkH265).
  */
 export function isOffHardwareH265(r: EncoderReport): boolean {
-    return /^video\/h265$/i.test(r.mimeType) && (r.framesEncoded ?? 0) > 0 && r.powerEfficient === false;
+    return /^video\/h265$/i.test(r.mimeType) && (r.framesEncoded ?? 0) > 0 && r.powerEfficient === false && !isForeignEncoder(r);
 }
 
 /**
@@ -717,7 +757,7 @@ export const AV1_HW_MIN_HEIGHT = 270;
  * 270p (AV1_HW_MIN_HEIGHT) e o software de proposito e nao conta. Sem evidencia: false.
  */
 export function isOffHardwareAv1(r: EncoderReport): boolean {
-    if (!/^video\/av1$/i.test(r.mimeType) || (r.framesEncoded ?? 0) <= 0) return false;
+    if (!/^video\/av1$/i.test(r.mimeType) || (r.framesEncoded ?? 0) <= 0 || isForeignEncoder(r)) return false;
     if (r.height && r.height < AV1_HW_MIN_HEIGHT) return false;
     if (typeof r.powerEfficient === "boolean") return !r.powerEfficient;
     return /libaom|svt|rav1e/i.test(r.implementation ?? "");
