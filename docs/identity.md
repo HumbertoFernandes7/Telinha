@@ -1,7 +1,8 @@
 # Telinha — prova de identidade do Discord entre peers
 
-Status: **integrado** à sessão (branch `feat/identity`), com o Client ID do app "Telinha" em
-`src/plugins/telinha/core/identity/config.ts`. Falta o teste manual com o app real (checklist no fim).
+Status: **no produto** (vai em toda versão), com o Client ID do app "Telinha" em
+`src/plugins/telinha/core/identity/config.ts`. O checklist de teste manual no fim ainda não foi feito inteiro entre
+dois PCs (o `exp` do token já foi medido com o app real).
 Sem servidor nosso: só o Discord (OIDC) e os próprios peers.
 
 ## O problema
@@ -228,7 +229,7 @@ Conferido contra o app real **sem login** (2026-10-29):
 
 ## Testes
 
-`pnpm test:file src/plugins/telinha/core/identity/identity.test.ts` (também no `pnpm test:unit`) — 54 testes das partes puras: os 32 do protótipo (token válido, copiado, vencido, `sub`/
+`pnpm test:file src/plugins/telinha/core/identity/identity.test.ts` (e os outros `*.test.ts` de `core/identity/` e `core/session.identity.test.ts`, todos no `pnpm test:unit`) — as partes puras: os 32 do protótipo (token válido, copiado, vencido, `sub`/
 `aud`/`iss` errados, assinatura, `kid`, `alg`, entradas malformadas, fingerprint remoto, PKCE, `location` do
 modal, troca do code, `JwksCache`) e mais: **sem Client ID = v0.1.0** para todas as combinações (hello byte a
 byte, admissão, aprovação, duplicados, nenhum token vira "falso"); admissão para verificado / não verificado

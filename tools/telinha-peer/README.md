@@ -1,7 +1,9 @@
 # Telinha — amigo virtual
 
-Página fora do Discord que fala **exatamente o protocolo P2P v1** do plugin
-`src/plugins/telinha` (Trystero 0.26.0 via Nostr + WebRTC direto, só STUN). Serve para
+Página fora do Discord que fala o **protocolo P2P v1** do plugin
+`src/plugins/telinha` (Trystero 0.26.0 via Nostr + WebRTC direto, só STUN), só o núcleo dele: presença, `watch`,
+aprovação e senha. Não tem as partes opcionais (identidade verificada, pedido de codec, diagnóstico compartilhado e
+`caps.hwDecode` por perfil), então com ela o plugin sempre manda H.264 Baseline ou VP9 (nunca H.264 High, H.265 nem AV1). Serve para
 testar o plugin do Discord localmente **sem uma segunda pessoa**: a página entra na mesma
 sala do canal de voz, transmite (padrão de teste ou uma tela/aba do navegador) e assiste à
 transmissão do plugin.
@@ -78,7 +80,7 @@ precisa pedir de novo.
 2. Em "Peers na sala" o peer do plugin aparece com "● transmitindo" (título, tipo
    `screen`/`window`, resolução, fps, áudio) e o botão **Assistir** (envia `watch start`).
 3. O vídeo aparece com stats ao vivo: resolução, fps, kbps, **codec** (ex.: `H264
-   (42e01f)` ou `VP8`), decoder (software/HW), perda, jitter, quadros perdidos, e os tempos
+   (42001f)` ou `VP9`), decoder (software/HW), perda, jitter, quadros perdidos, e os tempos
    até o 1º quadro. **Parar** envia `watch stop`.
 4. Para testar a escolha de codec do plugin, alterne a caixa `caps.h264HwDecode`, peça
    para assistir de novo e confira o codec mostrado (o plugin lê `caps` da presença).
