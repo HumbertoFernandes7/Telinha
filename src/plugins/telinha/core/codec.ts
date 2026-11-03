@@ -667,14 +667,14 @@ export function h264HwAcceptsSize(width: number, height: number): boolean {
 }
 
 /** Famílias de codec de um mimeType ou de um nome de encoder (encoderFamilyOf, mimeFamilyOf). */
-export type CodecFamily = "h264" | "h265" | "av1" | "vpx";
+type CodecFamily = "h264" | "h265" | "av1" | "vpx";
 
 /**
  * A familia de codec que um encoderImplementation do Chromium codifica, pelo nome: "OpenH264" e "... H.264 Encoder MFT"
  * (h264), "... HEVC/H.265 ..." (h265), "libaom", "SVT-AV1", "rav1e" e "... AV1 Encoder ..." (av1), "libvpx" e "... VP9 ..."
  * (vpx). undefined = o nome nao diz (ex.: "ExternalEncoder", "MediaFoundationVideoEncodeAccelerator" sem o fabricante).
  */
-export function encoderFamilyOf(implementation: string | undefined): CodecFamily | undefined {
+function encoderFamilyOf(implementation: string | undefined): CodecFamily | undefined {
     const name = implementation ?? "";
     // "av1" solto no meio: nomes colados como "AMDav1Encoder" (sem \b dos dois lados)
     if (/libaom|svt-?av1|rav1e|dav1d|av1/i.test(name)) return "av1";
@@ -685,7 +685,7 @@ export function encoderFamilyOf(implementation: string | undefined): CodecFamily
 }
 
 /** A familia de codec de um mimeType ("video/H264" → h264). undefined = outro (ex.: rtx, red). */
-export function mimeFamilyOf(mimeType: string): CodecFamily | undefined {
+function mimeFamilyOf(mimeType: string): CodecFamily | undefined {
     const m = /^video\/(h264|h265|hevc|av1|vp8|vp9)$/i.exec(mimeType)?.[1]?.toLowerCase();
     if (!m) return undefined;
     return m === "hevc" ? "h265" : m === "vp8" || m === "vp9" ? "vpx" : (m as CodecFamily);

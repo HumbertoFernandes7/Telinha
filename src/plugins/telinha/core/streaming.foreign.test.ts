@@ -157,4 +157,21 @@ describe("encoder de outro codec no relatorio por tempo demais (checkForeign)", 
         assert.equal(sendPlanFor(v.peerId)?.codec, "h264");
         assert.equal(getLocalCaps().h264HwEncode, true);
     });
+
+    test("foreign com a conexao ainda nao no ar: o relogio nao corre (nada contido); so conta depois de conectar", async () => {
+        const v = await watcher("conectando");
+        v.pc.connectionState = "connecting";
+        v.sender.stats = foreignStats();
+        const since = logMark();
+        await seconds(rig, H264_STALL_MS / 1000 + 6);
+        assert.equal(isContained(v.pc as unknown as RTCPeerConnection), false, "sem conexao o relogio nao anda: nada contido");
+        assert.deepEqual(repliesTo(rig.room, v.peerId).filter(m => m.op === "stuck"), []);
+        assert.deepEqual(about(since(), v), []);
+        assert.equal(stuckRecord(), null, "nada marcado");
+
+        // conectou: o relogio comeca agora, nao de antes
+        v.pc.connectionState = "connected";
+        await seconds(rig, 5);
+        assert.equal(isContained(v.pc as unknown as RTCPeerConnection), false, "o tempo conta so depois de conectar");
+    });
 });
