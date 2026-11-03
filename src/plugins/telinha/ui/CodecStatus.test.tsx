@@ -87,5 +87,5 @@ test("ligado nesta partida: so a linha do que falta deste PC, sem botao; e o que
     render(def.component({}));
     await settle();
     assert.ok(screen.getByText(/^AV1: .*; vai o do Automático\.$/));
-    assert.equal(screen.queryByRole("button"), null);
+    assert.ok(!screen.queryByRole("button"), "nao deveria existir: elemento com papel 'button'");
 });

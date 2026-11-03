@@ -103,9 +103,9 @@ describe("fakes", () => {
         let changes = 0;
         document.addEventListener("fullscreenchange", () => changes++);
         await el.requestFullscreen();
-        assert.equal(document.fullscreenElement, el);
+        assert.ok(document.fullscreenElement === el, "o elemento esta em tela cheia");
         await document.exitFullscreen();
-        assert.equal(document.fullscreenElement, null);
+        assert.ok(!document.fullscreenElement, "saiu da tela cheia: nenhum elemento em tela cheia");
         assert.equal(changes, 2);
 
         canvas2d.pixels = (w, h) => new Uint8ClampedArray(w * h * 4);
@@ -225,7 +225,7 @@ describe("fakes", () => {
         fireEvent.click(screen.getByLabelText(MODAL_CLOSE_LABEL));
         await settle();
         assert.equal(modals.list().length, 0);
-        assert.equal(screen.queryByText("Quem pode assistir"), null);
+        assert.ok(!screen.queryByText("Quem pode assistir"), "nao deveria existir: texto 'Quem pode assistir'");
     });
 
     test("modals: a \"Fechar\" action is the only button with that name, and two ModalHosts draw each modal once", async () => {

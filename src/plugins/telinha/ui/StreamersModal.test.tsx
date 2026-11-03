@@ -63,7 +63,7 @@ describe("StreamersModal (so com o estado do Telinha)", () => {
             assert.equal(modal.title(), "Quem está transmitindo");
             assert.match(modal.text(), /Transmissões pelo Telinha na sua call de voz\. Cada uma abre numa janela própria\./);
             screen.getByText("Entre num canal de voz para ver quem está transmitindo pelo Telinha.");
-            assert.deepEqual(rows(), []);
+            assert.equal(rows().length, 0, "nenhuma linha de transmissao deveria existir");
         });
 
         test("na sala do Telinha mas ninguem transmite: avisa que ninguem transmite", () => {
@@ -82,7 +82,7 @@ describe("StreamersModal (so com o estado do Telinha)", () => {
         test("quem esta na sala mas nao transmite nao entra na lista", () => {
             show({ peers: [friend({ streaming: false, stream: undefined })] });
             openInHost(openStreamersModal);
-            assert.deepEqual(rows(), []);
+            assert.equal(rows().length, 0, "nenhuma linha de transmissao deveria existir");
             screen.getByText(/Ninguém está transmitindo/);
         });
 
@@ -90,7 +90,7 @@ describe("StreamersModal (so com o estado do Telinha)", () => {
             act(() => setState({ ...EMPTY, identityAlerts: undefined }));
             openInHost(openStreamersModal);
             screen.getByText("Ninguém está transmitindo pelo Telinha nesta call agora.");
-            assert.equal(screen.queryByRole("status"), null);
+            assert.ok(!screen.queryByRole("status"), "nao deveria existir: elemento com papel 'status'");
         });
 
         test("Fechar fecha o modal", () => {
@@ -109,10 +109,10 @@ describe("StreamersModal (so com o estado do Telinha)", () => {
             const [row] = rows();
             assert.equal(nameOf(row), "Ana", "o nome do Discord do id anunciado, nao o apelido anunciado");
             assert.equal(row.querySelector(".vc-telinha-id-badge")?.textContent, "✔ verificado");
-            assert.equal(row.querySelector(".vc-telinha-access-badge"), null, "Todos da call nao tem etiqueta");
+            assert.ok(!row.querySelector(".vc-telinha-access-badge"), "Todos da call nao tem etiqueta");
             assert.equal(row.querySelector(".vc-telinha-streamer-meta")?.textContent, "Tela inteira · 1080p · 60 fps · com som");
             assert.equal(within(row).getByRole("button", { name: "Assistir" }).dataset.variant, "primary");
-            assert.equal(screen.queryByText(/Ninguém está transmitindo/), null);
+            assert.ok(!screen.queryByText(/Ninguém está transmitindo/), "nao deveria existir: texto /Ninguém está transmitindo/");
         });
 
         test("modo de acesso aparece como etiqueta (com o modo por extenso no tooltip) e quem esta fora do canal de voz e marcado", () => {
@@ -147,7 +147,7 @@ describe("StreamersModal (so com o estado do Telinha)", () => {
         test("sem identidade (recurso desligado ou versao antiga): sem selo", () => {
             show({ peers: [friend({ identity: undefined })] });
             openInHost(openStreamersModal);
-            assert.equal(rows()[0].querySelector(".vc-telinha-id-badge"), null);
+            assert.ok(!rows()[0].querySelector(".vc-telinha-id-badge"), "nao deveria existir: elemento '.vc-telinha-id-badge'");
         });
 
         test("quem voce ja esta assistindo mostra Abrir janela em vez de Assistir", () => {
@@ -227,7 +227,7 @@ describe("StreamersModal (so com o estado do Telinha)", () => {
             assert.equal(row.querySelector(".vc-telinha-streamer-meta")?.textContent, "Tela inteira · Todos da call · ninguém assistindo ainda");
             assert.deepEqual(within(row).getAllByRole("button").map(b => b.textContent), ["Quem assiste", "Trocar", "Parar"]);
             assert.equal(within(row).getByRole("button", { name: "Parar" }).dataset.variant, "dangerPrimary");
-            assert.equal(screen.queryByText(/Ninguém está transmitindo/), null, "voce transmite: a lista nao esta vazia");
+            assert.ok(!screen.queryByText(/Ninguém está transmitindo/), "voce transmite: a lista nao esta vazia");
         });
 
         test("janela com senha e dois assistindo", () => {
@@ -293,7 +293,7 @@ describe("StreamersModal com o nucleo de verdade", () => {
 
         act(() => scene.peerStreams("peerA", FRIEND_ID, "amigo", { access: "approval" }));
         await settle();
-        assert.equal(screen.queryByText(/Ninguém está transmitindo/), null);
+        assert.ok(!screen.queryByText(/Ninguém está transmitindo/), "nao deveria existir: texto /Ninguém está transmitindo/");
         const [row] = rows();
         assert.equal(nameOf(row), "Amigo", "apelido global do Discord");
         assert.equal(row.querySelector(".vc-telinha-access-badge")?.textContent, "✋ com aprovação");
@@ -315,7 +315,7 @@ describe("StreamersModal com o nucleo de verdade", () => {
         fireEvent.click(within(own).getByRole("button", { name: "Parar" }));
         await until(() => getState().local === null);
         await settle();
-        assert.equal(rows().find(r => nameOf(r)?.endsWith("(você)")), undefined, "a sua linha sumiu");
+        assert.ok(!rows().find(r => nameOf(r)?.endsWith("(você)")), "a sua linha sumiu");
         assert.deepEqual(toasts, []);
     });
 });

@@ -62,8 +62,8 @@ describe("com o loader do add-on", () => {
         assert.equal(screen.getByText("0.2.3").tagName, "STRONG");
         assert.ok(screen.getByText("Em dia."));
         assert.equal(button("Procurar atualização").disabled, false);
-        assert.equal(screen.queryByRole("button", { name: "Atualizar" }), null);
-        assert.equal(screen.queryByRole("button", { name: "Reiniciar agora" }), null);
+        assert.ok(!screen.queryByRole("button", { name: "Atualizar" }), "nao deveria existir: botao 'Atualizar'");
+        assert.ok(!screen.queryByRole("button", { name: "Reiniciar agora" }), "nao deveria existir: botao 'Reiniciar agora'");
     });
 
     test("a linha de status acompanha o que o main passa a dizer (sem recarregar a pagina)", async () => {
@@ -106,7 +106,7 @@ describe("com o loader do add-on", () => {
         fireEvent.click(button("Atualizar"));
         await waitFor(() => assert.ok(screen.getByText("Versão 0.2.4 pronta: reinicie o Discord para usar.")));
         assert.equal(native!.calls.filter(c => c.name === "updateDownload").length, 1);
-        assert.equal(screen.queryByRole("button", { name: "Atualizar" }), null);
+        assert.ok(!screen.queryByRole("button", { name: "Atualizar" }), "nao deveria existir: botao 'Atualizar'");
         assert.ok(button("Reiniciar agora"));
     });
 
@@ -116,7 +116,7 @@ describe("com o loader do add-on", () => {
         render(<UpdateSection />);
         await settle();
         assert.ok(screen.getByText("Versão 0.3.0 pronta, mas não entrou ao reiniciar (2 tentativas): outro Discord estava aberto quando este abriu (Discord Canary). Feche todos os Discords, inclusive pelo ícone perto do relógio (botão direito → Sair do Discord), e abra de novo."));
-        assert.equal(screen.queryByRole("button", { name: "Reiniciar agora" }), null);
+        assert.ok(!screen.queryByRole("button", { name: "Reiniciar agora" }), "nao deveria existir: botao 'Reiniciar agora'");
         const relaunch = mock.fn();
         g.DiscordNative = { app: { relaunch } };
         fireEvent.click(button("Fechei os outros, reiniciar"));
