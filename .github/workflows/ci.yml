@@ -5,7 +5,8 @@
 #     version or the last vX.Y.Z tag + 1 patch, whichever is greater) and whether it ships (product files changed
 #     since that tag); in the job summary
 #   - pnpm bootstrap: the official Vencord pinned in vencord.json, fetched and built into .vencord/
-#   - pnpm build:helper: native-audio\telinha-audio.exe (MSVC), which build:addon packs into the payload
+#   - pnpm build:helper: native-audio\bin\telinha-audio.exe (MSVC), which build:addon packs into the payload; cached
+#     under the hash of native-audio/** (a hit is the same exe: same sources), rebuilt on any change there
 #   - pnpm check:static: typecheck, lint, stylelint
 #   - pnpm build:addon + smoke, then pnpm test:coverage: the unit tests and test:addon (fake Discord/GitHub trees, and
 #     run-release-test.mjs: the notes template + the zip just built through the updater's own checks), each run once,
@@ -150,9 +151,37 @@ jobs:
           path: ${{ runner.temp }}/vencord-src
           key: ${{ steps.vencord-cache.outputs.cache-primary-key }}
 
+      # The MSVC helper is a pure function of native-audio/** (sources, resource, tests and build.cmd, whose cl/link
+      # flags include /Brepro: no timestamp in the PE), so the exe is cached under the hash of that whole folder: any
+      # change to it, build.cmd included, is a new key and a rebuild. Both copies build:addon looks at are saved together.
+      - name: Restore the audio helper
+        id: helper-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            native-audio/bin/telinha-audio.exe
+            dist/telinha-audio.exe
+          key: helper-${{ runner.os }}-${{ hashFiles('native-audio/**') }}
+
       # native-audio\build.cmd finds MSVC itself (vswhere + vcvars64), which the Windows runner image ships.
       - name: Build the audio helper (MSVC)
+        if: steps.helper-cache.outputs.cache-hit != 'true'
         run: pnpm build:helper
+
+      - name: Save the audio helper
+        if: steps.helper-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            native-audio/bin/telinha-audio.exe
+            dist/telinha-audio.exe
+          key: ${{ steps.helper-cache.outputs.cache-primary-key }}
+
+      # Built or restored, both copies must be there and identical: build:addon packs this exe into the payload.
+      - name: Audio helper (cache ${{ steps.helper-cache.outputs.cache-hit == 'true' && 'hit' || 'miss' }})
+        run: |
+          sha256sum native-audio/bin/telinha-audio.exe dist/telinha-audio.exe
+          cmp native-audio/bin/telinha-audio.exe dist/telinha-audio.exe
 
       # ------------------------------------------------------------------ gates
       # build:addon makes dist/addon/Telinha-addon-<commit>.zip as TELINHA_VERSION, from the clean checkout (a changed
