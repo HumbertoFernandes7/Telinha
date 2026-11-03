@@ -325,6 +325,41 @@ describe("start e stop do plugin", () => {
         assert.equal(getState().inRoom, false, "a sessao limpou o estado");
     });
 
+    test("start liga a captura pela placa de video (padrao novo), grava o arquivo do loader e vira Tempo real o que estava em Alta; uma escolha depois fica", async t => {
+        const clock = useFakeClock(t);
+        native.restore();
+        let saved = false;
+        const status = () => ({ loader: true, build: 26300, supported: true, saved, requested: false, applied: null, loaderNote: null, enableFeatures: null, saveError: null });
+        native = installNative({
+            gpuCaptureStatus: async () => status(),
+            setGpuCapture: async (on: boolean) => {
+                saved = on;
+                return status();
+            }
+        }, { addon: { updateStatus: async () => statusOf({ phase: "ready", ready: "0.9.0" }) } });
+        // em disco: o padrao antigo ficou salvo (captura desligada) e a prioridade estava em Alta
+        pluginSettings.load({ gpuCapture: false, gpuPriorityMode: "high" }, { lazy: true });
+
+        plugin.start();
+        await clock.tickAsync(0);
+
+        assert.equal(settings.plain.gpuCapture, true);
+        assert.equal(settings.plain.gpuPriorityMode, "realtime");
+        assert.equal((settings.plain as Record<string, unknown>).gpuCaptureDefaultOn, true);
+        assert.equal((settings.plain as Record<string, unknown>).gpuPriorityRealtimeDefault, true);
+        assert.equal(saved, true, "o capture-flags.json diz ligada para a proxima partida");
+        assert.deepEqual(native.calls.filter(c => c.name === "setGpuCapture").map(c => c.args[0]).at(-1), true);
+
+        // o usuario desliga e reabre o Discord: a escolha fica (o marcador ja existe)
+        plugin.stop();
+        pluginSettings.load({ gpuCapture: false, gpuPriorityMode: "high", gpuCaptureDefaultOn: true, gpuPriorityRealtimeDefault: true }, { lazy: true });
+        plugin.start();
+        await clock.tickAsync(0);
+        assert.equal(settings.plain.gpuCapture, false);
+        assert.equal(settings.plain.gpuPriorityMode, "high");
+        assert.equal(saved, false, "o arquivo volta a dizer desligada");
+    });
+
     test("falha ao ligar ou desligar a sessao: so um erro no log do plugin, o Vencord nao ve excecao", t => {
         t.mock.method(FluxDispatcher, "subscribe", () => {
             throw new Error("flux caiu");

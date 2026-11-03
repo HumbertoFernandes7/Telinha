@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-// Detector de "jogo pesado" para a opcao "Tempo real (teste)" da prioridade da captura na placa de video. Funcao pura (sem
+// Detector de "jogo pesado" para a opcao "Tempo real" da prioridade da captura na placa de video. Funcao pura (sem
 // relogio, sem native, sem log): recebe o estado, a ultima leitura do peso da live (core/liveWeight.ts) e o "agora", e diz
 // se a prioridade deve ir para o tempo real ou voltar para alta. Quem chama (core/captureBoost.ts) guarda o estado, pede a
 // troca ao main e escreve o log.

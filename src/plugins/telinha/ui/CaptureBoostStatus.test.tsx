@@ -33,6 +33,8 @@ function main(patch: Partial<GpuCaptureStatus> = {}) {
 
 beforeEach(() => {
     resetVencordFakes();
+    // os padroes agora sao ligados; estes testes partem das duas opcoes desligadas
+    pluginSettings.load({ gpuCapture: false, gpuPriorityMode: "off" });
     resetCaptureBoostForTests();
 });
 
@@ -84,7 +86,7 @@ test("ligada nesta partida: so a linha, sem botao", async () => {
     render(<CaptureBoostStatus />);
     await settle();
     assert.ok(screen.getByText("Captura pela placa de vídeo: ligada."));
-    assert.ok(!screen.queryByRole("button"), "nao deveria existir: elemento com papel 'button'");
+    assert.ok(!screen.queryByRole("button"), "nada deveria aparecer");
 });
 
 test("o que settings.ts entrega ao Vencord (OptionType.COMPONENT chama a funcao direto) e este componente", async () => {
@@ -102,13 +104,13 @@ test("ligar a prioridade na placa de video: a linha dela aparece (sem botao: nao
     env = installNative({ ...env!.telinha, setGpuPriority: async () => null });
     render(<CaptureBoostStatus />);
     await settle();
-    assert.ok(!screen.queryByText(/Prioridade/), "nao deveria existir: texto /Prioridade/");
+    assert.ok(!screen.queryByText(/Prioridade/), "nada deveria aparecer");
     act(() => {
         settings.store.gpuPriorityMode = "high";
     });
     await settle();
     assert.ok(screen.getByText("Prioridade da captura na placa de vídeo: vale quando você transmitir."));
-    assert.ok(!screen.queryByRole("button"), "nao deveria existir: elemento com papel 'button'");
+    assert.ok(!screen.queryByRole("button"), "nada deveria aparecer");
 });
 
 test("Windows mais antigo que o 24H2: a linha aparece mesmo com a opcao desligada", async () => {
@@ -116,5 +118,5 @@ test("Windows mais antigo que o 24H2: a linha aparece mesmo com a opcao desligad
     render(<CaptureBoostStatus />);
     await settle();
     assert.ok(screen.getByText("Captura pela placa de vídeo: não faz nada neste PC (precisa do Windows 11 24H2 ou mais novo; este é o build 22631)."));
-    assert.ok(!screen.queryByRole("button"), "nao deveria existir: elemento com papel 'button'");
+    assert.ok(!screen.queryByRole("button"), "nada deveria aparecer");
 });

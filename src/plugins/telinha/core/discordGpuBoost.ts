@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-// EXPERIMENTO (modo "Tempo real (teste)" da prioridade da captura na placa de video): pede ao proprio Discord que ponha os
+// Modo "Tempo real" (padrao) da prioridade da captura na placa de video: pede ao proprio Discord que ponha os
 // processos dele em REALTIME na placa de video, pelo mesmo caminho do "GPU boost" do Discord. O modulo nativo do Discord
 // (discord_utils.node) exporta setGPUBoostEnabledByPid, que manda um pedido ao servico DiscordSystemHelper (SYSTEM, so aceita
 // quem foi assinado pela Discord Inc.; o codigo roda dentro do Discord.exe). A assinatura exata da funcao nao e conhecida
@@ -28,7 +28,7 @@ import { errorText, log } from "./log";
 
 const MODULE_NAME = "discord_utils";
 const FUNCTION_NAME = "setGPUBoostEnabledByPid";
-const PREFIX = "Teste do tempo real pelo Discord";
+const PREFIX = "Tempo real pelo Discord";
 /** prazo para o requireModule responder (pode devolver uma Promise) */
 export const PROBE_TIMEOUT_MS = 3000;
 /** prazo para o pedido ao servico do Discord responder */
@@ -397,7 +397,7 @@ async function runStart(r: TestRun, opts: DiscordGpuBoostOptions) {
 }
 
 /**
- * A transmissao comecou em "Tempo real (teste)" e o "high" ja respondeu com os processos (core/captureBoost.ts): sonda o
+ * A transmissao comecou em "Tempo real" e o "high" ja respondeu com os processos (core/captureBoost.ts): sonda o
  * modulo do Discord e pede o REALTIME dos que o Telinha subiu. `reread` e o "high" do main (le as classes de novo, confere
  * os pids no fim e volta a HIGH depois do false). Em dobro (ja ha um teste na transmissao): nao faz nada. Se o fim da
  * transmissao anterior ainda esta desfazendo, espera ele. Nunca lanca.

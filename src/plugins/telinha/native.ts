@@ -333,12 +333,12 @@ export function setGpuPriority(_: IpcMainInvokeEvent, mode: string): Promise<Gpu
     return setGpuPriorityMain(mode === "high" || mode === "realtime" ? mode : "restore");
 }
 
-/** "Tempo real (teste)": se da para tentar neste PC (gpu-priority.json) ou por que esta desligado (o encoder parou, a GPU caiu, o Discord morreu em REALTIME). */
+/** "Tempo real": se da para tentar neste PC (gpu-priority.json) ou por que esta desligado (o encoder parou, a GPU caiu, o Discord morreu em REALTIME). */
 export function gpuRealtimeStatus(_: IpcMainInvokeEvent): GpuRealtimeStatus {
     return gpuRealtimeStatusMain();
 }
 
-/** Um texto desliga o REALTIME neste PC (fica em HIGH); null liga de novo (o usuario escolheu "Tempo real (teste)" outra vez). */
+/** Um texto desliga o REALTIME neste PC (fica em HIGH); null liga de novo (o usuario escolheu "Tempo real" outra vez). */
 export function setGpuRealtimeBlocked(_: IpcMainInvokeEvent, why: string | null): GpuRealtimeStatus {
     return setGpuRealtimeBlockedMain(why);
 }

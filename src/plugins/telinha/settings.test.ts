@@ -28,7 +28,7 @@ import { OTHER_ID, pluginSettings, resetVencordFakes } from "@test/fakes/vencord
 import { type Call, friendArrives, goLive, joinCall } from "@test/helpers/wpc-session";
 import { OptionType } from "@utils/types";
 
-import { migrateAccessSettings, migrateGpuPrioritySettings, migrateQualitySettings, settings } from "./settings";
+import { migrateAccessSettings, migrateGpuCaptureSettings, migrateGpuPrioritySettings, migrateQualitySettings, settings } from "./settings";
 
 // defaultQuality ("Qualidade padrão", ate a v0.3.x) virou defaultResolution + defaultFps: migrateQualitySettings
 const STORED_KEYS = [
@@ -60,8 +60,8 @@ describe("as opcoes", () => {
             codec: "auto",
             autoUpdate: true,
             shareDiagnostics: false,
-            gpuCapture: false,
-            gpuPriorityMode: "off"
+            gpuCapture: true,
+            gpuPriorityMode: "realtime"
         });
     });
 
@@ -284,36 +284,86 @@ describe("migracao de 'Prioridade da captura na placa de vídeo' (liga/desliga) 
         resetVencordFakes();
     });
 
-    test("ligada vira Alta e a chave antiga FICA (um downgrade ainda a le); o resto fica como estava", () => {
+    const PRIORITY_MARKER = "gpuPriorityRealtimeDefault";
+    const raw = () => settings.plain as Record<string, unknown>;
+
+    test("o antigo liga/desliga ligado vira Tempo real e a chave antiga FICA (um downgrade ainda a le); o resto fica como estava", () => {
         onDisk({ gpuPriority: true, groupPassword: "x" });
         migrateGpuPrioritySettings();
-        assert.equal(settings.plain.gpuPriorityMode, "high");
-        assert.equal((settings.plain as Record<string, unknown>).gpuPriority, true);
+        assert.equal(settings.plain.gpuPriorityMode, "realtime");
+        assert.equal(raw().gpuPriority, true);
         assert.equal(settings.plain.groupPassword, "x");
+        assert.equal(raw()[PRIORITY_MARKER], true);
     });
 
-    test("desligada: nada muda, a chave antiga fica (vale o padrao, Desligada)", () => {
+    test("o antigo liga/desliga desligado: nada gravado no seletor, vale o padrao (Tempo real); a chave antiga fica", () => {
         onDisk({ gpuPriority: false });
         migrateGpuPrioritySettings();
-        assert.equal((settings.plain as Record<string, unknown>).gpuPriority, false);
+        assert.equal(raw().gpuPriority, false);
         assert.equal("gpuPriorityMode" in settings.plain, false);
-        assert.equal(settings.store.gpuPriorityMode, "off");
+        assert.equal(settings.store.gpuPriorityMode, "realtime");
+        assert.equal(raw()[PRIORITY_MARKER], true);
     });
 
-    test("quem ja escolheu no seletor mantem a escolha; rodar de novo nao desfaz", () => {
+    test("'Alta' salva antes do marcador vira Tempo real; depois do marcador, quem escolheu Alta fica com Alta", () => {
+        onDisk({ gpuPriorityMode: "high" });
+        migrateGpuPrioritySettings();
+        assert.equal(settings.plain.gpuPriorityMode, "realtime");
+        assert.equal(raw()[PRIORITY_MARKER], true);
+        // o usuario escolhe Alta depois: o marcador ja existe e a escolha fica (mesmo rodando de novo)
+        settings.store.gpuPriorityMode = "high";
+        migrateGpuPrioritySettings();
+        assert.equal(settings.plain.gpuPriorityMode, "high");
+        onDisk({ gpuPriorityMode: "high", [PRIORITY_MARKER]: true });
+        migrateGpuPrioritySettings();
+        assert.equal(settings.plain.gpuPriorityMode, "high");
+    });
+
+    test("'Desligada' salva antes do marcador vira Tempo real (na 0.3.9 era o padrao, gravado pelo Vencord, nao uma escolha); depois do marcador, quem desliga fica desligado", () => {
+        onDisk({ gpuPriorityMode: "off" });
+        migrateGpuPrioritySettings();
+        assert.equal(settings.plain.gpuPriorityMode, "realtime");
+        assert.equal(raw()[PRIORITY_MARKER], true);
+        // o usuario desliga depois: o marcador ja existe e a escolha fica (mesmo rodando de novo)
+        settings.store.gpuPriorityMode = "off";
+        migrateGpuPrioritySettings();
+        assert.equal(settings.plain.gpuPriorityMode, "off");
+        onDisk({ gpuPriorityMode: "off", [PRIORITY_MARKER]: true });
+        migrateGpuPrioritySettings();
+        assert.equal(settings.plain.gpuPriorityMode, "off");
+    });
+
+    test("Tempo real salvo fica; configuracao limpa: so o marcador, e vale o padrao (Tempo real)", () => {
         onDisk({ gpuPriority: true, gpuPriorityMode: "realtime" });
         migrateGpuPrioritySettings();
         assert.equal(settings.plain.gpuPriorityMode, "realtime");
-        assert.equal((settings.plain as Record<string, unknown>).gpuPriority, true);
-        migrateGpuPrioritySettings();
-        assert.equal(settings.plain.gpuPriorityMode, "realtime");
-        assert.equal((settings.plain as Record<string, unknown>).gpuPriority, true);
-    });
-
-    test("configuracao limpa: nada muda", () => {
+        assert.equal(raw().gpuPriority, true);
         onDisk({});
         migrateGpuPrioritySettings();
-        assert.deepEqual(Object.keys(settings.plain), []);
+        assert.deepEqual(Object.keys(settings.plain), [PRIORITY_MARKER]);
+        assert.equal(settings.store.gpuPriorityMode, "realtime");
+    });
+
+    test("um onChange que lanca: o marcador ja esta salvo e a migracao nao roda de novo (a escolha seguinte fica)", t => {
+        const warn = t.mock.method(console, "warn", () => { });
+        t.mock.method(settings.def.gpuPriorityMode, "onChange", () => {
+            throw new Error("onChange falhou");
+        });
+        onDisk({ gpuPriorityMode: "high" });
+        migrateGpuPrioritySettings();
+        assert.equal(warn.mock.callCount(), 1);
+        assert.equal(raw()[PRIORITY_MARKER], true);
+        // o usuario escolhe Alta e reabre o Discord: o marcador vale, nada muda
+        raw().gpuPriorityMode = "high";
+        migrateGpuPrioritySettings();
+        assert.equal(settings.plain.gpuPriorityMode, "high");
+        assert.equal(warn.mock.callCount(), 1, "nao rodou de novo");
+    });
+
+    test("valor desconhecido salvo volta ao padrao (Tempo real)", () => {
+        onDisk({ gpuPriorityMode: "tempo real" });
+        migrateGpuPrioritySettings();
+        assert.equal(settings.plain.gpuPriorityMode, "realtime");
     });
 
     test("nunca lanca: sem configuracoes carregadas nao ha o que migrar; uma falha vira so um aviso no console", t => {
@@ -413,5 +463,72 @@ describe("mudar uma opcao com a call no ar", () => {
         await eventually(() => first.left);
         await new Promise(resolve => setTimeout(resolve, 300));
         assert.equal(trystero.rooms.length, 2, "uma troca so");
+    });
+});
+
+describe("migracao de 'Captura pela placa de vídeo': ligada por padrao, uma vez", () => {
+    const MARKER = "gpuCaptureDefaultOn";
+    const raw = () => settings.plain as Record<string, unknown>;
+
+    beforeEach(() => {
+        resetVencordFakes();
+    });
+
+    test("quem tinha desligada (o padrao antigo ficou salvo) passa a ligada e ganha o marcador", () => {
+        pluginSettings.load({ gpuCapture: false, groupPassword: "x" }, { lazy: true });
+        migrateGpuCaptureSettings();
+        assert.equal(settings.plain.gpuCapture, true);
+        assert.equal(raw()[MARKER], true);
+        assert.equal(settings.plain.groupPassword, "x");
+    });
+
+    test("depois do marcador a escolha fica: desligada continua desligada, mesmo rodando de novo", () => {
+        pluginSettings.load({ gpuCapture: false, [MARKER]: true }, { lazy: true });
+        migrateGpuCaptureSettings();
+        assert.equal(settings.plain.gpuCapture, false);
+        pluginSettings.load({ gpuCapture: true, [MARKER]: true }, { lazy: true });
+        migrateGpuCaptureSettings();
+        assert.equal(settings.plain.gpuCapture, true);
+    });
+
+    test("nada salvo: vale o padrao (ligada) e o marcador e gravado; rodar de novo respeita uma escolha feita depois", () => {
+        pluginSettings.load({}, { lazy: true });
+        migrateGpuCaptureSettings();
+        assert.equal(settings.store.gpuCapture, true);
+        assert.equal(raw()[MARKER], true);
+        settings.store.gpuCapture = false;
+        migrateGpuCaptureSettings();
+        assert.equal(settings.store.gpuCapture, false);
+    });
+
+    test("um onChange que lanca: o marcador ja esta salvo e a migracao nao roda de novo (a escolha seguinte fica)", t => {
+        const warn = t.mock.method(console, "warn", () => { });
+        t.mock.method(settings.def.gpuCapture, "onChange", () => {
+            throw new Error("onChange falhou");
+        });
+        pluginSettings.load({ gpuCapture: false }, { lazy: true });
+        migrateGpuCaptureSettings();
+        assert.equal(warn.mock.callCount(), 1);
+        assert.equal(raw()[MARKER], true);
+        raw().gpuCapture = false;
+        migrateGpuCaptureSettings();
+        assert.equal(settings.plain.gpuCapture, false);
+        assert.equal(warn.mock.callCount(), 1, "nao rodou de novo");
+    });
+
+    test("nunca lanca: sem configuracoes nao ha o que migrar; uma falha vira so um aviso no console", t => {
+        const warn = t.mock.method(console, "warn", () => { });
+        t.mock.getter(settings, "plain", () => undefined as never);
+        migrateGpuCaptureSettings();
+        assert.equal(warn.mock.callCount(), 0);
+        t.mock.restoreAll();
+
+        const warned = t.mock.method(console, "warn", () => { });
+        t.mock.getter(settings, "plain", () => {
+            throw new Error("Cannot access settings before plugin is initialized");
+        });
+        migrateGpuCaptureSettings();
+        assert.equal(warned.mock.callCount(), 1);
+        assert.match(String(warned.mock.calls[0].arguments[0]), /migração de "Captura pela placa de vídeo" falhou/);
     });
 });
