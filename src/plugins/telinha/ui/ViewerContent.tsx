@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-// The player shown inside a viewer window (Discord pop-out) or the in-app floating panel. It plays the main
-// window's MediaStream directly in a <video> created by the host document ("direct" strategy from the spike:
+// The player shown inside a viewer window (Discord pop-out), the in-app floating panel or the small "pip" window
+// (janelinha, no controls: the frame around it handles click/drag/close; see ui/PipViewer.tsx).
+// It plays the main window's MediaStream directly in a <video> created by the host document ("direct" strategy from the spike:
 // 1080p at ~49 fps in the pop-out). Everything here is styled inline: pop-outs don't receive Vencord's CSS.
 // The volume (and mute) is the one in ui/volumes.ts, shared with the call tile: what is set in one shows in the other.
 
@@ -19,7 +20,7 @@ import { CloseIcon, FullscreenIcon, StopIcon, VolumeIcon } from "./icons";
 import { useVolume, volumeKeyFor } from "./volumes";
 import { AuthorizeToWatchButton, PasswordForm, passwordOverlayText } from "./WatchGate";
 
-export type ViewerMode = "popout" | "floating";
+export type ViewerMode = "popout" | "floating" | "pip";
 
 const CONTROLS_IDLE_MS = 2500;
 
@@ -96,6 +97,8 @@ const buttonBase: CSSProperties = {
 const ghostButton: CSSProperties = { ...buttonBase, padding: "0 8px", background: "rgba(255, 255, 255, 0.12)" };
 const dangerButton: CSSProperties = { ...buttonBase, background: "#da373c" };
 const accentButton: CSSProperties = { ...buttonBase, background: ACCENT };
+/** "Ativar som" da janelinha: o unico controle dela, sempre visivel no canto de baixo a esquerda */
+const pipSoundButton: CSSProperties = { ...accentButton, position: "absolute", left: 8, bottom: 8, height: 28 };
 
 const spinnerStyle: CSSProperties = {
     width: 34,
@@ -276,6 +279,7 @@ export function ViewerContent({ peerId, mode, onMounted, onUnmounted, onClose }:
     const hasAudio = (stream?.getAudioTracks().length ?? 0) > 0 || !!peer?.stream?.hasAudio;
     const overlay = getOverlay(session, hadSession.current, name);
     const showControls = active || overlay != null;
+    const pip = mode === "pip";
 
     const poke = () => {
         if (!active) setActive(true);
@@ -346,7 +350,7 @@ export function ViewerContent({ peerId, mode, onMounted, onUnmounted, onClose }:
     return (
         <div
             ref={rootRef}
-            style={{ ...rootStyle, cursor: showControls ? "default" : "none" }}
+            style={{ ...rootStyle, cursor: pip ? "inherit" : showControls ? "default" : "none" }}
             onMouseMove={poke}
             onMouseLeave={() => {
                 if (idleTimer.current) clearTimeout(idleTimer.current);
@@ -354,16 +358,18 @@ export function ViewerContent({ peerId, mode, onMounted, onUnmounted, onClose }:
             }}
         >
             {/* The <video> is appended here imperatively; React never renders children into it */}
-            <div ref={mediaRef} style={mediaStyle} onDoubleClick={toggleFullscreen} />
+            <div ref={mediaRef} style={mediaStyle} onDoubleClick={pip ? undefined : toggleFullscreen} />
 
             {overlay && (
-                <div style={overlayStyle}>
+                <div style={pip ? { ...overlayStyle, gap: 8, padding: 12 } : overlayStyle}>
                     {overlay.spinner && <Spinner />}
-                    <div style={{ fontSize: 17, fontWeight: 600 }}>{overlay.title}</div>
-                    {overlay.detail && <div style={{ maxWidth: 520, color: "#b5bac1", fontSize: 13 }}>{overlay.detail}</div>}
-                    {overlay.gate === "password" && <PasswordForm key={peerId} peerId={peerId} />}
-                    {overlay.gate === "authorize" && <AuthorizeToWatchButton peerId={peerId} />}
-                    {overlay.closable && (
+                    <div style={{ fontSize: pip ? 13 : 17, fontWeight: 600 }}>{overlay.title}</div>
+                    {/* Na janelinha o aviso e so o titulo; o formulario de senha / autorizar fica na tile (o clique leva la) */}
+                    {pip && overlay.gate && <div style={{ color: "#b5bac1", fontSize: 12 }}>Clique para abrir a call</div>}
+                    {!pip && overlay.detail && <div style={{ maxWidth: 520, color: "#b5bac1", fontSize: 13 }}>{overlay.detail}</div>}
+                    {!pip && overlay.gate === "password" && <PasswordForm key={peerId} peerId={peerId} />}
+                    {!pip && overlay.gate === "authorize" && <AuthorizeToWatchButton peerId={peerId} />}
+                    {!pip && overlay.closable && (
                         <button style={ghostButton} onClick={onClose}>
                             <CloseIcon size={14} />
                             Fechar
@@ -378,23 +384,32 @@ export function ViewerContent({ peerId, mode, onMounted, onUnmounted, onClose }:
                 </div>
             )}
 
-            <div style={{ ...bottomBarStyle, opacity: showControls ? 1 : 0, pointerEvents: showControls ? "auto" : "none" }}>
-                <button style={dangerButton} onClick={onClose}>
-                    <StopIcon size={14} />
-                    Parar de assistir
+            {pip && hasAudio && autoplayBlocked && (
+                <button style={pipSoundButton} onClick={enableSound}>
+                    <VolumeIcon muted={true} />
+                    Ativar som
                 </button>
-                {soundControls}
-                <div style={{ flex: 1 }} />
-                {statsText && <span style={{ color: "#b5bac1", fontSize: 12, whiteSpace: "nowrap" }}>{statsText}</span>}
-                <button
-                    style={ghostButton}
-                    title={fullscreen ? "Sair da tela cheia" : "Tela cheia"}
-                    aria-label={fullscreen ? "Sair da tela cheia" : "Tela cheia"}
-                    onClick={toggleFullscreen}
-                >
-                    <FullscreenIcon exit={fullscreen} />
-                </button>
-            </div>
+            )}
+
+            {!pip && (
+                <div style={{ ...bottomBarStyle, opacity: showControls ? 1 : 0, pointerEvents: showControls ? "auto" : "none" }}>
+                    <button style={dangerButton} onClick={onClose}>
+                        <StopIcon size={14} />
+                        Parar de assistir
+                    </button>
+                    {soundControls}
+                    <div style={{ flex: 1 }} />
+                    {statsText && <span style={{ color: "#b5bac1", fontSize: 12, whiteSpace: "nowrap" }}>{statsText}</span>}
+                    <button
+                        style={ghostButton}
+                        title={fullscreen ? "Sair da tela cheia" : "Tela cheia"}
+                        aria-label={fullscreen ? "Sair da tela cheia" : "Tela cheia"}
+                        onClick={toggleFullscreen}
+                    >
+                        <FullscreenIcon exit={fullscreen} />
+                    </button>
+                </div>
+            )}
         </div>
     );
 }

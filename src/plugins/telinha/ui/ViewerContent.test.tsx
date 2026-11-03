@@ -23,6 +23,7 @@ import { animations, assertAbsent, installAnimate } from "@test/helpers/wpe-dom"
 import type { ReactNode } from "react";
 
 import { ViewerContent, type ViewerMode } from "./ViewerContent";
+import { setVolume, volumeKeyFor } from "./volumes";
 
 const PEER = "peerA";
 const EMPTY: TelinhaState = { inRoom: true, channelId: "500000000000000005", peers: [], local: null, viewing: {}, lastError: null, blocked: [], identityAlerts: [] };
@@ -527,6 +528,175 @@ describe("ViewerContent", () => {
             await settle();
             assertAbsent(document.fullscreenElement);
             assert.ok(warnings().includes("Tela cheia falhou"));
+        });
+    });
+
+    // #endregion
+
+    // #region janelinha (pip)
+
+    describe("janelinha (pip)", () => {
+        const pipKey = () => volumeKeyFor(PEER, FRIEND_ID);
+
+        test("sem controles: nada de Parar de assistir, Tela cheia, volume nem barra do nome", async () => {
+            show(session({ stream: stream(true), stats: { width: 1920, height: 1080, fps: 60, kbps: 4200 } }));
+            await mount("pip");
+            assertAbsent(screen.queryByRole("button", { name: "Parar de assistir" }));
+            assertAbsent(screen.queryByRole("button", { name: /Tela cheia/ }));
+            assertAbsent(screen.queryByLabelText("Volume"));
+            assertAbsent(screen.queryByRole("button", { name: /Silenciar|Ativar som/ }));
+            assertAbsent(screen.queryByText("amigo — Telinha"));
+            assertAbsent(screen.queryByText(/fps/));
+            assert.equal(screen.queryAllByRole("button").length, 0, "nenhum botao com a transmissao tocando");
+        });
+
+        test("nao ocupa a janela (sem ajuste de altura) e deixa o cursor para a moldura", async () => {
+            show(session({ stream: stream() }));
+            const { root } = await mount("pip");
+            assert.equal(root.style.height, "100%");
+            assert.equal(root.style.cursor, "inherit");
+        });
+
+        test("clicar duas vezes na imagem nao liga a tela cheia", async () => {
+            show(session({ stream: stream() }));
+            const { root } = await mount("pip");
+            fireEvent.doubleClick(root.firstElementChild as HTMLElement);
+            await settle();
+            assertAbsent(document.fullscreenElement);
+        });
+
+        test("nao mexe no titulo do Discord", async () => {
+            document.title = "Discord";
+            show(session({ stream: stream() }));
+            await mount("pip");
+            assert.equal(document.title, "Discord");
+        });
+
+        const titles: { name: string; sess: ViewerSession | null; title: string; spinner: boolean; }[] = [
+            { name: "sem sessao ainda", sess: null, title: "Conectando…", spinner: true },
+            { name: "conectando", sess: session({ status: "connecting" }), title: "Conectando…", spinner: true },
+            { name: "esperando aprovar (sem o detalhe)", sess: session({ status: "connecting", awaitingApproval: true }), title: "Aguardando o transmissor aprovar…", spinner: true },
+            { name: "conferindo a senha", sess: session({ status: "connecting", checkingPassword: true }), title: "Conferindo a senha…", spinner: true },
+            { name: "esperando o primeiro quadro", sess: session({ status: "waiting-first-frame" }), title: "Aguardando a primeira imagem…", spinner: true },
+            { name: "a transmissao acabou (sem Fechar)", sess: session({ status: "ended" }), title: "A transmissão terminou", spinner: false },
+            { name: "erro (sem detalhe nem Fechar)", sess: session({ status: "error", error: "Falha ao pedir a transmissão: x" }), title: "Não foi possível assistir a esta transmissão", spinner: false },
+            { name: "recusado", sess: session({ status: "error", denied: "declined", error: "O transmissor recusou o seu pedido para assistir." }), title: "O transmissor recusou sua visualização", spinner: false }
+        ];
+
+        for (const c of titles) {
+            test(`aviso so com o titulo: ${c.name}`, async () => {
+                show(c.sess);
+                await mount("pip");
+                const title = screen.getByText(c.title);
+                assert.equal(title.style.fontSize, "13px");
+                const overlay = title.parentElement as HTMLElement;
+                assert.equal(overlay.children.length, c.spinner ? 2 : 1, "so o titulo (e o spinner, quando carregando)");
+                assert.equal(overlay.textContent, c.title);
+                assert.equal(screen.queryAllByRole("button").length, 0);
+                assert.equal(animations.started.length > 0, c.spinner);
+            });
+        }
+
+        test("a sessao some depois de existir: \"A transmissão terminou\" sem botao", async () => {
+            show(session({ status: "connecting" }));
+            const view = viewer("pip");
+            const { rerender } = render(view.ui);
+            show(null);
+            rerender(view.ui);
+            await settle();
+            assert.ok(screen.getByText("A transmissão terminou"));
+            assert.equal(screen.queryAllByRole("button").length, 0);
+        });
+
+        test("pedindo a senha: so \"Clique para abrir a call\", sem campo, sem botoes e sem o detalhe", async () => {
+            show(session({ status: "connecting", passwordPrompt: { attemptsLeft: 5, wrong: false } }));
+            await mount("pip");
+            const overlay = screen.getByText("Esta transmissão é com senha").parentElement as HTMLElement;
+            assert.ok(within(overlay).getByText("Clique para abrir a call"));
+            assertAbsent(screen.queryByText(/Digite a senha/));
+            assertAbsent(overlay.querySelector("input"));
+            assert.equal(screen.queryAllByRole("button").length, 0);
+        });
+
+        test("senha errada e \"precisa autorizar o Telinha\": tambem mandam clicar para abrir a call", async () => {
+            show(session({ status: "connecting", passwordPrompt: { attemptsLeft: 1, wrong: true } }));
+            const wrong = await mount("pip");
+            assert.ok(screen.getByText("Senha incorreta"));
+            assert.ok(screen.getByText("Clique para abrir a call"));
+            assertAbsent(screen.queryByText(/Resta 1 tentativa/));
+            wrong.unmount();
+
+            show(session({ status: "error", denied: "notVerified" }));
+            await mount("pip");
+            assert.ok(screen.getByText("Autorize o Telinha no Discord para assistir"));
+            assert.ok(screen.getByText("Clique para abrir a call"));
+            assertAbsent(screen.queryByRole("button", { name: "Autorizar o Telinha" }));
+            assertAbsent(screen.queryByRole("button", { name: "Fechar" }));
+        });
+
+        test("tocando de verdade: sem aviso nenhum", async () => {
+            show(session({ stream: stream() }));
+            const { container } = await mount("pip");
+            assertAbsent(screen.queryByText(/Conectando|Aguardando|terminou|Não foi possível|enha/));
+            assert.ok(video(container));
+        });
+
+        test("o navegador recusa tocar com som: \"Ativar som\" aparece sempre, e o clique liga o som", async t => {
+            const clock = useFakeClock(t);
+            media.playImpl = async el => {
+                if (!el.muted) throw new DOMException("autoplay com som", "NotAllowedError");
+            };
+            show(session({ stream: stream(true) }), { discordUserId: freshId() });
+            const { container } = await mount("pip");
+            const v = video(container)!;
+            const enable = screen.getByRole("button", { name: /Ativar som/ });
+            assert.equal(enable.textContent, "Ativar som");
+            assert.equal(enable.style.position, "absolute");
+            assert.equal(enable.style.left, "8px");
+            assert.equal(enable.style.bottom, "8px");
+            assert.equal(v.muted, true);
+            assert.equal(screen.queryAllByRole("button").length, 1, "e o unico controle");
+
+            act(() => clock.tick(10_000)); // parado ha muito tempo: o botao nao some como a barra do player grande
+            assert.ok(screen.getByRole("button", { name: /Ativar som/ }));
+
+            media.playImpl = null;
+            fireEvent.click(enable);
+            await settle();
+            assert.equal(v.muted, false);
+            assertAbsent(screen.queryByRole("button", { name: /Ativar som/ }));
+            assertAbsent(screen.queryByLabelText("Volume"));
+            assert.deepEqual(warnings(), []);
+        });
+
+        test("recusa tocar com som mas a transmissao nao tem audio: nenhum botao", async () => {
+            media.playImpl = async el => {
+                if (!el.muted) throw new DOMException("autoplay com som", "NotAllowedError");
+            };
+            show(session({ stream: stream(false) }), { discordUserId: freshId() });
+            await mount("pip");
+            assert.equal(screen.queryAllByRole("button").length, 0);
+        });
+
+        test("o <video> toca o stream da sessao com o volume lembrado do amigo (o mesmo da tile e do visualizador)", async () => {
+            const s = stream(true);
+            setVolume(pipKey(), { volume: 0.4, muted: false });
+            try {
+                show(session({ stream: s }));
+                const { container } = await mount("pip");
+                const v = video(container)!;
+                assert.ok(v.srcObject === s);
+                assert.equal(v.volume, 0.4);
+                assert.equal(v.muted, false);
+                assert.ok(media.played.includes(v));
+
+                act(() => setVolume(pipKey(), { volume: 0.7, muted: true }));
+                await settle();
+                assert.equal(v.volume, 0.7, "mexer no volume em outro lugar acompanha");
+                assert.equal(v.muted, true);
+            } finally {
+                act(() => setVolume(pipKey(), { volume: 1, muted: false }));
+            }
         });
     });
 
