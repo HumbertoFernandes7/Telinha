@@ -67,7 +67,7 @@ describe("panelJsx: a barra do Telinha acima do painel da conta", () => {
     test("fora de um canal de voz a barra fica quieta e so o painel original aparece", () => {
         render(panelJsx.jsx("section", { "data-testid": "account" }));
         assert.ok(screen.getByTestId("account"));
-        assert.equal(screen.queryByRole("button", { name: /Transmitir com Telinha/ }), null);
+        assert.ok(!screen.queryByRole("button", { name: /Transmitir com Telinha/ }), "nao deveria existir: botao /Transmitir com Telinha/");
     });
 
     test("a chave (key) do elemento original vai para o fragmento, que e o que o React compara na lista", () => {
@@ -88,20 +88,20 @@ describe("voiceUserIconsJsx: a etiqueta TELINHA na linha do usuario", () => {
             const tag = screen.getByText("TELINHA");
             const icons = screen.getByTestId("icons");
             assert.equal(order(tag, icons), -1, "a etiqueta fica antes dos icones de mudo/surdo/AO VIVO");
-            assert.equal(screen.getByRole("button", { name: /Transmitindo pelo Telinha/ }), tag.closest("[role=button]"));
+            assert.ok(screen.getByRole("button", { name: /Transmitindo pelo Telinha/ }) === tag.closest("[role=button]"), "o botao e o proprio elemento da etiqueta");
         });
     }
 
     test("lista recolhida (so avatares): a etiqueta nao aparece, os icones sim", () => {
         setState({ ...EMPTY, peers: [streamer] });
         render(voiceUserIconsJsx.jsx(Icons, { user: { id: FRIEND_ID }, "data-testid": "icons", collapsed: true }));
-        assert.equal(screen.queryByText("TELINHA"), null);
+        assert.ok(!screen.queryByText("TELINHA"), "nao deveria existir: texto 'TELINHA'");
         assert.ok(screen.getByTestId("icons"));
     });
 
     test("usuario que nao transmite: so os icones originais", () => {
         render(voiceUserIconsJsx.jsx(Icons, { user: { id: FRIEND_ID }, "data-testid": "icons" }));
-        assert.equal(screen.queryByText("TELINHA"), null);
+        assert.ok(!screen.queryByText("TELINHA"), "nao deveria existir: texto 'TELINHA'");
         assert.ok(screen.getByTestId("icons"));
     });
 

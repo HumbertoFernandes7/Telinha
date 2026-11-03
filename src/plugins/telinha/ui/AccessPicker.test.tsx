@@ -73,15 +73,15 @@ describe("AccessPicker: o seletor", () => {
         assert.equal(select().value, "all");
         assert.ok([...select().options].every(o => !o.disabled), "com Client ID, nenhum modo fica indisponivel");
         screen.getByText("Quem está no seu canal de voz assiste direto; quem não tem a identidade verificada precisa do seu Permitir.");
-        assert.equal(screen.queryByLabelText("Senha desta transmissão"), null, "sem senha fora do modo Com senha");
-        assert.equal(screen.queryByText(/está indisponível/), null);
+        assert.ok(!screen.queryByLabelText("Senha desta transmissão"), "sem senha fora do modo Com senha");
+        assert.ok(!screen.queryByText(/está indisponível/), "nao deveria existir: texto /está indisponível/");
     });
 
     test("Todos da call com a identidade verificada desligada: a explicacao nao fala do Permitir", () => {
         pluginSettings.set("requireVerifiedIdentity", false);
         render(<Picker />);
         screen.getByText("Quem está no seu canal de voz assiste direto.");
-        assert.equal(screen.queryByText(/Permitir/), null);
+        assert.ok(!screen.queryByText(/Permitir/), "nao deveria existir: texto /Permitir/");
     });
 
     test("escolher cada modo avisa o pai e troca a explicacao", () => {
@@ -157,17 +157,17 @@ describe("AccessPicker: o seletor", () => {
             const hint = screen.getByText("A senha pode ter no máximo 64 caracteres.");
             assert.match(hint.className, /vc-telinha-access-error/);
             assert.equal(copyButton().disabled, true);
-            assert.equal(screen.queryByText(/nunca fica salva/), null);
+            assert.ok(!screen.queryByText(/nunca fica salva/), "nao deveria existir: texto /nunca fica salva/");
 
             fireEvent.change(passwordInput(), { target: { value: "a".repeat(64) } });
-            assert.equal(screen.queryByText(/no máximo 64/), null, "64 ainda cabe");
+            assert.ok(!screen.queryByText(/no máximo 64/), "64 ainda cabe");
             assert.equal(copyButton().disabled, false);
         });
     });
 
     test("o limite de 64 conta depois de tirar os espacos das pontas", () => {
         render(<Picker initial="password" initialPassword={`  ${"a".repeat(64)}  `} />);
-        assert.equal(screen.queryByText(/no máximo/), null);
+        assert.ok(!screen.queryByText(/no máximo/), "nao deveria existir: texto /no máximo/");
         assert.equal(copyButton().disabled, false);
     });
 });

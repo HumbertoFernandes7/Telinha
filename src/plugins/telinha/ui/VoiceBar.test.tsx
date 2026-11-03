@@ -149,7 +149,7 @@ describe("VoiceBar (so com o estado do Telinha)", () => {
             assert.equal(statusRow().querySelector(".vc-telinha-bar-row-text")?.textContent, "Ao vivo · ninguém assistindo ainda");
             assert.equal(statusRow().querySelector(".vc-telinha-bar-row-count")?.textContent, "0");
             assert.equal(tooltipOf(statusRow()), "Ninguém abriu a sua transmissão ainda");
-            assert.equal(screen.queryByRole("button", { name: "Transmitir com Telinha" }), null);
+            assert.ok(!screen.queryByRole("button", { name: "Transmitir com Telinha" }), "nao deveria existir: botao 'Transmitir com Telinha'");
             button("Parar transmissão");
         });
 
@@ -253,7 +253,7 @@ describe("VoiceBar (so com o estado do Telinha)", () => {
         test("sem identidade (recurso desligado): o pedido nao leva selo", () => {
             show({ local: mine({ pendingViewers: [request({ identity: undefined })] }) });
             renderBar();
-            assert.equal(screen.getByRole("alert").querySelector(".vc-telinha-id-badge"), null);
+            assert.ok(!screen.getByRole("alert").querySelector(".vc-telinha-id-badge"), "nao deveria existir: selo de identidade no alerta");
         });
     });
 
@@ -317,8 +317,8 @@ describe("VoiceBar (so com o estado do Telinha)", () => {
                 assert.equal(qualityRow().previousElementSibling?.className, "vc-telinha-bar-access", "logo depois de Quem assiste");
                 assert.equal(qualityRow().disabled, false);
                 assert.equal(screen.queryAllByRole("group").length, 0, "sem Resolução e FPS soltos na barra");
-                assert.equal(document.querySelector(".vc-telinha-bar-seg"), null);
-                assert.equal(document.querySelector(".vc-telinha-bar-wrap.vc-telinha-bar-info"), null, "sem aviso de tamanho solto");
+                assert.ok(!document.querySelector(".vc-telinha-bar-seg"), "nao deveria existir: elemento '.vc-telinha-bar-seg'");
+                assert.ok(!document.querySelector(".vc-telinha-bar-wrap.vc-telinha-bar-info"), "sem aviso de tamanho solto");
             });
         }
 
@@ -340,8 +340,8 @@ describe("VoiceBar (so com o estado do Telinha)", () => {
             show({ local: mine({ quality: "1080p60" }) });
             renderBar();
             await openQuality();
-            assert.equal(screen.queryByText(HINT_2K), null);
-            assert.equal(document.querySelector(".vc-telinha-quality-hint"), null);
+            assert.ok(!screen.queryByText(HINT_2K), "nao deveria existir: texto HINT_2K");
+            assert.ok(!document.querySelector(".vc-telinha-quality-hint"), "nao deveria existir: elemento '.vc-telinha-quality-hint'");
         });
 
         test("2K numa tela menor: o aviso de que vai no tamanho dela aparece no modal, e a linha segue curta", async () => {
@@ -467,8 +467,8 @@ describe("VoiceBar (so com o estado do Telinha)", () => {
             show({ local: null });
             await settle();
             assert.equal(modals.list().length, 0);
-            assert.equal(screen.queryByRole("group"), null);
-            assert.equal(screen.queryByText("Qualidade da transmissão"), null);
+            assert.ok(!screen.queryByRole("group"), "nao deveria existir: elemento com papel 'group'");
+            assert.ok(!screen.queryByText("Qualidade da transmissão"), "nao deveria existir: texto 'Qualidade da transmissão'");
         });
     });
 
@@ -478,7 +478,7 @@ describe("VoiceBar (so com o estado do Telinha)", () => {
         test("no maximo escolhido: nenhuma linha extra (a linha Qualidade ja diz o nivel)", () => {
             show({ local: mine({ autoQuality: auto() }) });
             renderBar();
-            assert.equal(document.querySelector(".vc-telinha-bar-info"), null);
+            assert.ok(!document.querySelector(".vc-telinha-bar-info"), "nao deveria existir: elemento '.vc-telinha-bar-info'");
             assert.ok(!texts().some(t => t.startsWith("Agora:")));
         });
 
@@ -503,7 +503,7 @@ describe("VoiceBar (so com o estado do Telinha)", () => {
         test("desligada (sem autoQuality): sem a linha", () => {
             show({ local: mine({ autoQuality: null }) });
             renderBar();
-            assert.equal(document.querySelector(".vc-telinha-bar-info"), null);
+            assert.ok(!document.querySelector(".vc-telinha-bar-info"), "nao deveria existir: elemento '.vc-telinha-bar-info'");
         });
     });
 
@@ -519,7 +519,7 @@ describe("VoiceBar (so com o estado do Telinha)", () => {
         test("sem aviso, sem linha", () => {
             show({ local: mine({ captureWarning: null }) });
             renderBar();
-            assert.equal(screen.queryByRole("status"), null);
+            assert.ok(!screen.queryByRole("status"), "nao deveria existir: elemento com papel 'status'");
         });
     });
 
@@ -572,7 +572,7 @@ describe("VoiceBar (so com o estado do Telinha)", () => {
         test("quem esta na call mas nao transmite nao ganha linha", () => {
             show({ peers: [friend({ streaming: false, stream: undefined })] });
             renderBar();
-            assert.equal(document.querySelector(".vc-telinha-bar-row-icon"), null);
+            assert.ok(!document.querySelector(".vc-telinha-bar-row-icon"), "nao deveria existir: elemento '.vc-telinha-bar-row-icon'");
             assert.deepEqual(texts(), []);
         });
     });
@@ -681,7 +681,7 @@ describe("VoiceBar com o nucleo de verdade", () => {
         fireEvent.click(within(screen.getByRole("alert")).getByRole("button", { name: "Recusar" }));
         await settle();
         assert.deepEqual(toasts, [{ text: "beto não vai assistir esta transmissão", variant: "success" }]);
-        assert.equal(screen.queryByRole("alert"), null, "nenhum pedido sobrou");
+        assert.ok(!screen.queryByRole("alert"), "nenhum pedido sobrou");
     });
 
     test("Copiar senha da barra copia a senha da transmissao", async () => {
@@ -729,7 +729,7 @@ describe("VoiceBar com o nucleo de verdade", () => {
         await act(async () => void await until(() => getState().local?.quality === "1080p30"));
         await settle();
         await openQualityModal();
-        assert.equal(screen.queryByText(/2K escolhido/), null, "sem 2K, sem aviso");
+        assert.ok(!screen.queryByText(/2K escolhido/), "sem 2K, sem aviso");
         fireEvent.click(button("Fechar"));
         assert.deepEqual(getState().local?.viewers, ["peerA"]);
     });
@@ -762,7 +762,7 @@ describe("VoiceBar com o nucleo de verdade", () => {
         const row = screen.getByTitle("A captura foi recusada.");
         fireEvent.click(within(row).getByRole("button", { name: "Dispensar aviso" }));
         await settle();
-        assert.equal(screen.queryByTitle("A captura foi recusada."), null);
+        assert.ok(!screen.queryByTitle("A captura foi recusada."), "nao deveria existir: elemento com titulo 'A captura foi recusada.'");
         assert.equal(getState().lastError, null);
     });
 
@@ -772,7 +772,7 @@ describe("VoiceBar com o nucleo de verdade", () => {
         await act(async () => void await until(() => getState().local === null));
         await settle();
         button("Transmitir com Telinha");
-        assert.equal(statusRow(), null);
+        assert.ok(!statusRow(), "nao deveria existir: linha de status");
         assert.deepEqual(toasts, []);
     });
 });

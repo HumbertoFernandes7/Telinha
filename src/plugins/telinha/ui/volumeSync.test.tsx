@@ -259,7 +259,7 @@ describe("volume compartilhado entre a tile da call e a janela do visualizador",
             assert.equal(video(win).volume, 0.35, "mas o nivel e o do amigo");
             assert.deepEqual(getVolume(id), { volume: 0.35, muted: false });
             assert.ok(button(win, /Ativar som/), "enquanto recusado, so o convite");
-            assert.equal(within(win.container).queryByLabelText("Volume"), null);
+            assert.ok(!within(win.container).queryByLabelText("Volume"), "nao deveria existir: controle de volume");
         });
     });
 });

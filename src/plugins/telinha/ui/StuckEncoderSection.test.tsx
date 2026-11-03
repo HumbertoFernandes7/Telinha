@@ -39,7 +39,7 @@ test("com o travamento: a linha e o botao; o botao esquece, avisa e a linha some
     await settle();
     assert.equal(pluginSettings.get("stuckHwH264"), null);
     assert.deepEqual(toasts.map(t => t.text), ["Pronto: a próxima pessoa que assistir recebe o H.264 da placa de vídeo de novo."]);
-    assert.equal(screen.queryByText(/A placa de vídeo travou/), null);
+    assert.ok(!screen.queryByText(/A placa de vídeo travou/), "nao deveria existir: texto /A placa de vídeo travou/");
 });
 
 test("travou nesta sessao (ha um envio contido): o botao vale so depois de reiniciar o Discord", async () => {
@@ -58,15 +58,15 @@ test("so o AV1 saiu da placa (offHw, sem travamento do H.264): a linha do AV1 e 
     assert.equal(av1ProbeRecord()?.verdict, "offHw");
     render(<StuckEncoderSection />);
     assert.ok(screen.getByText("O AV1 saiu da placa de vídeo neste PC em 02/11; ele fica desligado até você tentar de novo."));
-    assert.equal(screen.queryByText(/A placa de vídeo travou/), null, "o H.264 nao travou");
+    assert.ok(!screen.queryByText(/A placa de vídeo travou/), "o H.264 nao travou");
     act(() => {
         fireEvent.click(screen.getByRole("button", { name: "Tentar a placa de vídeo de novo" }));
     });
     await settle();
     assert.equal(pluginSettings.get("hwAv1Probe"), null);
     assert.equal(av1ProbeRecord(), null);
-    assert.equal(screen.queryByText(/O AV1 saiu da placa/), null);
-    assert.equal(screen.queryByRole("button", { name: "Tentar a placa de vídeo de novo" }), null);
+    assert.ok(!screen.queryByText(/O AV1 saiu da placa/), "nao deveria existir: texto /O AV1 saiu da placa/");
+    assert.ok(!screen.queryByRole("button", { name: "Tentar a placa de vídeo de novo" }), "nao deveria existir: botao 'Tentar a placa de vídeo de novo'");
 });
 
 test("o AV1 que travou de verdade (broken) nao mostra o botao: so o offHw limpa", () => {

@@ -79,13 +79,13 @@ describe("Avatar", () => {
         assert.equal(img.className, "vc-telinha-avatar");
         assert.match(img.getAttribute("src")!, /size=64/);
         assert.equal(img.getAttribute("alt"), "");
-        assert.equal(container.querySelector("svg"), null);
+        assert.ok(!container.querySelector("svg"), "nao deveria existir: elemento 'svg'");
     });
 
     test("usuario que o Discord nao conhece (ou sem id): o icone do Telinha no lugar da foto", () => {
         for (const id of [OTHER_ID, undefined]) {
             const { container, unmount } = render(<Avatar userId={id} />);
-            assert.equal(container.querySelector("img"), null);
+            assert.ok(!container.querySelector("img"), "nao deveria existir: elemento 'img'");
             const empty = container.querySelector("span")!;
             assert.equal(empty.className, "vc-telinha-avatar vc-telinha-avatar-empty");
             assert.equal(empty.querySelector("svg")!.getAttribute("width"), "18");

@@ -81,7 +81,7 @@ describe("SourcePickerModal: a lista e as opcoes", () => {
 
         await act(async () => resolve({ sources: [SCREEN, GAME] }));
         screen.getByRole("button", { name: "Atualizar lista" });
-        assert.equal(screen.queryByText("Carregando telas e janelas…"), null);
+        assert.ok(!screen.queryByText("Carregando telas e janelas…"), "nao deveria existir: texto 'Carregando telas e janelas…'");
     });
 
     test("com janelas abertas, comeca na aba Janelas com a contagem de cada aba; nada vem escolhido", async t => {
@@ -94,7 +94,7 @@ describe("SourcePickerModal: a lista e as opcoes", () => {
         assert.equal(tab(/^Telas/).textContent, "Telas1");
         assert.equal(card("Jogo").getAttribute("aria-pressed"), "false");
         assert.equal(card("Navegador").getAttribute("aria-pressed"), "false");
-        assert.equal(screen.queryByTitle("Tela inteira"), null, "a tela esta na outra aba");
+        assert.ok(!screen.queryByTitle("Tela inteira"), "a tela esta na outra aba");
         assert.equal(modal.button("Transmitir").disabled, true, "falta escolher");
     });
 
@@ -106,7 +106,7 @@ describe("SourcePickerModal: a lista e as opcoes", () => {
         card("Tela inteira");
         fireEvent.click(tab(/^Janelas/));
         screen.getByText("Nenhuma janela aberta encontrada.");
-        assert.equal(screen.queryByTitle("Tela inteira"), null);
+        assert.ok(!screen.queryByTitle("Tela inteira"), "nao deveria existir: elemento com titulo 'Tela inteira'");
     });
 
     test("so janelas: a aba Telas diz que nao ha nenhuma", async t => {
@@ -141,7 +141,7 @@ describe("SourcePickerModal: a lista e as opcoes", () => {
 
         current = [CHAT, SCREEN];
         await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Atualizar lista" })));
-        assert.equal(screen.queryByTitle("Jogo"), null, "o jogo foi fechado");
+        assert.ok(!screen.queryByTitle("Jogo"), "o jogo foi fechado");
         assert.equal(tab(/^Janelas/).textContent, "Janelas1");
         assert.equal(tab(/^Telas/).textContent, "Telas1");
         assert.equal(modal.button("Transmitir").disabled, true, "a escolha sumiu junto");
@@ -200,12 +200,12 @@ describe("SourcePickerModal: a lista e as opcoes", () => {
             openWith(t, sources(GAME));
             await settle();
             assert.deepEqual([resolutionSelect().value, fpsSelect().value], ["1080", "60"], "padrao: 1080p a 60 fps");
-            assert.equal(screen.queryByText(/precisa de uma tela 2K/), null);
+            assert.ok(!screen.queryByText(/precisa de uma tela 2K/), "nao deveria existir: texto /precisa de uma tela 2K/");
 
             fireEvent.change(resolutionSelect(), { target: { value: "1440" } });
             screen.getByText("2K (1440p) precisa de uma tela 2K: numa tela ou janela menor, vai no tamanho dela.");
             fireEvent.change(resolutionSelect(), { target: { value: "720" } });
-            assert.equal(screen.queryByText(/precisa de uma tela 2K/), null);
+            assert.ok(!screen.queryByText(/precisa de uma tela 2K/), "nao deveria existir: texto /precisa de uma tela 2K/");
         });
     });
 
@@ -372,6 +372,6 @@ describe("SourcePickerModal: Trocar com a captura bloqueada (streaming.ts → re
         fireEvent.click(card("Navegador"));
         await settle();
         assert.equal(modal.button("Trocar").disabled, false);
-        assert.equal(screen.queryByText(STUCK), null);
+        assert.ok(!screen.queryByText(STUCK), "nao deveria existir: texto STUCK");
     });
 });
