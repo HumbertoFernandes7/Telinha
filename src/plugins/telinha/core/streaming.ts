@@ -32,7 +32,7 @@ import { startScreenAudioCapture } from "./audio/screenAudio";
 import { captureEndedText, noteCaptureStarted, noteCaptureStopped, textureCaptureActive } from "./captureBoost";
 import { copyOnArrival, startCaptureCopy } from "./captureCopy";
 import {
-    AV1_HW_MIN_HEIGHT, chooseCodec, type CodecDecision, type EncoderReport, getLocalCaps, h264ReserveOf, HW_ONLY_LABEL, isOffHardwareHwOnly, isSoftwareH264, isTransientSoftwareH264, noteH264Fallback,
+    AV1_HW_MIN_HEIGHT, chooseCodec, type CodecDecision, type EncoderReport, getLocalCaps, h264ReserveOf, HW_ONLY_LABEL, isForeignEncoder, isOffHardwareHwOnly, isSoftwareH264, isTransientSoftwareH264, noteH264Fallback,
     pickNegotiatedCodec, softwareFallback, whyNoHwOnlyHere
 } from "./codec";
 import { blockOf, captureTrackOf, getPc, type LocalCapture, peerLabel, publish, rt, setLastError } from "./context";
@@ -1910,6 +1910,10 @@ export function tick() {
                 mimeType: codec, implementation: out.encoderImplementation, powerEfficient: out.powerEfficientEncoder, framesEncoded: out.framesEncoded,
                 width: out.frameWidth, height: out.frameHeight, limitation: out.qualityLimitationReason
             };
+            // o codec (codecId) e o encoder sao lidos em momentos diferentes: logo depois da troca de preferencia o relatorio
+            // pode trazer o H.264 com o encoder do codec de antes (libaom do AV1, sem tamanho). Nao diz nada do codec no ar:
+            // sem veredito, sem log, sem culpa; tenta de novo nas proximas estatisticas (isForeignEncoder)
+            if (isForeignEncoder(enc)) return;
             const fmtp = String(codecStat?.sdpFmtpLine ?? "");
             // H.264: o perfil negociado de fato (o fmtp do codec em uso), para conferir o High no ar e culpar o certo (blameOf)
             const profile = /^video\/h264$/i.test(codec) ? h264ProfileLevelId(fmtp) : null;
