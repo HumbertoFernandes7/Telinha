@@ -108,6 +108,20 @@ Four jobs, all in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml):
 
 A release is never created over an existing release or tag of the same version (the job fails instead).
 
+**Repository locks (Settings):**
+- `main` takes changes only through a pull request with `Tree already passed?` and `pnpm check + installer (Windows)`
+  green (skipped by the fast path counts as green; the gate itself always runs), and it can't be
+  force-pushed or deleted. `develop` can't be force-pushed or deleted.
+- A `v*` tag can't be moved or deleted by anyone. (Creation stays open: a personal repository can't give the GitHub
+  Actions app a bypass, and the release job creates the tag.)
+- Releases are immutable: once published, the files and the tag can't change. The title, notes and the
+  pre-release flag still can, which is what the job uses to turn a bad release into a pre-release.
+- A publish runs in the `release` environment, which only accepts `main`. A manual run uses `dry-run`.
+- Every action in `ci.yml` is pinned by commit SHA, and the repository requires it. Only GitHub's own actions and
+  `pnpm/action-setup` are allowed. Dependabot (`.github/dependabot.yml`) opens a weekly PR to `develop` to update
+  them; its security PRs (any ecosystem) target `main`, so change their base to `develop` before merging.
+- Workflows from a fork pull request need approval for every outside contributor.
+
 **Several merges in a row:** runs on `main` queue, one at a time, and a release in progress is never cancelled. GitHub
 keeps only one waiting run per branch, so with three quick merges the middle run is dropped and the last one releases
 both (its notes gather the `## Novidades` of every merge since the last tag). A run that failed, or an old run started

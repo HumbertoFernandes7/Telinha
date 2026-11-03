@@ -1,0 +1,12 @@
+# Keeps the actions pinned by SHA in ci.yml up to date (one weekly PR to develop, never to main: a merge into main
+# publishes a release). Security alerts for npm and Go are on in the repository settings.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
