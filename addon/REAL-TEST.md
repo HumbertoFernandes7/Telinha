@@ -1,7 +1,12 @@
 # Telinha add-on: real-Discord test (official Vencord + Telinha add-on)
 
+> **Historical:** the script used on 2026-10-29 for the first test of the add-on in the real Discord (v0.1.0, with the old
+> fork still installed, which is why several steps deal with it). Today the normal way in is `TelinhaInstaller.exe`; the
+> current contract is [`PAYLOAD.md`](PAYLOAD.md). The file list and the natives count below were updated to today's; the
+> fork steps were not.
+
 For the orchestrator to run **with the user**, on this PC. Everything is PowerShell, run from the repo
-(`C:\Users\Humbe\Evig\Projetos\PeerLive`). Each step says what to expect; stop at the first surprise and roll back
+(`C:\Users\Humbe\Evig\Projetos\Telinha`). Each step says what to expect; stop at the first surprise and roll back
 (step 9 takes seconds). Contract behind all of this: [`PAYLOAD.md`](PAYLOAD.md).
 
 What changes on the machine, and nothing else:
@@ -20,14 +25,14 @@ What changes on the machine, and nothing else:
 ## 0. Build and check the payload (dev machine, Discord can stay open)
 
 ```powershell
-cd C:\Users\Humbe\Evig\Projetos\PeerLive
+cd C:\Users\Humbe\Evig\Projetos\Telinha
 pnpm build:addon                      # must end with: BUILD SMOKE PASSED
 node addon\test\run-main-test.mjs     # must end with: ALL ... CHECKS PASSED
 node addon\test\run-renderer-test.mjs # must end with: ALL ... CHECKS PASSED
 Get-Content dist\addon\*.zip.sha256
 ```
 
-Write down the commit shown by `pnpm build:addon` (`built Telinha add-on 0.1.0 (<commit>)`); `main.log` must show
+Write down the commit shown by `pnpm build:addon` (`built Telinha add-on <version> (<commit>)`); `main.log` must show
 the same one later.
 
 ## 1. Close Discord completely
@@ -114,7 +119,7 @@ Get-ChildItem "$env:APPDATA\Telinha\addon" | Select-Object Name, Length
 ```
 
 → `addon.json main.js payload.js preload.js register.js stub-template.js telinha-audio.exe telinha.main.js
-telinha.renderer.js version.json`.
+telinha.renderer.js updater.js version.json`.
 
 ## 6. Start Discord and read the logs
 
@@ -127,7 +132,7 @@ Get-Content "$env:APPDATA\Telinha\logs\main.log" -Tail 15
 Expected for one Discord start (`[pid]` after the timestamp): first these two, in this order,
 
 1. `boot {"vencordPatcher":"...\\Vencord\\dist\\patcher.js",...}`
-2. `loaded {"version":"0.1.0","commit":"<step 0>","rendererHooked":true,"ipcMapHooked":true,"natives":8,"helperDir":"...\\Telinha\\addon","errors":0}`
+2. `loaded {"version":"<version>","commit":"<step 0>","rendererHooked":true,"ipcMapHooked":true,"natives":24,"helperDir":"...\\Telinha\\addon","errors":0}`
 
 then, once the main window loads (either order):
 
@@ -151,7 +156,7 @@ webpackAlreadyRunning: false}` and **no** `Patch by Telinha errored` / `had no e
 ```js
 TelinhaAddon.boot                                      // {via: "ipc-hook", metaPatched: true, metaReason: null}
 TelinhaAddon.registrations.Telinha                     // {enabled: true, webpackAlreadyRunning: false}
-Object.keys(VencordNative.pluginHelpers.Telinha).length // 8
+Object.keys(VencordNative.pluginHelpers.Telinha).length // 24
 await VencordNative.pluginHelpers.Telinha.screenAudioStatus()
                                                        // {available: true, reason: "áudio do PC sem o Discord (process loopback do Windows)"}
 Vencord.WebpackPatcher.patches.filter(p => p.plugin === "Telinha").length
