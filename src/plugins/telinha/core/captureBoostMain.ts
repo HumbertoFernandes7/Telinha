@@ -24,7 +24,7 @@
 // quadro com um jogo pesado). Quando o Windows recusa, so fica no log e na pagina do plugin ("não foi possível (precisa de
 // administrador)"); nunca pede elevacao.
 //
-// O modo "realtime" ("Tempo real (teste)") tem duas fases: 1) tudo o que o "high" faz; 2) so nos processos que ficaram em
+// O modo "realtime" ("Tempo real") tem duas fases: 1) tudo o que o "high" faz; 2) so nos processos que ficaram em
 // HIGH, outra chamada com --class realtime --raise --allow-realtime (o helper so aceita REALTIME com essa chave). Como vem
 // por cima do HIGH, uma recusa do Windows (sem administrador) ou um Windows que mantem HIGH deixa o processo em HIGH, nunca
 // em NORMAL; fica no relatorio (realtimeRefused). O processo que ja estava em REALTIME (o do Discord) nao e tocado. Cada
@@ -448,7 +448,7 @@ export function gpuRealtimeStatusMain(): GpuRealtimeStatus {
     return { available: hasFile && !blocked && !realtimeSaveError, blocked, reason: hasFile ? realtimeSaveError : NO_LOADER_REALTIME };
 }
 
-/** Um texto bloqueia, null libera (a nova escolha de "Tempo real (teste)" na pagina); qualquer outro valor do IPC e ignorado. */
+/** Um texto bloqueia, null libera (a nova escolha de "Tempo real" na pagina); qualquer outro valor do IPC e ignorado. */
 export function setGpuRealtimeBlockedMain(why: unknown): GpuRealtimeStatus {
     if (why === null) unblockRealtime();
     else if (typeof why === "string") blockRealtime(why);

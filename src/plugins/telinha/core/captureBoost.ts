@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-// A live com um jogo que usa a placa de video toda (experimental, desligado por padrao). Com o jogo em tela cheia
+// A live com um jogo que usa a placa de video toda (ligada por padrao). Com o jogo em tela cheia
 // saturando a placa, a captura do Chromium entrega ~10 quadros por segundo: cada quadro espera atras do jogo para ser
 // copiado da placa de video para o processador (um Map bloqueante), e o laco da captura dorme o mesmo tempo que gastou.
 //
@@ -148,32 +148,67 @@ function gpuCaptureDiagnostics(st: GpuCaptureStatus | null): string {
 
 // #region prioridade na placa de video
 
-/** O modo escolhido; valor desconhecido (ou ausente) conta como desligada. */
+/** O modo que vale sem escolha salva (e para um valor desconhecido): tempo real. */
+export const DEFAULT_GPU_PRIORITY_MODE = "realtime";
+
+/** O modo escolhido; ausente ou desconhecido vale o padrao (tempo real). */
 export function gpuPriorityModeSetting(): "off" | "high" | "realtime" {
     const v: unknown = settings.store.gpuPriorityMode;
-    return v === "high" || v === "realtime" ? v : "off";
+    return v === "off" || v === "high" ? v : DEFAULT_GPU_PRIORITY_MODE;
 }
 
-// ate o passo S6, "realtime" se comporta exatamente como "high"
+// "realtime" pede HIGH como a "high" e, depois, o REALTIME ao proprio Discord (core/discordGpuBoost.ts)
 const gpuPriorityOn = () => gpuPriorityModeSetting() !== "off";
 
-/** O que ficou salvo da opcao antiga gpuPriority (liga/desliga) e o que ela vira em gpuPriorityMode. */
+/** O que ficou salvo da opcao antiga gpuPriority (liga/desliga), do seletor gpuPriorityMode e do marcador da troca de padrao. */
 export interface StoredGpuPrioritySettings {
     /** opcao antiga: true = ligada */
     gpuPriority?: unknown;
     /** opcao nova: "off" | "high" | "realtime" */
     gpuPriorityMode?: unknown;
+    /** true = a troca do padrao para "Tempo real" ja foi feita neste PC (so acontece uma vez) */
+    gpuPriorityRealtimeDefault?: unknown;
+}
+
+/** A chave que guarda o marcador da troca do padrao da prioridade (settings.plain). */
+export const GPU_PRIORITY_MARKER = "gpuPriorityRealtimeDefault";
+
+/**
+ * Migracao da prioridade: "Tempo real" virou o padrao. `mode` = o valor a gravar (null = nao mexer); `markDone` = gravar o
+ * marcador (a troca so acontece uma vez: depois dele, "Alta" e "Desligada" escolhidas ficam). Antes do marcador: "Alta"
+ * salva (vinda da opcao antiga ligada/desligada) vira "Tempo real"; "Desligada" salva tambem vira "Tempo real": na 0.3.9 o
+ * padrao era "Desligada" e o Vencord grava o padrao quando a opcao e lida, entao o "off" salvo e so o padrao de entao, nao
+ * uma escolha; o booleano antigo ligado vira "Tempo real"; nada salvo vale o padrao; valor desconhecido vale o padrao. A
+ * chave antiga NAO e apagada (uma versao anterior do Telinha ainda a le).
+ */
+export function migrateGpuPrioritySetting(stored: StoredGpuPrioritySettings | null | undefined): { mode: "realtime" | null; markDone: boolean; } {
+    const s = stored ?? {};
+    if (s.gpuPriorityRealtimeDefault === true) return { mode: null, markDone: false };
+    const mode = s.gpuPriorityMode;
+    if (mode === "realtime") return { mode: null, markDone: true };
+    // "off" e "high" salvos antes do marcador: o "off" e o padrao da 0.3.9 gravado pelo Vencord, nao uma escolha
+    if (mode === "off" || mode === "high") return { mode: "realtime", markDone: true };
+    if (mode === undefined) return { mode: s.gpuPriority === true ? "realtime" : null, markDone: true };
+    // valor desconhecido salvo: volta ao padrao
+    return { mode: "realtime", markDone: true };
+}
+
+/** A chave que guarda o marcador da troca do padrao da captura pela placa de video (settings.plain). */
+export const GPU_CAPTURE_MARKER = "gpuCaptureDefaultOn";
+
+/** O que ficou salvo do marcador da troca de padrao da "Captura pela placa de vídeo". */
+export interface StoredGpuCaptureSettings {
+    gpuCaptureDefaultOn?: unknown;
 }
 
 /**
- * Migracao da opcao booleana gpuPriority para gpuPriorityMode. `mode` = o valor a gravar (null = nao mexer). A chave antiga
- * NAO e apagada (uma versao anterior do Telinha ainda a le): so deixa de ser lida quando gpuPriorityMode ja existe (valido).
+ * Migracao da captura pela placa de video: virou ligada por padrao. Uma unica vez (marcador), liga para todo mundo: muita
+ * gente a desligou so por causa do problema antigo da copia dos quadros. Depois do marcador, a escolha fica.
+ * `on` = true quando deve gravar a opcao ligada (null = nao mexer); `markDone` = gravar o marcador.
  */
-export function migrateGpuPrioritySetting(stored: StoredGpuPrioritySettings | null | undefined): { mode: "high" | null; } {
-    const s = stored ?? {};
-    const hasNew = s.gpuPriorityMode === "off" || s.gpuPriorityMode === "high" || s.gpuPriorityMode === "realtime";
-    if (hasNew) return { mode: null };
-    return { mode: s.gpuPriority === true ? "high" : null };
+export function migrateGpuCaptureSetting(stored: StoredGpuCaptureSettings | null | undefined): { on: true | null; markDone: boolean; } {
+    if (stored?.gpuCaptureDefaultOn === true) return { on: null, markDone: false };
+    return { on: true, markDone: true };
 }
 const hasPriorityNative = () => typeof getNativeOrNull()?.setGpuPriority === "function";
 
@@ -265,7 +300,7 @@ async function raisePriority(): Promise<void> {
     lastRaise = report;
     changed();
     logPriority(report, raiseOutcome(report));
-    // so em "Tempo real (teste)": o experimento do GPU boost do proprio Discord (core/discordGpuBoost.ts); a releitura das
+    // so em "Tempo real": o pedido do GPU boost do proprio Discord (core/discordGpuBoost.ts); a releitura das
     // classes e o mesmo "high" (nunca abaixa e so sobe quem esta abaixo de HIGH, entao na pratica so le). A transmissao pode
     // ter acabado (ou o modo mudado, ou outra comecado) enquanto o "high" voltava: so vale se esta ainda e a mesma
     if (gpuPriorityModeSetting() === "realtime" && priorityActive && priorityRun === run) startRealtimeTest(report, () => askPriority("high"));

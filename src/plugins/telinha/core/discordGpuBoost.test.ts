@@ -259,7 +259,7 @@ test("resultText: curto e sem lancar", () => {
 // #region ligacao com a transmissao
 
 describe("na transmissao (core/captureBoost.ts)", () => {
-    const P = "Teste do tempo real pelo Discord";
+    const P = "Tempo real pelo Discord";
     const targets = (after: string, role2After = after): GpuPriorityReport["targets"] => [
         { pid: 1234, role: "Discord", before: "NORMAL", after, kept: false, error: null },
         { pid: 5678, role: "GPU", before: "NORMAL", after: role2After, kept: false, error: null }
@@ -294,6 +294,7 @@ describe("na transmissao (core/captureBoost.ts)", () => {
 
     beforeEach(() => {
         resetVencordFakes();
+        pluginSettings.load({ gpuCapture: false, gpuPriorityMode: "off" });
         resetState();
         resetCaptureBoostForTests();
         resetDiscordGpuBoostForTests();

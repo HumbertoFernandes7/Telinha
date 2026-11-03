@@ -13,7 +13,7 @@
 import "@test/fakes/dom";
 
 import assert from "node:assert/strict";
-import { after, afterEach, before, describe, test } from "node:test";
+import { after, afterEach, before, beforeEach, describe, test } from "node:test";
 
 import { STREAM_KIND_SCREEN } from "@plugins/telinha/protocol";
 import { getState } from "@plugins/telinha/store";
@@ -188,6 +188,11 @@ describe("startStreaming: validacao e erros de captura", () => {
 });
 
 describe("startStreaming: tela, janela e audio", () => {
+    // as linhas de modo da captura abaixo sao as das opcoes da placa de video desligadas (os padroes agora sao ligados)
+    beforeEach(() => {
+        pluginSettings.load({ gpuCapture: false, gpuPriorityMode: "off" });
+    });
+
     afterEach(() => {
         stopStreaming();
         resetCapture();
