@@ -165,9 +165,11 @@ describe("prioridade na placa de video (telinha-audio.exe --gpu-priority)", () =
     /**
      * O helper responde como o de verdade, lembrando a classe de cada pid entre as chamadas (`classes`): `before(pid)` = a
      * classe de cada um antes da primeira; `refuse` = os pids recusados. --raise so sobe quem esta abaixo; --if-class so
-     * muda quem esta naquela classe; o resto ganha uma linha "keep".
+     * muda quem esta naquela classe; o resto ganha uma linha "keep". `realtime` = o que o Windows faz com o REALTIME:
+     * "accept" (o de verdade), "refuse" (0xC0000061 em todos), "clamp" (aceita a chamada e mantem a classe) e "old" (um helper
+     * antigo, que nao conhece --allow-realtime).
      */
-    function helperAnswers(t: TestContext, { before = (_pid: string): string => "NORMAL", refuse = [] as string[], hags = "on" } = {}) {
+    function helperAnswers(t: TestContext, { before = (_pid: string): string => "NORMAL", refuse = [] as string[], hags = "on", realtime = "accept" as "accept" | "refuse" | "clamp" | "old" } = {}) {
         helperHost(t);
         const classes = new Map<string, string>();
         const procs = mockSpawn(t, p => {
@@ -177,13 +179,17 @@ describe("prioridade na placa de video (telinha-audio.exe --gpu-priority)", () =
             const line = (pid: string) => {
                 if (refuse.includes(pid)) return `error open 0x80070005 pid=${pid} Acesso negado.`;
                 const now = classes.get(pid) ?? before(pid);
+                const lower = CLASSES.indexOf(now) < CLASSES.indexOf(cls);
+                if (cls === "REALTIME" && realtime === "refuse" && lower) return `error set 0xC0000061 pid=${pid} privilegio ausente`;
+                if (cls === "REALTIME" && realtime === "clamp" && lower) return `ok pid=${pid} before=${now} after=${now}`;
                 const keep = condition === "--raise" ? CLASSES.indexOf(now) >= CLASSES.indexOf(cls) : condition === "--if-class" && now !== ifClass.toUpperCase();
                 if (keep) return `keep pid=${pid} class=${now}`;
                 classes.set(pid, cls);
                 return `ok pid=${pid} before=${now} after=${cls}`;
             };
+            if (cls === "REALTIME" && realtime === "old") return answer(p, { stderr: "error usage 0x80070057 uso: telinha-audio.exe ...\n", code: 2 });
             const lines = [`hags ${hags}`, ...pids.map(line)];
-            answer(p, { stdout: lines.join("\r\n") + "\r\n", code: refuse.some(r => pids.includes(r)) ? 6 : 0 });
+            answer(p, { stdout: lines.join("\r\n") + "\r\n", code: lines.some(l => l.startsWith("error ")) ? 6 : 0 });
         });
         return Object.assign(procs, { classes });
     }
@@ -198,7 +204,7 @@ describe("prioridade na placa de video (telinha-audio.exe --gpu-priority)", () =
         assert.deepEqual(procs.spawned[0].args, ["--gpu-priority", `${ME},${GPU}`, "--class", "high", "--raise"], "so sobe: nunca abaixa");
         assert.deepEqual(procs.spawned[0].options, { windowsHide: true, shell: false, stdio: ["ignore", "pipe", "pipe"] });
         const expected: GpuPriorityReport = {
-            mode: "high", ok: true, done: 2, hags: "on", reason: null, refused: false, raised: 2, quiet: false, notes: [],
+            mode: "high", ok: true, done: 2, hags: "on", reason: null, refused: false, raised: 2, quiet: false, notes: [], level: "HIGH", realtimeRefused: false,
             targets: [target(ME, "Discord", "NORMAL", "HIGH"), target(GPU, "GPU", "NORMAL", "HIGH")]
         };
         assert.deepEqual(up, expected);
@@ -512,6 +518,206 @@ describe("prioridade na placa de video (telinha-audio.exe --gpu-priority)", () =
         assert.equal(procs.spawned.length, 2);
     });
 
+    describe("tempo real (modo realtime: HIGH e, por cima, REALTIME so com --allow-realtime)", () => {
+        const REAL = ["--gpu-priority", `${ME},${GPU}`, "--class", "realtime", "--raise", "--allow-realtime"];
+        const REFUSED_TEXT = "set 0xC0000061 privilegio ausente";
+
+        test("(a) NORMAL → HIGH → REALTIME nos dois; a volta parte de REALTIME e cada um volta ao que era", async t => {
+            const procs = helperAnswers(t);
+            const up = await setGpuPriorityMain("realtime");
+            assert.deepEqual(procs.spawned.map(p => p.args), [["--gpu-priority", `${ME},${GPU}`, "--class", "high", "--raise"], REAL], "duas fases; REALTIME so com --raise e --allow-realtime");
+            assert.deepEqual([up.mode, up.ok, up.done, up.raised, up.level, up.realtimeRefused, up.refused, up.reason], ["realtime", true, 2, 2, "REALTIME", false, false, null]);
+            assert.deepEqual(up.targets, [target(ME, "Discord", "HIGH", "REALTIME"), target(GPU, "GPU", "HIGH", "REALTIME")]);
+            assert.deepEqual(Object.fromEntries(procs.classes), { [ME]: "REALTIME", [GPU]: "REALTIME" });
+
+            const down = await setGpuPriorityMain("restore");
+            assert.deepEqual(procs.spawned[2].args, ["--gpu-priority", `${ME},${GPU}`, "--class", "normal", "--if-class", "realtime"]);
+            assert.deepEqual([down.ok, down.done, down.raised, down.level], [true, 2, 0, null]);
+            assert.deepEqual(down.targets, [target(ME, "Discord", "REALTIME", "NORMAL"), target(GPU, "GPU", "REALTIME", "NORMAL")]);
+            assert.deepEqual(Object.fromEntries(procs.classes), { [ME]: "NORMAL", [GPU]: "NORMAL" });
+        });
+
+        test("(b) o processo da GPU ja em REALTIME (o Discord poe): fica, so o principal sobe, e a volta nao mexe nele", async t => {
+            const procs = helperAnswers(t, { before: pid => (pid === String(GPU) ? "REALTIME" : "NORMAL") });
+            const up = await setGpuPriorityMain("realtime");
+            assert.deepEqual(procs.spawned.map(p => p.args[1]), [`${ME},${GPU}`, `${ME}`], "a 2a fase so vai ao que ficou em HIGH");
+            assert.deepEqual(up.targets, [target(ME, "Discord", "HIGH", "REALTIME"), keptRealtime()]);
+            assert.deepEqual([up.ok, up.done, up.raised, up.level, up.realtimeRefused], [true, 2, 1, "REALTIME", false]);
+
+            const down = await setGpuPriorityMain("restore");
+            assert.deepEqual(procs.spawned[2].args, ["--gpu-priority", `${ME}`, "--class", "normal", "--if-class", "realtime"]);
+            assert.deepEqual(down.targets, [target(ME, "Discord", "REALTIME", "NORMAL"), keptRealtime()]);
+            assert.equal(procs.classes.get(String(GPU)), undefined, "a classe do processo da GPU nunca foi trocada");
+        });
+
+        test("(c) o Windows recusa o REALTIME (0xC0000061): realtimeRefused, fica em HIGH e a volta parte de HIGH", async t => {
+            const procs = helperAnswers(t, { realtime: "refuse" });
+            const up = await setGpuPriorityMain("realtime");
+            assert.deepEqual([up.ok, up.done, up.realtimeRefused, up.refused, up.raised, up.level, up.reason], [false, 0, true, true, 2, null, null]);
+            assert.deepEqual(up.targets.map(t => t.error), [REFUSED_TEXT, REFUSED_TEXT]);
+            assert.deepEqual(Object.fromEntries(procs.classes), { [ME]: "HIGH", [GPU]: "HIGH" }, "nunca cai para NORMAL");
+
+            const down = await setGpuPriorityMain("restore");
+            assert.deepEqual(procs.spawned[2].args, ["--gpu-priority", `${ME},${GPU}`, "--class", "normal", "--if-class", "high"]);
+            assert.deepEqual([down.ok, down.done], [true, 2]);
+        });
+
+        test("(d) o Windows aceita a chamada e mantem HIGH: conta como recusado, com o texto", async t => {
+            const procs = helperAnswers(t, { realtime: "clamp" });
+            const up = await setGpuPriorityMain("realtime");
+            assert.deepEqual([up.ok, up.done, up.realtimeRefused, up.refused, up.level], [false, 0, true, false, null]);
+            assert.deepEqual(up.targets.map(t => [t.before, t.after, t.error]), [["HIGH", "HIGH", "o Windows manteve HIGH"], ["HIGH", "HIGH", "o Windows manteve HIGH"]]);
+            await setGpuPriorityMain("restore");
+            assert.deepEqual(procs.spawned[2].args.slice(4), ["--if-class", "high"]);
+        });
+
+        test("(e) helper antigo (error usage na 2a fase): o motivo diz que falta o tempo real, e fica em HIGH", async t => {
+            const procs = helperAnswers(t, { realtime: "old" });
+            const up = await setGpuPriorityMain("realtime");
+            assert.deepEqual([up.ok, up.reason, up.realtimeRefused, up.raised, up.level], [false, "o ajudante do Telinha é de uma versão antiga (sem o tempo real)", false, 2, null]);
+            assert.deepEqual(Object.fromEntries(procs.classes), { [ME]: "HIGH", [GPU]: "HIGH" });
+            await setGpuPriorityMain("restore");
+            assert.deepEqual(procs.spawned[2].args.slice(4), ["--if-class", "high"]);
+        });
+
+        test("(f) high depois de realtime desce so o que o Telinha pos, para HIGH; depois o restore volta a NORMAL", async t => {
+            const procs = helperAnswers(t);
+            await setGpuPriorityMain("realtime");
+            const down = await setGpuPriorityMain("high");
+            assert.deepEqual(procs.spawned.slice(2).map(p => p.args), [
+                ["--gpu-priority", `${ME},${GPU}`, "--class", "high", "--raise"],
+                ["--gpu-priority", `${ME},${GPU}`, "--class", "high", "--if-class", "realtime"]
+            ], "o --raise deixa o REALTIME como esta (keep) e a descida e outra chamada");
+            assert.deepEqual(down.targets, [target(ME, "Discord", "REALTIME", "HIGH"), target(GPU, "GPU", "REALTIME", "HIGH")]);
+            assert.deepEqual([down.ok, down.done, down.raised, down.level], [true, 2, 2, "HIGH"]);
+
+            await setGpuPriorityMain("restore");
+            assert.deepEqual(procs.spawned[4].args, ["--gpu-priority", `${ME},${GPU}`, "--class", "normal", "--if-class", "high"]);
+            assert.deepEqual(Object.fromEntries(procs.classes), { [ME]: "NORMAL", [GPU]: "NORMAL" });
+        });
+
+        test("pedir realtime de novo nao desce nem sobe de novo: so a 1a fase (keep), e o nivel segue REALTIME", async t => {
+            const procs = helperAnswers(t);
+            await setGpuPriorityMain("realtime");
+            const again = await setGpuPriorityMain("realtime");
+            assert.equal(procs.spawned.length, 3, "nada ficou em HIGH para a 2a fase");
+            assert.deepEqual([again.ok, again.level, again.raised, again.realtimeRefused], [true, "REALTIME", 2, false]);
+        });
+
+        test("(g) a descida acha que outro mudou a classe (keep): a entrada sai da lista e a volta nao toca nesse processo", async t => {
+            const procs = replies(t,
+                ["hags on", ok(ME, "NORMAL", "HIGH"), ok(GPU, "NORMAL", "HIGH")],
+                ["hags on", ok(ME, "HIGH", "REALTIME"), ok(GPU, "HIGH", "REALTIME")],
+                ["hags on", keep(ME, "REALTIME"), keep(GPU, "REALTIME")],
+                ["hags on", ok(ME, "REALTIME", "HIGH"), keep(GPU, "ABOVE_NORMAL")], // outro baixou o processo da GPU no meio
+                ["hags on", ok(ME, "HIGH", "NORMAL")]
+            );
+            await setGpuPriorityMain("realtime");
+            const down = await setGpuPriorityMain("high");
+            assert.deepEqual(procs.spawned[3].args, ["--gpu-priority", `${ME},${GPU}`, "--class", "high", "--if-class", "realtime"]);
+            assert.deepEqual(down.targets, [target(ME, "Discord", "REALTIME", "HIGH"), keptRealtime()]); // o relatorio fica com o que o 1o passo viu
+            assert.deepEqual([down.ok, down.raised, down.level], [true, 1, "HIGH"]);
+            await setGpuPriorityMain("restore");
+            assert.equal(procs.spawned[4].args[1], `${ME}`, "o processo da GPU saiu da lista");
+        });
+
+        test("a classe de um processo em REALTIME que outro baixou para HIGH: o \"high\" o acha em HIGH e nao pede a descida", async t => {
+            const procs = helperAnswers(t);
+            await setGpuPriorityMain("realtime");
+            procs.classes.set(String(GPU), "HIGH"); // outro baixou o processo da GPU para HIGH
+            const again = await setGpuPriorityMain("high");
+            assert.deepEqual(procs.spawned.slice(2).map(p => p.args.slice(3)), [["high", "--raise"], ["high", "--if-class", "realtime"]], "so o principal desce");
+            assert.equal(procs.spawned[3].args[1], `${ME}`);
+            assert.deepEqual(again.targets.map(t => t.after), ["HIGH", "HIGH"]);
+        });
+
+        test("a descida que falha deixa a entrada em REALTIME e a proxima tenta de novo; um processo que terminou sai da lista", async t => {
+            const procs = replies(t,
+                ["hags on", ok(ME, "NORMAL", "HIGH"), ok(GPU, "NORMAL", "HIGH")],
+                ["hags on", ok(ME, "HIGH", "REALTIME"), ok(GPU, "HIGH", "REALTIME")],
+                ["hags on", keep(ME, "REALTIME"), keep(GPU, "REALTIME")],
+                ["hags on", `error open 0x80070005 pid=${ME} Acesso negado.`, `error gone 0x80070057 pid=${GPU} o processo terminou`],
+                ["hags on", keep(ME, "REALTIME")],
+                ["hags on", ok(ME, "REALTIME", "HIGH")],
+                ["hags on", ok(ME, "HIGH", "NORMAL")]
+            );
+            await setGpuPriorityMain("realtime");
+            const failed = await setGpuPriorityMain("high");
+            assert.deepEqual([failed.ok, failed.refused, failed.raised, failed.targets[0].error], [false, true, 1, "open 0x80070005 Acesso negado."]);
+            app.appMetrics = [{ pid: ME, type: "Browser" }]; // o processo da GPU terminou
+            const retry = await setGpuPriorityMain("high");
+            assert.equal(procs.spawned[5].args[1], `${ME}`, "so o que ficou em REALTIME");
+            assert.deepEqual([retry.ok, retry.level, retry.targets[0].after], [true, "HIGH", "HIGH"]);
+            const final = await setGpuPriorityMain("restore");
+            assert.deepEqual([final.ok, final.raised], [true, 0]);
+        });
+
+        test("a descida sem o helper (sumiu): o relatorio diz por que e a entrada fica para a proxima", async t => {
+            const host = helperHost(t);
+            const lines = [
+                ["hags on", ok(ME, "NORMAL", "HIGH"), ok(GPU, "NORMAL", "HIGH")],
+                ["hags on", ok(ME, "HIGH", "REALTIME"), ok(GPU, "HIGH", "REALTIME")]
+            ];
+            mockSpawn(t, p => answer(p, { stdout: (lines.shift() ?? []).join("\n") + "\n", code: 0 }));
+            await setGpuPriorityMain("realtime");
+            host.setExe(false);
+            const down = await setGpuPriorityMain("high");
+            assert.deepEqual([down.ok, down.raised, down.level], [false, 2, null]);
+            assert.equal(down.reason, "o ajudante do Telinha (telinha-audio.exe) não foi instalado");
+        });
+
+        test("(h) quem ja estava em HIGH por outro vai a REALTIME; o restore o devolve a HIGH, a classe que tinha", async t => {
+            const procs = helperAnswers(t, { before: pid => (pid === String(GPU) ? "HIGH" : "NORMAL") });
+            const up = await setGpuPriorityMain("realtime");
+            assert.deepEqual(up.targets, [target(ME, "Discord", "HIGH", "REALTIME"), target(GPU, "GPU", "HIGH", "REALTIME")]);
+            assert.deepEqual([up.raised, up.level], [2, "REALTIME"]);
+            const down = await setGpuPriorityMain("restore");
+            assert.deepEqual(Object.fromEntries(procs.spawned.slice(2).map(p => [p.args[1], [p.args[3], p.args[5]]])), { [ME]: ["normal", "realtime"], [GPU]: ["high", "realtime"] });
+            assert.deepEqual(down.targets, [target(ME, "Discord", "REALTIME", "NORMAL"), target(GPU, "GPU", "REALTIME", "HIGH")]);
+            assert.deepEqual(Object.fromEntries(procs.classes), { [ME]: "NORMAL", [GPU]: "HIGH" });
+        });
+
+        test("outro pos o REALTIME entre as duas fases (keep na 2a): nao e do Telinha, volta de HIGH", async t => {
+            const procs = replies(t,
+                ["hags on", ok(ME, "NORMAL", "HIGH"), ok(GPU, "NORMAL", "HIGH")],
+                ["hags on", ok(ME, "HIGH", "REALTIME"), keep(GPU, "REALTIME")],
+                ["hags on", ok(ME, "REALTIME", "NORMAL")],
+                ["hags on", ok(GPU, "REALTIME", "NORMAL")]
+            );
+            const up = await setGpuPriorityMain("realtime");
+            assert.deepEqual([up.ok, up.raised, up.level], [true, 2, "REALTIME"]);
+            await setGpuPriorityMain("restore");
+            assert.deepEqual(procs.spawned.slice(2).map(p => p.args), [
+                ["--gpu-priority", `${ME}`, "--class", "normal", "--if-class", "realtime"],
+                ["--gpu-priority", `${GPU}`, "--class", "normal", "--if-class", "high"]
+            ]);
+        });
+
+        test("sem o helper: a 1a fase diz por que e a 2a nem roda", async t => {
+            helperHost(t, { exe: false });
+            const procs = mockSpawn(t, p => answer(p, { stdout: "" }));
+            const none = await setGpuPriorityMain("realtime");
+            assert.deepEqual([none.ok, none.reason, none.level, none.realtimeRefused, procs.spawned.length], [false, "o ajudante do Telinha (telinha-audio.exe) não foi instalado", null, false, 0]);
+        });
+
+        test("o Windows recusa ate o HIGH: nada ficou em HIGH, entao nada de REALTIME a pedir", async t => {
+            const procs = helperAnswers(t, { refuse: [String(ME), String(GPU)] });
+            const up = await setGpuPriorityMain("realtime");
+            assert.deepEqual([up.mode, up.ok, up.refused, up.realtimeRefused, up.raised, up.level, procs.spawned.length], ["realtime", false, true, false, 0, null, 1]);
+        });
+
+        test("o REALTIME recusado so no processo da GPU: o principal chega la e a volta tem um helper por classe atual", async t => {
+            const procs = replies(t,
+                ["hags on", ok(ME, "NORMAL", "HIGH"), ok(GPU, "NORMAL", "HIGH")],
+                ["hags on", ok(ME, "HIGH", "REALTIME"), `error set 0xC0000022 pid=${GPU} acesso negado`]
+            );
+            const up = await setGpuPriorityMain("realtime");
+            assert.deepEqual([up.ok, up.done, up.realtimeRefused, up.level, up.raised], [false, 1, true, null, 2]);
+            await setGpuPriorityMain("restore");
+            assert.deepEqual(procs.spawned.slice(2).map(p => [p.args[1], p.args[5]]), [[`${ME}`, "realtime"], [`${GPU}`, "high"]]);
+        });
+    });
+
     describe("o processo da GPU do Discord reinicia no meio da transmissao", () => {
         const NEW_GPU = 60_002; // nao e multiplo de 4: nunca e o pid deste processo (no Windows os pids sao)
         const gone = (type = "GPU") => app.emit("child-process-gone", {}, { type, reason: "crashed", exitCode: 1 });
@@ -634,6 +840,24 @@ describe("prioridade na placa de video (telinha-audio.exe --gpu-priority)", () =
             gone();
             const down = await restoring;
             assert.deepEqual([down.ok, down.raised, procs.spawned.length], [true, 0, 2]);
+        });
+
+        test("(i) o processo da GPU reinicia com o tempo real ligado: o novo sobe so para HIGH, e o principal desce para HIGH", async t => {
+            const clock = useFakeClock(t);
+            const procs = helperAnswers(t);
+            await setGpuPriorityMain("realtime");
+            app.appMetrics = [{ pid: ME, type: "Browser" }, { pid: NEW_GPU, type: "GPU" }];
+            gone();
+            procs.classes.delete(String(GPU)); // o processo novo nasce em NORMAL
+            await after(clock, 2000);
+            assert.deepEqual(procs.spawned.slice(2).map(p => p.args), [
+                ["--gpu-priority", `${ME},${NEW_GPU}`, "--class", "high", "--raise"],
+                ["--gpu-priority", `${ME}`, "--class", "high", "--if-class", "realtime"]
+            ], "nunca REALTIME sozinho no novo; o principal desce para HIGH");
+            assert.equal(procs.classes.get(String(NEW_GPU)), "HIGH");
+            const down = await setGpuPriorityMain("restore");
+            assert.match(down.notes[0], new RegExp(`\\(${GPU} → ${NEW_GPU}\\): alta de novo$`));
+            assert.deepEqual(procs.spawned[4].args, ["--gpu-priority", `${ME},${NEW_GPU}`, "--class", "normal", "--if-class", "high"]);
         });
 
         test("app.on que lanca: a prioridade funciona, so sem o ouvinte", async t => {

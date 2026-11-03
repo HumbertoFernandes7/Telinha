@@ -321,11 +321,13 @@ export function setGpuCapture(_: IpcMainInvokeEvent, on: boolean): GpuCaptureSta
 
 /**
  * "Prioridade da captura na placa de vídeo": "high" sobe o processo principal do Discord e o da GPU para HIGH na placa de
- * video (inicio da transmissao), so os que estao abaixo: nunca abaixa (o processo da GPU pode ja estar em REALTIME) e
- * nunca pede REALTIME; qualquer outro valor volta o que o "high" mudou (fim da transmissao).
+ * video (inicio da transmissao), so os que estao abaixo: nunca abaixa um REALTIME que nao e do Telinha (o processo da GPU
+ * pode ja estar em REALTIME), e desce para HIGH o que o proprio Telinha pos em REALTIME; "realtime" faz o "high" e, por
+ * cima, pede REALTIME (o helper so aceita com --allow-realtime; uma recusa deixa HIGH); qualquer outro valor volta o que o
+ * Telinha mudou (fim da transmissao).
  */
 export function setGpuPriority(_: IpcMainInvokeEvent, mode: string): Promise<GpuPriorityReport> {
-    return setGpuPriorityMain(mode === "high" ? "high" : "restore");
+    return setGpuPriorityMain(mode === "high" || mode === "realtime" ? mode : "restore");
 }
 
 // #endregion
