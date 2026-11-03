@@ -1,10 +1,10 @@
 # Telinha como addon do Vencord oficial: estudo de viabilidade e protótipo
 
-> **Nota (atualização):** estudo escrito para o protótipo, quando o projeto ainda se chamava PeerLive; os nomes foram
-> atualizados para Telinha e o protótipo virou o payload real. O plugin de teste `TelinhaAddonHello` citado abaixo
-> foi removido (os testes agora usam o plugin Telinha real). Contrato atual de instalação: [`PAYLOAD.md`](PAYLOAD.md).
-> Teste no Discord real: [`REAL-TEST.md`](REAL-TEST.md). Layout atual: `addon/loader`, `addon/installer`,
-> `addon/build/build-addon.mjs` (`pnpm build:addon`), `addon/test`.
+> **Histórico:** estudo de viabilidade do protótipo, escrito quando o projeto ainda se chamava PeerLive. O desenho dos
+> hooks (seções 1 a 6) continua valendo; o resto é histórico. O estado atual está em [`PAYLOAD.md`](PAYLOAD.md) (layout,
+> instalador, atualização automática, recursos do Chromium ligados pelo loader). O plugin de teste `TelinhaAddonHello` foi
+> removido: os testes usam o plugin Telinha real. Teste no Discord real: [`REAL-TEST.md`](REAL-TEST.md). Código atual:
+> `addon/loader`, `addon/installer`, `addon/build/build-addon.mjs` (`pnpm build:addon`), `addon/test`.
 
 ## Resumo (pt-BR)
 
@@ -47,17 +47,16 @@ do Vencord, o updater só reescreve `%APPDATA%\Vencord\dist\*`, e o loader relê
   memória: o arquivo do Vencord não muda.
 - O **Vencord Installer → Repair/Install** troca o nosso stub pelo dele. O Vencord continua ok, mas o Telinha some
   até rodar o nosso instalador de novo. O **Uninstall** do Vencord remove os dois.
-- O instalador final precisa ser um `.exe`/`.ps1`, porque o usuário não tem Node. O protótipo do instalador é Node.
+- O instalador final é o `TelinhaInstaller.exe`, em Go (`installer/`); o instalador em Node (`addon/installer/`) ficou só para os testes e o teste no Discord real.
 
 **Provado offline** (Vencord **oficial 443688b**, com cópias em `%TEMP%\tl-addon`; nada real foi tocado):
 
-- 46 checagens do lado main com o `patcher.js` e o `preload.js` reais;
-- 25 checagens do renderer em `vm` com o `renderer.js` real e um runtime webpack falso, em que o patch é **aplicado**
+- checagens do lado main com o `patcher.js` e o `preload.js` reais;
+- checagens do renderer em `vm` com o `renderer.js` real e um runtime webpack falso, em que o patch é **aplicado**
   de fato;
 - o build do **plugin Telinha real, sem alterações**, como addon, com smoke ok.
 
-O teste no Discord real é o próximo passo, com backup (veja o
-[plano de teste no Discord real](#real-discord-test-plan-explicit-step-with-backups)).
+O teste no Discord real foi feito com o roteiro do [`REAL-TEST.md`](REAL-TEST.md).
 
 ---
 
@@ -69,9 +68,8 @@ O teste no Discord real é o próximo passo, com backup (veja o
     _app.asar    <- Discord's original (renamed by the OFFICIAL Vencord installer; we never touch it)
 %APPDATA%\Vencord\dist\          <- official Vencord, self-updating, untouched
 %APPDATA%\Telinha\
-    addon\  main.js payload.js register.js preload.js addon.json <plugin>.main.js <plugin>.renderer.js
-    backup\ app-<ver>.vencord-app.asar      (Vencord's stub as we found it)
-    logs\   main.log                        (main-process stdout is invisible on Windows)
+    addon\  the payload, backup\ Vencord's stub as we found it, logs\ the loader log
+            (current layout: PAYLOAD.md, sections 1 and 2)
 ```
 
 Boot sequence (main process):
@@ -79,6 +77,7 @@ Boot sequence (main process):
 ```
 Discord.exe -> resources/app.asar/index.js  (our stub; require.main)
   -> %APPDATA%/Telinha/addon/main.js boot()
+       updater.startup() (swap/rollback, PAYLOAD.md 8.3-8.4) -> applyCaptureFlags() (PAYLOAD.md 6.1)
        install hooks: ipcMain.on wrapper, ipcMain.handle(natives), whenReady CSP wrapper, BrowserWindow subclass
   -> require(<Vencord patcher.js path copied from Vencord's own stub>)
        Vencord: require.main.filename -> _app.asar main, BrowserWindow subclass (extends ours), ipcMain.on(...) [hooked]
@@ -256,18 +255,14 @@ Vencord's settings store, finders and React. `@utils/types` is the only file inl
 internals"). `.css` becomes a `<style>`. JSX uses Vencord's own `VencordCreateElement` inject.
 
 Result today:
-- renderer 356 KiB, main 14 KiB, no Vencord source files bundled;
-- internals used: `@api/Settings`, `@components/{Button,ErrorBoundary,FormSwitch,Paragraph}`,
-  `@utils/{Logger,clipboard,css,types}`, `@webpack`, `@webpack/common`;
+- no Vencord source files bundled;
+- internals used: `@api/{ContextMenu,DataStore,Notifications,Settings}`, `@components/{Button,ErrorBoundary,FormSwitch,Paragraph}`,
+  `@utils/{Logger,clipboard,css,types}`, `@webpack`, `@webpack/common` (and the `@main/csp` shim in the main bundle);
 - it registers in official 443688b, and S5 boots it through the real `patcher.js`/`preload.js`: `pluginHelpers.Telinha`
   is present, and the relays from the unchanged `native.ts` reach the CSP header.
 
-Todo for production:
-- `enabledByDefault` for the addon build (otherwise the user must enable it and restart once);
-- an addon self-updater (GitHub release → `%APPDATA%\Telinha\addon`);
-- the installer as a signed Go/PowerShell tool (prototype is Node; Vencord's own installer is Go, and our asar writer
-  is a port of it);
-- publishing the source under GPL-3.0, since the addon is a Vencord plugin.
+Done since: `enabledByDefault` (`build-addon.mjs`), the self-updater (`loader/updater.js`), the Go installer
+(`installer/`) and the GPL-3.0 source. Still open: code-signing the installer and `telinha-audio.exe`.
 
 ## 8. Prototype layout and offline results
 
@@ -278,11 +273,11 @@ addon/
   loader/payload.js         pure helpers: PluginMeta patch, renderer wrapper, CSP merge
   loader/register.js        renderer: late plugin registration (initPluginManager equivalent)
   loader/preload.js         fallback B preload
-  payload/addon.json, hello.main.js, hello.renderer.js   trivial TelinhaAddonHello (1 setting, 2 patches, natives)
   installer/asar.js, install.js     status/install/uninstall (refuses real paths without --real; refuses if Discord runs)
   build/build-addon.mjs    build + smoke an unchanged Vencord plugin folder as addon payload
   test/run-main-test.mjs    S1-S5 + installer, real Vencord patcher/preload/renderer, fake electron + fake trees
   test/run-renderer-test.mjs  vm: real Vencord renderer + payload actually served in S1 + fake Discord webpack
+  test/run-all.mjs          pnpm test:addon: every run-*-test.mjs (main, renderer, update, helper, release) + the *.test.mjs units
 ```
 
 Run (Vencord build defaults to `.vencord/dist`, the pinned official Vencord built by `pnpm bootstrap`, read-only;
@@ -290,8 +285,8 @@ scratch is `%TEMP%\tl-addon-<hash of the repo path>`, so two checkouts can run a
 
 ```
 node addon/build/build-addon.mjs        # optional; enables S5
-node addon/test/run-main-test.mjs        # 46 checks
-node addon/test/run-renderer-test.mjs    # 25 checks (uses S1's served script)
+node addon/test/run-main-test.mjs        # main-process scenarios
+node addon/test/run-renderer-test.mjs    # renderer scenarios (uses S1's served script)
 ```
 
 What the scenarios show:
@@ -302,7 +297,7 @@ What the scenarios show:
   - window chain `Vencord → Telinha(dormant) → Electron`, still listed by `getAllWindows()`;
   - Vencord's real preload runs Discord's preload;
   - one `executeJavaScript` with Vencord then the addon, `PluginMeta` patched;
-  - `pluginHelpers.TelinhaAddonHello` round-trip, display-media handler, untrusted frame rejected;
+  - `pluginHelpers.Telinha` round-trip, display-media handler, untrusted frame rejected;
   - CSP chained (1 listener, Vencord's rules + 8 relays, stylesheet fix intact);
   - Discord-update persistence of our stub.
 - **S2**, channels renamed: fallback B swaps the preload, two scripts, `window.TelinhaNative` works, CSP still chained.
