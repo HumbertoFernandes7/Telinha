@@ -104,7 +104,7 @@ test("ligar a prioridade na placa de video: a linha dela aparece (sem botao: nao
     await settle();
     assert.equal(screen.queryByText(/Prioridade/), null);
     act(() => {
-        settings.store.gpuPriority = true;
+        settings.store.gpuPriorityMode = "high";
     });
     await settle();
     assert.ok(screen.getByText("Prioridade da captura na placa de vídeo: vale quando você transmitir."));

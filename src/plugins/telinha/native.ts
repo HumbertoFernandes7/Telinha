@@ -14,7 +14,10 @@ import { app, desktopCapturer, type IpcMainInvokeEvent } from "electron";
 import { readScreenAudioMain, screenAudioStatusMain, startScreenAudioMain, stopScreenAudioMain } from "./core/audio/screenAudioMain";
 import type { ScreenAudioRead, ScreenAudioStart, ScreenAudioStatus } from "./core/audio/types";
 import { type Av1FlagStatus, av1FlagStatusMain, setAv1FlagMain } from "./core/av1FlagMain";
-import { type GpuCaptureStatus, gpuCaptureStatusMain, type GpuPriorityReport, setGpuCaptureMain, setGpuPriorityMain } from "./core/captureBoostMain";
+import {
+    type GpuCaptureStatus, gpuCaptureStatusMain, type GpuPriorityReport, type GpuRealtimeStatus, gpuRealtimeStatusMain, setGpuCaptureMain, setGpuPriorityMain,
+    setGpuRealtimeBlockedMain
+} from "./core/captureBoostMain";
 import { appendDiagLogMain, clearDiagLogMain, readDiagLogMain } from "./core/diagLogMain";
 import { type LiveWeightReport, type LiveWeightStart, readLiveWeightMain, startLiveWeightMain, stopLiveWeightMain } from "./core/liveWeightMain";
 import { getWindowProcessInfo } from "./nativeWindowPid";
@@ -321,11 +324,23 @@ export function setGpuCapture(_: IpcMainInvokeEvent, on: boolean): GpuCaptureSta
 
 /**
  * "Prioridade da captura na placa de vídeo": "high" sobe o processo principal do Discord e o da GPU para HIGH na placa de
- * video (inicio da transmissao), so os que estao abaixo: nunca abaixa (o processo da GPU pode ja estar em REALTIME) e
- * nunca pede REALTIME; qualquer outro valor volta o que o "high" mudou (fim da transmissao).
+ * video (inicio da transmissao), so os que estao abaixo: nunca abaixa um REALTIME que nao e do Telinha (o processo da GPU
+ * pode ja estar em REALTIME), e desce para HIGH o que o proprio Telinha pos em REALTIME; "realtime" faz o "high" e, por
+ * cima, pede REALTIME (o helper so aceita com --allow-realtime; uma recusa deixa HIGH); qualquer outro valor volta o que o
+ * Telinha mudou (fim da transmissao).
  */
 export function setGpuPriority(_: IpcMainInvokeEvent, mode: string): Promise<GpuPriorityReport> {
-    return setGpuPriorityMain(mode === "high" ? "high" : "restore");
+    return setGpuPriorityMain(mode === "high" || mode === "realtime" ? mode : "restore");
+}
+
+/** "Tempo real (teste)": se da para tentar neste PC (gpu-priority.json) ou por que esta desligado (o encoder parou, a GPU caiu, o Discord morreu em REALTIME). */
+export function gpuRealtimeStatus(_: IpcMainInvokeEvent): GpuRealtimeStatus {
+    return gpuRealtimeStatusMain();
+}
+
+/** Um texto desliga o REALTIME neste PC (fica em HIGH); null liga de novo (o usuario escolheu "Tempo real (teste)" outra vez). */
+export function setGpuRealtimeBlocked(_: IpcMainInvokeEvent, why: string | null): GpuRealtimeStatus {
+    return setGpuRealtimeBlockedMain(why);
 }
 
 // #endregion

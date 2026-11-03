@@ -12,7 +12,7 @@
  *   node addon/test/run-helper-test.mjs [--payload <dir>]       (also run by `pnpm test:addon`, after build:addon)
  *
  * The targets are this node process (the helper's parent, like Discord main) and a child of it, at HIGH and back to
- * NORMAL; never REALTIME, never a process outside this tree. Whether Windows accepts the change depends on the machine
+ * NORMAL; REALTIME only in H6, with --allow-realtime; never a process outside this tree. Whether Windows accepts the change depends on the machine
  * (a runner may have no GPU): either answer must follow the protocol, and when HIGH is accepted, the class must still be
  * there after the helper exited (the restore reads it as "before"). Skipped off Windows, or without a built helper
  * outside CI. Nothing here touches Discord or %APPDATA%.
@@ -64,7 +64,7 @@ function setClass(label, pid, cls) {
 console.log("H1 version");
 {
     const r = run("--version");
-    check("--version says telinha-audio 3 (--gpu-priority with --raise / --if-class)", r.code === 0 && r.out[0] === "telinha-audio 3", r);
+    check("--version says telinha-audio 4 (--gpu-priority with --raise / --if-class / --allow-realtime)", r.code === 0 && r.out[0] === "telinha-audio 4", r);
 }
 
 // ---------------------------------------------------------------------------------------------- H2 this process
@@ -95,7 +95,7 @@ console.log("H3 --gpu-priority on a child of the caller (what the plugin does wi
 }
 
 // ---------------------------------------------------------------------------------------------- H4 refusals
-console.log("H4 refusals: outside the caller's tree, REALTIME, bad arguments");
+console.log("H4 refusals: outside the caller's tree, REALTIME without --allow-realtime, bad arguments");
 {
     const outside = process.ppid;
     const r = run("--gpu-priority", String(outside), "--class", "high");
@@ -111,7 +111,8 @@ console.log("H4 refusals: outside the caller's tree, REALTIME, bad arguments");
         && (g.out[1].startsWith(`error gone 0x80070057 pid=${dead.pid} `) || g.out[1].startsWith(`error tree 0x80070005 pid=${dead.pid} `)), g);
 
     const rt = run("--gpu-priority", String(process.pid), "--class", "realtime");
-    check("--class realtime is refused (exit 2, nothing changed)", rt.code === 2 && rt.out.length === 0 && /realtime nao e permitido/.test(rt.err), rt);
+    check("--class realtime without --allow-realtime is refused (exit 2, nothing changed)", rt.code === 2 && rt.out.length === 0
+        && /realtime nao e permitido sem --allow-realtime/.test(rt.err), rt);
     const rtUpper = run("--gpu-priority", String(process.pid), "--class", "REALTIME");
     check("... in any case", rtUpper.code === 2 && rtUpper.out.length === 0, rtUpper);
 
@@ -128,7 +129,9 @@ console.log("H4 refusals: outside the caller's tree, REALTIME, bad arguments");
         ["--gpu-priority", String(process.pid), "--class", "high", "--class", "normal"],
         ["--gpu-priority", String(process.pid), "--class", "high", "--raise", "--if-class", "high"],
         ["--gpu-priority", String(process.pid), "--class", "high", "--raise", "--raise"],
-        ["--gpu-priority", String(process.pid), "--class", "normal", "--if-class", "realtime"],
+        ["--gpu-priority", String(process.pid), "--class", "high", "--allow-realtime"],
+        ["--probe", "--allow-realtime"],
+        ["--gpu-priority", String(process.pid), "--class", "realtime", "--allow-realtime", "--allow-realtime"],
         ["--gpu-priority", String(process.pid), "--class", "normal", "--if-class"],
         ["--probe", "--raise"],
         ["--sessions", "--if-class", "high"]
@@ -168,6 +171,48 @@ console.log("H5 --raise never lowers; --if-class only changes a process still in
         check("--if-class high puts a process still at HIGH back to NORMAL", back.before === "HIGH" && back.after === "NORMAL", back);
     } else {
         call("--raise on a machine that refused HIGH", "high", "--raise");
+        console.log("        (this machine refused the change: only the protocol is checked)");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------- H6 REALTIME
+console.log("H6 REALTIME with --allow-realtime (what the plugin's \"Tempo real (teste)\" does, on top of HIGH)");
+{
+    const keepLine = pid => new RegExp(`^keep pid=${pid} class=([A-Z_]+|CLASS-?\\d+)$`);
+    /** One call on this process: exit 0 with "ok ..." or "keep ...", or exit 6 with an error line. */
+    const call = (label, ...args) => {
+        const r = run("--gpu-priority", String(process.pid), ...args);
+        const ok = r.out[1] && okLine(process.pid).exec(r.out[1]);
+        const keep = r.out[1] && keepLine(process.pid).exec(r.out[1]);
+        const fine = r.out.length === 2 && HAGS_RE.test(r.out[0]) && r.err === ""
+            && (r.code === 0 ? !!(ok || keep) : r.code === 6 && errorLine(process.pid, "open|get|set").test(r.out[1]));
+        console.log(`        (${label}: exit ${r.code}, ${JSON.stringify(r.out)})`);
+        check(`${label}: protocol (hags line + one ok/keep/error line, exit 0/6)`, fine, r);
+        return { ...r, before: ok?.[1] ?? null, after: ok?.[2] ?? null, kept: keep?.[1] ?? null };
+    };
+    const start = accepted ? setClass("this process at NORMAL to start", process.pid, "normal") : null;
+    if (start?.code === 0) {
+        const high = call("--class high --raise", "--class", "high", "--raise");
+        check("--raise from NORMAL sets HIGH (phase 1)", high.before === "NORMAL" && high.after === "HIGH", high);
+        const rt = call("--class realtime --raise --allow-realtime", "--class", "realtime", "--raise", "--allow-realtime");
+        if (rt.code !== 0) {
+            console.log("        (REALTIME refused by Windows: exit 6 with an error line, the class stays HIGH)");
+        } else if (rt.after === "REALTIME") {
+            console.log("        (REALTIME accepted)");
+            check("REALTIME accepted: before=HIGH after=REALTIME", rt.before === "HIGH", rt);
+            const again = call("--class realtime --raise --allow-realtime again", "--class", "realtime", "--raise", "--allow-realtime");
+            check("--raise on a process already at REALTIME leaves it (keep class=REALTIME)", again.kept === "REALTIME", again);
+            const down = call("--class high --if-class realtime", "--class", "high", "--if-class", "realtime");
+            check("--if-class realtime steps a process still at REALTIME down to HIGH", down.before === "REALTIME" && down.after === "HIGH", down);
+            const back = call("--class normal --if-class high", "--class", "normal", "--if-class", "high");
+            check("--if-class high puts it back to NORMAL", back.before === "HIGH" && back.after === "NORMAL", back);
+        } else {
+            console.log(`        (REALTIME clamped: Windows accepted the call but kept ${rt.after})`);
+            check("REALTIME clamped: before=HIGH and a class below REALTIME", rt.before === "HIGH", rt);
+            call("--class normal --if-class high", "--class", "normal", "--if-class", "high");
+        }
+    } else {
+        call("--class realtime --raise --allow-realtime on a machine that refused HIGH", "--class", "realtime", "--raise", "--allow-realtime");
         console.log("        (this machine refused the change: only the protocol is checked)");
     }
 }

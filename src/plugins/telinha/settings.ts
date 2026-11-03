@@ -7,7 +7,7 @@
 import { definePluginSettings } from "@api/Settings";
 import { migrateAccessSetting } from "@plugins/telinha/core/access";
 import { onAv1SettingChanged } from "@plugins/telinha/core/av1Flag";
-import { onGpuCaptureSettingChanged, onGpuPrioritySettingChanged } from "@plugins/telinha/core/captureBoost";
+import { migrateGpuPrioritySetting, onGpuCaptureSettingChanged, onGpuPrioritySettingChanged } from "@plugins/telinha/core/captureBoost";
 import { onShareDiagnosticsChanged } from "@plugins/telinha/core/diagShare";
 import { isIdentityConfigured } from "@plugins/telinha/core/identity/config";
 import { migrateQualitySetting } from "@plugins/telinha/core/quality/choice";
@@ -164,11 +164,17 @@ export const settings = definePluginSettings({
         default: false,
         onChange: () => void onGpuCaptureSettingChanged()
     },
-    gpuPriority: {
-        type: OptionType.BOOLEAN,
+    // substitui a opcao booleana gpuPriority (migrada em migrateGpuPrioritySettings: true → "high"); a chave e nova porque
+    // um true salvo nao e um valor valido do seletor
+    gpuPriorityMode: {
+        type: OptionType.SELECT,
         displayName: "Prioridade da captura na placa de vídeo (experimental)",
-        description: "Deixa a live mais fluida quando um jogo usa a placa de vídeo toda: enquanto você transmite, a captura passa na frente na fila da placa de vídeo.",
-        default: false,
+        description: "Deixa a live mais fluida quando um jogo usa a placa de vídeo toda. Alta: enquanto você transmite, a captura passa na frente na fila da placa de vídeo. Tempo real (teste): alta, e quando um jogo pesado ocupa a placa, a captura passa na frente de tudo (o jogo pode perder alguns fps); se a placa travar, volta sozinho para alta e lembra neste PC.",
+        options: [
+            { label: "Desligada", value: "off", default: true },
+            { label: "Alta", value: "high" },
+            { label: "Tempo real (teste)", value: "realtime" }
+        ],
         onChange: () => onGpuPrioritySettingChanged()
     },
     // o que as opcoes acima fazem agora (ui/CaptureBoostStatus.tsx); nada fica salvo nesta chave
@@ -212,5 +218,21 @@ export function migrateQualitySettings(): void {
         if (fps) settings.store.defaultFps = fps;
     } catch (e) {
         console.warn("[Telinha] migração de \"Qualidade padrão\" falhou", e);
+    }
+}
+
+/**
+ * A opcao booleana "Prioridade da captura na placa de vídeo" (gpuPriority: true) virou o seletor gpuPriorityMode:
+ * true → "Alta". A chave antiga fica como esta (uma versao anterior do Telinha ainda a le); so deixa de ser lida quando
+ * gpuPriorityMode existe. Chamado no start() do plugin. Nunca lanca.
+ */
+export function migrateGpuPrioritySettings(): void {
+    try {
+        const plain = settings.plain as Record<string, unknown> | undefined;
+        if (!plain) return;
+        const { mode } = migrateGpuPrioritySetting(plain);
+        if (mode) settings.store.gpuPriorityMode = mode;
+    } catch (e) {
+        console.warn("[Telinha] migração de \"Prioridade da captura na placa de vídeo\" falhou", e);
     }
 }
