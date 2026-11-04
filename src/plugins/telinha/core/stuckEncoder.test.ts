@@ -103,12 +103,13 @@ describe("placa de video que trava com H.264: lembrada neste PC", () => {
         const record = stuckRecord()!;
         assert.equal(stuckLine(record), "A placa de vídeo travou com H.264 neste PC em 31/10; usando VP9.");
         const diag = stuckEncoderDiagnostics().split("\n");
-        assert.deepEqual(diag.slice(0, 3), [
+        assert.deepEqual(diag.slice(0, 4), [
             "ambiente do encoder: placa de vídeo 1002:7550, driver 32.0.21001.9024; Chromium 152.0.7444.59; Discord 1.0.9266 (placa via main)",
+            "placas de vídeo: ? (parte nativa antiga); dica duas placas: não",
             `H.264 da placa travado neste PC: em ${new Date(STUCK_AT).toISOString()} (placa de vídeo 1002:7550, driver 32.0.21001.9024; Chromium 152.0.7444.59; Discord 1.0.9266); H.264 automático desligado`,
             "travou nesta sessão: não"
         ]);
-        assert.equal(diag[3], "sonda WebCodecs H.264 placa: não feita (a placa já travou neste PC)");
+        assert.equal(diag[4], "sonda WebCodecs H.264 placa: não feita (a placa já travou neste PC)");
     });
 
     test("\"Tentar a placa de vídeo de novo\": esquece o travamento E a sonda, e o H.264 so volta depois de a sonda responder", async () => {

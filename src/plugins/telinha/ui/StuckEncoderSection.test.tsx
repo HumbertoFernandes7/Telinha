@@ -24,7 +24,7 @@ afterEach(() => resetVencordFakes());
 
 test("sem travamento lembrado: nada aparece (e o diagnostico diz que o ambiente ainda nao foi lido)", () => {
     pluginSettings.load({});
-    assert.ok(stuckEncoderDiagnostics().startsWith("ambiente do encoder: ainda lendo\nH.264 da placa travado neste PC: não;"));
+    assert.ok(stuckEncoderDiagnostics().startsWith("ambiente do encoder: ainda lendo\nplacas de vídeo: ? (parte nativa antiga); dica duas placas: não\nH.264 da placa travado neste PC: não;"));
     const { container } = render(<StuckEncoderSection />);
     assert.equal(container.textContent, "");
 });

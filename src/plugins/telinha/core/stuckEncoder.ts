@@ -67,6 +67,7 @@ import {
 } from "./codec";
 import { rt } from "./context";
 import { type ProbeResult, type ProbeVerdict, runEncoderProbe } from "./encoderProbe";
+import { describeAdapters, type DualGpuHint, dualGpuHint, type GpuAdapter } from "./gpuAdapters";
 import { errorText, log } from "./log";
 import { getNativeOrNull } from "./nativeApi";
 import { containedCount } from "./peerConnection";
@@ -174,6 +175,11 @@ let envPromise: Promise<EncoderEnv> | null = null;
 let envNow: EncoderEnv | null = null;
 /** de onde veio a placa de video: "main" (app.getGPUInfo), "webgpu", ou o motivo de ter ficado desconhecida */
 let envSource = "";
+/** as placas e a tela embutida que o main mandou (fora do EncoderEnv: nao entram na mudanca de ambiente); para a dica das duas placas */
+let storedAdapters: GpuAdapter[] | undefined;
+let storedInternal: boolean | null | undefined;
+/** o log da dica das duas placas sai uma vez por sessao */
+let dualGpuLogged = false;
 /** a placa travou NESTA sessao do Discord (ha conexao contida: o botao so vale depois de reiniciar) */
 let stuckThisSession = false;
 let started: Promise<void> | null = null;
@@ -242,6 +248,8 @@ async function fromWebGpu(): Promise<Pick<EncoderEnv, "vendorId" | "deviceId"> |
 export async function measureEnvironment(): Promise<EncoderEnv> {
     const env: EncoderEnv = { vendorId: null, deviceId: null, driver: null, chrome: null, discord: null };
     const why: string[] = [];
+    storedAdapters = undefined;
+    storedInternal = undefined;
     try {
         const native = getNativeOrNull();
         if (typeof native?.gpuEnvironment === "function") {
@@ -252,6 +260,8 @@ export async function measureEnvironment(): Promise<EncoderEnv> {
             env.driver = text(res?.driverVersion);
             env.chrome = text(res?.chrome);
             env.discord = text(res?.discord);
+            if (Array.isArray(res?.adapters)) storedAdapters = res.adapters;
+            if (res && "internalDisplay" in res) storedInternal = typeof res.internalDisplay === "boolean" ? res.internalDisplay : null;
             if (typeof res?.error === "string") why.push(res.error.slice(0, 200));
         } else {
             why.push("parte nativa sem gpuEnvironment (Discord ainda não reiniciado depois da atualização)");
@@ -283,6 +293,21 @@ export async function measureEnvironment(): Promise<EncoderEnv> {
 /** O ambiente desta sessao do Discord (lido uma vez). Nunca rejeita. */
 export function environment(): Promise<EncoderEnv> {
     return envPromise ??= measureEnvironment();
+}
+
+/** A dica das duas placas (core/gpuAdapters.ts): so com o registro do H.264 Baseline (stuckRecord; High/H.265/AV1 tem outras chaves). */
+export function dualGpuTip(): DualGpuHint | null {
+    return dualGpuHint(storedAdapters, storedInternal, !!stuckRecord());
+}
+
+const tipLabel = (tip: DualGpuHint | null) => (tip ? (tip.kind === "disable" ? "desativar a integrada" : "notebook: sem desativar") : "não");
+
+function logDualGpuTipOnce() {
+    if (dualGpuLogged) return;
+    const tip = dualGpuTip();
+    if (!tip) return;
+    dualGpuLogged = true;
+    log.info(`Dica das duas placas de vídeo (${tipLabel(tip)}): ${describeAdapters(storedAdapters, storedInternal)}`);
 }
 
 const ENV_PARTS: readonly [keyof EncoderEnv, string][] = [
@@ -508,6 +533,7 @@ export function startLocalCaps(report: (line: string) => void): Promise<void> {
         const measuring = probeLocalCaps();
         const env = await environment();
         const record = stuckRecord();
+        logDualGpuTipOnce();
         const sameEnv = !!record && !envChanges(record.env, env).length;
         // "inconclusiva" nunca e salva, entao `done` e ok ou travou
         const done = doneIn(probeRecord(), env);
@@ -516,6 +542,7 @@ export function startLocalCaps(report: (line: string) => void): Promise<void> {
         const caps = await measuring;
         const line = () => {
             const rec = stuckRecord();
+            logDualGpuTipOnce();
             report(`${describeLocalCaps({ ...caps, av1HwFeature: getLocalCaps().av1HwFeature })}; ${describeEnv(env)}; sonda WebCodecs H.264 placa: ${probeNote}`
                 + (caps.h264HighHwProfile ? `; sonda WebCodecs H.264 High: ${highNote}` : "")
                 + (caps.h265HwFmtp ? `; sonda WebCodecs H.265: ${hwOnlyNotes.h265}` : "")
@@ -1051,6 +1078,7 @@ export function stuckEncoderDiagnostics(): string {
     const feature = caps.av1HwFeature === true ? "ligado" : caps.av1HwFeature === false ? "desligado" : "desconhecido";
     return [
         `ambiente do encoder: ${env ? `${describeEnv(env)} (placa via ${envSource})` : "ainda lendo"}`,
+        `placas de vídeo: ${describeAdapters(storedAdapters, storedInternal)}; dica duas placas: ${tipLabel(dualGpuTip())}`,
         `H.264 da placa travado neste PC: ${remembered}${record?.source === "probe" ? " [visto pela sonda]" : ""}; H.264 automático ${isH264HwStuck() ? "desligado" : "ligado"}`,
         `travou nesta sessão: ${stuckThisSession ? `sim (${contained} ${contained === 1 ? "conexão contida" : "conexões contidas"})` : "não"}`,
         `sonda WebCodecs H.264 placa: ${probeNote}${saved ? `; salva: ${PROBE_LABEL[saved.verdict]} em ${new Date(saved.at).toISOString()} (${saved.detail})` : ""}`,
