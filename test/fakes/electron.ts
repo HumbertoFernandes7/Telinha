@@ -118,4 +118,14 @@ export const app = {
     exit() { }
 };
 
+export const screen = {
+    /** what getAllDisplays() answers (default: one external monitor); replace per test */
+    displays: [{ id: 1, internal: false }] as { id: number; internal?: boolean; }[],
+    /** replace to make getAllDisplays throw */
+    getAllDisplaysImpl: null as (() => unknown[]) | null,
+    getAllDisplays(): any[] {
+        return screen.getAllDisplaysImpl ? screen.getAllDisplaysImpl() : screen.displays;
+    }
+};
+
 export const ipcMain = { handle() { }, on() { }, removeHandler() { } };

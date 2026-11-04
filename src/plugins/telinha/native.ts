@@ -9,7 +9,7 @@
 // permitido e liberar os relays no CSP. Todo o resto (handler de display media etc.) e preguicoso.
 
 import { ConnectSrc, CspPolicies } from "@main/csp";
-import { app, desktopCapturer, type IpcMainInvokeEvent } from "electron";
+import { app, desktopCapturer, type IpcMainInvokeEvent, screen } from "electron";
 
 import { readScreenAudioMain, screenAudioStatusMain, startScreenAudioMain, stopScreenAudioMain } from "./core/audio/screenAudioMain";
 import type { ScreenAudioRead, ScreenAudioStart, ScreenAudioStatus } from "./core/audio/types";
@@ -238,6 +238,18 @@ export function resetDisplayMedia(_: IpcMainInvokeEvent) {
 
 // #region ambiente do encoder (core/stuckEncoder.ts)
 
+export interface GpuAdapter {
+    vendorId: number;
+    deviceId: number;
+    /** deviceString do Chromium (nome do Windows) */
+    name: string;
+    driverVendor: string;
+    driverVersion: string;
+    active: boolean;
+    /** gpuPreference do Chromium: 0 nenhum, 1 padrao, 2 baixo consumo, 3 alto desempenho */
+    preference: number;
+}
+
 /**
  * Ambiente que decide se o H.264 da placa de video volta a ser tentado depois de travar (core/stuckEncoder.ts): a placa
  * ativa (app.getGPUInfo("basic"): vendorId/deviceId PCI e a versao do driver), o Chromium e o Discord deste processo.
@@ -251,15 +263,46 @@ export interface GpuEnvironment {
     discord: string | null;
     /** por que a placa ficou desconhecida (diagnostico) */
     error: string | null;
+    /** todas as placas de gpuDevice, na ordem do Chromium (max. 8). Opcional: uma parte nativa antiga nao manda */
+    adapters?: GpuAdapter[];
+    /** ha tela embutida (notebook/all-in-one)? null = desconhecido. Opcional: parte nativa antiga nao manda */
+    internalDisplay?: boolean | null;
 }
+
+const MAX_ADAPTERS = 8;
 
 const GPU_INFO_TIMEOUT_MS = 3000;
 
 const pciId = (n: unknown) => (typeof n === "number" && Number.isInteger(n) && n >= 0 && n <= 0xFFFF ? n : null);
 const shortText = (s: unknown) => (typeof s === "string" && s.trim() ? s.trim().slice(0, 64) : null);
 
+const adapterText = (s: unknown) => (typeof s === "string" ? s.replace(/[\p{Cc}\p{Cf}]/gu, "").replace(/\s+/g, " ").trim().slice(0, 128) : "");
+
+function toAdapter(d: any): GpuAdapter {
+    return {
+        vendorId: pciId(d?.vendorId) ?? 0,
+        deviceId: pciId(d?.deviceId) ?? 0,
+        name: adapterText(d?.deviceString),
+        driverVendor: adapterText(d?.driverVendor),
+        driverVersion: adapterText(d?.driverVersion),
+        active: d?.active === true,
+        preference: typeof d?.gpuPreference === "number" && Number.isInteger(d.gpuPreference) && d.gpuPreference >= 0 && d.gpuPreference <= 3 ? d.gpuPreference : 0
+    };
+}
+
+function hasInternalDisplay(): boolean | null {
+    try {
+        return screen.getAllDisplays().some(d => d.internal === true);
+    } catch {
+        return null;
+    }
+}
+
 export async function gpuEnvironment(_: IpcMainInvokeEvent): Promise<GpuEnvironment> {
     const env: GpuEnvironment = { vendorId: null, deviceId: null, driverVersion: null, chrome: shortText(process.versions?.chrome), discord: null, error: null };
+    env.internalDisplay = hasInternalDisplay();
+    // sempre manda a lista (vazia se o getGPUInfo falhar): o renderer distingue "native novo sem lista" de "native antigo"
+    env.adapters = [];
     try {
         env.discord = shortText(app.getVersion());
     } catch { }
@@ -275,6 +318,7 @@ export async function gpuEnvironment(_: IpcMainInvokeEvent): Promise<GpuEnvironm
         }
         const devices: any[] = Array.isArray((info as any)?.gpuDevice) ? (info as any).gpuDevice : [];
         const gpu = devices.find(d => d?.active === true) ?? devices[0];
+        env.adapters = devices.slice(0, MAX_ADAPTERS).map(toAdapter);
         if (!gpu) {
             env.error = "getGPUInfo sem gpuDevice";
             return env;

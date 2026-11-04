@@ -27,6 +27,7 @@ file but shared by the tests inside it: stop what you start (`stopSession()`, `s
   `[Telinha] ...` console lines (every call whose first argument starts with `[Telinha]`) silenced (read the core's with
   `getEventLog()` from `store.ts`; `TELINHA_TEST_ECHO=1` prints them).
 - Tests import the controls from `@test/...` (the same module instances the plugin gets).
+- CI runs the unit and add-on tests once, under coverage (`pnpm test:coverage`); `pnpm check` runs them without coverage.
 
 ## The fakes
 
@@ -42,8 +43,13 @@ file but shared by the tests inside it: stop what you start (`stopSession()`, `s
 | `@test/fakes/render` | testing-library/react (`render`, `screen`, `fireEvent`, `act`, `waitFor`, `within`...), loads the DOM, unmounts after each test; `settle()` lets the core's microtask-published state land inside `act`. Import testing-library **only from here**. |
 | `@test/fakes/fetch` | `installFetch(handler)` + `jsonResponse()`; everything else is blocked. |
 | `@test/fakes/childProcess` | `mockSpawn(t, onSpawn)` → `FakeChildProcess` (`writeStdout`, `exit`, `fail`) for the main-process code. |
-| `@test/fakes/electron` | `desktopCapturer` (`sources`, `getSourcesImpl`), `FakeSession.requestDisplayMedia()`, `ipcEvent()`, `app.getGPUInfo` (`gpuInfo`, `getGPUInfoImpl`). |
+| `@test/fakes/electron` | `desktopCapturer` (`sources`, `getSourcesImpl`), `FakeSession.requestDisplayMedia()`, `ipcEvent()`, `app.getGPUInfo` (`gpuInfo`, `getGPUInfoImpl`), `screen.getAllDisplays` (`displays`, `getAllDisplaysImpl`). |
+| `@test/fakes/captureCopy` | `fakeCopyEnv()`: the browser side of `core/captureCopy.ts` (a scriptable Worker with `addEventListener`, `MediaStreamTrackProcessor`/`MediaStreamTrackGenerator`); the copy is off in the product (`COPY_ON_ARRIVAL`), this is for its own tests. |
+| `test/fakes/vendor.ts` | loads happy-dom and other big test-only packages from one esbuild bundle in `node_modules/.cache/telinha-tests/` (rebuilt when `pnpm-lock.yaml` changes): ~0.1 s per test process instead of ~2 s. |
 | `@test/fakes/worker` | `installWorker(script)`: a dedicated `Worker` whose worker side is the test's `script` (`emit`, `fail`; `terminated`, `posted`, `refuse` for a CSP); `healthyProbe()` / `stuckProbe()` play the WebCodecs probe worker (core/encoderProbe.ts). |
+
+`test/helpers/wp*-*.ts`: shared setup of the bigger test groups (quality controller and the NVENC model, streaming, session,
+identity, audio, viewing...), imported by the test files of that area. Reuse them before writing a new harness.
 
 Per-test overrides: every fake is a plain object or class with public fields. Replace a method with node:test's
 `t.mock.method(UserStore, "getUser", ...)` / `t.mock.method(dataStoreImpl, "get", ...)`, or set the `*Impl` hooks

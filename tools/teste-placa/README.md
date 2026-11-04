@@ -43,9 +43,9 @@ novas a cada teste e fechadas antes do próximo. O codec nunca é trocado no ar.
 No passo 2 a fonte é a tela e roda a lista inteira:
 
 1. VP9 (controle);
-2. H.264 42001f em 720p30, 1080p30 e 1080p60 (este é o igual ao Telinha hoje);
+2. H.264 42001f em 720p30, 1080p30 e 1080p60 (o que o Telinha manda quando um dos lados não faz High na placa; é o "igual ao Telinha hoje" da página);
 3. 42e01f;
-4. Main e High 5.2, só se o navegador oferecer o perfil;
+4. Main e High 5.2, só se o navegador oferecer o perfil (o High, 6400xx, é o que o Telinha manda quando as duas placas fazem);
 5. por último, as variantes de nível 5.2 (420034 e 42e034).
 
 O teste "igual ao Telinha hoje" repete o plugin:

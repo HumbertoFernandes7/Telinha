@@ -20,6 +20,7 @@ import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 
 import { rt } from "@plugins/telinha/core/context";
+import { installNative } from "@test/fakes/native";
 import { pluginSettings } from "@test/fakes/vencord";
 import { type FakeMediaStreamTrack, type FakeRTCPeerConnection, type FakeRTCRtpSender, videoSenderStats } from "@test/fakes/webrtc";
 import {
@@ -28,8 +29,10 @@ import {
 } from "@test/helpers/wpb-streaming";
 
 import { getLocalCaps } from "./codec";
+import { DUAL_GPU_BAR_SUFFIX } from "./gpuAdapters";
 import { containedCount, isContained } from "./peerConnection";
 import { H264_STALL_MS, kickViewer, sendPlanFor, setStreamAccess, startStreaming, stopStreaming } from "./streaming";
+import { measureEnvironment, STUCK_NOTICE, STUCK_NOTICE_PINNED } from "./stuckEncoder";
 
 let rig: StreamingRig;
 let seq = 0;
@@ -245,6 +248,51 @@ describe("envio travado na placa de video: nada desmonta", () => {
         assertUntouched(v, "trocar de fonte");
     });
 
+    test("dica das duas placas: o aviso do H.264 Baseline na barra ganha o rabicho so quando o PC tem as duas placas (a lista vem do native)", async () => {
+        const adapters = [
+            { vendorId: 0x1002, deviceId: 0x164E, name: "AMD Radeon(TM) Graphics", driverVendor: "AMD", driverVersion: "32.0.1", active: false, preference: 2 },
+            { vendorId: 0x1002, deviceId: 0x7550, name: "AMD Radeon RX 9070 XT", driverVendor: "AMD", driverVersion: "32.0.21001.9024", active: true, preference: 3 }
+        ];
+        const withGpu = (extra: Record<string, unknown>) => installNative({
+            gpuEnvironment: async () => ({ vendorId: 0x1002, deviceId: 0x7550, driverVersion: "32.0.21001.9024", chrome: "152.0.7444.59", discord: "1.0.9266", error: null, ...extra })
+        });
+        // o registro do travamento e gravado depois do aviso (assincrono): o primeiro travamento de um PC tambem leva o rabicho
+        const stuckOnce = async (name: string) => {
+            pluginSettings.set("stuckHwH264", undefined);
+            const v = await stuckWatcher(name);
+            rig.room.receive("watch", { op: "stop" }, v.peerId);
+            const notice = rt.lastError;
+            await turns();
+            return notice;
+        };
+        let native = withGpu({});
+        try {
+            await measureEnvironment();
+            assert.equal(await stuckOnce("semdica"), STUCK_NOTICE_PINNED, "native sem a lista de placas (pinado): o aviso de sempre");
+
+            native.restore();
+            native = withGpu({ adapters, internalDisplay: false });
+            await measureEnvironment();
+            assert.equal(await stuckOnce("comdica"), STUCK_NOTICE_PINNED + DUAL_GPU_BAR_SUFFIX);
+
+            // modo Automatico, sem registro nenhum antes: o rabicho vem no primeiro travamento
+            pluginSettings.set("codec", "auto");
+            assert.equal(await stuckOnce("auto"), STUCK_NOTICE + DUAL_GPU_BAR_SUFFIX);
+
+            // e sem a lista de placas, no mesmo modo e com o registro gravado, continua o aviso de sempre
+            native.restore();
+            native = withGpu({});
+            await measureEnvironment();
+            assert.equal(await stuckOnce("autosem"), STUCK_NOTICE);
+            assert.ok(pluginSettings.get("stuckHwH264"), "o registro do Baseline existe depois do travamento");
+        } finally {
+            pluginSettings.set("codec", "h264");
+            native.restore();
+            // a lista do ambiente volta a "sem native" para os testes seguintes
+            await measureEnvironment();
+        }
+    });
+
     test("parar de transmitir e a sala fechar (o Trystero fecha todas as conexoes): so as saudaveis saem e fecham", async () => {
         const v = await stuckWatcher("fim");
         const healthy = await healthyWatcher("fimok");
@@ -253,7 +301,7 @@ describe("envio travado na placa de video: nada desmonta", () => {
         stopStreaming();
         assert.ok(tracks.every(t => t.readyState === "ended"), "a captura para (track.stop() so para de entregar quadros)");
         assert.equal(removalsFrom(rig.room, healthy.peerId).length, 1);
-        assert.ok(since().some(l => l.startsWith(`Envio travado pela placa de vídeo deixado como está para ${v.label}`)));
+        assert.ok(since().some(l => l.startsWith(`Envio travado pela placa de vídeo deixado como está para ${v.label}`)), since().join(" | "));
         assertUntouched(v, "parar de transmitir");
 
         const { room } = rig;

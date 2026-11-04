@@ -1,5 +1,9 @@
 # Telinha: servidor no meio (SFU) gratuito? Pesquisa (29/10/2026)
 
+> **Decisão (29/10/2026):** o dono decidiu ficar sem servidor, só P2P. A pesquisa fica como registro. Atenção às contas: elas
+> supõem 8 Mbps por espectador, e hoje o teto do Telinha é de 20 Mbps (1080p60 e 2K). Com 20 Mbps cada espectador-hora
+> pesa ~9 GB, então a cota grátis rende 2,5 vezes menos espectador-hora do que está nas tabelas abaixo.
+
 Conta usada em tudo: 1080p60 a 8 Mbps = **3,6 GB por espectador-hora** (vh). "N" = número de espectadores (quem transmite não conta).
 
 ## TL;DR

@@ -8,9 +8,11 @@ installer, both from `releases/latest`.
 ## Branches
 
 - **`develop`**: day-to-day work. Feature branches open pull requests into `develop`; CI runs on every pull request
-  and push, into `develop` and into `main` alike. Nothing is released from `develop`.
-- **`main`**: the official line. A pull request **`develop` → `main`** is "ship it": when it is merged, CI runs every
-  gate again on the merge commit and, if they pass and the product changed, publishes the release. Nobody pushes to
+  and push, into `develop` and into `main` alike (a tree that already passed skips the gates, see "What CI does").
+  Nothing is released from `develop`.
+- **`main`**: the official line. A pull request **`develop` → `main`** is "ship it": when it is merged, CI builds and
+  tests the files it ships (and runs every gate unless this exact tree already passed them) and, if the product
+  changed, publishes the release. Nobody pushes to
   `main` directly.
 
 ## What to write in the `develop` → `main` pull request
@@ -76,15 +78,25 @@ that does change the product releases everything since the last tag. The exact r
 
 ## What CI does
 
-All in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml):
+Four jobs, all in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml):
 
-1. **`check`** (Windows), on every run: `scripts/release.mjs plan` computes the version and whether this commit ships;
-   every build below carries that version (`TELINHA_VERSION`), on pull requests too. Then the usual gates: `pnpm check`
-   (which also runs `addon/test/run-release-test.mjs`: the notes template rendered for the zip just built, run through
-   the updater's own checks), coverage, `go vet` / `go test`, the installer build, the update test's group G, the
-   coverage floor. Only after all of them pass, and only for a push to `main` that ships (or a dry run), the installer,
-   zip and `.sha256` are uploaded as the `release-files` artifact, and their SHA-256 passed on as job outputs.
-2. **`release`** (Linux, the only job with `contents: write`): checks the artifact against those hashes (the files
+1. **`gate`** (Linux): looks for the `ci-passed-<tree>` artifact of this exact tree (`git rev-parse HEAD^{tree}`; for a
+   pull request, GitHub's merge commit, which is why a `develop` → `main` merge usually finds it). Found in a run of
+   this repository: `check` is skipped, unless the run releases (see 2). Any doubt (no marker, a fork, the API down, a
+   manual run without `reuse_passed_tree`) means a full run.
+2. **`check`** (Windows): `scripts/release.mjs plan` computes the version and whether this commit ships; every build
+   below carries that version (`TELINHA_VERSION`), on pull requests too. Then the gates: `pnpm check:static`,
+   `pnpm build:addon` + smoke, `pnpm test:coverage` (the unit and add-on tests, each run once, under coverage; this
+   includes `addon/test/run-release-test.mjs`: the notes template rendered for the zip just built, run through the
+   updater's own checks), `go vet` / `go test -cover`, the installer build, the update test's group G, the coverage
+   floor. `telinha-audio.exe` is cached under the hash of `native-audio/**`. **Fast path:** a run that releases (a push
+   to `main` that ships, or a manual run with `reuse_passed_tree`) on a tree that already passed skips the pure gates
+   (static checks, coverage, `go vet` / `go test`, the floor) but still builds and tests what it ships: `build:addon` +
+   smoke, `run-release-test.mjs`, the installer and its version, group G. Only after every gate that ran has passed, and
+   only for a push to `main` that ships (or a dry run), the installer, zip and `.sha256` are uploaded as the
+   `release-files` artifact, and their SHA-256 passed on as job outputs.
+3. **`passed`**: only when every gate of a full `check` passed, uploads the `ci-passed-<tree>` marker.
+4. **`release`** (Linux, the only job with `contents: write`): checks the artifact against those hashes (the files
    built and tested in this run, never rebuilt), writes the notes (`scripts/release.mjs notes`), checks the whole
    release with the add-on's updater against a fake GitHub (`scripts/release.mjs verify`: every SHA-256 the updater and
    the installer read agrees, the tag, the zip's `version.json` and the last release are in order, an installed copy
@@ -95,6 +107,20 @@ All in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml):
    job fails.
 
 A release is never created over an existing release or tag of the same version (the job fails instead).
+
+**Repository locks (Settings):**
+- `main` takes changes only through a pull request with `Tree already passed?` and `pnpm check + installer (Windows)`
+  green (skipped by the fast path counts as green; the gate itself always runs), and it can't be
+  force-pushed or deleted. `develop` can't be force-pushed or deleted.
+- A `v*` tag can't be moved or deleted by anyone. (Creation stays open: a personal repository can't give the GitHub
+  Actions app a bypass, and the release job creates the tag.)
+- Releases are immutable: once published, the files and the tag can't change. The title, notes and the
+  pre-release flag still can, which is what the job uses to turn a bad release into a pre-release.
+- A publish runs in the `release` environment, which only accepts `main`. A manual run uses `dry-run`.
+- Every action in `ci.yml` is pinned by commit SHA, and the repository requires it. Only GitHub's own actions and
+  `pnpm/action-setup` are allowed. Dependabot (`.github/dependabot.yml`) opens a weekly PR to `develop` to update
+  them; its security PRs (any ecosystem) target `main`, so change their base to `develop` before merging.
+- Workflows from a fork pull request need approval for every outside contributor.
 
 **Several merges in a row:** runs on `main` queue, one at a time, and a release in progress is never cancelled. GitHub
 keeps only one waiting run per branch, so with three quick merges the middle run is dropped and the last one releases
@@ -115,6 +141,9 @@ release titled "Telinha X.Y.Z (dry run)": drafts never show up in `releases/late
 installer can see it, and GitHub creates no tag for a draft. The job summary has the notes and a link to the draft.
 **Delete the draft when you are done** (`gh release delete vX.Y.Z --yes`): the real release refuses to start while a
 release with its tag exists. With `draft=false` nothing is created; the notes and the checks are in the job summary.
+
+A manual run always runs every gate; add `-f reuse_passed_tree=true` to take the fast path on a tree that already passed
+(as a push to `main` does).
 
 ## When a release went wrong
 
