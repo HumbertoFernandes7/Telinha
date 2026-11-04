@@ -36,6 +36,7 @@ import {
     pickNegotiatedCodec, softwareFallback, whyNoHwOnlyHere
 } from "./codec";
 import { blockOf, captureTrackOf, getPc, type LocalCapture, peerLabel, publish, rt, setLastError } from "./context";
+import { DUAL_GPU_BAR_SUFFIX } from "./gpuAdapters";
 import { isIdentityConfigured } from "./identity/config";
 import { type ApprovalInput, identityRequiresApproval } from "./identity/policy";
 import { currentLiveWeight, liveWeightTick, startLiveWeight, stopLiveWeight } from "./liveWeight";
@@ -50,7 +51,7 @@ import { encodingFor, LEVELS, levelText, scaledSize } from "./quality/levels";
 import { isHardwareEncoder } from "./quality/stats";
 import { h264ProfileLevelId, type HwOnlyCodec, isH264High, isHwOnlyCodec, sameH264Profile } from "./sdp";
 import {
-    noteHighFailed, noteHwOnlyFailed, noteStreamStarting, noteStuckEncoder, onStreamStopped, STUCK_NOTICE, STUCK_NOTICE_AV1, STUCK_NOTICE_H265, STUCK_NOTICE_HIGH, STUCK_NOTICE_PINNED, stuckNoticeUnknown
+    dualGpuTip, noteHighFailed, noteHwOnlyFailed, noteStreamStarting, noteStuckEncoder, onStreamStopped, STUCK_NOTICE, STUCK_NOTICE_AV1, STUCK_NOTICE_H265, STUCK_NOTICE_HIGH, STUCK_NOTICE_PINNED, stuckNoticeUnknown
 } from "./stuckEncoder";
 
 export interface QualityProfile {
@@ -1635,7 +1636,10 @@ function containStuck(peerId: PeerId, local: LocalCapture, send: ViewerSend, why
             : hwOnly ? `O ${what} fica desligado neste PC até o driver, o Chromium ou a placa mudarem (o H.264 não leva a culpa); nesta sessão, o automático vai em VP9.`
             : high ? "O High fica desligado neste PC até o driver, o Chromium ou a placa mudarem; nesta sessão, o automático vai em VP9."
                 : "O H.264 automático fica desligado neste PC até o driver, o Chromium ou a placa mudarem."));
-    setLastError(!blame ? stuckNoticeUnknown(label) : hwOnly === "h265" ? STUCK_NOTICE_H265 : hwOnly === "av1" ? STUCK_NOTICE_AV1 : high ? STUCK_NOTICE_HIGH : pinned ? STUCK_NOTICE_PINNED : STUCK_NOTICE);
+    // so o aviso do H.264 Baseline leva a dica das duas placas (High, H.265 e AV1 nunca)
+    const baseline = blame && !hwOnly && !high;
+    const notice = !blame ? stuckNoticeUnknown(label) : hwOnly === "h265" ? STUCK_NOTICE_H265 : hwOnly === "av1" ? STUCK_NOTICE_AV1 : high ? STUCK_NOTICE_HIGH : pinned ? STUCK_NOTICE_PINNED : STUCK_NOTICE;
+    setLastError(baseline && dualGpuTip() ? notice + DUAL_GPU_BAR_SUFFIX : notice);
     reply(peerId, { op: "stuck" });
 }
 
