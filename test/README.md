@@ -43,7 +43,7 @@ file but shared by the tests inside it: stop what you start (`stopSession()`, `s
 | `@test/fakes/render` | testing-library/react (`render`, `screen`, `fireEvent`, `act`, `waitFor`, `within`...), loads the DOM, unmounts after each test; `settle()` lets the core's microtask-published state land inside `act`. Import testing-library **only from here**. |
 | `@test/fakes/fetch` | `installFetch(handler)` + `jsonResponse()`; everything else is blocked. |
 | `@test/fakes/childProcess` | `mockSpawn(t, onSpawn)` → `FakeChildProcess` (`writeStdout`, `exit`, `fail`) for the main-process code. |
-| `@test/fakes/electron` | `desktopCapturer` (`sources`, `getSourcesImpl`), `FakeSession.requestDisplayMedia()`, `ipcEvent()`, `app.getGPUInfo` (`gpuInfo`, `getGPUInfoImpl`). |
+| `@test/fakes/electron` | `desktopCapturer` (`sources`, `getSourcesImpl`), `FakeSession.requestDisplayMedia()`, `ipcEvent()`, `app.getGPUInfo` (`gpuInfo`, `getGPUInfoImpl`), `screen.getAllDisplays` (`displays`, `getAllDisplaysImpl`). |
 | `@test/fakes/captureCopy` | `fakeCopyEnv()`: the browser side of `core/captureCopy.ts` (a scriptable Worker with `addEventListener`, `MediaStreamTrackProcessor`/`MediaStreamTrackGenerator`); the copy is off in the product (`COPY_ON_ARRIVAL`), this is for its own tests. |
 | `test/fakes/vendor.ts` | loads happy-dom and other big test-only packages from one esbuild bundle in `node_modules/.cache/telinha-tests/` (rebuilt when `pnpm-lock.yaml` changes): ~0.1 s per test process instead of ~2 s. |
 | `@test/fakes/worker` | `installWorker(script)`: a dedicated `Worker` whose worker side is the test's `script` (`emit`, `fail`; `terminated`, `posted`, `refuse` for a CSP); `healthyProbe()` / `stuckProbe()` play the WebCodecs probe worker (core/encoderProbe.ts). |

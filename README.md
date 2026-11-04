@@ -168,7 +168,7 @@ Porque o vídeo não passa pelo Discord nem por nenhum servidor: ele vai direto 
 Sim. Funciona com a aceleração de hardware do Discord ligada ou desligada. Desligada, usa mais CPU. O codec é escolhido automaticamente: H.264 pela placa de vídeo quando os dois lados têm (High quando as duas placas fazem), senão VP9. H.265 e AV1 só vão se você fixar em **"Formato de vídeo (codec)"**.
 
 **Por que o Telinha passou a usar VP9 no meu PC?**
-Se a placa de vídeo travar codificando H.264, o Telinha avisa e, daí em diante, o automático usa VP9 neste PC (se travar no meio de uma transmissão, é preciso reiniciar o Discord para transmitir de novo). A página do plugin mostra "A placa de vídeo travou com H.264 neste PC…" e um botão para testar a placa de novo, por exemplo depois de atualizar o driver.
+Se a placa de vídeo travar codificando H.264, o Telinha avisa e, daí em diante, o automático usa VP9 neste PC (se travar no meio de uma transmissão, é preciso reiniciar o Discord para transmitir de novo). A página do plugin mostra "A placa de vídeo travou com H.264 neste PC…" e um botão para testar a placa de novo, por exemplo depois de atualizar o driver. Se o PC tiver duas placas de vídeo (uma dentro do processador e uma placa separada), a de dentro do processador pode estar pegando a gravação e travando: a página mostra uma dica de como desabilitar ela no Gerenciador de Dispositivos (nunca em notebook, onde ela cuida da tela).
 
 **Dá ban?**
 Mods de cliente **violam os Termos de Serviço do Discord**, então o uso é **por sua conta e risco**. Não temos conhecimento de bans por plugins que não fazem nada abusivo, mas não há garantia nenhuma.
