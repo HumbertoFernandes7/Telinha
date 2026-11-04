@@ -32,7 +32,7 @@ import { getLocalCaps } from "./codec";
 import { DUAL_GPU_BAR_SUFFIX } from "./gpuAdapters";
 import { containedCount, isContained } from "./peerConnection";
 import { H264_STALL_MS, kickViewer, sendPlanFor, setStreamAccess, startStreaming, stopStreaming } from "./streaming";
-import { measureEnvironment, STUCK_NOTICE_PINNED } from "./stuckEncoder";
+import { measureEnvironment, STUCK_NOTICE, STUCK_NOTICE_PINNED } from "./stuckEncoder";
 
 let rig: StreamingRig;
 let seq = 0;
@@ -256,21 +256,37 @@ describe("envio travado na placa de video: nada desmonta", () => {
         const withGpu = (extra: Record<string, unknown>) => installNative({
             gpuEnvironment: async () => ({ vendorId: 0x1002, deviceId: 0x7550, driverVersion: "32.0.21001.9024", chrome: "152.0.7444.59", discord: "1.0.9266", error: null, ...extra })
         });
+        // o registro do travamento e gravado depois do aviso (assincrono): o primeiro travamento de um PC tambem leva o rabicho
+        const stuckOnce = async (name: string) => {
+            pluginSettings.set("stuckHwH264", undefined);
+            const v = await stuckWatcher(name);
+            rig.room.receive("watch", { op: "stop" }, v.peerId);
+            const notice = rt.lastError;
+            await turns();
+            return notice;
+        };
         let native = withGpu({});
         try {
             await measureEnvironment();
-            const without = await stuckWatcher("semdica");
-            rig.room.receive("watch", { op: "stop" }, without.peerId);
-            assert.equal(rt.lastError, STUCK_NOTICE_PINNED, "native sem a lista de placas: o aviso de sempre");
-            await turns();
+            assert.equal(await stuckOnce("semdica"), STUCK_NOTICE_PINNED, "native sem a lista de placas (pinado): o aviso de sempre");
 
             native.restore();
             native = withGpu({ adapters, internalDisplay: false });
             await measureEnvironment();
-            const withTip = await stuckWatcher("comdica");
-            rig.room.receive("watch", { op: "stop" }, withTip.peerId);
-            assert.equal(rt.lastError, STUCK_NOTICE_PINNED + DUAL_GPU_BAR_SUFFIX);
+            assert.equal(await stuckOnce("comdica"), STUCK_NOTICE_PINNED + DUAL_GPU_BAR_SUFFIX);
+
+            // modo Automatico, sem registro nenhum antes: o rabicho vem no primeiro travamento
+            pluginSettings.set("codec", "auto");
+            assert.equal(await stuckOnce("auto"), STUCK_NOTICE + DUAL_GPU_BAR_SUFFIX);
+
+            // e sem a lista de placas, no mesmo modo e com o registro gravado, continua o aviso de sempre
+            native.restore();
+            native = withGpu({});
+            await measureEnvironment();
+            assert.equal(await stuckOnce("autosem"), STUCK_NOTICE);
+            assert.ok(pluginSettings.get("stuckHwH264"), "o registro do Baseline existe depois do travamento");
         } finally {
+            pluginSettings.set("codec", "h264");
             native.restore();
             // a lista do ambiente volta a "sem native" para os testes seguintes
             await measureEnvironment();

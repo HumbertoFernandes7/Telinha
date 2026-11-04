@@ -51,7 +51,7 @@ import { encodingFor, LEVELS, levelText, scaledSize } from "./quality/levels";
 import { isHardwareEncoder } from "./quality/stats";
 import { h264ProfileLevelId, type HwOnlyCodec, isH264High, isHwOnlyCodec, sameH264Profile } from "./sdp";
 import {
-    dualGpuTip, noteHighFailed, noteHwOnlyFailed, noteStreamStarting, noteStuckEncoder, onStreamStopped, STUCK_NOTICE, STUCK_NOTICE_AV1, STUCK_NOTICE_H265, STUCK_NOTICE_HIGH, STUCK_NOTICE_PINNED, stuckNoticeUnknown
+    dualGpuTipFor, noteHighFailed, noteHwOnlyFailed, noteStreamStarting, noteStuckEncoder, onStreamStopped, STUCK_NOTICE, STUCK_NOTICE_AV1, STUCK_NOTICE_H265, STUCK_NOTICE_HIGH, STUCK_NOTICE_PINNED, stuckNoticeUnknown
 } from "./stuckEncoder";
 
 export interface QualityProfile {
@@ -1639,7 +1639,7 @@ function containStuck(peerId: PeerId, local: LocalCapture, send: ViewerSend, why
     // so o aviso do H.264 Baseline leva a dica das duas placas (High, H.265 e AV1 nunca)
     const baseline = blame && !hwOnly && !high;
     const notice = !blame ? stuckNoticeUnknown(label) : hwOnly === "h265" ? STUCK_NOTICE_H265 : hwOnly === "av1" ? STUCK_NOTICE_AV1 : high ? STUCK_NOTICE_HIGH : pinned ? STUCK_NOTICE_PINNED : STUCK_NOTICE;
-    setLastError(baseline && dualGpuTip() ? notice + DUAL_GPU_BAR_SUFFIX : notice);
+    setLastError(baseline && dualGpuTipFor(true) ? notice + DUAL_GPU_BAR_SUFFIX : notice);
     reply(peerId, { op: "stuck" });
 }
 

@@ -245,6 +245,10 @@ async function fromWebGpu(): Promise<Pick<EncoderEnv, "vendorId" | "deviceId"> |
 }
 
 /** Le o ambiente agora (sem memorizar; environment() le uma vez por sessao). Nunca rejeita. */
+const validAdapter = (a: any): a is GpuAdapter => !!a && typeof a === "object"
+    && typeof a.vendorId === "number" && typeof a.deviceId === "number" && typeof a.preference === "number"
+    && typeof a.name === "string" && typeof a.driverVendor === "string" && typeof a.driverVersion === "string" && typeof a.active === "boolean";
+
 export async function measureEnvironment(): Promise<EncoderEnv> {
     const env: EncoderEnv = { vendorId: null, deviceId: null, driver: null, chrome: null, discord: null };
     const why: string[] = [];
@@ -260,7 +264,7 @@ export async function measureEnvironment(): Promise<EncoderEnv> {
             env.driver = text(res?.driverVersion);
             env.chrome = text(res?.chrome);
             env.discord = text(res?.discord);
-            if (Array.isArray(res?.adapters)) storedAdapters = res.adapters;
+            if (Array.isArray(res?.adapters)) storedAdapters = res.adapters.filter(validAdapter).slice(0, 8);
             if (res && "internalDisplay" in res) storedInternal = typeof res.internalDisplay === "boolean" ? res.internalDisplay : null;
             if (typeof res?.error === "string") why.push(res.error.slice(0, 200));
         } else {
@@ -297,7 +301,12 @@ export function environment(): Promise<EncoderEnv> {
 
 /** A dica das duas placas (core/gpuAdapters.ts): so com o registro do H.264 Baseline (stuckRecord; High/H.265/AV1 tem outras chaves). */
 export function dualGpuTip(): DualGpuHint | null {
-    return dualGpuHint(storedAdapters, storedInternal, !!stuckRecord());
+    return dualGpuTipFor(!!stuckRecord());
+}
+
+/** Igual a dualGpuTip, com o "travou" dado (o registro do primeiro travamento e gravado de forma assincrona). */
+export function dualGpuTipFor(stuck: boolean): DualGpuHint | null {
+    return dualGpuHint(storedAdapters, storedInternal, stuck);
 }
 
 const tipLabel = (tip: DualGpuHint | null) => (tip ? (tip.kind === "disable" ? "desativar a integrada" : "notebook: sem desativar") : "não");
@@ -1078,7 +1087,7 @@ export function stuckEncoderDiagnostics(): string {
     const feature = caps.av1HwFeature === true ? "ligado" : caps.av1HwFeature === false ? "desligado" : "desconhecido";
     return [
         `ambiente do encoder: ${env ? `${describeEnv(env)} (placa via ${envSource})` : "ainda lendo"}`,
-        `placas de vídeo: ${describeAdapters(storedAdapters, storedInternal)}; dica duas placas: ${tipLabel(dualGpuTip())}`,
+        `placas de vídeo: dica duas placas: ${tipLabel(dualGpuTip())}; ${describeAdapters(storedAdapters, storedInternal)}`,
         `H.264 da placa travado neste PC: ${remembered}${record?.source === "probe" ? " [visto pela sonda]" : ""}; H.264 automático ${isH264HwStuck() ? "desligado" : "ligado"}`,
         `travou nesta sessão: ${stuckThisSession ? `sim (${contained} ${contained === 1 ? "conexão contida" : "conexões contidas"})` : "não"}`,
         `sonda WebCodecs H.264 placa: ${probeNote}${saved ? `; salva: ${PROBE_LABEL[saved.verdict]} em ${new Date(saved.at).toISOString()} (${saved.detail})` : ""}`,

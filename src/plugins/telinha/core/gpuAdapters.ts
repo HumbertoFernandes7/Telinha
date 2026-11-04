@@ -27,6 +27,8 @@ export interface DualGpuHint {
     kind: "disable" | "laptop";
     integrated: GpuAdapter;
     dedicated: GpuAdapter;
+    /** ha tela embutida? null/undefined = desconhecido */
+    internalDisplay: boolean | null | undefined;
 }
 
 const between = (n: number, lo: number, hi: number) => n >= lo && n <= hi;
@@ -63,7 +65,7 @@ export function dualGpuHint(adapters: readonly GpuAdapter[] | undefined, interna
     const integrated = real.find(a => isIntegrated(a, adapters));
     const dedicated = real.find(a => a !== integrated && !isIntegrated(a, adapters));
     if (!integrated || !dedicated) return null;
-    return { kind: internalDisplay === false && integrated.active === false ? "disable" : "laptop", integrated, dedicated };
+    return { kind: internalDisplay === false && integrated.active === false ? "disable" : "laptop", integrated, dedicated, internalDisplay };
 }
 
 const hex = (n: number) => n.toString(16).padStart(4, "0");
@@ -72,33 +74,38 @@ const PREFERENCE = ["", "", "baixo consumo", "alto desempenho"];
 /** A linha do diagnostico: todas as placas na ordem do Chromium e se ha tela embutida. */
 export function describeAdapters(adapters: readonly GpuAdapter[] | undefined, internalDisplay: boolean | null | undefined): string {
     if (!adapters) return "? (parte nativa antiga)";
+    if (!adapters.length) return "? (getGPUInfo sem placas)";
     const list = adapters.map((a, i) => {
         const tags = [
             isSoftware(a) ? "software" : a.driverVendor === "" ? "NPU" : isIntegrated(a, adapters) ? "integrada" : "dedicada",
             ...(a.active ? ["ativa"] : []),
             ...(PREFERENCE[a.preference] ? [PREFERENCE[a.preference]] : [])
         ];
-        return `#${i} ${hex(a.vendorId)}:${hex(a.deviceId)} "${a.name}" ${tags.join(", ")}`;
+        return `#${i} ${hex(a.vendorId)}:${hex(a.deviceId)} "${a.name.replace(/"/g, "'")}" ${tags.join(", ")}`;
     });
     const display = internalDisplay === true ? "sim" : internalDisplay === false ? "não" : "?";
     return `${list.length ? list.join("; ") : "nenhuma"}; tela embutida: ${display}`;
 }
 
-/** O texto da dica, um parágrafo por item (nomes reais das placas). */
-export function dualGpuParagraphs(hint: DualGpuHint): string[] {
+/** O texto da dica, um parágrafo por item (nomes reais das placas). `pinned` = o codec está fixado em H.264 nas configurações. */
+export function dualGpuParagraphs(hint: DualGpuHint, opts?: { pinned?: boolean; }): string[] {
     const integrated = hint.integrated.name || "a placa de dentro do processador";
     const dedicated = hint.dedicated.name || "a placa de vídeo";
     if (hint.kind === "laptop") {
+        const reason = hint.internalDisplay === true ? "Como ela também cuida da tela, não desative nada: " : "Ela pode estar cuidando da tela, então não desative nada: ";
         return [
             "Este PC tem duas placas de vídeo, e a de dentro do processador pode estar pegando a gravação da transmissão. "
-            + "Como ela também cuida da tela, não desative nada: o Telinha continua transmitindo em VP9 (pelo processador), só gasta um pouco mais."
+            + (opts?.pinned
+                ? "Não desative nada. Para transmitir, escolha o codec Automático nas configurações do Telinha: ele vai em VP9 (pelo processador)."
+                : `${reason}o Telinha continua transmitindo em VP9 (pelo processador), só gasta um pouco mais.`)
         ];
     }
     return [
-        `Este PC tem duas placas de vídeo: a que vem dentro do processador (${integrated}) e a placa de vídeo (${dedicated}). `
+        `Este PC tem duas placas de vídeo: a que vem dentro do processador (${integrated}) e a placa de vídeo separada (${dedicated}). `
         + "Pode ser que a de dentro do processador esteja pegando a gravação da transmissão e travando. Para usar só a placa de vídeo:",
+        "Não faça isso em notebook: a tela dele depende da placa de dentro do processador.",
         "1. Confira que o cabo do monitor está ligado na placa de vídeo, e não na saída da placa-mãe.",
-        `2. Clique com o botão direito no Iniciar → Gerenciador de Dispositivos → Adaptadores de vídeo → botão direito em "${integrated}" → Desabilitar dispositivo.`,
+        `2. Clique com o botão direito no Iniciar → Gerenciador de Dispositivos → Adaptadores de vídeo → botão direito em "${integrated}" → Desabilitar dispositivo → Sim.`,
         "3. Aperte \"Tentar a placa de vídeo de novo\" aqui embaixo e reinicie o Discord (feche por completo e abra de novo).",
         "Para desfazer: no mesmo lugar, botão direito nela → Habilitar dispositivo. "
         + "Se a tela apagar, passe o cabo do monitor para a placa de vídeo, ou reinicie o PC e habilite de novo."

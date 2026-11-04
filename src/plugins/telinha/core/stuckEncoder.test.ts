@@ -105,7 +105,7 @@ describe("placa de video que trava com H.264: lembrada neste PC", () => {
         const diag = stuckEncoderDiagnostics().split("\n");
         assert.deepEqual(diag.slice(0, 4), [
             "ambiente do encoder: placa de vídeo 1002:7550, driver 32.0.21001.9024; Chromium 152.0.7444.59; Discord 1.0.9266 (placa via main)",
-            "placas de vídeo: ? (parte nativa antiga); dica duas placas: não",
+            "placas de vídeo: dica duas placas: não; ? (parte nativa antiga)",
             `H.264 da placa travado neste PC: em ${new Date(STUCK_AT).toISOString()} (placa de vídeo 1002:7550, driver 32.0.21001.9024; Chromium 152.0.7444.59; Discord 1.0.9266); H.264 automático desligado`,
             "travou nesta sessão: não"
         ]);

@@ -15,7 +15,7 @@ import { after, describe, test } from "node:test";
 import { installNative, type NativeEnv } from "@test/fakes/native";
 import { pluginSettings } from "@test/fakes/vencord";
 
-import { dualGpuTip, measureEnvironment, stuckEncoderDiagnostics } from "./stuckEncoder";
+import { dualGpuTip, dualGpuTipFor, measureEnvironment, stuckEncoderDiagnostics } from "./stuckEncoder";
 
 const ENV = { vendorId: "1002", deviceId: "7550", driver: "32.0.21001.9024", chrome: "152.0.7444.59", discord: "1.0.9266" };
 const AT = new Date(2026, 9, 31, 2, 54).getTime();
@@ -41,7 +41,7 @@ describe("dica das duas placas no diagnostico", () => {
         pluginSettings.load({ stuckHwH264: { at: AT, env: { ...ENV }, source: "stream" } });
         await measureEnvironment();
         assert.equal(dualGpuTip(), null);
-        assert.equal(stuckEncoderDiagnostics().split("\n")[1], "placas de vídeo: ? (parte nativa antiga); dica duas placas: não");
+        assert.equal(stuckEncoderDiagnostics().split("\n")[1], "placas de vídeo: dica duas placas: não; ? (parte nativa antiga)");
     });
 
     test("com a lista, sem tela embutida e o registro do Baseline: desativar a integrada", async () => {
@@ -49,15 +49,15 @@ describe("dica das duas placas no diagnostico", () => {
         await measureEnvironment();
         assert.equal(dualGpuTip()?.kind, "disable");
         assert.equal(stuckEncoderDiagnostics().split("\n")[1],
-            'placas de vídeo: #0 1002:164e "AMD Radeon(TM) Graphics" integrada, baixo consumo; #1 1002:7550 "AMD Radeon RX 9070 XT" dedicada, ativa, alto desempenho; tela embutida: não; '
-            + "dica duas placas: desativar a integrada");
+            'placas de vídeo: dica duas placas: desativar a integrada; #0 1002:164e "AMD Radeon(TM) Graphics" integrada, baixo consumo; #1 1002:7550 "AMD Radeon RX 9070 XT" dedicada, ativa, alto desempenho; tela embutida: não');
     });
 
     test("com tela embutida: notebook, sem desativar", async () => {
         useNative({ adapters, internalDisplay: true });
         await measureEnvironment();
         assert.equal(dualGpuTip()?.kind, "laptop");
-        assert.ok(stuckEncoderDiagnostics().split("\n")[1].endsWith("tela embutida: sim; dica duas placas: notebook: sem desativar"));
+        const line = stuckEncoderDiagnostics().split("\n")[1];
+        assert.ok(line.startsWith("placas de vídeo: dica duas placas: notebook: sem desativar; ") && line.endsWith("tela embutida: sim"), line);
     });
 
     test("so registro do High, H.265 ou AV1 (sem o do Baseline): nenhuma dica", async () => {
@@ -66,6 +66,32 @@ describe("dica das duas placas no diagnostico", () => {
         pluginSettings.load({ hwH264HighProbe: { ...probe, profile: "640020" }, hwH265Probe: { ...probe, codec: "hvc1.1.6.L120.B0" }, hwAv1Probe: { ...probe, codec: "av01.0.08M.08" } });
         await measureEnvironment();
         assert.equal(dualGpuTip(), null);
-        assert.ok(stuckEncoderDiagnostics().split("\n")[1].endsWith("tela embutida: não; dica duas placas: não"));
+        const line = stuckEncoderDiagnostics().split("\n")[1];
+        assert.ok(line.startsWith("placas de vídeo: dica duas placas: não; ") && line.endsWith("tela embutida: não"), line);
+    });
+});
+
+describe("lista vazia, entradas mal formadas e o travamento recem-visto", () => {
+    test("native novo sem placas: a linha diz que o getGPUInfo nao devolveu placas", async () => {
+        useNative({ adapters: [], internalDisplay: false });
+        pluginSettings.load({ stuckHwH264: { at: AT, env: { ...ENV }, source: "stream" } });
+        await measureEnvironment();
+        assert.equal(stuckEncoderDiagnostics().split("\n")[1], "placas de vídeo: dica duas placas: não; ? (getGPUInfo sem placas)");
+    });
+
+    test("entrada mal formada e descartada, sem lancar; as boas ficam", async () => {
+        useNative({ adapters: [{ vendorId: "1002", deviceId: 1, name: 5, driverVendor: "AMD", driverVersion: "1", active: true, preference: 3 }, null, ...adapters], internalDisplay: false });
+        pluginSettings.load({ stuckHwH264: { at: AT, env: { ...ENV }, source: "stream" } });
+        await measureEnvironment();
+        const line = stuckEncoderDiagnostics().split("\n")[1];
+        assert.ok(line.includes("#0 1002:164e") && line.includes("#1 1002:7550") && !line.includes("#2"), line);
+    });
+
+    test("dualGpuTipFor(true) vale sem o registro (o primeiro travamento ainda nao gravou)", async () => {
+        useNative({ adapters, internalDisplay: false });
+        pluginSettings.load({});
+        await measureEnvironment();
+        assert.equal(dualGpuTip(), null);
+        assert.equal(dualGpuTipFor(true)?.kind, "disable");
     });
 });

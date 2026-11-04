@@ -25,7 +25,7 @@ afterEach(() => resetVencordFakes());
 
 test("sem travamento lembrado: nada aparece (e o diagnostico diz que o ambiente ainda nao foi lido)", async () => {
     pluginSettings.load({});
-    assert.ok(stuckEncoderDiagnostics().startsWith("ambiente do encoder: ainda lendo\nplacas de vídeo: ? (parte nativa antiga); dica duas placas: não\nH.264 da placa travado neste PC: não;"));
+    assert.ok(stuckEncoderDiagnostics().startsWith("ambiente do encoder: ainda lendo\nplacas de vídeo: dica duas placas: não; ? (parte nativa antiga)\nH.264 da placa travado neste PC: não;"));
     const { container } = render(<StuckEncoderSection />);
     await settle();
     assert.equal(container.textContent, "");
@@ -120,6 +120,26 @@ test("dica das duas placas: notebook (tela embutida) mostra so o paragrafo do no
     render(<StuckEncoderSection />);
     await settle();
     assert.ok(screen.getByText(/não desative nada/));
+    assert.ok(!screen.queryByText(/Desabilitar/), "nao deveria existir: texto /Desabilitar/");
+});
+
+test("dica das duas placas: notebook com o H.264 fixado manda escolher o Automático, e tela desconhecida usa o motivo neutro", async () => {
+    await friendsPc({ adapters, internalDisplay: true });
+    stuck();
+    pluginSettings.set("codec", "h264");
+    const first = render(<StuckEncoderSection />);
+    await settle();
+    assert.ok(screen.getByText(/escolha o codec Automático nas configurações do Telinha/));
+    assert.ok(!screen.queryByText(/continua transmitindo/), "nao deveria existir: texto /continua transmitindo/");
+    first.unmount();
+
+    pluginSettings.set("codec", "auto");
+    await friendsPc({ adapters, internalDisplay: null });
+    stuck();
+    render(<StuckEncoderSection />);
+    await settle();
+    assert.ok(screen.getByText(/Ela pode estar cuidando da tela, então não desative nada/));
+    assert.ok(!screen.queryByText(/Como ela também cuida da tela/), "nao deveria existir: texto /Como ela também/");
     assert.ok(!screen.queryByText(/Desabilitar/), "nao deveria existir: texto /Desabilitar/");
 });
 

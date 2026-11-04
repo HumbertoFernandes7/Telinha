@@ -51,7 +51,7 @@ export function StuckEncoderSection() {
     return (
         <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-start" }}>
             {record && <Paragraph>{stuckLine(record)}</Paragraph>}
-            {tip && dualGpuParagraphs(tip).map(paragraph => <Paragraph key={paragraph}>{paragraph}</Paragraph>)}
+            {tip && dualGpuParagraphs(tip, { pinned: settings.store.codec === "h264" }).map(paragraph => <Paragraph key={paragraph}>{paragraph}</Paragraph>)}
             {av1Off && <Paragraph>{`O AV1 saiu da placa de vídeo neste PC em ${shortDate(av1Off.at)}; ele fica desligado até você tentar de novo.`}</Paragraph>}
             <Button size="small" variant="secondary" onClick={retry}>
                 Tentar a placa de vídeo de novo

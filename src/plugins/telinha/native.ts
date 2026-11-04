@@ -276,7 +276,7 @@ const GPU_INFO_TIMEOUT_MS = 3000;
 const pciId = (n: unknown) => (typeof n === "number" && Number.isInteger(n) && n >= 0 && n <= 0xFFFF ? n : null);
 const shortText = (s: unknown) => (typeof s === "string" && s.trim() ? s.trim().slice(0, 64) : null);
 
-const adapterText = (s: unknown) => (typeof s === "string" ? s.replace(/\s+/g, " ").trim().slice(0, 128) : "");
+const adapterText = (s: unknown) => (typeof s === "string" ? s.replace(/[\p{Cc}\p{Cf}]/gu, "").replace(/\s+/g, " ").trim().slice(0, 128) : "");
 
 function toAdapter(d: any): GpuAdapter {
     return {
@@ -301,6 +301,8 @@ function hasInternalDisplay(): boolean | null {
 export async function gpuEnvironment(_: IpcMainInvokeEvent): Promise<GpuEnvironment> {
     const env: GpuEnvironment = { vendorId: null, deviceId: null, driverVersion: null, chrome: shortText(process.versions?.chrome), discord: null, error: null };
     env.internalDisplay = hasInternalDisplay();
+    // sempre manda a lista (vazia se o getGPUInfo falhar): o renderer distingue "native novo sem lista" de "native antigo"
+    env.adapters = [];
     try {
         env.discord = shortText(app.getVersion());
     } catch { }

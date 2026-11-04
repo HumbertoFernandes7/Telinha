@@ -99,7 +99,7 @@ describe("describeAdapters e os textos", () => {
         assert.equal(describeAdapters(undefined, undefined), "? (parte nativa antiga)");
         assert.equal(describeAdapters([UHD, WARP, NPU], true),
             '#0 8086:a780 "Intel(R) UHD Graphics 770" integrada; #1 1414:008c "Microsoft Basic Render Driver" software; #2 8086:7d1d "Intel(R) AI Boost" NPU; tela embutida: sim');
-        assert.equal(describeAdapters([], null), "nenhuma; tela embutida: ?");
+        assert.equal(describeAdapters([], null), "? (getGPUInfo sem placas)");
     });
 
     test("disable: nomes reais, passos e o desfazer; laptop: nunca manda desativar", () => {
@@ -109,6 +109,30 @@ describe("describeAdapters e os textos", () => {
         const laptop = dualGpuParagraphs(dualGpuHint([UHD, RTX], true, true)!).join("\n");
         assert.ok(!laptop.includes("Desabilitar"));
         assert.ok(laptop.includes("VP9"));
+    });
+
+    test("o texto do desativar avisa do notebook; o do notebook muda conforme o codec fixado e a tela", () => {
+        const disable = dualGpuParagraphs(dualGpuHint([RAPHAEL, RX9070], false, true)!);
+        assert.ok(disable.includes("Não faça isso em notebook: a tela dele depende da placa de dentro do processador."));
+        assert.equal(disable[1], "Não faça isso em notebook: a tela dele depende da placa de dentro do processador.", "logo depois da introdução");
+        assert.ok(disable[0].includes("a que vem dentro do processador (AMD Radeon(TM) Graphics) e a placa de vídeo separada (AMD Radeon RX 9070 XT)"));
+        assert.ok(disable.some(p => p.endsWith("→ Desabilitar dispositivo → Sim.")));
+
+        const pinned = dualGpuParagraphs(dualGpuHint([UHD, RTX], true, true)!, { pinned: true }).join("\n");
+        assert.ok(pinned.includes("Para transmitir, escolha o codec Automático nas configurações do Telinha: ele vai em VP9 (pelo processador)."));
+        assert.ok(!pinned.includes("continua transmitindo"));
+
+        const internal = dualGpuParagraphs(dualGpuHint([UHD, RTX], true, true)!).join("\n");
+        assert.ok(internal.includes("Como ela também cuida da tela, não desative nada:") && internal.includes("continua transmitindo em VP9"));
+
+        const unknown = dualGpuParagraphs(dualGpuHint([UHD, RTX], null, true)!).join("\n");
+        assert.ok(unknown.includes("Ela pode estar cuidando da tela, então não desative nada:") && !unknown.includes("Como ela também"));
+        const active = dualGpuParagraphs(dualGpuHint([{ ...RAPHAEL, active: true }, { ...RX9070, active: false }], false, true)!).join("\n");
+        assert.ok(active.includes("Ela pode estar cuidando da tela") && !active.includes("Como ela também"));
+    });
+
+    test("aspas no nome da placa viram apóstrofo na linha do diagnóstico", () => {
+        assert.ok(describeAdapters([{ ...RX9070, name: 'My "GPU"' }], false).includes("\"My 'GPU'\""));
     });
 
     test("sem nome: o texto usa as descricoes genericas", () => {

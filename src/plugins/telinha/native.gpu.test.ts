@@ -51,7 +51,9 @@ test("sem placa ativa marcada: a primeira; campos estranhos ficam de fora", asyn
 
 test("sem gpuDevice, getGPUInfo que lanca ou que nao responde: placa desconhecida com o motivo; app.getVersion que lanca", async t => {
     app.gpuInfo = {};
-    assert.equal((await gpuEnvironment(ipcEvent())).error, "getGPUInfo sem gpuDevice");
+    const empty = await gpuEnvironment(ipcEvent());
+    assert.equal(empty.error, "getGPUInfo sem gpuDevice");
+    assert.deepEqual(empty.adapters, [], "native novo sem lista: [] (e nao undefined, que seria native antigo)");
 
     app.getGPUInfoImpl = async () => {
         throw new Error("GPU access is disabled");
@@ -63,12 +65,15 @@ test("sem gpuDevice, getGPUInfo que lanca ou que nao responde: placa desconhecid
     assert.equal(failed.error, "Error: GPU access is disabled");
     assert.equal(failed.vendorId, null);
     assert.equal(failed.discord, null);
+    assert.deepEqual(failed.adapters, []);
 
     const clock = useFakeClock(t);
     app.getGPUInfoImpl = () => new Promise(() => { });
     const hanging = gpuEnvironment(ipcEvent());
     await clock.tickAsync(3001, 500);
-    assert.equal((await hanging).error, "getGPUInfo demorou demais");
+    const timedOut = await hanging;
+    assert.equal(timedOut.error, "getGPUInfo demorou demais");
+    assert.deepEqual(timedOut.adapters, []);
 });
 
 test("adapters: todas as placas na mesma ordem (iGPU, dGPU ativa, WARP, NPU), saneadas; os campos antigos seguem a placa ativa", async () => {
@@ -112,4 +117,10 @@ test("internalDisplay: tela embutida true, so externas false, screen que lanca n
     assert.equal(env.internalDisplay, null);
     assert.equal(env.error, null);
     assert.equal(env.vendorId, 0x10DE);
+});
+
+test("adapters: caracteres de controle e de formatacao (bidi, largura zero) saem do nome", async () => {
+    app.gpuInfo = { gpuDevice: [{ active: true, vendorId: 0x10DE, deviceId: 1, deviceString: "NV‮IDIA​ GeoForce", driverVendor: "NVIDIA", driverVersion: "1" }] };
+    const env = await gpuEnvironment(ipcEvent());
+    assert.equal(env.adapters?.[0].name, "NVIDIA GeoForce");
 });
