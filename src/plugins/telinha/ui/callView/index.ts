@@ -13,8 +13,10 @@ import { React } from "@webpack/common";
 
 import { CallTileStream } from "./CallTileStream";
 import { resetTileState } from "./tileState";
+import { resetTrayVolume } from "./trayVolume";
 
 export { callViewPatches } from "./patches";
+export { TrayVolume } from "./TrayVolumeSlider";
 
 /**
  * Chamado pelo CallTile do Discord a cada render, logo depois do conteudo da tile (avatar/camera).
@@ -39,6 +41,7 @@ export function renderCallTileStream(participant: unknown, isUser: unknown) {
 export function stopCallView() {
     try {
         resetTileState();
+        resetTrayVolume();
     } catch (e) {
         logger.error("stopCallView falhou", e);
     }

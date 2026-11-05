@@ -23,7 +23,7 @@ import { stuckEncoderDiagnostics } from "./core/stuckEncoder";
 import { refreshUpdateLog, refreshUpdateStatus, startUpdateChecks, stopUpdateChecks, updateDiagnostics } from "./core/update";
 import { migrateAccessSettings, migrateGpuCaptureSettings, migrateGpuPrioritySettings, migrateQualitySettings, settings } from "./settings";
 import { formatDiagnostics } from "./store";
-import { callViewPatches, renderCallTileStream, stopCallView } from "./ui/callView";
+import { callViewPatches, renderCallTileStream, stopCallView, TrayVolume } from "./ui/callView";
 import { runAction } from "./ui/common";
 import { DiagShareSection } from "./ui/DiagShareUI";
 import { IdentitySection } from "./ui/IdentityUI";
@@ -163,5 +163,6 @@ export default definePlugin({
 
     panelJsx,
     voiceUserIconsJsx,
-    renderCallTileStream
+    renderCallTileStream,
+    TrayVolume
 });

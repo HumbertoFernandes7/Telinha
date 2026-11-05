@@ -17,7 +17,7 @@ import { after, afterEach, before, beforeEach, describe, test } from "node:test"
 import { type LocalCapture, rt } from "@plugins/telinha/core/context";
 import { resetState, setState } from "@plugins/telinha/store";
 import type { RemotePeer, TelinhaState, ViewerSession } from "@plugins/telinha/types";
-import { getVolume, setVolume } from "@plugins/telinha/ui/volumes";
+import { getVolume, setVolume, volumeKeyFor } from "@plugins/telinha/ui/volumes";
 import { useFakeClock } from "@test/fakes/clock";
 import { fullscreen, media, resetMedia, resizeObservers } from "@test/fakes/dom";
 import { act, cleanup, fireEvent, render, screen, settle, within } from "@test/fakes/render";
@@ -28,6 +28,8 @@ import type { ReactNode } from "react";
 
 import { CallTileStream } from "./CallTileStream";
 import { isLocalPreviewHidden, isTileOwned, resetTileState, setLocalPreviewHidden } from "./tileState";
+import { getTileAudioKey, registerTrayBar, resetTrayVolume } from "./trayVolume";
+import { TrayVolume } from "./TrayVolumeSlider";
 
 const PEER = "peerA";
 const EMPTY: TelinhaState = { inRoom: true, channelId: "500000000000000005", peers: [], local: null, viewing: {}, lastError: null, blocked: [], identityAlerts: [] };
@@ -73,6 +75,7 @@ describe("CallTileStream", () => {
 
     beforeEach(() => {
         resetVencordFakes();
+        resetTrayVolume();
         resetMedia();
         resetState();
         animations.reset();
@@ -82,6 +85,7 @@ describe("CallTileStream", () => {
 
     afterEach(async () => {
         cleanup();
+        resetTrayVolume();
         await act(async () => {
             resetTileState();
             setLocalPreviewHidden(false);
@@ -573,6 +577,139 @@ describe("CallTileStream", () => {
             await settle();
             assert.ok(screen.getByRole("button", { name: "Ativar som" }));
             assert.equal(video(container)!.muted, true);
+        });
+    });
+
+    // #endregion
+
+    // #region barra de volume da call
+
+    describe("barra de volume da call", () => {
+        const withAudio = (s: MediaStream | null = stream(true)) => show(session({ stream: s }), { stream: { ...friend().stream!, hasAudio: true } });
+        const rowStillThere = () => {
+            assert.ok(screen.getByTitle(/está transmitindo pelo Telinha/), "etiqueta TELINHA");
+            assert.ok(screen.getByRole("button", { name: /Tela cheia|Sair da tela cheia/ }));
+            assert.ok(screen.getByRole("button", { name: "Abrir em janela" }));
+            assert.ok(screen.getByRole("button", { name: "Parar de assistir" }));
+        };
+
+        test("tile tocando o som avisa a barra (chave do volume) e limpa ao desmontar", async () => {
+            withAudio();
+            const view = await mount(<CallTileStream userId={FRIEND_ID} />);
+            assert.equal(getTileAudioKey(FRIEND_ID), volumeKeyFor(PEER, FRIEND_ID));
+            view.unmount();
+            assert.equal(getTileAudioKey(FRIEND_ID), null);
+        });
+
+        test("com o autoplay bloqueado a barra ja pode mexer no volume; o botao Ativar som continua", async () => {
+            media.playImpl = async el => {
+                if (!el.muted) throw new DOMException("autoplay com som", "NotAllowedError");
+            };
+            withAudio();
+            await mount(<CallTileStream userId={FRIEND_ID} />);
+            assert.equal(getTileAudioKey(FRIEND_ID), FRIEND_ID);
+            assert.ok(screen.getByRole("button", { name: "Ativar som" }));
+        });
+
+        test("sem audio na transmissao: nada e publicado", async () => {
+            show(session({ stream: stream(false) }));
+            await mount(<CallTileStream userId={FRIEND_ID} />);
+            assert.equal(getTileAudioKey(FRIEND_ID), null);
+        });
+
+        test("sem o id do Discord do amigo: nada e publicado", async () => {
+            show(session({ stream: stream(true) }), { discordUserId: "" });
+            await mount(<CallTileStream userId="" />);
+            assert.equal(getTileAudioKey(""), null);
+        });
+
+        test("a segunda tile do mesmo amigo (calada) nao publica; ao sair a primeira, a outra assume", async () => {
+            withAudio();
+            const first = await mount(<CallTileStream userId={FRIEND_ID} />);
+            const second = await mount(<CallTileStream userId={FRIEND_ID} />);
+            assert.equal(getTileAudioKey(FRIEND_ID), FRIEND_ID);
+            first.unmount();
+            await settle();
+            assert.equal(getTileAudioKey(FRIEND_ID), FRIEND_ID, "a segunda tile passou a tocar e publicou");
+            second.unmount();
+            assert.equal(getTileAudioKey(FRIEND_ID), null);
+        });
+
+        test("barra no comando: o slider e o mudo de cima somem e o resto da linha fica; sem a barra, voltam", async () => {
+            withAudio();
+            await mount(<CallTileStream userId={FRIEND_ID} />);
+            assert.ok(screen.getByLabelText("Volume"));
+            let undo = () => { };
+            act(() => void (undo = registerTrayBar(FRIEND_ID, window)));
+            assert.ok(!screen.queryByLabelText("Volume"));
+            assert.ok(!screen.queryByRole("button", { name: /Silenciar|Ativar som/ }));
+            rowStillThere();
+
+            act(() => undo());
+            assert.ok(screen.getByLabelText("Volume"));
+            assert.ok(screen.getByRole("button", { name: "Silenciar" }));
+        });
+
+        test("barra registrada para OUTRA janela nao esconde o slider desta tile", async () => {
+            withAudio();
+            await mount(<CallTileStream userId={FRIEND_ID} />);
+            act(() => void registerTrayBar(FRIEND_ID, { name: "outra" } as unknown as Window));
+            assert.ok(screen.getByLabelText("Volume"), "a barra de outra janela nao manda aqui");
+            act(() => void registerTrayBar(FRIEND_ID, window));
+            assert.ok(!screen.queryByLabelText("Volume"));
+        });
+
+        test("trocar o peer da tile montada republica com o token novo e o desmonte limpa", async () => {
+            const OTHER_PEER = "peerB";
+            withAudio();
+            const view = await mount(<CallTileStream userId={FRIEND_ID} />);
+            assert.equal(getTileAudioKey(FRIEND_ID), volumeKeyFor(PEER, FRIEND_ID));
+            act(() => setState({
+                ...EMPTY,
+                peers: [friend({ peerId: OTHER_PEER })],
+                viewing: { [OTHER_PEER]: session({ peerId: OTHER_PEER, stream: stream(true) }) }
+            }));
+            await settle();
+            view.rerender(<CallTileStream userId={FRIEND_ID} />);
+            await settle();
+            assert.equal(getTileAudioKey(FRIEND_ID), volumeKeyFor(OTHER_PEER, FRIEND_ID));
+            view.unmount();
+            assert.equal(getTileAudioKey(FRIEND_ID), null);
+        });
+
+        test("em tela cheia do Telinha a barra do Discord nao aparece: o slider fica", async () => {
+            withAudio();
+            const { container } = await mount(<CallTileStream userId={FRIEND_ID} />);
+            act(() => void registerTrayBar(FRIEND_ID, window));
+            assert.ok(!screen.queryByLabelText("Volume"));
+            fireEvent.mouseMove(tile(container));
+            fireEvent.click(screen.getByRole("button", { name: "Tela cheia" }));
+            await settle();
+            assert.ok(screen.getByLabelText("Volume"), "em tela cheia mostra o slider");
+            fireEvent.click(screen.getByRole("button", { name: "Sair da tela cheia" }));
+            await settle();
+            assert.ok(!screen.queryByLabelText("Volume"));
+        });
+
+        test("integracao: o TrayVolume assume (maxValue 100), a tile esconde o slider e mover a barra muda o volume da live", async () => {
+            withAudio();
+            const props: Record<string, any>[] = [];
+            const Slider = (p: Record<string, any>) => {
+                props.push(p);
+                return <div data-testid="discord-slider" />;
+            };
+            const { container } = await mount(<CallTileStream userId={FRIEND_ID} />);
+            const bar = await mount(<TrayVolume Slider={Slider} discordProps={{ maxValue: 200 }} userId={FRIEND_ID} context="default" />);
+            await settle();
+            assert.equal(props[props.length - 1].maxValue, 100);
+            assert.ok(!screen.queryByLabelText("Volume"), "a tile esconde o slider dela");
+            act(() => props[props.length - 1].onValueChange(30));
+            assert.deepEqual(getVolume(FRIEND_ID), { volume: 0.3, muted: false });
+            assert.equal(video(container)!.volume, 0.3);
+
+            bar.unmount();
+            await settle();
+            assert.ok(screen.getByLabelText("Volume"), "sem a barra o slider volta");
         });
     });
 

@@ -31,6 +31,7 @@ import type { ReactNode } from "react";
 
 import { CallTileStream } from "./CallTileStream";
 import { isTileOwned, PIP_DELAY_MS, resetTileState, setLocalPreviewHidden } from "./tileState";
+import { getTileAudioKey, resetTrayVolume } from "./trayVolume";
 
 const POPOUT_KEY = `DISCORD_TELINHA_VIEWER_${FRIEND_ID}`;
 
@@ -53,6 +54,7 @@ describe("CallTileStream com o nucleo de verdade", () => {
     });
 
     beforeEach(() => {
+        resetTrayVolume();
         resetMedia();
         animations.reset();
         PopoutActions.reset();
@@ -241,6 +243,14 @@ describe("CallTileStream com o nucleo de verdade", () => {
             await settle();
             assert.equal(PopoutActions.opened.length, 1, "nao abriu outra");
             assert.equal(PopoutWindowStore.getWindow(POPOUT_KEY)!.focused, 1);
+        });
+
+        test("com a janela aberta o som sai da tile e ela deixa de publicar para a barra da call", async () => {
+            await withStream(true);
+            assert.equal(getTileAudioKey(FRIEND_ID), FRIEND_ID);
+            fireEvent.click(screen.getByRole("button", { name: "Abrir em janela" }));
+            await settle();
+            assert.equal(getTileAudioKey(FRIEND_ID), null);
         });
 
         test("o volume ajustado na tile vale na janela que abre; o que se ajusta na janela chega na tile que segue montada", async () => {
