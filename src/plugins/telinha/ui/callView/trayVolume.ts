@@ -16,7 +16,11 @@ import { logger } from "@plugins/telinha/ui/common";
 import { React } from "@webpack/common";
 
 const tileAudio = new Map<string, { token: symbol; key: string; }>();
-const bars = new Map<string, number>();
+// barras no comando, por usuario e por janela (a call pode estar na janela principal e na janela solta do Discord)
+const bars = new Map<string, Map<Window, number>>();
+
+// sobe a cada reset: cada "desfazer" guarda a geracao em que nasceu
+let generation = 0;
 
 let version = 0;
 const listeners = new Set<() => void>();
@@ -63,32 +67,41 @@ export function getTileAudioKey(userId: string): string | null {
     return tileAudio.get(userId)?.key ?? null;
 }
 
-/** A barra assumiu o controle deste usuario. Devolve o "desfazer" (idempotente) */
-export function registerTrayBar(userId: string): () => void {
-    const wasActive = isTrayBarActive(userId);
-    bars.set(userId, (bars.get(userId) ?? 0) + 1);
+/** A barra, na janela `win`, assumiu o controle deste usuario. Devolve o "desfazer" (idempotente) */
+export function registerTrayBar(userId: string, win: Window): () => void {
+    const wasActive = isTrayBarActive(userId, win);
+    let perWindow = bars.get(userId);
+    if (!perWindow) bars.set(userId, perWindow = new Map());
+    perWindow.set(win, (perWindow.get(win) ?? 0) + 1);
     if (!wasActive) emit();
+    const myGeneration = generation;
     let done = false;
     return () => {
         if (done) return;
         done = true;
-        const count = bars.get(userId);
-        if (!count) return; // o reset ja esqueceu esta barra
+        if (myGeneration !== generation) return; // o reset ja esqueceu esta barra: nao mexer na de depois
+        const current = bars.get(userId);
+        const count = current?.get(win);
+        if (!current || !count) return;
         if (count > 1) {
-            bars.set(userId, count - 1);
+            current.set(win, count - 1);
             return;
         }
-        bars.delete(userId);
+        current.delete(win);
+        if (current.size === 0) bars.delete(userId);
         emit();
     };
 }
 
-export function isTrayBarActive(userId: string): boolean {
-    return (bars.get(userId) ?? 0) > 0;
+/** Ha uma barra comandando este usuario na janela `win`? Sem janela (null/undefined): nao, e a tile mostra o slider */
+export function isTrayBarActive(userId: string, win: Window | null | undefined): boolean {
+    if (!win) return false;
+    return (bars.get(userId)?.get(win) ?? 0) > 0;
 }
 
 /** Plugin parado: esquece tudo */
 export function resetTrayVolume() {
+    generation++; // os "desfazer" criados antes deste reset passam a nao fazer nada
     tileAudio.clear();
     bars.clear();
     emit();

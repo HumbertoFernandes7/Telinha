@@ -443,7 +443,7 @@ function TilePlayer({ peer, session }: { peer: RemotePeer; session: ViewerSessio
         setTileAudio(tileUserId, token, volumeKey);
         return () => setTileAudio(tileUserId, token, null);
     }, [publishAudio, tileUserId, volumeKey, peerId]); // peerId: registerTile troca o token quando ele muda
-    useTrayVersion();
+    useTrayVersion(); // a barra da MESMA janela desta tile (o ref e nulo no 1o render: o slider aparece e a barra, ao registrar, re-renderiza)
 
     const status = getStatus(session, name);
     const showControls = active || fullscreen || status != null || (autoplayBlocked && hasAudio && audioHere);
@@ -463,7 +463,7 @@ function TilePlayer({ peer, session }: { peer: RemotePeer; session: ViewerSessio
                 <VolumeIcon muted={true} size={14} />
             </IconButton>
         );
-    } else if (hasAudio && audioHere && isTrayBarActive(tileUserId) && !fullscreen) {
+    } else if (hasAudio && audioHere && isTrayBarActive(tileUserId, rootRef.current?.ownerDocument?.defaultView) && !fullscreen) {
         // A barra de volume da call (canto inferior direito) comanda o volume da live: sem slider duplicado aqui.
         // Em tela cheia do Telinha a barra do Discord nao aparece, entao o slider fica.
         sound = null;

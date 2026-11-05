@@ -41,6 +41,8 @@
 //   (0,i.jsx)($self.TrayVolume,{Slider:c.A,discordProps:{currentWindow:C,...,onToggleMute:()=>{...}},userId:g,context:x})
 //
 // Se o patch nao aplicar, ninguem registra a barra (trayVolume.ts) e a tile mantem o slider dela.
+// `all: true`: o modulo pode existir em dois chunks e sem isso o Vencord so patcha o primeiro que contem o `find`;
+// `noWarn: true`: o VolumeBooster ja mexe no mesmo modulo e a copia que nao casa nao deve gerar aviso.
 
 export const callViewPatches = [
     {
@@ -54,6 +56,8 @@ export const callViewPatches = [
     // Volume da barra da call (canto inferior direito, so com a tile em foco): ver o segundo trecho do comentario acima
     {
         find: "currentVolume:",
+        all: true,
+        noWarn: true,
         replacement: {
             match: /\(0,(\i)\.jsx\)\((\i\.\i),(\{currentWindow:\i,.+?onToggleMute:\(\)=>\{.+?toggleLocalMute\((\i),(\i)\)\}\})\)/,
             replace: "(0,$1.jsx)($self.TrayVolume,{Slider:$2,discordProps:$3,userId:$4,context:$5})"

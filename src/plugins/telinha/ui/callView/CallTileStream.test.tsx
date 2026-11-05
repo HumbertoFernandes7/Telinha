@@ -640,7 +640,7 @@ describe("CallTileStream", () => {
             await mount(<CallTileStream userId={FRIEND_ID} />);
             assert.ok(screen.getByLabelText("Volume"));
             let undo = () => { };
-            act(() => void (undo = registerTrayBar(FRIEND_ID)));
+            act(() => void (undo = registerTrayBar(FRIEND_ID, window)));
             assert.ok(!screen.queryByLabelText("Volume"));
             assert.ok(!screen.queryByRole("button", { name: /Silenciar|Ativar som/ }));
             rowStillThere();
@@ -650,10 +650,37 @@ describe("CallTileStream", () => {
             assert.ok(screen.getByRole("button", { name: "Silenciar" }));
         });
 
+        test("barra registrada para OUTRA janela nao esconde o slider desta tile", async () => {
+            withAudio();
+            await mount(<CallTileStream userId={FRIEND_ID} />);
+            act(() => void registerTrayBar(FRIEND_ID, { name: "outra" } as unknown as Window));
+            assert.ok(screen.getByLabelText("Volume"), "a barra de outra janela nao manda aqui");
+            act(() => void registerTrayBar(FRIEND_ID, window));
+            assert.ok(!screen.queryByLabelText("Volume"));
+        });
+
+        test("trocar o peer da tile montada republica com o token novo e o desmonte limpa", async () => {
+            const OTHER_PEER = "peerB";
+            withAudio();
+            const view = await mount(<CallTileStream userId={FRIEND_ID} />);
+            assert.equal(getTileAudioKey(FRIEND_ID), volumeKeyFor(PEER, FRIEND_ID));
+            act(() => setState({
+                ...EMPTY,
+                peers: [friend({ peerId: OTHER_PEER })],
+                viewing: { [OTHER_PEER]: session({ peerId: OTHER_PEER, stream: stream(true) }) }
+            }));
+            await settle();
+            view.rerender(<CallTileStream userId={FRIEND_ID} />);
+            await settle();
+            assert.equal(getTileAudioKey(FRIEND_ID), volumeKeyFor(OTHER_PEER, FRIEND_ID));
+            view.unmount();
+            assert.equal(getTileAudioKey(FRIEND_ID), null);
+        });
+
         test("em tela cheia do Telinha a barra do Discord nao aparece: o slider fica", async () => {
             withAudio();
             const { container } = await mount(<CallTileStream userId={FRIEND_ID} />);
-            act(() => void registerTrayBar(FRIEND_ID));
+            act(() => void registerTrayBar(FRIEND_ID, window));
             assert.ok(!screen.queryByLabelText("Volume"));
             fireEvent.mouseMove(tile(container));
             fireEvent.click(screen.getByRole("button", { name: "Tela cheia" }));

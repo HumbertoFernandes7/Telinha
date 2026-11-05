@@ -29,6 +29,8 @@ import {
 const U = "100000000000000001";
 const A = Symbol("a");
 const B = Symbol("b");
+const WIN = globalThis.window;
+const OTHER = { name: "janela solta" } as unknown as Window;
 
 describe("trayVolume", () => {
     let calls = 0;
@@ -71,24 +73,59 @@ describe("trayVolume", () => {
     });
 
     test("barra no comando: contador e desfazer idempotente", () => {
-        assert.equal(isTrayBarActive(U), false);
-        const a = registerTrayBar(U);
-        const b = registerTrayBar(U);
-        assert.equal(isTrayBarActive(U), true);
+        assert.equal(isTrayBarActive(U, WIN), false);
+        const a = registerTrayBar(U, WIN);
+        const b = registerTrayBar(U, WIN);
+        assert.equal(isTrayBarActive(U, WIN), true);
         a();
         a(); // segunda chamada nao desconta de novo
-        assert.equal(isTrayBarActive(U), true);
+        assert.equal(isTrayBarActive(U, WIN), true);
         b();
-        assert.equal(isTrayBarActive(U), false);
+        assert.equal(isTrayBarActive(U, WIN), false);
     });
 
     test("desfazer depois do reset nao faz nada", () => {
-        const a = registerTrayBar(U);
+        const a = registerTrayBar(U, WIN);
         resetTrayVolume();
         const before = calls;
         a();
         assert.equal(calls, before);
-        assert.equal(isTrayBarActive(U), false);
+        assert.equal(isTrayBarActive(U, WIN), false);
+    });
+
+    test("uma janela nao enxerga a barra da outra; sem janela nunca esta ativa", () => {
+        const a = registerTrayBar(U, WIN);
+        assert.equal(isTrayBarActive(U, WIN), true);
+        assert.equal(isTrayBarActive(U, OTHER), false);
+        assert.equal(isTrayBarActive(U, null), false);
+        assert.equal(isTrayBarActive(U, undefined), false);
+        const b = registerTrayBar(U, OTHER);
+        a();
+        assert.equal(isTrayBarActive(U, WIN), false);
+        assert.equal(isTrayBarActive(U, OTHER), true, "a outra janela segue");
+        b();
+        assert.equal(isTrayBarActive(U, OTHER), false);
+    });
+
+    test("avisa a cada mudanca do par usuario e janela", () => {
+        const before = calls;
+        const a = registerTrayBar(U, WIN);
+        assert.equal(calls, before + 1);
+        const b = registerTrayBar(U, OTHER);
+        assert.equal(calls, before + 2, "outra janela e outro estado");
+        a();
+        b();
+        assert.equal(calls, before + 4);
+    });
+
+    test("desfazer antigo (de antes do reset) nao tira uma barra registrada depois", () => {
+        const old = registerTrayBar(U, WIN);
+        resetTrayVolume();
+        const fresh = registerTrayBar(U, WIN);
+        old();
+        assert.equal(isTrayBarActive(U, WIN), true);
+        fresh();
+        assert.equal(isTrayBarActive(U, WIN), false);
     });
 
     test("so avisa quando algo muda de verdade", () => {
@@ -99,9 +136,9 @@ describe("trayVolume", () => {
         setTileAudio(U, B, null);
         assert.equal(calls, 1, "token de outra tile");
 
-        const a = registerTrayBar(U);
+        const a = registerTrayBar(U, WIN);
         assert.equal(calls, 2);
-        const b = registerTrayBar(U);
+        const b = registerTrayBar(U, WIN);
         assert.equal(calls, 2, "ja havia barra");
         a();
         assert.equal(calls, 2, "ainda sobra uma barra");
@@ -130,11 +167,11 @@ describe("trayVolume", () => {
         const before = result.current;
         act(() => setTileAudio(U, A, "k1"));
         assert.ok(result.current > before);
-        act(() => void registerTrayBar(U));
+        act(() => void registerTrayBar(U, WIN));
         const mid = calls;
         act(() => resetTrayVolume());
         assert.equal(calls, mid + 1);
         assert.equal(getTileAudioKey(U), null);
-        assert.equal(isTrayBarActive(U), false);
+        assert.equal(isTrayBarActive(U, WIN), false);
     });
 });

@@ -29,7 +29,9 @@ interface Props {
 function Takeover({ Slider, discordProps, userId, volumeKey }: Pick<Props, "Slider" | "discordProps"> & { userId: string; volumeKey: string; }) {
     const [{ volume, muted }, set] = useVolume(volumeKey);
 
-    React.useEffect(() => registerTrayBar(userId), [userId]);
+    // a janela desta barra (a da call pode ser a solta do Discord); sem uma valida, a principal
+    const win: Window = typeof discordProps.currentWindow === "object" && discordProps.currentWindow !== null ? discordProps.currentWindow : window;
+    React.useEffect(() => registerTrayBar(userId, win), [userId, win]);
 
     return (
         <Slider
@@ -38,7 +40,7 @@ function Takeover({ Slider, discordProps, userId, volumeKey }: Pick<Props, "Slid
             muted={muted}
             maxValue={100}
             onValueChange={(v: number) => set({ volume: v / 100, muted: v === 0 })}
-            onToggleMute={() => set({ volume, muted: !muted })}
+            onToggleMute={() => set(muted && volume === 0 ? { volume: 1, muted: false } : { volume, muted: !muted })} // desmutar em 0 devolve o som
         />
     );
 }
