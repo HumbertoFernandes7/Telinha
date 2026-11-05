@@ -34,6 +34,7 @@ import {
     unregisterTile,
     useTileStateVersion
 } from "./tileState";
+import { isTrayBarActive, setTileAudio, useTrayVersion } from "./trayVolume";
 
 const CONTROLS_IDLE_MS = 2500;
 const COMPACT_WIDTH = 300;
@@ -430,6 +431,20 @@ function TilePlayer({ peer, session }: { peer: RemotePeer; session: ViewerSessio
     const { autoplayBlocked, enableSound } = useStreamVideo(mediaRef, stream, muted || !audioHere, volume);
 
     const hasAudio = (stream?.getAudioTracks().length ?? 0) > 0 || !!peer.stream?.hasAudio;
+
+    // Avisa a barra de volume da call (trayVolume.ts) que esta tile toca o som da live; vale tambem com o autoplay
+    // bloqueado (a barra ja pode mexer no volume). Limpa quando o som sai daqui (janela aberta, sem audio) e ao desmontar.
+    const volumeKey = volumeKeyFor(peerId, peer.discordUserId);
+    const publishAudio = hasAudio && audioHere;
+    const tileUserId = peer.discordUserId;
+    useEffect(() => {
+        const token = tokenRef.current as symbol; // o efeito de registerTile ja rodou
+        if (!publishAudio || !tileUserId) return;
+        setTileAudio(tileUserId, token, volumeKey);
+        return () => setTileAudio(tileUserId, token, null);
+    }, [publishAudio, tileUserId, volumeKey, peerId]); // peerId: registerTile troca o token quando ele muda
+    useTrayVersion(); // a barra da MESMA janela desta tile (o ref e nulo no 1o render: o slider aparece e a barra, ao registrar, re-renderiza)
+
     const status = getStatus(session, name);
     const showControls = active || fullscreen || status != null || (autoplayBlocked && hasAudio && audioHere);
 
@@ -448,6 +463,10 @@ function TilePlayer({ peer, session }: { peer: RemotePeer; session: ViewerSessio
                 <VolumeIcon muted={true} size={14} />
             </IconButton>
         );
+    } else if (hasAudio && audioHere && isTrayBarActive(tileUserId, rootRef.current?.ownerDocument?.defaultView) && !fullscreen) {
+        // A barra de volume da call (canto inferior direito) comanda o volume da live: sem slider duplicado aqui.
+        // Em tela cheia do Telinha a barra do Discord nao aparece, entao o slider fica.
+        sound = null;
     } else if (hasAudio && audioHere) {
         const shown = muted ? 0 : Math.round(volume * 100);
         sound = (

@@ -129,6 +129,8 @@ Na primeira vez, o Telinha pede para você autorizá-lo no Discord (a janela é 
 
 A transmissão também pode abrir em uma **janela separada** (no quadradinho da call, use **Abrir em janela**; pela barra do Telinha e pelo menu ela já abre assim), com tela cheia, volume e "Parar de assistir".
 
+**Volume:** com o quadradinho da pessoa em destaque, o controle de volume do canto inferior direito da barra da call (o do próprio Discord) muda o som da transmissão, e não a voz dela. Sem quadradinho em destaque, ou na tela cheia do Telinha, o volume fica no próprio quadradinho. Quando a transmissão acaba, aquele controle volta a ser o da voz.
+
 **Janelinha:** se você sair da tela da call enquanto assiste, a transmissão continua num quadradinho no canto do Discord. Arraste para mudar de lugar, clique nele para voltar à call ou no **×** para parar de assistir.
 
 **Quem está assistindo**

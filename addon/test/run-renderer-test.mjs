@@ -46,6 +46,7 @@ const commentSafe = s => (String(s).includes("*/") ? null : `/* ${s} */`);
  *   5001 account panel  `(0,r.jsx)(Panel,{...,userTag:u,occluded:!1})`
  *   5002 voice user row `(0,r.jsx)(VoiceUserIcons,{...,isHovered:h})`
  *   5003 CallTile       `u.type===ek.lp.USER?(0,r.jsx)("div",{...containerDimensions:{...}}):null,e2,R?null:...`
+ *   5005 call-bar volume `{currentVolume:p,...}` + `(0,r.jsx)(c.A,{currentWindow:w,...,onToggleMute:()=>{...toggleLocalMute(g,x)}})`
  */
 const fakeWebpack = finds => `(() => {
     var __webpack_modules__ = {
@@ -54,6 +55,7 @@ const fakeWebpack = finds => `(() => {
         5002: function(e,t,n){${finds.voiceUser}var r=n(5099),I=function VoiceUserIcons(){};e.exports={row:function(u,h){return(0,r.jsx)(I,{disabled:!1,user:u,collapsed:!1,isHovered:h})}}},
         5003: function(e,t,n){var r=n(5099),W={A:function(){}},ek={lp:{USER:"USER"}};function O(){}O.displayName="CallTileOverlay";e.exports={tile:function(u,e2,R){return[u.type===ek.lp.USER?(0,r.jsx)("div",{className:"fx",children:(0,r.jsx)(W.A,{userId:u.user.id,containerDimensions:{width:1,height:2}})}):null,e2,R?null:"overlay"]}}},
         5004: function(e,t,n){e.exports={other:function(){return"untouched"}}},
+        5005: function(e,t,n){var r=n(5099),c={A:function Slider(){}},d={getLocalVolume:function(){return 100},isLocalMute:function(){return!1}},a={default:{setLocalVolume:function(){},toggleLocalMute:function(){}}};e.exports={bar:function(g,x,w){var{currentVolume:p,muted:E}={currentVolume:d.getLocalVolume(g,x),muted:d.isLocalMute(g,x)};return(0,r.jsx)(c.A,{currentWindow:w,value:p,muted:E,maxValue:200,onValueChange:e=>{a.default.setLocalVolume(g,e,x)},onToggleMute:()=>{a.default.toggleLocalMute(g,x)}})}}},
         5099: function (e, t, n) { e.exports = { jsx: function (type, props) { return { from: "discord-jsx", type: type, props: props }; }, jsxs: function (type, props) { return { from: "discord-jsxs", type: type, props: props }; } }; }
     };
     var __webpack_module_cache__ = {};
@@ -103,7 +105,7 @@ let finds;
     check("add-on ran via ipc-hook with PluginMeta patched", $("JSON.stringify(__TelinhaAddonBoot)") === JSON.stringify({ via: "ipc-hook", metaPatched: true, metaReason: null }));
     check("registered into Vencord.Plugins.plugins, enabled by default, before webpack", $("JSON.stringify(TelinhaAddon.registrations.Telinha)") === '{"enabled":true,"webpackAlreadyRunning":false}' && $("Vencord.Webpack.wreq === undefined"));
     const queued = queuedPatches($);
-    check("3 patches queued in Vencord's patch list (account panel, voice user row, call tile)", queued.length === 3, queued);
+    check("4 patches queued in Vencord's patch list (account panel, voice user row, call tile, call-bar volume)", queued.length === 4, queued);
     finds = {
         account: commentSafe(queued.find(q => q.match[0].includes("userTag"))?.find),
         voiceUser: commentSafe(queued.find(q => q.match[0].includes("isHovered"))?.find)
@@ -124,8 +126,12 @@ let finds;
     check("PATCH APPLIED call tile: $self.renderCallTileStream inserted right after the tile content", tile[1] === "E2" && tile[2] === "SPY:tile" && tile[3] === "overlay", tile);
     const tile2 = JSON.parse($(`JSON.stringify(__fakeWreq(5003).tile({ type: "STREAM", user: { id: "42" } }, "E2", false))`));
     check("call tile, non-user participant: the plugin's real renderCallTileStream returns null", tile2[2] === null && tile2.length === 4, tile2);
+    const bar = $(`(() => { const o = __fakeWreq(5005).bar("42", "default", null); return JSON.stringify({ ours: o.type === ${P}.TrayVolume, slider: o.props.Slider?.name, userId: o.props.userId, context: o.props.context, max: o.props.discordProps?.maxValue, mute: typeof o.props.discordProps?.onToggleMute }); })()`);
+    check("PATCH APPLIED call-bar volume: Discord's slider goes through $self.TrayVolume with its own props", bar === JSON.stringify({ ours: true, slider: "Slider", userId: "42", context: "default", max: 200, mute: "function" }), bar);
     check("other modules untouched", $("__fakeWreq(5004).other()") === "untouched");
-    check("all applied patches left Vencord's pending list", $(`Vencord.WebpackPatcher.patches.filter(p => p.plugin === "Telinha").length`) === 0);
+    // o patch da barra de volume e `all: true` (o modulo pode estar em dois chunks): o Vencord o mantem na lista
+    check("all applied patches left Vencord's pending list (except the call-bar volume one, which is `all`)",
+        JSON.stringify($(`JSON.stringify(Vencord.WebpackPatcher.patches.filter(p => p.plugin === "Telinha").map(p => [String(p.find), !!p.all]))`)) === JSON.stringify(JSON.stringify([["currentVolume:", true]])));
     check("no 'Patch by Telinha errored/had no effect' on the console", !p.consoleLines.some(l => /Patch by Telinha/.test(l)), p.consoleLines.filter(l => /Patch by/.test(l)));
 
     $(`Vencord.Settings.plugins.Telinha.codec = "vp9"; Vencord.Settings.plugins.Telinha.rejectOutsiders = false; Vencord.Settings.plugins.Telinha.groupPassword = "senha-teste";`);
