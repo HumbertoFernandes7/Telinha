@@ -41,7 +41,7 @@ describe("patch da tile da call", () => {
     const { match, replace } = patch.replacement;
 
     test("procura o modulo do CallTileOverlay do Discord", () => {
-        assert.equal(callViewPatches.length, 1);
+        assert.equal(callViewPatches.length, 2);
         assert.equal(patch.find, ".displayName=\"CallTileOverlay\"");
     });
 

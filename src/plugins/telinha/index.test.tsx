@@ -68,8 +68,8 @@ describe("o que o Vencord le do plugin", () => {
         assert.equal(typeof plugin.stop, "function");
     });
 
-    test("tres patches: painel da conta, etiqueta na lista de voz e a tela da call", () => {
-        assert.equal(patches.length, 3);
+    test("quatro patches: painel da conta, etiqueta na lista de voz, a tela da call e o volume da barra", () => {
+        assert.equal(patches.length, 4);
         for (const p of patches) {
             assert.ok(typeof p.find === "string" && p.find.length > 8, "cada patch diz em qual modulo do Discord age");
             assert.ok(p.replacement.match instanceof RegExp);
