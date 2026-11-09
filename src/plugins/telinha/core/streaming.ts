@@ -1705,7 +1705,7 @@ function checkHwOnly(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc:
         if (isOffHardwareHwOnly(codec, enc)) {
             const impl = enc.implementation || "sem aceleração";
             // so diagnostico: o contexto da troca (tamanho, nivel, tempo no ar); nada aqui muda a decisao
-            const context = codec === "av1" ? offHardwareContext(peerId, local, send, enc) : "";
+            const context = codec === "av1" && !send.fellBack ? offHardwareContext(peerId, local, send, enc) : "";
             leaveHwOnly(codec, peerId, local, send, `O ${name} para ${label} não está sendo codificado pela placa de vídeo (${impl})`, true,
                 context ? { text: context, saved: `${name} saiu da placa (${impl}) p/ ${label}: ${context}` } : undefined);
         }
