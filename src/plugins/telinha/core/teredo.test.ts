@@ -62,13 +62,13 @@ describe("overlayName: VPNs overlay pelo endereco", () => {
             ["26.40.111.45", "Radmin"], ["26.0.0.1", "Radmin"], ["fdfd::1a28:6f2d", "Radmin"], ["FDFD::1A28:6F2D", "Radmin"],
             ["[fdfd::1a28:6f2d]", "Radmin"], ["fdfd::1a28:6f2d%5", "Radmin"], ["fdfd:0:0:0:0:0:1a28:6f2d", "Radmin"],
             ["25.1.2.3", "Hamachi"], ["2620:9b::1900:1", "Hamachi"], ["2620:009b:0000:0000:0000:0000:1900:0001", "Hamachi"],
-            ["fd7a:115c:a1e0::1", "Tailscale"], ["fd7a:115c:a1e0:ab12::5", "Tailscale"]
+            ["fd7a:115c:a1e0::1", "Tailscale"], ["fd7a:115c:a1e0:ab12::5", "Tailscale"], ["fdfd::26.40.111.45", "Radmin"]
         ];
         for (const [a, name] of yes) assert.equal(overlayName(a), name, a);
     });
 
     test("todo o resto e null (outras ULA, CGNAT, Teredo, mDNS, faixas privadas, lixo)", () => {
-        for (const a of ["27.0.0.1", "126.1.1.1", "10.26.0.1", "fd00::1", "fdfd:1::1", "fdfe::1", "100.64.0.1", "2001:0:abcd::1", "abc.local", "", "garbage", "192.168.0.26", "2620:9b:1::1", "fd7a:115c:a1e1::1", "25.1.2"])
+        for (const a of ["27.0.0.1", "126.1.1.1", "10.26.0.1", "fd00::1", "fdfd:1::1", "fdfe::1", "100.64.0.1", "2001:0:abcd::1", "abc.local", "", "garbage", "192.168.0.26", "2620:9b:1::1", "fd7a:115c:a1e1::1", "25.1.2", "::ffff:26.1.2.3", "0:0:0:0:0:ffff:1a01:203"])
             assert.equal(overlayName(a), null, a);
         for (const a of [undefined, null, 26, {}]) assert.equal(overlayName(a), null);
     });
@@ -324,6 +324,48 @@ describe("TeredoFilter: o resgate (o outro caminho nao funcionou)", () => {
         assert.equal(g.filterSdp(remoteSdp, "remote", add), remoteSdp);
         clock.tick(TEREDO_HOLD_MS);
         assert.equal(added.length, 3, "nada segurado sobrou");
+    });
+});
+
+describe("TeredoFilter: onFirstDrop", () => {
+    const local = (address: string) => ({ candidate: { candidate: cand(address), sdpMid: "0", usernameFragment: "l1" } }) as unknown as RTCPeerConnectionIceEvent;
+    const sdp = ["v=0", "a=ice-ufrag:r1", "m=video 9 UDP/TLS/RTP/SAVPF 96", "a=mid:0", `a=${cand(V4)}`, `a=${cand(TEREDO)}`, ""].join("\r\n");
+
+    test("trickle local: uma vez, no primeiro descartado", () => {
+        let n = 0;
+        const f = new TeredoFilter(() => "x", () => n++);
+        f.localCandidate(local(V4), () => { });
+        assert.equal(n, 0, "nada de fora");
+        f.localCandidate(local(TEREDO), () => { });
+        assert.equal(n, 1);
+        f.localCandidate(local("26.1.2.3"), () => { });
+        assert.equal(n, 1, "os seguintes nao chamam de novo");
+    });
+
+    test("trickle remoto e SDP com resgate", () => {
+        let n = 0;
+        const f = new TeredoFilter(() => "x", () => n++);
+        f.remoteCandidate({ candidate: cand(V4), sdpMid: "0", usernameFragment: "r1" }, () => { });
+        f.remoteCandidate({ candidate: cand(TEREDO), sdpMid: "0", usernameFragment: "r1" }, () => { });
+        assert.equal(n, 1);
+        let m = 0;
+        const g = new TeredoFilter(() => "x", () => m++);
+        g.filterSdp(sdp, "remote", () => { });
+        assert.equal(m, 1);
+        g.filterSdp(sdp.replace(TEREDO, "2001::5ef5:79fd"), "remote", () => { });
+        assert.equal(m, 1);
+    });
+
+    test("nunca depois do resgate, e sem callback nao quebra", () => {
+        let n = 0;
+        const f = new TeredoFilter(() => "x", () => n++);
+        f.releaseDropped();
+        f.remoteCandidate({ candidate: cand(V4), sdpMid: "0", usernameFragment: "r1" }, () => { });
+        f.remoteCandidate({ candidate: cand(TEREDO), sdpMid: "0", usernameFragment: "r1" }, () => { });
+        assert.equal(n, 0);
+        const g = new TeredoFilter(() => "x");
+        g.remoteCandidate({ candidate: cand(V4), sdpMid: "0", usernameFragment: "r1" }, () => { });
+        g.remoteCandidate({ candidate: cand(TEREDO), sdpMid: "0", usernameFragment: "r1" }, () => { });
     });
 });
 

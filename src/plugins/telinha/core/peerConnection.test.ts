@@ -386,6 +386,35 @@ describe("TelinhaPeerConnection", () => {
             assert.equal(logged(/não abriu/, mark).length, 1);
         });
 
+        test("a coleta nunca acaba (VPN sem rota): o resgate sai do primeiro candidato posto de lado", async t => {
+            const clock = useFakeClock(t);
+            const pc = newPc();
+            pc.connectionState = "connecting";
+            plan = { codec: null, bitrate: null, label: "amigo (abc123)" };
+            const seen: (string | null)[] = [];
+            pc.onicecandidate = ev => seen.push(ev.candidate?.candidate ?? null);
+            pc.emitIceCandidate({ candidate: cand(V4), sdpMid: "0", usernameFragment: "l1" });
+            pc.emitIceCandidate({ candidate: cand("26.1.2.3"), sdpMid: "0", usernameFragment: "l1" });
+            const mark = logMark();
+            clock.tick(TEREDO_RESCUE_MS - 1);
+            assert.deepEqual(seen, [cand(V4)]);
+            clock.tick(1);
+            await new Promise(resolve => setImmediate(resolve));
+            assert.deepEqual(seen, [cand(V4), cand("26.1.2.3")]);
+            assert.equal(logged(/não abriu/, mark).length, 1);
+
+            // conectada ate la: nada acontece
+            const ok = newPc();
+            ok.connectionState = "connecting";
+            ok.onicecandidate = () => { };
+            ok.emitIceCandidate({ candidate: cand(V4), sdpMid: "0", usernameFragment: "l1" });
+            ok.emitIceCandidate({ candidate: cand("26.1.2.3"), sdpMid: "0", usernameFragment: "l1" });
+            ok.connectionState = "connected";
+            const mark2 = logMark();
+            clock.tick(TEREDO_RESCUE_MS);
+            assert.deepEqual(logged(/não abriu/, mark2), []);
+        });
+
         test("conectada a tempo, fechada ou sem nada de fora: o resgate nao faz nada", t => {
             const clock = useFakeClock(t);
             const open = newPc();

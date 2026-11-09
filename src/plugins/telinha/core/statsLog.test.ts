@@ -419,6 +419,17 @@ describe("rota por VPN overlay", () => {
         }
     });
 
+    test("resumo do envio: a VPN acompanha a rota (o par mudou, a VPN antiga sai)", () => {
+        const log = new SenderLog(0);
+        const at = (i: number, patch: Partial<SenderLogCounters>) => sender({ at: i * 2000, framesEncoded: i * 60, bytesSent: i * 400_000, log: senderLog(patch) });
+        log.add(null, at(0, {}));
+        log.add(at(0, {}), at(1, { route: "host/host", overlay: { name: "Radmin", side: "both" } }));
+        log.add(at(1, {}), at(2, { route: "srflx/srflx", overlay: null }));
+        const s = log.summary("A", 4000)!;
+        assert.match(s, / · rota srflx\/srflx$/);
+        assert.doesNotMatch(s, /VPN/);
+    });
+
     test("resumo do envio, linha e resumo da recepcao carregam a VPN", () => {
         const log = new SenderLog(0);
         const at = (i: number, overlay: SenderLogCounters["overlay"]) => sender({ at: i * 2000, framesEncoded: i * 60, bytesSent: i * 400_000, log: senderLog({ overlay }) });

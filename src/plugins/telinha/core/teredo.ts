@@ -19,8 +19,10 @@
 //   Teredo e melhor que nada). Os SDPs (renegociacoes, reinicio do ICE) levam os candidatos ja coletados: filterSdp.
 // - "outro caminho" e so a EXISTENCIA de um candidato direto, nao a prova de que ele funciona: com os dois PCs atras de
 //   CGNAT (comum na fibra no Brasil) o par srflx x srflx falha e so o Teredo conectaria. Por isso o que ficou de fora e
-//   guardado e o resgate (releaseDropped) devolve tudo se a conexao nao abrir TEREDO_RESCUE_MS depois de a coleta dos
-//   nossos candidatos acabar (peerConnection.ts). Depois do resgate o filtro desliga nessa conexao.
+//   guardado e o resgate (releaseDropped) devolve tudo se a conexao nao abrir TEREDO_RESCUE_MS depois do que vier primeiro:
+//   o primeiro candidato posto de lado (onFirstDrop) ou o fim da coleta dos nossos candidatos (peerConnection.ts). Nao
+//   depende so do fim da coleta: o adaptador de uma VPN overlay nao tem rota para a internet e o libwebrtc insiste no
+//   STUN dele por ~40 s, entao a coleta so acabaria depois de o Trystero desistir da conexao. Depois do resgate o filtro desliga nessa conexao.
 //
 // Regra a mais, so para o lado remoto: se o IPv6 DESTE PC nesta conexao e so Teredo (nos nossos candidatos: algum Teredo
 // e nenhum IPv6 global; ULA fc00::/7 e link-local nao contam), um IPv6 global do outro lado so e alcancado pelo nosso
@@ -254,7 +256,10 @@ export class TeredoFilter {
     private off = false;
     private readonly id = Math.random().toString(36).slice(2, 10);
 
-    constructor(private readonly label: () => string) { }
+    /** onFirstDrop acontece uma vez, quando o primeiro candidato e posto de lado (nunca depois do resgate) */
+    private firstDropDone = false;
+
+    constructor(private readonly label: () => string, private readonly onFirstDrop?: () => void) { }
 
     /** O IPv6 deste PC nesta conexao e so Teredo (algum candidato nosso no Teredo e nenhum IPv6 global). */
     ipv6OnlyTeredo(): boolean {
@@ -366,6 +371,10 @@ export class TeredoFilter {
         if (this.seen.has(key)) return;
         this.seen.add(key);
         this.dropped.push({ item, pass });
+        if (!this.firstDropDone && !this.off) {
+            this.firstDropDone = true;
+            this.onFirstDrop?.();
+        }
     }
 
     private route<T>(side: Side, state: SideState<T>, key: string, route: Route, tag: LowTag, item: T, pass: (item: T) => void, candidate: string) {

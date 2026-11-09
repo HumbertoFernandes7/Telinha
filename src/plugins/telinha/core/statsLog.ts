@@ -284,7 +284,8 @@ export class SenderLog {
         addTime(this.fpsMs, Math.round(w.m.encodedFps / 5) * 5, w.m.dt * 1000);
         this.resChanges = add(this.resChanges, w.resChanges);
         this.teredo = w.teredo ?? this.teredo;
-        this.overlay = w.overlay ?? this.overlay;
+        // a VPN acompanha a rota: depois de o par mudar, a VPN antiga nao vale
+        this.overlay = w.route ? (w.overlay ?? null) : (w.overlay ?? this.overlay);
         pushCapped(this.estKbps, w.m.availableKbps);
         pushCapped(this.sentKbps, w.m.sentKbps);
         this.lost = add(this.lost, w.lost);

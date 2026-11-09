@@ -106,13 +106,13 @@ const IDENTITY_SHORT: Record<NonNullable<RemotePeer["identity"]>, string> = {
     invalid: "identidade falsa"
 };
 
-/** O lado da conexao no Teredo (core/teredo.ts → TEREDO_TEXT), sem endereco. */
 /** O lado da conexao numa VPN overlay (core/teredo.ts → overlayText), sem endereco. */
 const OVERLAY_SHORT: Record<NonNullable<RemotePeer["teredo"]>, string> = {
     local: "este PC",
     remote: "o PC dele",
     both: "os dois PCs"
 };
+/** O lado da conexao no Teredo (core/teredo.ts → TEREDO_TEXT), sem endereco. */
 const TEREDO_SHORT: Record<NonNullable<RemotePeer["teredo"]>, string> = {
     local: "rota via Teredo: este PC",
     remote: "rota via Teredo: o PC dele",
