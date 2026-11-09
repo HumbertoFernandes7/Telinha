@@ -89,6 +89,10 @@ describe("readSenderSample", () => {
         assert.equal(remote?.log?.teredo, "remote", "host mDNS deste lado: desconhecido, nao Teredo");
         const plain = await readSenderSample(senderWith(withAddresses("192.168.0.10", "2804:14c:5b80::1")));
         assert.equal(plain?.log?.teredo, null);
+        const vpn = await readSenderSample(senderWith(withAddresses("26.40.111.45", "203.0.113.7")));
+        assert.deepEqual(vpn?.log?.overlay, { name: "Radmin", side: "local" });
+        assert.equal(plain?.log?.overlay, undefined);
+        assert.doesNotMatch(JSON.stringify(vpn), /26\.40/, "nenhum endereco na leitura");
     });
 
     test("so para o log: o remote-inbound-rtp e o da outbound-rtp escolhida (localId); sem par de candidatos, sem rota", async () => {

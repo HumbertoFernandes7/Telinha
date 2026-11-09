@@ -22,7 +22,7 @@ import { getPc, peerLabel, publish, rt, type ViewerEntry } from "./context";
 import { errorText, log, logThrottled } from "./log";
 import { me } from "./presence";
 import { emptyReceiverCounters, guardStatsLog, readAudioInbound, readVideoInbound, ReceiverLog, type ReceiverSample } from "./statsLog";
-import { pairTeredo, selectedPair } from "./teredo";
+import { pairOverlay, pairTeredo, selectedPair } from "./teredo";
 
 const RESPONSE_TIMEOUT_MS = 20_000;
 /** o transmissor pediu para esperar a aprovacao dele (60 s do lado dele + folga de rede) */
@@ -376,7 +376,11 @@ async function sample(v: ViewerEntry): Promise<InboundSample | null> {
     };
     for (const r of receivers) {
         const report = await r.getStats();
-        if (r === video) out.teredo = pairTeredo(report, selectedPair(report));
+        if (r === video) {
+            const pair = selectedPair(report);
+            out.teredo = pairTeredo(report, pair);
+            out.overlay = pairOverlay(report, pair);
+        }
         report.forEach((s: any) => {
             if (s.type !== "inbound-rtp") return;
             out.bytes += s.bytesReceived ?? 0;

@@ -21,7 +21,8 @@
 //   ha outro caminho para o mesmo componente. Os ganchos sao desta classe (o Trystero so ve ela): nada no Trystero e
 //   mudado. Se um dia ele passar a ler os candidatos por outro caminho, o filtro so deixa de agir (a conexao nao quebra).
 //   Resgate (armRescue): "outro caminho" e so um candidato que existe, nao um que funciona. Se a conexao nao abrir
-//   TEREDO_RESCUE_MS depois de a coleta dos nossos candidatos acabar, o que ficou de fora entra: os nossos pelo
+//   TEREDO_RESCUE_MS depois do que vier primeiro (o primeiro candidato posto de lado ou o fim da coleta dos nossos
+//   candidatos; a coleta de uma VPN sem rota pode levar ~40 s), o que ficou de fora entra: os nossos pelo
 //   onicecandidate do Trystero (ele os sinaliza), os do outro lado pelo addIceCandidate. O Trystero nunca reinicia o ICE
 //   numa conexao que falhou (fecha e a sala reconecta): sem o resgate, dois PCs atras de CGNAT ficariam num ciclo sem fim.
 //
@@ -159,14 +160,15 @@ const teredoFilters = new WeakMap<RTCPeerConnection, TeredoFilter>();
 /** O filtro de candidatos pelo Teredo desta conexao (core/teredo.ts). */
 function teredoOf(pc: RTCPeerConnection): TeredoFilter {
     let filter = teredoFilters.get(pc);
-    if (!filter) teredoFilters.set(pc, filter = new TeredoFilter(() => labelOf(pc)));
+    if (!filter) teredoFilters.set(pc, filter = new TeredoFilter(() => labelOf(pc), () => armRescue(pc)));
     return filter;
 }
 
 const rescueTimers = new WeakMap<RTCPeerConnection, ReturnType<typeof setTimeout>>();
 
 /**
- * A coleta dos nossos candidatos acabou: se a conexao nao estiver aberta em TEREDO_RESCUE_MS, o que o filtro do Teredo
+ * Chamada no primeiro candidato posto de lado e no fim da coleta dos nossos candidatos, o que vier primeiro (idempotente
+ * enquanto ha um relogio pendente): se a conexao nao estiver aberta em TEREDO_RESCUE_MS, o que o filtro do Teredo
  * deixou de fora entra (core/teredo.ts → releaseDropped) e o filtro desliga nela. Uma linha no log.
  */
 function armRescue(pc: RTCPeerConnection) {
@@ -176,8 +178,8 @@ function armRescue(pc: RTCPeerConnection) {
         const filter = teredoOf(pc);
         if (pc.connectionState === "connected" || pc.connectionState === "closed" || !filter.hasDropped()) return;
         const n = filter.releaseDropped();
-        log.warn(`${labelOf(pc)}: a conexão não abriu em ${TEREDO_RESCUE_MS / 1000} s sem o Teredo; `
-            + (n === 1 ? "o candidato pelo Teredo que tinha ficado de fora entrou" : `os ${n} candidatos pelo Teredo que tinham ficado de fora entraram`));
+        log.warn(`${labelOf(pc)}: a conexão não abriu em ${TEREDO_RESCUE_MS / 1000} s sem os caminhos de reserva (Teredo/VPN); `
+            + (n === 1 ? "o candidato de reserva entrou" : `os ${n} candidatos de reserva entraram`));
     }, TEREDO_RESCUE_MS));
 }
 

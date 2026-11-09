@@ -7,7 +7,7 @@
 // Leitura das estatisticas de UM RTCRtpSender de video (outbound-rtp + media-source + par de
 // candidatos) e o resumo de uma janela entre duas leituras.
 
-import { pairTeredo, type TeredoSide } from "@plugins/telinha/core/teredo";
+import { type PairOverlay, pairOverlay, pairTeredo, type TeredoSide } from "@plugins/telinha/core/teredo";
 
 /**
  * O que a mesma leitura traz da rede e para o log de estatisticas (core/statsLog.ts). A qualidade automatica usa so a
@@ -44,6 +44,8 @@ export interface SenderLogCounters {
     route: string | null;
     /** o par em uso passa pelo Teredo (core/teredo.ts); null = nao, ou nao da para saber */
     teredo: TeredoSide | null;
+    /** o par em uso passa por uma VPN overlay (core/teredo.ts); ausente/null = nao */
+    overlay?: PairOverlay | null;
     /** qualityLimitationResolutionChanges: trocas de resolucao feitas pelo proprio WebRTC */
     resolutionChanges: number | null;
 }
@@ -135,6 +137,7 @@ function logCounters(report: RTCStatsReport, out: any, remote: any, pair: any): 
     const jitter = num(remote?.jitter);
     const local = str(report.get(pair?.localCandidateId)?.candidateType);
     const peer = str(report.get(pair?.remoteCandidateId)?.candidateType);
+    const overlay = pairOverlay(report, pair);
     return {
         mimeType: str(out.codecId ? report.get(out.codecId)?.mimeType : null),
         targetKbps: target != null ? target / 1000 : null,
@@ -154,6 +157,7 @@ function logCounters(report: RTCStatsReport, out: any, remote: any, pair: any): 
         jitterMs: jitter != null ? jitter * 1000 : null,
         route: local || peer ? `${local ?? "?"}/${peer ?? "?"}` : null,
         teredo: pairTeredo(report, pair),
+        ...(overlay ? { overlay } : {}),
         resolutionChanges: num(out.qualityLimitationResolutionChanges)
     };
 }

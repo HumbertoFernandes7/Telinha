@@ -11,7 +11,7 @@
 
 import { getPc, peerLabel, publish, rt } from "./context";
 import { log } from "./log";
-import { pairTeredo, selectedPair, type TeredoSide } from "./teredo";
+import { type PairOverlay, pairOverlay, pairTeredo, selectedPair, type TeredoSide } from "./teredo";
 
 /** Intervalo entre duas leituras do par em uso de cada conexao. */
 export const TEREDO_CHECK_MS = 10_000;
@@ -34,13 +34,22 @@ export async function checkTeredoRoutes(): Promise<void> {
         const pc = getPc(entry.peerId);
         if (!pc || pc.connectionState !== "connected") continue;
         let side: TeredoSide | null = null;
+        let overlay: PairOverlay | null = null;
         try {
             const report = await pc.getStats();
-            side = pairTeredo(report, selectedPair(report));
+            const pair = selectedPair(report);
+            side = pairTeredo(report, pair);
+            overlay = pairOverlay(report, pair);
         } catch {
             continue;
         }
-        if (rt.peers.get(entry.peerId) !== entry || (entry.teredo ?? null) === side) continue;
+        if (rt.peers.get(entry.peerId) !== entry) continue;
+        const overlayChanged = (entry.overlay?.name ?? null) !== (overlay?.name ?? null) || (entry.overlay?.side ?? null) !== (overlay?.side ?? null);
+        if (overlayChanged) {
+            entry.overlay = overlay ?? undefined;
+            changed = true;
+        }
+        if ((entry.teredo ?? null) === side) continue;
         entry.teredo = side ?? undefined;
         changed = true;
         const id = entry.hello?.discordUserId;

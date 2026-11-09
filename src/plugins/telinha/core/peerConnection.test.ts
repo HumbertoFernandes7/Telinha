@@ -375,7 +375,7 @@ describe("TelinhaPeerConnection", () => {
             assert.deepEqual(seen, [cand(V4), null, cand(TEREDO)], "o nosso Teredo vai para o Trystero, que o sinaliza");
             assert.deepEqual(pc.remoteCandidates.map(c => c?.candidate).sort(), [cand(V4), cand(TEREDO), cand(other)].sort());
             assert.deepEqual(logged(/Teredo/, mark).map(e => e.msg), [
-                "amigo (abc123): a conexão não abriu em 8 s sem o Teredo; os 3 candidatos pelo Teredo que tinham ficado de fora entraram"
+                "amigo (abc123): a conexão não abriu em 8 s sem os caminhos de reserva (Teredo/VPN); os 3 candidatos de reserva entraram"
             ]);
 
             // depois do resgate o filtro fica desligado nesta conexao; outro fim de coleta nao repete nada
@@ -384,6 +384,35 @@ describe("TelinhaPeerConnection", () => {
             pc.emitIceCandidate(null);
             clock.tick(TEREDO_RESCUE_MS);
             assert.equal(logged(/não abriu/, mark).length, 1);
+        });
+
+        test("a coleta nunca acaba (VPN sem rota): o resgate sai do primeiro candidato posto de lado", async t => {
+            const clock = useFakeClock(t);
+            const pc = newPc();
+            pc.connectionState = "connecting";
+            plan = { codec: null, bitrate: null, label: "amigo (abc123)" };
+            const seen: (string | null)[] = [];
+            pc.onicecandidate = ev => seen.push(ev.candidate?.candidate ?? null);
+            pc.emitIceCandidate({ candidate: cand(V4), sdpMid: "0", usernameFragment: "l1" });
+            pc.emitIceCandidate({ candidate: cand("26.1.2.3"), sdpMid: "0", usernameFragment: "l1" });
+            const mark = logMark();
+            clock.tick(TEREDO_RESCUE_MS - 1);
+            assert.deepEqual(seen, [cand(V4)]);
+            clock.tick(1);
+            await new Promise(resolve => setImmediate(resolve));
+            assert.deepEqual(seen, [cand(V4), cand("26.1.2.3")]);
+            assert.equal(logged(/não abriu/, mark).length, 1);
+
+            // conectada ate la: nada acontece
+            const ok = newPc();
+            ok.connectionState = "connecting";
+            ok.onicecandidate = () => { };
+            ok.emitIceCandidate({ candidate: cand(V4), sdpMid: "0", usernameFragment: "l1" });
+            ok.emitIceCandidate({ candidate: cand("26.1.2.3"), sdpMid: "0", usernameFragment: "l1" });
+            ok.connectionState = "connected";
+            const mark2 = logMark();
+            clock.tick(TEREDO_RESCUE_MS);
+            assert.deepEqual(logged(/não abriu/, mark2), []);
         });
 
         test("conectada a tempo, fechada ou sem nada de fora: o resgate nao faz nada", t => {
@@ -414,7 +443,7 @@ describe("TelinhaPeerConnection", () => {
             one.emitIceCandidate({ candidate: cand(TEREDO), sdpMid: "0", usernameFragment: "l1" });
             one.emitIceCandidate(null);
             clock.tick(TEREDO_RESCUE_MS);
-            assert.match(logged(/não abriu/, mark).map(e => e.msg).join(""), /; o candidato pelo Teredo que tinha ficado de fora entrou$/);
+            assert.match(logged(/não abriu/, mark).map(e => e.msg).join(""), /; o candidato de reserva entrou$/);
         });
 
         test("onicecandidate: o handler do Trystero so recebe o que o filtro deixa passar; o getter devolve o handler", t => {

@@ -136,7 +136,8 @@ describe("formatDiagnostics", () => {
                 { peerId: "p4", discordUserId: "4", username: "duda", streaming: false, admitted: true, identity: "invalid", blocked: "tooManyAttempts" },
                 { peerId: "p5", discordUserId: "5", username: "edu", streaming: false, admitted: true, teredo: "local" },
                 { peerId: "p6", discordUserId: "6", username: "fer", streaming: false, admitted: true, teredo: "remote" },
-                { peerId: "p7", discordUserId: "7", username: "gil", streaming: false, admitted: true, teredo: "both" }
+                { peerId: "p7", discordUserId: "7", username: "gil", streaming: false, admitted: true, teredo: "both" },
+                { peerId: "p8", discordUserId: "8", username: "hugo", streaming: false, admitted: true, overlay: { name: "Radmin", side: "both" } }
             ],
             local: {
                 source: { id: "screen:0:0", name: "Tela", kind: "screen" },
@@ -163,7 +164,7 @@ describe("formatDiagnostics", () => {
         });
         const text = formatDiagnostics();
         assert.match(text, /na sala: sim; canal: 500000000000000005; erro: erro visivel/);
-        assert.match(text, /peers: ana \(fora do canal\) \(identidade duplicada\) <conferindo>, bia <verificado> \[expulso\] \[transmitindo, acesso password\], caio <não verificado> \[recusado\] \[transmitindo\], duda <identidade falsa> \[errou a senha\], edu \[rota via Teredo: este PC\], fer \[rota via Teredo: o PC dele\], gil \[rota via Teredo: os dois PCs\]\n/);
+        assert.match(text, /peers: ana \(fora do canal\) \(identidade duplicada\) <conferindo>, bia <verificado> \[expulso\] \[transmitindo, acesso password\], caio <não verificado> \[recusado\] \[transmitindo\], duda <identidade falsa> \[errou a senha\], edu \[rota via Teredo: este PC\], fer \[rota via Teredo: o PC dele\], gil \[rota via Teredo: os dois PCs\], hugo \[rota via VPN Radmin: os dois PCs\]\n/);
         assert.match(text, /transmitindo: screen 720p60 com áudio, quem pode assistir: approval, espectadores: 2, pedidos pendentes: 0/);
         assert.match(text, /alertas de identidade: ana \(2 conexões\), diz ser você \(1 conexões\), duda \[prova falsa\] \(1 conexões\), bia \[não verificada x verificada\] \(1 conexões\), caio \(1 conexões\)/);
         assert.match(text, /bloqueados: zeca \(errou a senha\)/);

@@ -72,6 +72,35 @@ describe("checkTeredoRoutes", () => {
         assert.equal(lines().length, 1, "sem mudanca: nada");
     });
 
+    test("VPN overlay: o estado e o diagnostico marcam, sem linha de aviso no log e sem endereco", async () => {
+        const pc = addStreamer(room, "peerA");
+        pc.stats = pairStats("26.40.111.45", "26.7.7.7");
+        const lines = logMark();
+        await checkTeredoRoutes();
+        await flushPromises();
+        assert.deepEqual(rt.peers.get("peerA")?.overlay, { name: "Radmin", side: "both" });
+        assert.equal(rt.peers.get("peerA")?.teredo, undefined);
+        assert.deepEqual(getState().peers.find(p => p.peerId === "peerA")?.overlay, { name: "Radmin", side: "both" });
+        assert.match(formatDiagnostics(), /amigo.*\[rota via VPN Radmin: os dois PCs\]/);
+        assert.doesNotMatch(formatDiagnostics(), /26\.40|26\.7/);
+        assert.deepEqual(lines(), []);
+
+        pc.stats = pairStats("26.40.111.45", V4);
+        await checkTeredoRoutes();
+        assert.equal(rt.peers.get("peerA")?.overlay?.side, "local");
+        pc.stats = pairStats(V4, V4);
+        await checkTeredoRoutes();
+        await flushPromises();
+        assert.equal(rt.peers.get("peerA")?.overlay, undefined);
+        assert.equal(getState().peers.find(p => p.peerId === "peerA")?.overlay, undefined);
+
+        // Teredo e overlay juntos: os dois marcadores, sem quebrar
+        pc.stats = pairStats(TEREDO, "26.1.1.1");
+        await checkTeredoRoutes();
+        assert.equal(rt.peers.get("peerA")?.teredo, "local");
+        assert.deepEqual(rt.peers.get("peerA")?.overlay, { name: "Radmin", side: "remote" });
+    });
+
     test("so o PC do amigo no Teredo: o log pede para ele desligar", async () => {
         const pc = addStreamer(room, "peerB", { discordUserId: OTHER_ID, username: "beto" });
         pc.stats = pairStats(V4, TEREDO);
