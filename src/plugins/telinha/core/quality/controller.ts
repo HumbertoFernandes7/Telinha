@@ -394,6 +394,8 @@ interface ViewerState {
     log: SenderLog;
     /** motivo da proxima troca de degrau que o log anota (setGlobal / setViewerBw → noteLevels) */
     changeWhy: string | null;
+    /** performance.now() da ultima troca de degrau deste envio (noteLevels); null = nunca trocou */
+    levelChangedAt: number | null;
 }
 
 type Active = ViewerState & { metrics: WindowMetrics; };
@@ -484,6 +486,11 @@ export class QualityController {
         return v ? meet(this.global, v.bwLevel) : this.global;
     }
 
+    /** So diagnostico: o degrau do espectador e quando (performance.now()) ele trocou pela ultima vez (null = nunca trocou). */
+    levelInfo(peerId: PeerId): { level: QualityLevel; changedAt: number | null; } {
+        return { level: this.levelFor(peerId), changedAt: this.viewers.get(peerId)?.levelChangedAt ?? null };
+    }
+
     /**
      * Antes de negociar: ja entra no degrau atual (e desce todos se mais um encode nao cabe). `gpu`: o encoder dele deve
      * rodar na placa de video (ex.: H.264 com este PC codificando por hardware); undefined = como os espectadores ja
@@ -496,7 +503,7 @@ export class QualityController {
         this.viewers.set(peerId, {
             peerId, ready: false, readyAt: Infinity, ignoreUntil: now + WARMUP_MS, prev: null, metrics: null, fresh: false,
             bwLevel: this.top, bwHeld: false, bwHold: newHold(now, BW_HOLD), net: newNet(), applied: null, applying: false, resized: false, expectGpu: gpu,
-            log: new SenderLog(now), changeWhy: null
+            log: new SenderLog(now), changeWhy: null, levelChangedAt: null
         });
         if (this.deps.enabled()) {
             const before = this.global;
@@ -661,6 +668,7 @@ export class QualityController {
             guardStatsLog(() => {
                 const changed = v.log.trackLevel(this.levelFor(v.peerId), now, v.changeWhy);
                 v.changeWhy = null;
+                if (changed) v.levelChangedAt = now;
                 const line = changed && v.prev && v.log.line(v.prev, this.deps.label(v.peerId), this.levelsOf(v), true);
                 if (line) log.info(line);
             });

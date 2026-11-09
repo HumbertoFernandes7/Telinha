@@ -50,6 +50,7 @@ import { QualityController } from "./quality/controller";
 import { encodingFor, LEVELS, levelText, scaledSize } from "./quality/levels";
 import { isHardwareEncoder } from "./quality/stats";
 import { h264ProfileLevelId, type HwOnlyCodec, isH264High, isHwOnlyCodec, sameH264Profile } from "./sdp";
+import { formatDuration } from "./statsLog";
 import {
     dualGpuTipFor, noteHighFailed, noteHwOnlyFailed, noteStreamStarting, noteStuckEncoder, onStreamStopped, STUCK_NOTICE, STUCK_NOTICE_AV1, STUCK_NOTICE_H265, STUCK_NOTICE_HIGH, STUCK_NOTICE_PINNED, stuckNoticeUnknown
 } from "./stuckEncoder";
@@ -115,6 +116,8 @@ export const APPROVAL_TIMEOUT_MS = 60_000;
 
 interface ViewerSend {
     decision: CodecDecision;
+    /** performance.now() de quando este envio comecou (so diagnostico: o contexto da saida do AV1 da placa) */
+    startedAt?: number;
     /** codec que o encoder realmente usa (lido das estatisticas), para logar uma vez */
     reportedCodec?: string;
     /** parametros de envio ja aplicados uma vez (as mudancas seguintes sao logadas pela qualidade automatica) */
@@ -1167,7 +1170,7 @@ function sendTo(peerId: PeerId, carried?: CarriedCodec) {
     }
 
     const decision = carried?.decision ?? chooseCodec(entry.presence?.caps, settings.store.codec as CodecSetting, getLocalCaps());
-    const send: ViewerSend = { ...carried, decision, expectedKind: expectedKindFor(decision) };
+    const send: ViewerSend = { ...carried, decision, expectedKind: expectedKindFor(decision), startedAt: performance.now() };
     sends.set(peerId, send);
     local.viewers.add(peerId);
     syncQualityLock(local);
@@ -1699,7 +1702,13 @@ function checkHwOnly(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc:
     if (hwOnlyOfMime(enc.mimeType) === codec) {
         if ((enc.framesEncoded ?? 0) > 0) send.hwOnlySeen = true;
         // o Chromium trocou a placa pelo software (AV1: libaom): nao e travada, o botao da placa de video limpa (offHw)
-        if (isOffHardwareHwOnly(codec, enc)) leaveHwOnly(codec, peerId, local, send, `O ${name} para ${label} não está sendo codificado pela placa de vídeo (${enc.implementation || "sem aceleração"})`, true);
+        if (isOffHardwareHwOnly(codec, enc)) {
+            const impl = enc.implementation || "sem aceleração";
+            // so diagnostico: o contexto da troca (tamanho, nivel, tempo no ar); nada aqui muda a decisao
+            const context = codec === "av1" && !send.fellBack ? offHardwareContext(peerId, local, send, enc) : "";
+            leaveHwOnly(codec, peerId, local, send, `O ${name} para ${label} não está sendo codificado pela placa de vídeo (${impl})`, true,
+                context ? { text: context, saved: `${name} saiu da placa (${impl}) p/ ${label}: ${context}` } : undefined);
+        }
         return;
     }
     if ((enc.framesEncoded ?? 0) <= 0) return;
@@ -1730,6 +1739,55 @@ function checkHwOnly(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc:
     syncQualityLock(local);
 }
 
+/** O que se sabe do momento em que o AV1 saiu da placa (offHardwareContext); cada peca ausente (null/undefined) some. */
+export interface OffHardwareFacts {
+    /** tamanho codificado (EncoderReport) */
+    width?: number;
+    height?: number;
+    /** tamanho e tipo da captura */
+    sourceWidth?: number;
+    sourceHeight?: number;
+    sourceKind?: "screen" | "window";
+    /** degrau do envio (ex.: "1080p60") e ha quantos ms ele trocou (null = nunca trocou) */
+    level?: string;
+    levelChangedAgoMs?: number | null;
+    /** ha quantos ms o envio comecou */
+    upMs?: number | null;
+    framesEncoded?: number;
+    limitation?: string;
+}
+
+/** Texto curto do contexto da troca da placa para o libaom, ex.: "1917x1079 (ímpar), captura janela 1917x1079, nível 1080p60 (trocou há 3 s), 2 min 10 s no ar, 7800 quadros". */
+export function formatOffHardwareContext(f: OffHardwareFacts): string {
+    const parts: string[] = [];
+    if (f.width && f.height) parts.push(`${f.width}x${f.height}${f.width % 2 || f.height % 2 ? " (ímpar)" : ""}`);
+    if (f.sourceWidth && f.sourceHeight)
+        parts.push(`captura ${f.sourceKind === "window" ? "janela " : f.sourceKind === "screen" ? "tela " : ""}${f.sourceWidth}x${f.sourceHeight}`);
+    if (f.level) parts.push(`nível ${f.level}${f.levelChangedAgoMs != null ? ` (trocou há ${formatDuration(f.levelChangedAgoMs)})` : ""}`);
+    if (f.upMs != null) parts.push(`${formatDuration(f.upMs)} no ar`);
+    if (f.framesEncoded != null) parts.push(`${f.framesEncoded} quadros`);
+    if (f.limitation && f.limitation !== "none") parts.push(`limitação ${f.limitation}`);
+    return parts.join(", ");
+}
+
+/** Os fatos de agora deste envio (so leitura: nada aqui muda decisao nem estado) e o texto deles. */
+function offHardwareContext(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: EncoderReport): string {
+    try {
+        const now = performance.now();
+        const track = captureTrackOf(local)?.getSettings();
+        const info = qualityOf(local)?.levelInfo(peerId);
+        return formatOffHardwareContext({
+            width: enc.width, height: enc.height,
+            sourceWidth: track?.width, sourceHeight: track?.height, sourceKind: local.source.kind,
+            level: info?.level, levelChangedAgoMs: info?.changedAt != null ? now - info.changedAt : null,
+            upMs: send.startedAt != null ? now - send.startedAt : null,
+            framesEncoded: enc.framesEncoded, limitation: enc.limitation
+        });
+    } catch {
+        return "";
+    }
+}
+
 /**
  * O H.265/AV1 deste envio saiu da placa de video no ar (checkHwOnly, checkStall): culpa dele (noteHwOnlyFailed, nunca o
  * registro do H.264 nem a contagem de quedas dele) e so ESTE espectador passa para a reserva H.264 da decisao (ou, sem
@@ -1737,15 +1795,16 @@ function checkHwOnly(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc:
  * trocar e seguro. Uma vez por espectador (send.fellBack). `why`: a frase do problema, sem ponto. `offHardware`: o Chromium
  * trocou a placa pelo software (checkHwOnly; so o AV1 tem software): fica salvo "offHw" (o botao da placa limpa), nao "broken".
  */
-function leaveHwOnly(codec: HwOnlyCodec, peerId: PeerId, local: LocalCapture, send: ViewerSend, why: string, offHardware = false) {
+function leaveHwOnly(codec: HwOnlyCodec, peerId: PeerId, local: LocalCapture, send: ViewerSend, why: string, offHardware = false, context?: { text: string; saved: string; }) {
     if (send.fellBack) return;
     send.fellBack = true;
     const label = peerLabel(peerId);
     const name = HW_ONLY_LABEL[codec];
-    // so o AV1 tem software no Chromium: la o "offHw" (sai da placa, o botao limpa); o resto (travou, H.265) fica "broken"
-    noteHwOnlyFailed(codec, `${why.slice(0, 120)} (${label})`, offHardware && codec === "av1" ? "offHw" : "broken");
+    // so o AV1 tem software no Chromium: la o "offHw" (sai da placa, o botao limpa); o resto (travou, H.265) fica "broken".
+    // `context`: o que se sabe do momento da troca (offHardwareContext): vai no log e no detalhe salvo (que cabe ate 300 caracteres)
+    noteHwOnlyFailed(codec, context ? context.saved : `${why.slice(0, 120)} (${label})`, offHardware && codec === "av1" ? "offHw" : "broken");
     const next = h264ReserveOf(send.decision, `a reserva do ${name}, que saiu da placa de vídeo`) ?? chooseWithout(codec, peerId);
-    log.warn(`${why}: o ${name} fica desligado neste PC até o driver, o Chromium ou a placa mudarem (o H.264 não leva a culpa); trocando para ${next.codec.toUpperCase()} só para ${label}.`);
+    log.warn(`${why}${context ? ` — no momento: ${context.text}` : ""}: o ${name} fica desligado neste PC até o driver, o Chromium ou a placa mudarem (o H.264 não leva a culpa); trocando para ${next.codec.toUpperCase()} só para ${label}.`);
     void switchSendCodec(peerId, local, send, next);
 }
 

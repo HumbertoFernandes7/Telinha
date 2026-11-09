@@ -62,6 +62,19 @@ describe("CPU: o encoder nao mantem o fps da fonte", () => {
         assert.deepEqual(qualityLines(floor), ["Qualidade automática: já no mínimo (720p 30 fps) e ainda limitado por CPU — A codificado a 20 de 30 fps"]);
     });
 
+    test("levelInfo (diagnostico): sem troca changedAt e null; depois de uma descida, o degrau novo e quando trocou", async t => {
+        const clock = useFakeClock(t);
+        const h = qualityHarness(clock, { A: new EncoderSim(SHORT) });
+        await h.join("A");
+        await h.runUntil(6000);
+        assert.deepEqual(h.controller.levelInfo("A"), { level: "1080p60", changedAt: null });
+        await h.runUntil(8000);
+        const info = h.controller.levelInfo("A");
+        assert.equal(info.level, "720p60");
+        assert.equal(typeof info.changedAt, "number");
+        assert.equal(h.controller.levelInfo("nao-existe").changedAt, null);
+    });
+
     test("quadros a menos que nao sao CPU: rede saturada, encoder folgado, banda limitada, fonte lenta", async t => {
         const clock = useFakeClock(t);
         const cases = {
