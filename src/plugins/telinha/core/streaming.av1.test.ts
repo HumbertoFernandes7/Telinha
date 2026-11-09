@@ -22,7 +22,7 @@ import { connectViewer, createRig, destroyRig, enterCall, logMark, screenOptions
 
 import { getLocalCaps, setAv1HwFeature, setAv1ProbeOk, setH264HighProbeOk, setH264HwStuck } from "./codec";
 import { rt } from "./context";
-import { H264_STALL_MS, onCodecRequest, sendPlanFor, startStreaming, stopStreaming } from "./streaming";
+import { formatOffHardwareContext, H264_STALL_MS, onCodecRequest, sendPlanFor, startStreaming, stopStreaming } from "./streaming";
 import { av1ProbeRecord, highProbeRecord, STUCK_NOTICE_AV1, stuckEncoderDiagnostics, stuckRecord } from "./stuckEncoder";
 
 const NVENC_AV1 = "MediaFoundationVideoEncodeAccelerator (NVIDIA AV1 Encoder MFT)";
@@ -130,8 +130,13 @@ test("o libaom no lugar da placa (powerEfficientEncoder false): sai do AV1 na ho
     const since = logMark();
     await seconds(rig, 2);
     const lines = since();
-    assert.ok(lines.some(l => l.startsWith(`O AV1 para ${v.label} não está sendo codificado pela placa de vídeo (libaom): o AV1 fica desligado neste PC`)
-        && l.endsWith(`trocando para H264 só para ${v.label}.`)), lines.join("\n"));
+    assert.ok(lines.some(l => l.startsWith(`O AV1 para ${v.label} não está sendo codificado pela placa de vídeo (libaom) — no momento: 1920x1080, `)
+        && l.includes(": o AV1 fica desligado neste PC") && l.endsWith(`trocando para H264 só para ${v.label}.`)), lines.join("\n"));
+    const warn = lines.find(l => l.includes("— no momento:")) ?? "";
+    assert.ok(!warn.includes("(ímpar)") && !warn.includes("trocou há"), warn);
+    assert.match(warn, /nível 1080p60, \d+ s no ar, 600 quadros/);
+    const saved = av1ProbeRecord()?.detail ?? "";
+    assert.ok(saved.startsWith(`AV1 saiu da placa (libaom) p/ ${v.label}: 1920x1080, `) && saved.length <= 300 && !saved.includes("(ímpar)"), saved);
     await turns();
     assert.equal(plan(v.peerId).codec, "h264");
     assert.equal(v.sender.encoding.codec?.mimeType, "video/H264", "trocado com setParameters");
@@ -141,6 +146,28 @@ test("o libaom no lugar da placa (powerEfficientEncoder false): sai do AV1 na ho
     assert.equal(highProbeRecord()?.verdict, "ok");
     const next = await watcher("depoislibaom", BOTH);
     assert.equal(plan(next.peerId).codec, "h264", "o AV1 desligado: os proximos vao no High");
+});
+
+test("o libaom com tamanho impar: o aviso e o detalhe salvo trazem o tamanho (ímpar), o nivel e o tempo no ar, e o detalhe sobrevive a releitura", async () => {
+    const v = await watcher("impar", BOTH);
+    v.sender.stats = av1Stats({ powerEfficientEncoder: false, encoderImplementation: "libaom", frameWidth: 1917, frameHeight: 1079, framesEncoded: 7800 });
+    const since = logMark();
+    await seconds(rig, 2);
+    const warn = since().find(l => l.includes("— no momento:")) ?? "";
+    assert.match(warn, /— no momento: 1917x1079 \(ímpar\), .*nível 1080p60, \d+ s no ar, 7800 quadros: o AV1 fica desligado/, warn);
+    const saved = av1ProbeRecord()?.detail ?? "";
+    assert.ok(saved.includes("1917x1079 (ímpar)") && saved.includes("7800 quadros") && saved.length <= 300, saved);
+    assert.equal(av1ProbeRecord()?.verdict, "offHw");
+});
+
+test("formatOffHardwareContext: impar + troca de nivel recente; par sem troca nao diz ímpar nem trocou há; pecas ausentes somem", () => {
+    assert.equal(formatOffHardwareContext({
+        width: 1917, height: 1079, sourceWidth: 1917, sourceHeight: 1079, sourceKind: "window", level: "1080p60", levelChangedAgoMs: 3000, upMs: 130_000, framesEncoded: 7800
+    }), "1917x1079 (ímpar), captura janela 1917x1079, nível 1080p60 (trocou há 3 s), 2 min 10 s no ar, 7800 quadros");
+    const even = formatOffHardwareContext({ width: 1920, height: 1080, level: "1080p60", levelChangedAgoMs: null, limitation: "cpu" });
+    assert.equal(even, "1920x1080, nível 1080p60, limitação cpu");
+    assert.equal(formatOffHardwareContext({ width: 1920, height: 1080, limitation: "none" }), "1920x1080");
+    assert.equal(formatOffHardwareContext({}), "");
 });
 
 test("o libaom sem o powerEfficientEncoder (so o nome): tambem sai do AV1", async () => {

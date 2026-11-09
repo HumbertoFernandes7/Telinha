@@ -387,6 +387,11 @@ function writeRecord(record: StuckRecord | null) {
     save("stuckHwH264", record ? { at: record.at, env: { ...record.env }, source: record.source ?? "stream" } : null, "que a placa de vídeo travou");
 }
 
+/** Detalhe salvo de um envio H.265/AV1 que falhou (noteHwOnlyFailed): cabe o contexto da troca (tamanho, nivel, tempo no ar). */
+const HW_ONLY_DETAIL_MAX = 300;
+/** Ao ler o registro salvo: um pouco acima do que se grava, para nunca cortar um detalhe valido */
+const DETAIL_LOAD_MAX = 320;
+
 const VERDICTS: readonly StoredVerdict[] = ["ok", "broken", "unknown"];
 
 function readProbe(key: "hwH264Probe" | "hwH264HighProbe" | "hwH265Probe" | "hwAv1Probe") {
@@ -394,7 +399,7 @@ function readProbe(key: "hwH264Probe" | "hwH264HighProbe" | "hwH265Probe" | "hwA
     // "offHw" so existe no H.265/AV1 (noteHwOnlyFailed); nas chaves do H.264 um valor assim e lixo
     const verdict = (key === "hwH265Probe" || key === "hwAv1Probe" ? [...VERDICTS, "offHw" as const] : VERDICTS).find(v => v === saved?.raw.verdict);
     if (!saved || !verdict) return null;
-    return { saved, record: { at: saved.at, env: saved.env, verdict, detail: text(saved.raw.detail, 200) ?? "" } };
+    return { saved, record: { at: saved.at, env: saved.env, verdict, detail: text(saved.raw.detail, DETAIL_LOAD_MAX) ?? "" } };
 }
 
 /** O resultado da sonda WebCodecs salvo neste PC (de qualquer ambiente). null = nenhum. */
@@ -951,8 +956,8 @@ export function noteHwOnlyFailed(codec: HwOnlyCodec, detail: string, verdict: "b
     const spec = HW_ONLY[codec];
     const tested = spec.probeCodec(spec.fmtp(getLocalCaps()));
     spec.setOk(false);
-    hwOnlyNotes[codec] = `${verdict === "offHw" ? "saiu da placa" : "travou"} num envio (${detail.slice(0, 200)})`;
-    void environment().then(env => saveHwOnly(codec, { at, env, verdict, detail: detail.slice(0, 200), codec: tested, source: "stream" }));
+    hwOnlyNotes[codec] = `${verdict === "offHw" ? "saiu da placa" : "travou"} num envio (${detail.slice(0, HW_ONLY_DETAIL_MAX)})`;
+    void environment().then(env => saveHwOnly(codec, { at, env, verdict, detail: detail.slice(0, HW_ONLY_DETAIL_MAX), codec: tested, source: "stream" }));
 }
 
 /** noteHwOnlyFailed do H.265. */

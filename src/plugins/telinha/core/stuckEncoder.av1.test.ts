@@ -368,6 +368,18 @@ describe("falhas no ar e o botao", () => {
         }
     });
 
+    test("offHw com o contexto da troca (ate 300 caracteres): salvo inteiro e relido sem corte; acima disso corta em 300", async () => {
+        const context = "AV1 saiu da placa (libaom) p/ X: 1917x1079 (ímpar), captura janela 1917x1079, nível 1080p60 (trocou há 3 s), 2 min 10 s no ar, 7800 quadros, limitação cpu";
+        pluginSettings.set("hwAv1Probe", null);
+        noteHwOnlyFailed("av1", context, "offHw");
+        await eventually(() => av1ProbeRecord()?.verdict === "offHw");
+        assert.equal(av1ProbeRecord()?.detail, context);
+        const long = "y".repeat(299) + "zw";
+        noteHwOnlyFailed("av1", long, "offHw");
+        await eventually(() => av1ProbeRecord()?.detail === long.slice(0, 300));
+        pluginSettings.set("hwAv1Probe", null);
+    });
+
     test("travou de verdade (broken) continua: o botao nao esquece; um offHw salvo numa chave do H.264 e lixo", async () => {
         noteHwOnlyFailed("av1", "travou de novo");
         await eventually(() => av1ProbeRecord()?.verdict === "broken");
