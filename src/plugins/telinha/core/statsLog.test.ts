@@ -399,3 +399,52 @@ test("STATS_LINE_RE reconhece as quatro linhas deste modulo e nada mais", () => 
     for (const l of ["Envio p/ a: x", "Resumo do envio p/ a: x", "Recepção de a: x", "Resumo da recepção de a: x"]) assert.match(l, STATS_LINE_RE);
     for (const l of ["Envio para a: 1080p 60 fps", "Assistir a: pedido enviado"]) assert.doesNotMatch(l, STATS_LINE_RE);
 });
+
+describe("rota por VPN overlay", () => {
+    const prev = sender({ at: 0, framesEncoded: 0, bytesSent: 0 });
+    const win = (patch: Partial<SenderLogCounters>) => senderWindow(prev, sender({ at: 10_000, framesEncoded: 300, bytesSent: 1_000_000, log: senderLog(patch) }))!;
+
+    test("envio: a rota ganha 'via VPN Radmin (...)' quando ha, nada quando nao; com Teredo tambem, sem quebrar; nunca um IP", () => {
+        const none = formatSenderLine("x", win({}), AUTO_720P30, "host/host");
+        assert.match(none, / · rota host\/host$/);
+        const radmin = formatSenderLine("x", win({ overlay: { name: "Radmin", side: "both" } }), AUTO_720P30, "host/host");
+        assert.match(radmin, / · rota host\/host via VPN Radmin \(os dois PCs\)$/);
+        const alone = formatSenderLine("x", win({ overlay: { name: "Hamachi", side: "local" } }), AUTO_720P30, null);
+        assert.match(alone, / · rota via VPN Hamachi \(este PC\)$/);
+        const both = formatSenderLine("x", win({ teredo: "local", overlay: { name: "Tailscale", side: "remote" } }), AUTO_720P30, "host/host");
+        assert.match(both, / · rota host\/host via Teredo \(este PC\) via VPN Tailscale \(o outro PC\)$/);
+        for (const l of [none, radmin, alone, both]) {
+            assertClean(l);
+            assert.doesNotMatch(l, /\d+\.\d+\.\d+\.\d+|fdfd|2620/);
+        }
+    });
+
+    test("resumo do envio: a VPN acompanha a rota (o par mudou, a VPN antiga sai)", () => {
+        const log = new SenderLog(0);
+        const at = (i: number, patch: Partial<SenderLogCounters>) => sender({ at: i * 2000, framesEncoded: i * 60, bytesSent: i * 400_000, log: senderLog(patch) });
+        log.add(null, at(0, {}));
+        log.add(at(0, {}), at(1, { route: "host/host", overlay: { name: "Radmin", side: "both" } }));
+        log.add(at(1, {}), at(2, { route: "srflx/srflx", overlay: null }));
+        const s = log.summary("A", 4000)!;
+        assert.match(s, / · rota srflx\/srflx$/);
+        assert.doesNotMatch(s, /VPN/);
+    });
+
+    test("resumo do envio, linha e resumo da recepcao carregam a VPN", () => {
+        const log = new SenderLog(0);
+        const at = (i: number, overlay: SenderLogCounters["overlay"]) => sender({ at: i * 2000, framesEncoded: i * 60, bytesSent: i * 400_000, log: senderLog({ overlay }) });
+        log.add(null, at(0, null));
+        log.add(at(0, null), at(1, { name: "Radmin", side: "both" }));
+        assert.match(log.summary("A", 2000)!, / · rota host\/srflx via VPN Radmin \(os dois PCs\)$/);
+
+        const rl = new ReceiverLog(0);
+        const w = (i: number) => ({ ...watching(i), overlay: { name: "Radmin" as const, side: "remote" as const } });
+        let line: string | null = null;
+        for (let i = 0; i <= 5; i++) line = rl.add(w(i), "A") ?? line;
+        assert.match(line!, / · rota via VPN Radmin \(o outro PC\)$/);
+        const summary = rl.summary("A", 10_000)!;
+        assert.match(summary, / · rota via VPN Radmin \(o outro PC\)$/);
+        assert.doesNotMatch(line! + summary, /\d+\.\d+\.\d+\.\d+/);
+        assert.doesNotMatch(new ReceiverLog(0).add(watching(0), "A") ?? "", /VPN/);
+    });
+});

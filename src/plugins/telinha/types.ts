@@ -64,6 +64,8 @@ export interface RemotePeer {
      * dela, "both" = os dois. Ausente = nao (core/teredoWatch.ts).
      */
     teredo?: "local" | "remote" | "both";
+    /** Idem para uma VPN overlay (Radmin, Hamachi, Tailscale): qual e o lado. Ausente = nao (core/teredoWatch.ts). */
+    overlay?: { name: "Radmin" | "Hamachi" | "Tailscale"; side: "local" | "remote" | "both"; };
 }
 
 /** Diagnostico compartilhado (core/diagShare.ts). Ausente em TelinhaState = nada acontecendo. */

@@ -16,7 +16,7 @@ import type { QualityLevel } from "@plugins/telinha/types";
 import { errorText, logThrottled } from "./log";
 import { LEVELS } from "./quality/levels";
 import { delta, diffSamples, linkWindow, NO_LINK_COUNTERS, ratio, type SenderSample, type WindowMetrics } from "./quality/stats";
-import { TEREDO_TEXT, type TeredoSide } from "./teredo";
+import { overlayText, type PairOverlay, TEREDO_TEXT, type TeredoSide } from "./teredo";
 
 /** Intervalo das linhas periodicas (por envio e por transmissao assistida). */
 export const STATS_LOG_MS = 10_000;
@@ -121,9 +121,9 @@ function shares<K>(map: Map<K, number>, label: (key: K) => string): string | nul
 }
 
 /** "rota srflx/srflx via Teredo (este PC)": o tipo dos candidatos (se `route`) e o marcador do Teredo (se `teredo`). */
-function routeText(route: string | null, teredo: TeredoSide | null | undefined): string | null {
-    if (!route && !teredo) return null;
-    return `rota ${join([route, !!teredo && TEREDO_TEXT[teredo]])}`;
+function routeText(route: string | null, teredo: TeredoSide | null | undefined, overlay?: PairOverlay | null): string | null {
+    if (!route && !teredo && !overlay) return null;
+    return `rota ${join([route, !!teredo && TEREDO_TEXT[teredo], !!overlay && overlayText(overlay)])}`;
 }
 
 // #endregion
@@ -166,6 +166,8 @@ export interface SenderWindow {
     route: string | null;
     /** o par em uso passa pelo Teredo (core/teredo.ts) */
     teredo: TeredoSide | null;
+    /** o par em uso passa por uma VPN overlay (core/teredo.ts) */
+    overlay: PairOverlay | null;
     /** trocas de resolucao feitas pelo proprio WebRTC na janela (qualityLimitationResolutionChanges) */
     resChanges: number | null;
 }
@@ -197,6 +199,7 @@ export function senderWindow(prev: SenderSample, cur: SenderSample): SenderWindo
         pacerMs: link.pacerMs,
         route: b.route,
         teredo: b.teredo ?? null,
+        overlay: b.overlay ?? null,
         resChanges: delta(a.resolutionChanges ?? null, b.resolutionChanges ?? null)
     };
 }
@@ -223,7 +226,7 @@ export function formatSenderLine(label: string, w: SenderWindow, levels: SenderL
         join([`lim banda ${pct(m.bandwidthFraction)} cpu ${pct(m.cpuFraction)}`, opt(w.resChanges, n => `res WebRTC ${n}`)]),
         join([opt(m.encodeMsPerFrame, v => `${dec(v)} ms/q`), opt(w.qp, v => `qp ${int(v)}`)]),
         `nível ${levelsText(levels)}` + (change ? `, antes ${change}` : ""),
-        routeText(route, w.teredo)
+        routeText(route, w.teredo, w.overlay)
     ], " · ");
 }
 
@@ -251,6 +254,7 @@ export class SenderLog {
     /** trocas de resolucao do proprio WebRTC (null = o Chromium nao expos) */
     private resChanges: number | null = null;
     private teredo: TeredoSide | null = null;
+    private overlay: PairOverlay | null = null;
     private windows = 0;
     private seconds = 0;
     private frames = 0;
@@ -280,6 +284,8 @@ export class SenderLog {
         addTime(this.fpsMs, Math.round(w.m.encodedFps / 5) * 5, w.m.dt * 1000);
         this.resChanges = add(this.resChanges, w.resChanges);
         this.teredo = w.teredo ?? this.teredo;
+        // a VPN acompanha a rota: depois de o par mudar, a VPN antiga nao vale
+        this.overlay = w.route ? (w.overlay ?? null) : (w.overlay ?? this.overlay);
         pushCapped(this.estKbps, w.m.availableKbps);
         pushCapped(this.sentKbps, w.m.sentKbps);
         this.lost = add(this.lost, w.lost);
@@ -357,7 +363,7 @@ export class SenderLog {
             join([opt(median(this.estKbps), k => `est mediana ${int(k)}`), `enviado mediana ${int(median(this.sentKbps)!)}`, "kbps"]),
             join([opt(ratio(this.lost, this.media), r => `perda média ${dec(r * 100)}%`), opt(ratio(this.rttSum, this.rttCount), v => `rtt médio ${int(v)} ms`)]),
             opt(this.keyframes, k => `kf ${k}`),
-            routeText(this.route, this.teredo)
+            routeText(this.route, this.teredo, this.overlay)
         ], " · ");
     }
 }
@@ -440,6 +446,8 @@ export interface ReceiverSample {
     cushionMs?: number | null;
     /** o par em uso passa pelo Teredo (core/teredo.ts) */
     teredo?: TeredoSide | null;
+    /** o par em uso passa por uma VPN overlay (core/teredo.ts) */
+    overlay?: PairOverlay | null;
 }
 
 /** Uma janela de recepcao entre duas leituras. */
@@ -531,7 +539,7 @@ export function formatReceiverLine(label: string, cur: ReceiverSample, w: Receiv
         join([opt(w.nacks, n => `nack ${n}`), opt(w.plis, n => `pli ${n}`)]),
         `${int(w.kbps)} kbps`,
         opt(w.concealedPct, p => `áudio ocultado ${dec(p)}%`),
-        routeText(null, cur.teredo)
+        routeText(null, cur.teredo, cur.overlay)
     ], " · ");
 }
 
@@ -553,6 +561,7 @@ export class ReceiverLog {
     private targetSum: number | null = null;
     private targetCount = 0;
     private teredo: TeredoSide | null = null;
+    private overlay: PairOverlay | null = null;
     private concealed: number | null = null;
     private audioSamples: number | null = null;
     private readonly kbps: number[] = [];
@@ -581,6 +590,7 @@ export class ReceiverLog {
             this.targetSum = add(this.targetSum, w.bufferTargetMs);
             if (w.bufferTargetMs != null) this.targetCount++;
             this.teredo = cur.teredo ?? this.teredo;
+            this.overlay = cur.overlay ?? this.overlay;
             this.concealed = add(this.concealed, w.concealed);
             this.audioSamples = add(this.audioSamples, w.audioSamples);
             pushCapped(this.kbps, w.kbps);
@@ -612,7 +622,7 @@ export class ReceiverLog {
                 opt(last.cushionMs, v => `colchão ${int(v)} ms`)
             ]),
             opt(ratio(this.concealed, this.audioSamples), r => `áudio ocultado ${dec(r * 100)}%`),
-            routeText(null, this.teredo)
+            routeText(null, this.teredo, this.overlay)
         ], " · ");
     }
 }
