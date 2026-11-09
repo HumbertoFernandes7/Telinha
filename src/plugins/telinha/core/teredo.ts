@@ -81,6 +81,70 @@ export function addressKind(address: unknown): AddressKind {
     return first >= 0x2000 && first <= 0x3fff ? "ipv6" : "ipv6-local";
 }
 
+/** VPNs de sobreposicao (overlay) que o Telinha reconhece pelo endereco do candidato. */
+export type OverlayName = "Radmin" | "Hamachi" | "Tailscale";
+
+/** Um par em uso que passa por uma VPN overlay: qual e o lado (o mesmo formato do Teredo). */
+export interface PairOverlay {
+    name: OverlayName;
+    side: TeredoSide;
+}
+
+/** Os 8 grupos (numeros) de um IPv6 ja validado por addressKind; null se nao for IPv6 valido. */
+function ipv6Groups(a: string): number[] | null {
+    if (!a.includes(":")) return null;
+    const halves = a.split("::");
+    const part = (h: string) => (h ? h.split(":") : []);
+    const toGroups = (items: string[]): number[] | null => {
+        const out: number[] = [];
+        for (let i = 0; i < items.length; i++) {
+            if (IPV4_RE.test(items[i])) {
+                if (i !== items.length - 1) return null;
+                const o = items[i].split(".").map(Number);
+                out.push(o[0] * 256 + o[1], o[2] * 256 + o[3]);
+            } else out.push(parseInt(items[i], 16));
+        }
+        return out;
+    };
+    const head = toGroups(part(halves[0]));
+    const tail = halves.length === 2 ? toGroups(part(halves[1])) : [];
+    if (!head || !tail) return null;
+    if (halves.length === 1) return head.length === 8 ? head : null;
+    const fill = 8 - head.length - tail.length;
+    return fill < 0 ? null : [...head, ...new Array<number>(fill).fill(0), ...tail];
+}
+
+/**
+ * Nome da VPN overlay a que o endereco pertence, ou null. Radmin: 26.0.0.0/8 e fdfd::/96; Hamachi: 25.0.0.0/8 e
+ * 2620:9b::/96; Tailscale: so o IPv6 fd7a:115c:a1e0::/48 (o 100.64/10 e o CGNAT de qualquer operadora, nao conta).
+ * Nome mDNS, vazio ou invalido: null. Nunca devolve o endereco.
+ */
+export function overlayName(address: unknown): OverlayName | null {
+    if (typeof address !== "string") return null;
+    const a = address.trim().replace(/^\[|\]$/g, "").replace(/%.*$/, "").toLowerCase();
+    const kind = addressKind(a);
+    if (kind === "ipv4") {
+        const first = Number(a.split(".")[0]);
+        return first === 26 ? "Radmin" : first === 25 ? "Hamachi" : null;
+    }
+    if (kind === "unknown") return null;
+    const g = ipv6Groups(a);
+    if (!g) return null;
+    const low6 = g.slice(0, 6);
+    if (low6[0] === 0xfdfd && low6.slice(1).every(x => x === 0)) return "Radmin";
+    if (low6[0] === 0x2620 && low6[1] === 0x9b && low6.slice(2).every(x => x === 0)) return "Hamachi";
+    if (g[0] === 0xfd7a && g[1] === 0x115c && g[2] === 0xa1e0) return "Tailscale";
+    return null;
+}
+
+/** Texto do marcador da VPN overlay nas linhas do log e no diagnostico (sem endereco). */
+export const OVERLAY_SIDE_TEXT: Record<TeredoSide, string> = {
+    local: "este PC",
+    remote: "o outro PC",
+    both: "os dois PCs"
+};
+export const overlayText = (o: PairOverlay): string => `via VPN ${o.name} (${OVERLAY_SIDE_TEXT[o.side]})`;
+
 /** O lado do par no Teredo; null = nenhum (ou desconhecido). */
 export function teredoSide(local: AddressKind, remote: AddressKind): TeredoSide | null {
     if (local === "teredo") return remote === "teredo" ? "both" : "local";
@@ -109,6 +173,20 @@ export function selectedPair(report: RTCStatsReport): any {
 export function pairTeredo(report: RTCStatsReport, pair: any): TeredoSide | null {
     if (!pair) return null;
     return teredoSide(addressKind(statsAddress(report.get(pair.localCandidateId))), addressKind(statsAddress(report.get(pair.remoteCandidateId))));
+}
+
+/**
+ * O par `pair` passa por uma VPN overlay? A VPN do par e a do lado local, se houver, senao a do remoto; o lado diz qual
+ * PC esta nela ("both" so quando os dois estao na mesma VPN). null = nao, ou nao da para saber.
+ */
+export function pairOverlay(report: RTCStatsReport, pair: any): PairOverlay | null {
+    if (!pair) return null;
+    const local = overlayName(statsAddress(report.get(pair.localCandidateId)));
+    const remote = overlayName(statsAddress(report.get(pair.remoteCandidateId)));
+    if (local && remote) return local === remote ? { name: local, side: "both" } : { name: local, side: "local" };
+    if (local) return { name: local, side: "local" };
+    if (remote) return { name: remote, side: "remote" };
+    return null;
 }
 
 // #region filtro de candidatos

@@ -18,7 +18,7 @@ import { FakeStatsReport } from "@test/fakes/webrtc";
 import { logged, logMark } from "@test/helpers/wpa-session";
 
 import {
-    addressKind, pairTeredo, parseCandidate, selectedPair, TEREDO_HOLD_MS, TEREDO_TEXT, TeredoFilter, teredoSide
+    addressKind, overlayName, overlayText, pairOverlay, pairTeredo, parseCandidate, selectedPair, TEREDO_HOLD_MS, TEREDO_TEXT, TeredoFilter, teredoSide
 } from "./teredo";
 
 /** Enderecos de documentacao (RFC 5737 / 3849) e um Teredo como o Windows atribui (2001:0:servidor:flags:porta:cliente). */
@@ -53,6 +53,52 @@ describe("addressKind", () => {
     test("mDNS (host oculto pelo Chromium), vazio, invalido ou nao texto: desconhecido, nunca Teredo", () => {
         for (const a of [MDNS, "", "localhost", "1.2.3", "1.2.3.256", "2001:0:zzzz::1", "1::2::3", "1:2:3:4:5:6:7", "1:2:3:4:5:6:7:8:9", "1:2:3:4:5:6:7::8", null, undefined, 42])
             assert.equal(addressKind(a), "unknown", String(a));
+    });
+});
+
+describe("overlayName: VPNs overlay pelo endereco", () => {
+    test("Radmin, Hamachi e Tailscale (IPv4 e IPv6, sem diferenciar maiusculas, com colchetes e zone id)", () => {
+        const yes: [string, string][] = [
+            ["26.40.111.45", "Radmin"], ["26.0.0.1", "Radmin"], ["fdfd::1a28:6f2d", "Radmin"], ["FDFD::1A28:6F2D", "Radmin"],
+            ["[fdfd::1a28:6f2d]", "Radmin"], ["fdfd::1a28:6f2d%5", "Radmin"], ["fdfd:0:0:0:0:0:1a28:6f2d", "Radmin"],
+            ["25.1.2.3", "Hamachi"], ["2620:9b::1900:1", "Hamachi"], ["2620:009b:0000:0000:0000:0000:1900:0001", "Hamachi"],
+            ["fd7a:115c:a1e0::1", "Tailscale"], ["fd7a:115c:a1e0:ab12::5", "Tailscale"]
+        ];
+        for (const [a, name] of yes) assert.equal(overlayName(a), name, a);
+    });
+
+    test("todo o resto e null (outras ULA, CGNAT, Teredo, mDNS, faixas privadas, lixo)", () => {
+        for (const a of ["27.0.0.1", "126.1.1.1", "10.26.0.1", "fd00::1", "fdfd:1::1", "fdfe::1", "100.64.0.1", "2001:0:abcd::1", "abc.local", "", "garbage", "192.168.0.26", "2620:9b:1::1", "fd7a:115c:a1e1::1", "25.1.2"])
+            assert.equal(overlayName(a), null, a);
+        for (const a of [undefined, null, 26, {}]) assert.equal(overlayName(a), null);
+    });
+});
+
+describe("pairOverlay: o par em uso numa VPN overlay", () => {
+    const report = (local: string, remote: string) => new FakeStatsReport([
+        { id: "T", type: "transport", selectedCandidatePairId: "CP" },
+        { id: "CP", type: "candidate-pair", nominated: true, state: "succeeded", localCandidateId: "L", remoteCandidateId: "R" },
+        { id: "L", type: "local-candidate", candidateType: "host", address: local },
+        { id: "R", type: "remote-candidate", candidateType: "host", ip: remote }
+    ]) as unknown as RTCStatsReport;
+    const ov = (r: RTCStatsReport) => pairOverlay(r, selectedPair(r));
+
+    test("os dois lados, so o nosso, so o do outro, nenhum; o Teredo continua como era", () => {
+        assert.deepEqual(ov(report("26.1.1.1", "26.2.2.2")), { name: "Radmin", side: "both" });
+        assert.deepEqual(ov(report("26.1.1.1", V4)), { name: "Radmin", side: "local" });
+        assert.deepEqual(ov(report(V4, "fdfd::1a28:6f2d")), { name: "Radmin", side: "remote" });
+        assert.equal(ov(report(V4, V6)), null);
+        assert.equal(ov(report(MDNS, V4)), null);
+        assert.equal(pairOverlay(report(V4, V4), null), null);
+        const t = report(TEREDO, "26.1.1.1");
+        assert.equal(pairTeredo(t, selectedPair(t)), "local");
+        assert.deepEqual(ov(t), { name: "Radmin", side: "remote" });
+    });
+
+    test("o texto nunca tem endereco", () => {
+        assert.equal(overlayText({ name: "Radmin", side: "both" }), "via VPN Radmin (os dois PCs)");
+        assert.equal(overlayText({ name: "Hamachi", side: "local" }), "via VPN Hamachi (este PC)");
+        assert.equal(overlayText({ name: "Tailscale", side: "remote" }), "via VPN Tailscale (o outro PC)");
     });
 });
 
