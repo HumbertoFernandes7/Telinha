@@ -26,6 +26,10 @@
 // e nenhum IPv6 global; ULA fc00::/7 e link-local nao contam), um IPv6 global do outro lado so e alcancado pelo nosso
 // tunel, entao conta como Teredo tambem. Sem ela, o PC com Teredo continuaria formando o par (Teredo deste PC x IPv6 do
 // amigo) e o filtro nao adiantaria.
+//
+// As VPNs overlay (Radmin, Hamachi, Tailscale; overlayName) recebem o mesmo tratamento do Teredo: baixa prioridade, fora
+// enquanto houver outro caminho, de volta no resgate. Um par host x host dentro da VPN vence o srflx na prioridade do ICE
+// e pode ser retransmitido por servidor da VPN ou ser lento, mesmo com os dois PCs na mesma rede ou com caminho direto.
 
 import { logThrottled } from "./log";
 
@@ -195,6 +199,8 @@ export function pairOverlay(report: RTCStatsReport, pair: any): PairOverlay | nu
 export interface ParsedCandidate {
     component: string;
     kind: AddressKind;
+    /** VPN overlay do endereco (Radmin/Hamachi/Tailscale), se for de uma */
+    overlay: OverlayName | null;
 }
 
 /** "candidate:<fundacao> <componente> <transporte> <prioridade> <endereco> <porta> typ <tipo> ..." */
@@ -202,15 +208,17 @@ export function parseCandidate(line: unknown): ParsedCandidate | null {
     if (typeof line !== "string") return null;
     const parts = line.trim().replace(/^a=/, "").split(/\s+/);
     if (!/^candidate:/.test(parts[0]) || parts.length < 8) return null;
-    return { component: parts[1], kind: addressKind(parts[4]) };
+    return { component: parts[1], kind: addressKind(parts[4]), overlay: overlayName(parts[4]) };
 }
 
 type Side = "local" | "remote";
-type Route = "teredo" | "direct" | "unknown";
+type Route = "low" | "direct" | "unknown";
+/** Por que um candidato e de baixa prioridade: o Teredo ou o nome da VPN overlay (so para o log). */
+type LowTag = "Teredo" | OverlayName;
 
 interface Held<T> {
     /** os segurados e o texto de cada um (para o resgate) */
-    items: { item: T; candidate: string; }[];
+    items: { item: T; candidate: string; tag: LowTag; }[];
     /** para onde os segurados vao quando passam */
     pass: (item: T) => void;
     timer: ReturnType<typeof setTimeout>;
@@ -281,15 +289,17 @@ export class TeredoFilter {
         }
         const parsed = parseCandidate(c.candidate);
         if (!parsed) return emit(event);
-        this.learn(parsed.kind);
-        this.route("local", this.local, keyOf(c.usernameFragment, c.sdpMid ?? c.sdpMLineIndex, parsed.component), this.routeOf("local", parsed.kind), event, emit, c.candidate);
+        this.learn(parsed.kind, parsed.overlay);
+        const route = this.routeOf("local", parsed.kind, parsed.overlay);
+        this.route("local", this.local, keyOf(c.usernameFragment, c.sdpMid ?? c.sdpMLineIndex, parsed.component), route, this.tagOf(parsed.overlay), event, emit, c.candidate);
     }
 
     /** Candidato do outro lado (addIceCandidate): `add` agora, depois ou nunca. */
     remoteCandidate(init: RTCIceCandidateInit, add: (init: RTCIceCandidateInit) => void) {
         const parsed = parseCandidate(init.candidate);
         if (!parsed) return add(init);
-        this.route("remote", this.remote, keyOf(init.usernameFragment, init.sdpMid ?? init.sdpMLineIndex, parsed.component), this.routeOf("remote", parsed.kind), init, add, init.candidate!);
+        const route = this.routeOf("remote", parsed.kind, parsed.overlay);
+        this.route("remote", this.remote, keyOf(init.usernameFragment, init.sdpMid ?? init.sdpMLineIndex, parsed.component), route, this.tagOf(parsed.overlay), init, add, init.candidate!);
     }
 
     /**
@@ -306,40 +316,48 @@ export class TeredoFilter {
         const sessionUfrag = ufragIn(lines.slice(0, Math.max(0, lines.findIndex(l => l.startsWith("m=")))));
         // m-sections: [inicio, fim)
         const starts = lines.map((l, i) => (l.startsWith("m=") ? i : -1)).filter(i => i >= 0);
-        const drop = new Map<number, RTCIceCandidateInit>();
+        const drop = new Map<number, { init: RTCIceCandidateInit; tag: LowTag; }>();
         starts.forEach((start, n) => {
             const section = lines.slice(start, starts[n + 1] ?? lines.length);
             const ufrag = ufragIn(section) ?? sessionUfrag;
             const mid = section.find(l => l.startsWith("a=mid:"))?.slice(6).trim();
-            const teredo: { at: number; key: string; init: RTCIceCandidateInit; }[] = [];
+            const low: { at: number; key: string; init: RTCIceCandidateInit; tag: LowTag; }[] = [];
             section.forEach((line, i) => {
                 const parsed = parseCandidate(line);
                 if (!parsed) return;
-                if (side === "local") this.learn(parsed.kind);
+                if (side === "local") this.learn(parsed.kind, parsed.overlay);
                 const key = keyOf(ufrag, mid, parsed.component);
-                const route = this.routeOf(side, parsed.kind);
+                const route = this.routeOf(side, parsed.kind, parsed.overlay);
                 if (route === "direct") state.direct.add(key);
-                else if (route === "teredo") teredo.push({ at: start + i, key, init: { candidate: line.slice(2), sdpMid: mid, usernameFragment: ufrag } });
+                else if (route === "low") low.push({ at: start + i, key, init: { candidate: line.slice(2), sdpMid: mid, usernameFragment: ufrag }, tag: this.tagOf(parsed.overlay) });
             });
-            for (const t of teredo) if (state.direct.has(t.key)) drop.set(t.at, t.init);
+            for (const t of low) if (state.direct.has(t.key)) drop.set(t.at, { init: t.init, tag: t.tag });
         });
         if (!drop.size) return sdp;
-        if (rescue) for (const init of drop.values()) this.keep(side, init.candidate!, init, rescue);
-        this.noteDropped(side, drop.size);
+        if (rescue) for (const d of drop.values()) this.keep(side, d.init.candidate!, d.init, rescue);
+        this.noteTags(side, [...drop.values()].map(d => d.tag));
         return lines.filter((_, i) => !drop.has(i)).join(eol);
     }
 
-    private learn(kind: AddressKind) {
+    private learn(kind: AddressKind, overlay: OverlayName | null) {
+        // o IPv6 de uma VPN overlay (ex.: 2620:9b:: do Hamachi, "global" para o addressKind) nao e o IPv6 real deste PC
+        if (overlay) return;
         if (kind === "teredo") this.ipv6.teredo = true;
         else if (kind === "ipv6") this.ipv6.global = true;
     }
 
-    /** O caminho de um candidato: pelo Teredo, direto (IPv4 ou IPv6) ou desconhecido (mDNS). */
-    private routeOf(side: Side, kind: AddressKind): Route {
-        if (kind === "teredo") return "teredo";
+    /** O caminho de um candidato: baixa prioridade (VPN overlay ou Teredo), direto (IPv4 ou IPv6) ou desconhecido (mDNS). */
+    private routeOf(side: Side, kind: AddressKind, overlay: OverlayName | null): Route {
+        if (overlay) return "low";
+        if (kind === "teredo") return "low";
         if (kind === "unknown") return "unknown";
         // regra do lado remoto: com o IPv6 deste PC so no Teredo, o IPv6 global do outro lado so e alcancado por ele
-        return side === "remote" && kind === "ipv6" && this.ipv6OnlyTeredo() ? "teredo" : "direct";
+        return side === "remote" && kind === "ipv6" && this.ipv6OnlyTeredo() ? "low" : "direct";
+    }
+
+    /** O motivo (para o log) de um candidato de baixa prioridade: a VPN, ou o Teredo (inclusive a regra do IPv6 remoto). */
+    private tagOf(overlay: OverlayName | null): LowTag {
+        return overlay ?? "Teredo";
     }
 
     /** Guarda um candidato que ficou de fora para o resgate (uma vez por lado e candidato). */
@@ -350,7 +368,7 @@ export class TeredoFilter {
         this.dropped.push({ item, pass });
     }
 
-    private route<T>(side: Side, state: SideState<T>, key: string, route: Route, item: T, pass: (item: T) => void, candidate: string) {
+    private route<T>(side: Side, state: SideState<T>, key: string, route: Route, tag: LowTag, item: T, pass: (item: T) => void, candidate: string) {
         if (this.off || route === "unknown") return pass(item);
         if (route === "direct") {
             state.direct.add(key);
@@ -359,20 +377,20 @@ export class TeredoFilter {
                 clearTimeout(held.timer);
                 state.held.delete(key);
                 for (const h of held.items) this.keep(side, h.candidate, h.item, held.pass);
-                this.noteDropped(side, held.items.length);
+                this.noteTags(side, held.items.map(h => h.tag));
             }
             return pass(item);
         }
         if (state.direct.has(key)) {
             this.keep(side, candidate, item, pass);
-            return this.noteDropped(side, 1);
+            return this.noteTags(side, [tag]);
         }
         const held = state.held.get(key);
         if (held) {
-            held.items.push({ item, candidate });
+            held.items.push({ item, candidate, tag });
             return;
         }
-        state.held.set(key, { items: [{ item, candidate }], pass, timer: setTimeout(() => this.release(state, key), TEREDO_HOLD_MS) });
+        state.held.set(key, { items: [{ item, candidate, tag }], pass, timer: setTimeout(() => this.release(state, key), TEREDO_HOLD_MS) });
     }
 
     /** Segurado sem candidato direto ate o fim da espera (ou da coleta): passa (o Teredo e o unico caminho conhecido). */
@@ -389,9 +407,15 @@ export class TeredoFilter {
         for (const key of [...state.held.keys()]) this.release(state, key);
     }
 
-    private noteDropped(side: Side, count: number) {
-        logThrottled(`teredo-drop:${this.id}:${side}`, "info", `${this.label()}: ${count === 1 ? "um candidato" : `${count} candidatos`} `
-            + `${side === "local" ? "deste PC" : "do outro PC"} pelo Teredo deixado${count === 1 ? "" : "s"} de fora (há outro caminho, mais rápido)`, 60_000);
+    /** Um aviso por lado e motivo (Teredo, ou cada VPN): um nao engole o outro. */
+    private noteTags(side: Side, tags: LowTag[]) {
+        for (const tag of new Set(tags)) this.noteDropped(side, tag, tags.filter(t => t === tag).length);
+    }
+
+    private noteDropped(side: Side, tag: LowTag, count: number) {
+        const via = tag === "Teredo" ? "pelo Teredo" : `pela VPN ${tag}`;
+        logThrottled(`teredo-drop:${this.id}:${side}:${tag}`, "info", `${this.label()}: ${count === 1 ? "um candidato" : `${count} candidatos`} `
+            + `${side === "local" ? "deste PC" : "do outro PC"} ${via} deixado${count === 1 ? "" : "s"} de fora (há outro caminho, mais rápido)`, 60_000);
     }
 }
 

@@ -176,8 +176,8 @@ function armRescue(pc: RTCPeerConnection) {
         const filter = teredoOf(pc);
         if (pc.connectionState === "connected" || pc.connectionState === "closed" || !filter.hasDropped()) return;
         const n = filter.releaseDropped();
-        log.warn(`${labelOf(pc)}: a conexão não abriu em ${TEREDO_RESCUE_MS / 1000} s sem o Teredo; `
-            + (n === 1 ? "o candidato pelo Teredo que tinha ficado de fora entrou" : `os ${n} candidatos pelo Teredo que tinham ficado de fora entraram`));
+        log.warn(`${labelOf(pc)}: a conexão não abriu em ${TEREDO_RESCUE_MS / 1000} s sem os caminhos de reserva (Teredo/VPN); `
+            + (n === 1 ? "o candidato de reserva entrou" : `os ${n} candidatos de reserva entraram`));
     }, TEREDO_RESCUE_MS));
 }
 
