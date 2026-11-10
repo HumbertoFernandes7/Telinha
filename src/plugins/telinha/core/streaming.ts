@@ -135,6 +135,13 @@ interface ViewerSend {
     fellBack?: boolean;
     /** o H.264 esta no OpenH264 de passagem (o WebRTC reduziu a resolucao para um tamanho que a placa nao aceita) */
     transientSoftware?: boolean;
+    /**
+     * o H.264 High deste envio caiu para o software e o envio ja foi trocado para o Baseline da placa (fallBack): so ESTE
+     * espectador. NAO e fellBack: a checagem do encoder continua, para ver o Baseline cair tambem (ai vai para VP9)
+     */
+    leftHigh?: boolean;
+    /** leftHigh: as estatisticas ja mostraram o encoder novo (o perfil deixou de ser High); antes disso o relatorio e do encoder antigo */
+    leftHighSettled?: boolean;
     /** o video deste envio ja sai do PC (videoLeaving): a checagem do H.264 que nao sai (checkStall) acabou */
     sending?: boolean;
     /** checkStall: desde quando a conexao esta no ar e a captura entrega quadros sem nada do video sair */
@@ -1351,9 +1358,20 @@ async function applySenderParams(peerId: PeerId, local: LocalCapture, level: Qua
  * codec que chooseCodec escolher sem a placa (VP9); os proximos ainda tentam a placa. Na 2a queda da sessao do Discord
  * (noteH264Fallback), o H.264 automatico desliga para os proximos. Uma vez por espectador (send.fellBack): nunca volta e
  * repete. Codec fixado em H.264: continua H.264.
+ *
+ * Excecao, 1a queda num envio em High (blameOf "high"): a culpa e do High (noteHighFailed), nao do H.264 da placa, e o
+ * Baseline da placa (ja negociado, a reserva) esta disponivel: so ESTE espectador troca para ele (send.leftHigh, sem
+ * fellBack, sem noteH264Fallback). Se o Baseline tambem cair, vale a regra acima (VP9, fellBack). Logo depois da troca
+ * o relatorio ainda e do encoder antigo: ignorado ate o perfil deixar de ser High (send.leftHighSettled).
  */
 function checkEncoder(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: EncoderReport) {
     if (send.fellBack) return;
+    // High → Baseline da placa acabou de trocar: o relatorio ainda e do encoder antigo (OpenH264 em High) ou do primeiro
+    // instante do novo; nao e a queda do Baseline. Ignora os relatorios ate o perfil deixar de ser High e mais um
+    if (send.leftHigh && !send.leftHighSettled) {
+        if (!isH264High(send.inUse?.profile)) send.leftHighSettled = true;
+        return;
+    }
     const label = peerLabel(peerId);
     const size = enc.width && enc.height ? `${enc.width}x${enc.height}` : "tamanho desconhecido";
     if (isTransientSoftwareH264(enc)) {
@@ -1387,22 +1405,36 @@ function checkEncoder(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc
 
 /**
  * O H.264 deste envio caiu para software de verdade (checkEncoder: OpenH264 num tamanho que a placa aceita; o encoder
- * que esta no ar e o OpenH264, saudavel, entao trocar o codec e seguro): conta a queda na sessao do Discord
- * (noteH264Fallback: na 2a, o H.264 automatico desliga para os proximos)
- * e passa so ESTE espectador para `next` (o que chooseCodec escolhe sem a placa: VP9), sem reconectar. Com o codec fixado
- * em H.264 (`next` tambem H.264), so loga. Uma vez por espectador (send.fellBack). `why`: a frase do problema, sem ponto.
+ * que esta no ar e o OpenH264, saudavel, entao trocar o codec e seguro).
+ * - 1a queda num envio em High: registra a culpa do High (noteHighFailed; o H.264 da placa nao conta em noteH264Fallback)
+ *   e passa so ESTE espectador para o Baseline da placa (mesmo codec, outro perfil), sem fellBack: a checagem continua.
+ * - Senao (Baseline caindo, ou o High que ja saiu do High): conta a queda na sessao do Discord
+ *   (noteH264Fallback: na 2a, o H.264 automatico desliga para os proximos)
+ *   e passa so ESTE espectador para `next` (o que chooseCodec escolhe sem a placa: VP9), sem reconectar. Com o codec fixado
+ *   em H.264 (`next` tambem H.264), so loga. Uma vez por espectador (send.fellBack). `why`: a frase do problema, sem ponto.
  */
 function fallBack(peerId: PeerId, local: LocalCapture, send: ViewerSend, next: CodecDecision, why: string) {
-    send.fellBack = true;
     const label = peerLabel(peerId);
-    const name = next.codec.toUpperCase();
     // envio em High: a placa nao segurou o High; ele fica desligado neste PC (o Baseline nao leva a culpa)
     const blame = blameOf(send);
     const high = blame.kind === "high" ? blame.profile : null;
     if (high) {
         noteHighFailed(high, `caiu para o software numa transmissão em High (${label})`);
         log.warn(`O H.264 High (perfil ${high}) para ${label} caiu para o software: o High fica desligado neste PC até o driver, o Chromium ou a placa mudarem`);
+        // o Baseline da placa (a reserva negociada com ele): so este espectador, e a checagem continua (sem fellBack)
+        const baseline = getLocalCaps().h264HwProfile;
+        if (!send.leftHigh && baseline && !isH264High(baseline) && send.decision.codec === "h264") {
+            send.leftHigh = true;
+            log.warn(`O H.264 High para ${label} caiu para o software: trocando para o H.264 Baseline da placa (perfil ${baseline}) só para ${label}.`);
+            void switchSendCodec(peerId, local, send, {
+                codec: "h264", h264Profile: baseline,
+                reason: `H.264 Baseline da placa (perfil ${baseline}): o High caiu para o software neste envio`
+            });
+            return;
+        }
     }
+    send.fellBack = true;
+    const name = next.codec.toUpperCase();
     const { count, disabledNow } = noteH264Fallback();
     if (next.codec === send.decision.codec) {
         const session = disabledNow ? ` Foi a ${count}ª queda nesta sessão: o H.264 automático fica desligado.` : "";
