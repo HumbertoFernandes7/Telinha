@@ -237,7 +237,7 @@ test("H.265 fixado, espectador sem H.264 na placa (sem reserva): o outro lado ne
     }
 });
 
-test("H.265 fixado sem reserva que sai da placa antes de soltar algo (checkStall): culpa do H.265, vai o que o automatico escolhe sem ele (VP9)", async () => {
+test("H.265 fixado sem reserva que sai da placa antes de soltar algo (checkStall): culpa do H.265, vai o que o automatico escolhe sem ele (H.264 Baseline da placa)", async () => {
     pluginSettings.set("codec", "h265");
     try {
         const peerId = "psemres";
@@ -251,8 +251,8 @@ test("H.265 fixado sem reserva que sai da placa antes de soltar algo (checkStall
         const since = logMark();
         await seconds(rig, H264_STALL_MS / 1000 + 2);
         const lines = since();
-        assert.ok(lines.some(l => l.includes(", fora da placa de vídeo: o H.265 fica desligado neste PC") && l.endsWith("trocando para VP9 só para semres (psemre).")), lines.join("\n"));
-        assert.equal(plan(peerId).codec, "vp9");
+        assert.ok(lines.some(l => l.includes(", fora da placa de vídeo: o H.265 fica desligado neste PC") && l.endsWith("trocando para H264 só para semres (psemre).")), lines.join("\n"));
+        assert.equal(plan(peerId).codec, "h264");
         await turns();
         assert.equal(h265ProbeRecord()?.verdict, "broken");
         assert.equal(stuckRecord(), null);

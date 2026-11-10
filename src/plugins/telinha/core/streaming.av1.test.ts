@@ -234,7 +234,7 @@ test("quem assiste nao decodificou o AV1 e pediu VP9: vai a reserva H.264 so par
     assert.equal(getLocalCaps().av1ProbeOk, true);
 });
 
-test("AV1 sem reserva (o espectador sem H.264 na placa) fora da placa antes de soltar algo (checkStall): culpa do AV1, vai VP9", async () => {
+test("AV1 sem reserva (o espectador sem H.264 na placa) fora da placa antes de soltar algo (checkStall): culpa do AV1, vai o H.264 Baseline da placa", async () => {
     const v = await watcher("semres", { v: 1, av1: true }, false);
     assert.deepEqual(plan(v.peerId), { codec: "av1", h264Profile: null, bitrate: undefined, label: undefined });
     let source = 0;
@@ -242,8 +242,8 @@ test("AV1 sem reserva (o espectador sem H.264 na placa) fora da placa antes de s
     const since = logMark();
     await seconds(rig, H264_STALL_MS / 1000 + 2);
     const lines = since();
-    assert.ok(lines.some(l => l.includes(", fora da placa de vídeo: o AV1 fica desligado neste PC") && l.endsWith(`trocando para VP9 só para ${v.label}.`)), lines.join("\n"));
-    assert.equal(plan(v.peerId).codec, "vp9");
+    assert.ok(lines.some(l => l.includes(", fora da placa de vídeo: o AV1 fica desligado neste PC") && l.endsWith(`trocando para H264 só para ${v.label}.`)), lines.join("\n"));
+    assert.equal(plan(v.peerId).codec, "h264", "o automatico sem o AV1: H.264 Baseline da placa");
     assert.equal(stuckRecord(), null);
     await turns();
     assert.equal(av1ProbeRecord()?.verdict, "offHw", "libaom parado (stall): e software, nao travou a placa; o botao limpa");

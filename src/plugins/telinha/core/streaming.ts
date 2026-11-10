@@ -1177,7 +1177,7 @@ function sendTo(peerId: PeerId, carried?: CarriedCodec) {
     // H.264 com este PC codificando por hardware: mais um encoder na placa de video (a qualidade automatica preve o tempo dela)
     qualityOf(local)?.addViewer(peerId, send.expectedKind === "hardware");
     log.info(`Enviando para ${peerLabel(peerId)}: codec ${decision.codec.toUpperCase()} (${carried ? `o mesmo da captura anterior: ${decision.reason}` : decision.reason})`);
-    if (decision.codec === "h264" && entry.presence?.caps.h264HwDecode !== true)
+    if (decision.codec === "h264" && entry.presence?.caps.h264HwDecode !== true && send.expectedKind !== "hardware")
         log.warn(`${peerLabel(peerId)} não decodifica H.264 por hardware: o início pode travar por 15+ s`);
     publish();
 

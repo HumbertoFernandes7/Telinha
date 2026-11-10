@@ -62,7 +62,9 @@ describe("automatico: nunca AV1 (so manual), a ordem de antes", () => {
         const both = chooseCodec(BOTH, "auto", pc());
         assert.deepEqual([both.codec, both.h264Profile, both.h264Backup], ["h264", "640032", "42001f"]);
         assert.ok(!both.reason.includes("AV1"), both.reason);
-        assert.equal(chooseCodec(NO_H264, "auto", pc()).codec, "vp9");
+        // espectador sem H.264 na placa: o Baseline da placa deste PC, nunca VP9 por software
+        assert.equal(chooseCodec(NO_H264, "auto", pc()).codec, "h264");
+        assert.equal(chooseCodec(NO_H264, "auto", pc({ h264HwEncode: false })).codec, "vp9");
     });
 
     test("hwOnlyWanted: so fixado (o automatico nao pede a sonda nem o recurso)", () => {
@@ -91,7 +93,7 @@ describe("AV1 fixado: decisao e versoes", () => {
         assert.deepEqual([old.codec, old.h264Profile], ["h264", "640032"]);
         assert.match(old.reason, /^AV1 fixado nas configurações, mas o espectador não anuncia AV1 por hardware \(não tem, ou é uma versão antiga do Telinha\) → automático: H\.264 High/);
         assert.equal(chooseCodec(FUTURE, "av1", pc()).codec, "h264");
-        assert.equal(chooseCodec(undefined, "av1", pc()).codec, "vp9");
+        assert.equal(chooseCodec(undefined, "av1", pc()).codec, "h264", "sem presenca: nao decodifica na placa, Baseline da placa");
     });
 });
 
