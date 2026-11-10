@@ -130,24 +130,59 @@ test("um envio que comecou na placa continua \"placa\" se o H.264 for segurado l
     }
 });
 
-test("um envio em High que cai para o OpenH264 de verdade: o High fica travado neste PC (nao o Baseline); ele vai para VP9, os proximos para o Baseline", async () => {
+const software = (profile: string) => videoSenderStats({
+    mimeType: "video/H264", codecFmtp: fmtp(profile), encoderImplementation: "OpenH264", powerEfficientEncoder: false, framesEncoded: 600, frameWidth: 1920, frameHeight: 1080
+});
+const gpu = (profile: string) => videoSenderStats({
+    mimeType: "video/H264", codecFmtp: fmtp(profile), encoderImplementation: NVENC, powerEfficientEncoder: true, framesEncoded: 600, frameWidth: 1920, frameHeight: 1080
+});
+const HIGH_DROP = (label: string) => `O H.264 High (perfil 640032) para ${label} caiu para o software: o High fica desligado neste PC até o driver, o Chromium ou a placa mudarem`;
+const TO_BASELINE = (label: string) => `O H.264 High para ${label} caiu para o software: trocando para o H.264 Baseline da placa (perfil 42001f) só para ${label}.`;
+
+test("um envio em High que cai para o OpenH264 de verdade: o High fica travado neste PC; ele vai para o Baseline da placa (nao VP9), sem contar queda do H.264", async () => {
     const v = await watcher("caiu", { v: 1, h264High: true });
     assert.equal(sendPlanFor(v.peerId)?.h264Profile, "640032");
-    v.sender.stats = videoSenderStats({
-        mimeType: "video/H264", codecFmtp: fmtp("640032"), encoderImplementation: "OpenH264", powerEfficientEncoder: false, framesEncoded: 600, frameWidth: 1920, frameHeight: 1080
-    });
+    v.sender.stats = software("640032");
     const since = logMark();
     await seconds(rig, 2);
     const lines = since();
-    assert.ok(lines.includes(`O H.264 High (perfil 640032) para ${v.label} caiu para o software: o High fica desligado neste PC até o driver, o Chromium ou a placa mudarem`),
-        lines.join("\n"));
-    assert.equal(sendPlanFor(v.peerId)?.codec, "vp9");
+    assert.ok(lines.includes(HIGH_DROP(v.label)), lines.join("\n"));
+    assert.ok(lines.includes(TO_BASELINE(v.label)), lines.join("\n"));
+    const plan = sendPlanFor(v.peerId);
+    assert.equal(plan?.codec, "h264");
+    assert.equal(plan?.h264Profile, "42001f");
+    assert.match(v.sender.encoding.codec?.sdpFmtpLine ?? "", /42001f/, "a troca foi aplicada no sender");
+    assert.ok(!lines.some(l => l.includes("queda nesta sessão") || l.includes("trocando para VP9")), "a culpa e do High, nao do H.264 da placa");
+    v.sender.stats = gpu("42001f"); // o Chromium ja codifica o Baseline na placa
+    assert.equal(getLocalCaps().h264HwEncode, true);
     await turns();
     assert.equal(highProbeRecord()?.verdict, "broken");
     assert.equal(highProbeRecord()?.source, "stream");
     assert.equal(stuckRecord(), null);
     const next = await watcher("depois", { v: 1, h264High: true });
     assert.equal(sendPlanFor(next.peerId)?.h264Profile, "42001f", "o High desligado; o Baseline continua");
+});
+
+test("codec fixado em H.264 nas configuracoes: o High que cai tambem vai para o Baseline da placa (continua H.264)", async () => {
+    setH264HighProbeOk(true);
+    const v = await watcher("fixado", { v: 1, h264High: true });
+    assert.equal(sendPlanFor(v.peerId)?.h264Profile, "640032");
+    pluginSettings.set("codec", "h264");
+    try {
+        v.sender.stats = software("640032");
+        const since = logMark();
+        await seconds(rig, 2);
+        const lines = since();
+        assert.ok(lines.includes(TO_BASELINE(v.label)), lines.join("\n"));
+        const plan = sendPlanFor(v.peerId);
+        assert.equal(plan?.codec, "h264");
+        assert.equal(plan?.h264Profile, "42001f");
+        assert.match(v.sender.encoding.codec?.sdpFmtpLine ?? "", /42001f/, "a troca foi aplicada no sender");
+        assert.ok(!lines.some(l => l.includes("queda nesta sessão")));
+        v.sender.stats = gpu("42001f");
+    } finally {
+        pluginSettings.set("codec", "auto");
+    }
 });
 
 test("um envio em High que trava (nada sai): contido; marca o High, nao o Baseline; o aviso diz que da proxima vez vai sem o High", async () => {
@@ -170,4 +205,46 @@ test("um envio em High que trava (nada sai): contido; marca o High, nao o Baseli
     await turns();
     assert.equal(stuckRecord(), null, "o Baseline nao fica marcado: na proxima abertura, Baseline");
     assert.equal(highProbeRecord()?.detail, "o encoder da placa de vídeo travou numa transmissão em High");
+});
+
+test("um envio que ja comecou em Baseline e cai para o software: VP9, como sempre, contado como queda do H.264", async () => {
+    setH264HwStuck(false);
+    setH264HighProbeOk(false);
+    try {
+        const v = await watcher("baseline", { v: 1, h264High: true });
+        assert.equal(sendPlanFor(v.peerId)?.h264Profile, "42001f");
+        v.sender.stats = software("42001f");
+        const since = logMark();
+        await seconds(rig, 2);
+        const lines = since();
+        assert.equal(sendPlanFor(v.peerId)?.codec, "vp9", lines.join("\n"));
+        assert.ok(!lines.some(l => l.includes("High (perfil")));
+        assert.equal(getLocalCaps().h264HwEncode, true, "a 1a queda do H.264 da placa: os proximos ainda tentam a placa");
+    } finally {
+        setH264HighProbeOk(true);
+    }
+});
+
+test("depois de ir para o Baseline, o relatorio do encoder antigo nao conta como queda do Baseline; se o Baseline tambem cair, vai para VP9", async () => {
+    setH264HwStuck(false);
+    setH264HighProbeOk(true);
+    try {
+        const v = await watcher("caiu2", { v: 1, h264High: true });
+        v.sender.stats = software("640032");
+        await seconds(rig, 2);
+        assert.equal(sendPlanFor(v.peerId)?.h264Profile, "42001f");
+        // o encoder ainda reporta o OpenH264 em High (o antigo): nao e queda do Baseline
+        const since = logMark();
+        await seconds(rig, 3);
+        assert.equal(sendPlanFor(v.peerId)?.codec, "h264", "relatorio do encoder antigo: continua no Baseline");
+        // o Baseline tambem esta no software de verdade (a troca assentou: perfil fora do High e tempo passado)
+        v.sender.stats = software("42001f");
+        await seconds(rig, 3);
+        const lines = since();
+        assert.equal(sendPlanFor(v.peerId)?.codec, "vp9", lines.join("\n"));
+        assert.ok(lines.some(l => l.includes("está sendo codificado por software") && l.includes("trocando para VP9 só para")), lines.join("\n"));
+        assert.ok(!lines.some(l => l.includes("High (perfil")), "o High nao leva a culpa de novo");
+    } finally {
+        setH264HighProbeOk(true);
+    }
 });

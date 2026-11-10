@@ -62,7 +62,9 @@ describe("automatico: nunca AV1 (so manual), a ordem de antes", () => {
         const both = chooseCodec(BOTH, "auto", pc());
         assert.deepEqual([both.codec, both.h264Profile, both.h264Backup], ["h264", "640032", "42001f"]);
         assert.ok(!both.reason.includes("AV1"), both.reason);
-        assert.equal(chooseCodec(NO_H264, "auto", pc()).codec, "vp9");
+        // espectador sem H.264 na placa: o Baseline da placa deste PC, nunca VP9 por software
+        assert.equal(chooseCodec(NO_H264, "auto", pc()).codec, "h264");
+        assert.equal(chooseCodec(NO_H264, "auto", pc({ h264HwEncode: false })).codec, "vp9");
     });
 
     test("hwOnlyWanted: so fixado (o automatico nao pede a sonda nem o recurso)", () => {
@@ -77,12 +79,12 @@ describe("AV1 fixado: decisao e versoes", () => {
         assert.deepEqual(chooseCodec(BOTH, "av1", pc()), { codec: "av1", h264Profile: "640032", h264Backup: "42001f", reason: AV1_REASON });
     });
 
-    test("o espectador sem High mas com AV1: AV1 com o Baseline de reserva; sem H.264 na placa: AV1 sem reserva", () => {
+    test("o espectador sem High mas com AV1: AV1 com o Baseline de reserva; sem H.264 na placa no espectador: o Baseline da placa também é a reserva", () => {
         const d = chooseCodec(AV1_ONLY, "av1", pc());
         assert.deepEqual([d.codec, d.h264Profile, d.h264Backup], ["av1", "42001f", undefined]);
         const none = chooseCodec(NO_H264, "av1", pc());
-        assert.deepEqual(none, { codec: "av1", reason: "fixado nas configurações (AV1 por hardware nos dois lados, com a sonda do AV1 ok; sem reserva H.264 na placa para este espectador)" });
-        assert.equal(h264ReserveOf(none, "x"), null);
+        assert.deepEqual([none.codec, none.h264Profile, none.h264Backup], ["av1", "42001f", undefined]);
+        assert.deepEqual(h264ReserveOf(none, "x"), { codec: "h264", h264Profile: "42001f", reason: "x" });
         assert.deepEqual(h264ReserveOf(d, "r"), { codec: "h264", h264Profile: "42001f", reason: "r" });
     });
 
@@ -91,7 +93,7 @@ describe("AV1 fixado: decisao e versoes", () => {
         assert.deepEqual([old.codec, old.h264Profile], ["h264", "640032"]);
         assert.match(old.reason, /^AV1 fixado nas configurações, mas o espectador não anuncia AV1 por hardware \(não tem, ou é uma versão antiga do Telinha\) → automático: H\.264 High/);
         assert.equal(chooseCodec(FUTURE, "av1", pc()).codec, "h264");
-        assert.equal(chooseCodec(undefined, "av1", pc()).codec, "vp9");
+        assert.equal(chooseCodec(undefined, "av1", pc()).codec, "h264", "sem presenca: nao decodifica na placa, Baseline da placa");
     });
 });
 
