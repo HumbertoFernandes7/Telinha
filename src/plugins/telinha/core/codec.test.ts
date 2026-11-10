@@ -225,11 +225,11 @@ describe("chooseCodec", () => {
         assert.equal("h264Backup" in both, false, "Baseline: sem reserva (a mesma decisao de antes)");
 
         // espectador sem H.264 na placa + este PC codifica H.264 na placa: Baseline da placa (decodificar por software e leve; VP9 por software satura a CPU daqui)
-        const swViewer = { codec: "h264", h264Profile: "42001f", reason: "automático: o espectador decodifica H.264 por software e este PC codifica H.264 Baseline na placa (perfil 42001f)" };
+        const swViewer = { codec: "h264", h264Profile: "42001f", reason: "automático: o espectador decodifica H.264 por software e este PC codifica H.264 na placa (perfil 42001f)" };
         assert.deepEqual(chooseCodec(NO_HW, "auto", caps()), swViewer);
         assert.equal(chooseCodec(undefined, "auto", caps()).codec, "h264", "sem presenca: nao decodifica na placa, mesma regra");
         // mesmo espectador, este PC sem H.264 na placa: VP9
-        assert.deepEqual(chooseCodec(NO_HW, "auto", caps({ h264HwEncode: false, h264HwProfile: null })), { codec: "vp9", reason: "automático: o espectador não decodifica H.264 por hardware → VP9" });
+        assert.deepEqual(chooseCodec(NO_HW, "auto", caps({ h264HwEncode: false, h264HwProfile: null })), { codec: "vp9", reason: "automático: este PC não codifica H.264 por hardware → VP9" });
         // H.264 da placa desligado na sessao (queda/travou): VP9 tambem para este espectador
         assert.equal(chooseCodec(NO_HW, "auto", caps({ h264HwEncode: false })).codec, "vp9");
         assert.equal(chooseCodec(NO_HW, "auto", caps({ sendable: new Set(["vp8", "vp9"]) })).codec, "vp9", "este cliente nao envia H.264");

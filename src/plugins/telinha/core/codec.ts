@@ -447,7 +447,7 @@ export function chooseCodec(viewerCaps: ViewerCodecCaps | undefined, setting: Co
         const auto = chooseBaseAuto(viewerCaps, local);
         const no = whyNoHwOnly(setting, viewerCaps, local);
         if (no) return { ...auto, reason: `${HW_ONLY_LABEL[setting]} fixado nas configurações, mas ${no} → ${auto.reason}` };
-        return hwOnlyDecision(setting, auto, "fixado nas configurações", viewerCaps);
+        return hwOnlyDecision(setting, auto, "fixado nas configurações");
     }
 
     if (setting && setting !== "auto") {
@@ -457,7 +457,7 @@ export function chooseCodec(viewerCaps: ViewerCodecCaps | undefined, setting: Co
 
     const auto = chooseBaseAuto(viewerCaps, local);
     // o automatico nunca escolhe H.265 nem AV1 (so fixados) enquanto AUTO_HW_ONLY estiver vazio
-    for (const codec of AUTO_HW_ONLY) if (!whyNoHwOnly(codec, viewerCaps, local)) return hwOnlyDecision(codec, auto, "automático", viewerCaps);
+    for (const codec of AUTO_HW_ONLY) if (!whyNoHwOnly(codec, viewerCaps, local)) return hwOnlyDecision(codec, auto, "automático");
     return auto;
 }
 
@@ -471,10 +471,11 @@ function chooseBaseAuto(viewerCaps: ViewerCodecCaps | undefined, local: LocalCod
     if (!viewerHw && local.h264HwEncode && canSend("h264")) {
         return {
             codec: "h264", h264Profile: local.h264HwProfile,
-            reason: `automático: o espectador decodifica H.264 por software e este PC codifica H.264 Baseline na placa${local.h264HwProfile ? ` (perfil ${local.h264HwProfile})` : ""}`
+            reason: `automático: o espectador decodifica H.264 por software e este PC codifica H.264 na placa${local.h264HwProfile ? ` (perfil ${local.h264HwProfile})` : ""}`
         };
     }
-    const why = `automático: ${!viewerHw ? "o espectador não decodifica H.264 por hardware" : "este PC não codifica H.264 por hardware"}`;
+    // so chega aqui quando ESTE PC nao codifica (ou nao envia) H.264 na placa: o motivo culpa este PC, nao o espectador
+    const why = "automático: este PC não codifica H.264 por hardware";
     return canSend("vp9") ? { codec: "vp9", reason: `${why} → VP9` } : { codec: "vp8", reason: `${why}; VP9 indisponível → VP8` };
 }
 
@@ -486,10 +487,9 @@ export const HW_ONLY_LABEL: Record<HwOnlyCodec, string> = { h265: "H.265", av1: 
  * na negociacao quando e o H.264 da placa; senao, sem reserva H.264 (o espectador sem H.264 na placa ainda decodifica o
  * codec na placa). `how`: "fixado nas configurações" ou "automático".
  */
-function hwOnlyDecision(codec: HwOnlyCodec, auto: CodecDecision, how: string, viewerCaps: ViewerCodecCaps | undefined): CodecDecision {
+function hwOnlyDecision(codec: HwOnlyCodec, auto: CodecDecision, how: string): CodecDecision {
     const label = HW_ONLY_LABEL[codec];
-    // a reserva H.264 so existe para quem decodifica H.264 na placa (o H.264 para quem decodifica por software e so o automatico)
-    if (auto.codec !== "h264" || viewerCaps?.h264HwDecode !== true) {
+    if (auto.codec !== "h264") {
         return { codec, reason: `${how} (${label} por hardware nos dois lados, com a sonda do ${label} ok; sem reserva H.264 na placa para este espectador)` };
     }
     return {

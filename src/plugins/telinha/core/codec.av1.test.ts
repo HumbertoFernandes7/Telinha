@@ -79,12 +79,12 @@ describe("AV1 fixado: decisao e versoes", () => {
         assert.deepEqual(chooseCodec(BOTH, "av1", pc()), { codec: "av1", h264Profile: "640032", h264Backup: "42001f", reason: AV1_REASON });
     });
 
-    test("o espectador sem High mas com AV1: AV1 com o Baseline de reserva; sem H.264 na placa: AV1 sem reserva", () => {
+    test("o espectador sem High mas com AV1: AV1 com o Baseline de reserva; sem H.264 na placa no espectador: o Baseline da placa também é a reserva", () => {
         const d = chooseCodec(AV1_ONLY, "av1", pc());
         assert.deepEqual([d.codec, d.h264Profile, d.h264Backup], ["av1", "42001f", undefined]);
         const none = chooseCodec(NO_H264, "av1", pc());
-        assert.deepEqual(none, { codec: "av1", reason: "fixado nas configurações (AV1 por hardware nos dois lados, com a sonda do AV1 ok; sem reserva H.264 na placa para este espectador)" });
-        assert.equal(h264ReserveOf(none, "x"), null);
+        assert.deepEqual([none.codec, none.h264Profile, none.h264Backup], ["av1", "42001f", undefined]);
+        assert.deepEqual(h264ReserveOf(none, "x"), { codec: "h264", h264Profile: "42001f", reason: "x" });
         assert.deepEqual(h264ReserveOf(d, "r"), { codec: "h264", h264Profile: "42001f", reason: "r" });
     });
 

@@ -140,7 +140,9 @@ interface ViewerSend {
      * espectador. NAO e fellBack: a checagem do encoder continua, para ver o Baseline cair tambem (ai vai para VP9)
      */
     leftHigh?: boolean;
-    /** leftHigh: as estatisticas ja mostraram o encoder novo (o perfil deixou de ser High); antes disso o relatorio e do encoder antigo */
+    /** leftHigh: quando trocou (performance.now()); ate assentar (leftHighPending) o relatorio e do encoder antigo */
+    leftHighAt?: number;
+    /** leftHigh: a troca assentou (o perfil deixou de ser High, a troca falhou ou o prazo acabou): as checagens voltam */
     leftHighSettled?: boolean;
     /** o video deste envio ja sai do PC (videoLeaving): a checagem do H.264 que nao sai (checkStall) acabou */
     sending?: boolean;
@@ -1184,8 +1186,10 @@ function sendTo(peerId: PeerId, carried?: CarriedCodec) {
     // H.264 com este PC codificando por hardware: mais um encoder na placa de video (a qualidade automatica preve o tempo dela)
     qualityOf(local)?.addViewer(peerId, send.expectedKind === "hardware");
     log.info(`Enviando para ${peerLabel(peerId)}: codec ${decision.codec.toUpperCase()} (${carried ? `o mesmo da captura anterior: ${decision.reason}` : decision.reason})`);
-    if (decision.codec === "h264" && entry.presence?.caps.h264HwDecode !== true && send.expectedKind !== "hardware")
-        log.warn(`${peerLabel(peerId)} não decodifica H.264 por hardware: o início pode travar por 15+ s`);
+    if (decision.codec === "h264" && entry.presence?.caps.h264HwDecode !== true) {
+        if (send.expectedKind !== "hardware") log.warn(`${peerLabel(peerId)} não decodifica H.264 por hardware: o início pode travar por 15+ s`);
+        else log.info(`${peerLabel(peerId)} decodifica H.264 por software: vai o H.264 da placa; se não abrir em 10 s, ele pede VP9`);
+    }
     publish();
 
     // o addStream e assincrono: se o peer for expulso/parar no meio, o removeStream de removeFrom chega antes
@@ -1362,16 +1366,13 @@ async function applySenderParams(peerId: PeerId, local: LocalCapture, level: Qua
  * Excecao, 1a queda num envio em High (blameOf "high"): a culpa e do High (noteHighFailed), nao do H.264 da placa, e o
  * Baseline da placa (ja negociado, a reserva) esta disponivel: so ESTE espectador troca para ele (send.leftHigh, sem
  * fellBack, sem noteH264Fallback). Se o Baseline tambem cair, vale a regra acima (VP9, fellBack). Logo depois da troca
- * o relatorio ainda e do encoder antigo: ignorado ate o perfil deixar de ser High (send.leftHighSettled).
+ * o relatorio ainda e do encoder antigo: ignorado ate a troca assentar (leftHighPending).
  */
 function checkEncoder(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: EncoderReport) {
     if (send.fellBack) return;
     // High → Baseline da placa acabou de trocar: o relatorio ainda e do encoder antigo (OpenH264 em High) ou do primeiro
-    // instante do novo; nao e a queda do Baseline. Ignora os relatorios ate o perfil deixar de ser High e mais um
-    if (send.leftHigh && !send.leftHighSettled) {
-        if (!isH264High(send.inUse?.profile)) send.leftHighSettled = true;
-        return;
-    }
+    // instante do novo; nao e a queda do Baseline
+    if (leftHighPending(send)) return;
     const label = peerLabel(peerId);
     const size = enc.width && enc.height ? `${enc.width}x${enc.height}` : "tamanho desconhecido";
     if (isTransientSoftwareH264(enc)) {
@@ -1403,6 +1404,25 @@ function checkEncoder(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc
         `O H.264 para ${label} está sendo codificado por software (${enc.implementation || "sem aceleração"}, ${size}), não pela placa de vídeo, e a imagem pode travar`);
 }
 
+/** Tempo minimo (com o perfil ja fora do High) e maximo (a troca falhou) ate a troca High → Baseline assentar. */
+const LEFT_HIGH_MIN_MS = 2500;
+const LEFT_HIGH_MAX_MS = 8000;
+
+/**
+ * A troca High → Baseline da placa (send.leftHigh) ainda nao assentou: o relatorio e do encoder antigo. Assenta com o perfil
+ * em uso fora do High e LEFT_HIGH_MIN_MS passados, ou com LEFT_HIGH_MAX_MS passados (a troca falhou: o OpenH264 segue a
+ * checagem normal, VP9). Enquanto pendente, nem checkEncoder nem checkStall agem.
+ */
+function leftHighPending(send: ViewerSend): boolean {
+    if (!send.leftHigh || send.leftHighSettled) return false;
+    const age = performance.now() - (send.leftHighAt ?? 0);
+    if (age >= LEFT_HIGH_MAX_MS || (age >= LEFT_HIGH_MIN_MS && !isH264High(send.inUse?.profile))) {
+        send.leftHighSettled = true;
+        return false;
+    }
+    return true;
+}
+
 /**
  * O H.264 deste envio caiu para software de verdade (checkEncoder: OpenH264 num tamanho que a placa aceita; o encoder
  * que esta no ar e o OpenH264, saudavel, entao trocar o codec e seguro).
@@ -1423,12 +1443,24 @@ function fallBack(peerId: PeerId, local: LocalCapture, send: ViewerSend, next: C
         log.warn(`O H.264 High (perfil ${high}) para ${label} caiu para o software: o High fica desligado neste PC até o driver, o Chromium ou a placa mudarem`);
         // o Baseline da placa (a reserva negociada com ele): so este espectador, e a checagem continua (sem fellBack)
         const baseline = getLocalCaps().h264HwProfile;
-        if (!send.leftHigh && baseline && !isH264High(baseline) && send.decision.codec === "h264") {
+        // (com o H.264 da placa desligado na sessao, h264HwEncode, nao ha Baseline da placa: caminho de sempre, VP9)
+        if (!send.leftHigh && baseline && !isH264High(baseline) && getLocalCaps().h264HwEncode && send.decision.codec === "h264") {
             send.leftHigh = true;
+            send.leftHighAt = performance.now();
+            // o envio novo recomeca as checagens do H.264 (como checkHwOnly ao passar para a reserva)
+            send.reportedCodec = undefined;
+            send.encoderKind = undefined;
+            send.transientSoftware = false;
+            send.sending = false;
+            send.stall = undefined;
+            syncQualityLock(local);
             log.warn(`O H.264 High para ${label} caiu para o software: trocando para o H.264 Baseline da placa (perfil ${baseline}) só para ${label}.`);
+            // troca recusada: assenta na hora (a checagem normal volta e o OpenH264 segue para VP9)
             void switchSendCodec(peerId, local, send, {
                 codec: "h264", h264Profile: baseline,
                 reason: `H.264 Baseline da placa (perfil ${baseline}): o High caiu para o software neste envio`
+            }).then(ok => {
+                if (!ok) send.leftHighSettled = true;
             });
             return;
         }
@@ -1508,7 +1540,7 @@ function videoLeaving(encoded: number, sent: SentCounters) {
  * decodifica e o espectador, ele pede VP9 (viewing.ts → askForVp9; aqui, onCodecRequest).
  */
 function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: EncoderReport, frames: number | null, sent: SentCounters, foreign = false) {
-    if (send.stuck || send.fellBack || send.sending || !HW_SEND_MIME.test(enc.mimeType)) return;
+    if (send.stuck || send.fellBack || send.sending || leftHighPending(send) || !HW_SEND_MIME.test(enc.mimeType)) return;
     const encoded = enc.framesEncoded ?? 0;
     // encoder de outro codec no relatorio (foreign, checkForeign): os contadores sao do encoder de antes, nao dizem se ESTE
     // video sai (sending nao se decide por eles); a janela segue andando
@@ -1853,10 +1885,10 @@ function chooseWithout(codec: HwOnlyCodec, peerId: PeerId): CodecDecision {
  * loopback no Chromium 152: H.264 → VP9 na hora, o receiver continua decodificando a mesma faixa e o codec fica nos
  * setParameters seguintes (qualidade automatica). Se o Chromium recusar (ex.: colidiu com um setParameters da
  * qualidade automatica), tenta mais uma vez; falhando de novo, so avisa. So para um encoder saudavel (o video ja sai, ou
- * o OpenH264): nunca num envio travado (containStuck).
+ * o OpenH264): nunca num envio travado (containStuck). Devolve true se trocou, false se nao deu.
  */
-async function switchSendCodec(peerId: PeerId, local: LocalCapture, send: ViewerSend, next: CodecDecision) {
-    if (send.stuck || contained(peerId)) return;
+async function switchSendCodec(peerId: PeerId, local: LocalCapture, send: ViewerSend, next: CodecDecision): Promise<boolean> {
+    if (send.stuck || contained(peerId)) return false;
     const label = peerLabel(peerId);
     const name = next.codec.toUpperCase();
     // renegociacoes futuras (sendPlanFor) ja vao com o codec novo
@@ -1868,9 +1900,9 @@ async function switchSendCodec(peerId: PeerId, local: LocalCapture, send: Viewer
         const sender = videoSender(peerId, local);
         if (sends.get(peerId) !== send || !sender) {
             if (sends.get(peerId) === send) log.warn(`Não deu para trocar ${label} para ${name}: o envio de vídeo para ele sumiu`);
-            return;
+            return false;
         }
-        if (send.stuck) return;
+        if (send.stuck) return false;
         try {
             const params = sender.getParameters();
             const codec = pickNegotiatedCodec(params.codecs ?? [], next);
@@ -1885,12 +1917,13 @@ async function switchSendCodec(peerId: PeerId, local: LocalCapture, send: Viewer
             setTimeout(() => {
                 if (sends.get(peerId) === send) send.reportedCodec = undefined;
             }, 2000);
-            return;
+            return true;
         } catch (e) {
             error = errorText(e);
         }
     }
     log.warn(`Não deu para trocar ${label} para ${name} (${error}). Peça para ele parar de assistir e assistir de novo: vai receber ${name}.`);
+    return false;
 }
 
 // #region eventos vindos da sessao

@@ -116,11 +116,12 @@ describe("H.265 fixado nas configuracoes: as mesmas redes de seguranca", () => {
         assert.match(d.reason, /^fixado nas configurações \(H\.265 por hardware nos dois lados/);
     });
 
-    test("o espectador decodifica H.265 na placa mas nao H.264: H.265 sem reserva H.264", () => {
+    test("o espectador decodifica H.265 na placa mas nao H.264 (decodifica por software): H.265 com o Baseline da placa de reserva", () => {
         const d = chooseCodec(NO_HW, "h265", pc());
         assert.equal(d.codec, "h265");
-        assert.equal(d.h264Profile, undefined);
-        assert.match(d.reason, /sem reserva H\.264 na placa para este espectador/);
+        assert.equal(d.h264Profile, "42001f");
+        assert.ok(!("h264Backup" in d));
+        assert.match(d.reason, /reserva H\.264 perfil 42001f\)$/);
     });
 
     test("sem a sonda, sem o espectador, ou com a placa travada: o que o automatico escolheria, e o motivo diz que o H.265 estava fixado", () => {
