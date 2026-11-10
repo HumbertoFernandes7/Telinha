@@ -312,7 +312,7 @@ describe("Com senha", () => {
             `${mel.label} pediu para assistir: a transmissão é com senha, pedindo a senha (restam 5 tentativas). `
             + "Se ele usa uma versão antiga do Telinha (v0.1.0), ela não entende o pedido de senha: o pedido dele expira sem resposta.",
             `${mel.label} acertou a senha`,
-            `Enviando para ${mel.label}: codec VP9 (automático: o espectador não decodifica H.264 por hardware → VP9)`
+            `Enviando para ${mel.label}: codec VP9 (automático: este PC não codifica H.264 por hardware → VP9)`
         ]);
 
         // a mesma prova de novo (desafio ja usado) depois de parar: nao conta como erro, vai um desafio novo

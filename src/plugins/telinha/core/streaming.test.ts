@@ -508,7 +508,7 @@ describe("pedidos para assistir e o envio para cada espectador", () => {
         assert.equal(sender.params.degradationPreference, "balanced", "VP9: encoder por software");
         assert.deepEqual(getState().local?.viewers, ["peerE"]);
         assert.deepEqual(since(), [
-            "Enviando para edu (peerE): codec VP9 (automático: o espectador não decodifica H.264 por hardware → VP9)",
+            "Enviando para edu (peerE): codec VP9 (automático: este PC não codifica H.264 por hardware → VP9)",
             "Envio para edu (peerE): 1080p 60 fps, até 20000 kbps, encoder por software: equilibra resolução e fps (num soluço os dois cedem um pouco)"
         ]);
 

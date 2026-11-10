@@ -418,7 +418,11 @@ export function noteH264Fallback(): H264FallbackTally {
  * VP9 264 ms ate o 1o quadro / 58 fps / CPU 182% (melhor); VP8 327 ms / 56 fps / 249%; AV1 280 ms /
  * 52 fps / 283%; H.264 por software (OpenH264 → FFmpeg) 17,6 s e 106 PLIs (trava). Com GPU ligada,
  * H.264 NVIDIA → D3D11 nao trava e custa bem menos (3 espectadores 1080p60: 91% de um nucleo contra 420% do VP9).
- * Por isso "auto" = H.264 SO quando o espectador decodifica e este PC codifica H.264 por hardware; senao VP9.
+ * Por isso "auto" = H.264 sempre que este PC codifica H.264 por hardware; senao VP9. Espectador sem H.264 na placa tambem
+ * recebe H.264 Baseline da placa deste PC: decodificar por software e leve, e VP9 codificado por software (libvpx) satura a
+ * CPU do transmissor e derruba a qualidade de todos. Aquele teste de 17,6 s foi software→software; placa→software nao foi
+ * medido. Rede de seguranca: o espectador que fica 10 s sem decodificar nenhum quadro pede VP9 (viewing.ts) e o transmissor
+ * troca so aquele envio (streaming.ts). Sem H.264 na placa deste PC (ou desligado na sessao), continua VP9.
  * "Codifica por hardware" = a sonda achou um perfil por hardware e o encoder real nao caiu para software no ar
  * H264_FALLBACKS_TO_DISABLE vezes nesta sessao (h264HwEncode, noteH264Fallback). Com H.264, a decisao leva esse perfil (h264Profile), que vai na frente na negociacao: so o
  * packetization-mode=1 nao basta, porque 42e01f tambem e packetization-mode=1 e cai no OpenH264.
@@ -462,7 +466,16 @@ function chooseBaseAuto(viewerCaps: ViewerCodecCaps | undefined, local: LocalCod
     const canSend = (c: VideoCodecName) => local.sendable.size === 0 || local.sendable.has(c);
     const viewerHw = viewerCaps?.h264HwDecode === true;
     if (viewerHw && local.h264HwEncode && canSend("h264")) return chooseH264Hw(viewerCaps, local);
-    const why = `automático: ${!viewerHw ? "o espectador não decodifica H.264 por hardware" : "este PC não codifica H.264 por hardware"}`;
+    // espectador sem decodificacao na placa: codificar na placa (Baseline, nunca High) e decodificar por software e leve;
+    // codificar VP9 por software (libvpx) satura a CPU deste PC e derruba a qualidade de todos os espectadores
+    if (!viewerHw && local.h264HwEncode && canSend("h264")) {
+        return {
+            codec: "h264", h264Profile: local.h264HwProfile,
+            reason: `automático: o espectador decodifica H.264 por software e este PC codifica H.264 na placa${local.h264HwProfile ? ` (perfil ${local.h264HwProfile})` : ""}`
+        };
+    }
+    // so chega aqui quando ESTE PC nao codifica (ou nao envia) H.264 na placa: o motivo culpa este PC, nao o espectador
+    const why = "automático: este PC não codifica H.264 por hardware";
     return canSend("vp9") ? { codec: "vp9", reason: `${why} → VP9` } : { codec: "vp8", reason: `${why}; VP9 indisponível → VP8` };
 }
 

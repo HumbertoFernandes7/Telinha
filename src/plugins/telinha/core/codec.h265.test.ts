@@ -61,7 +61,8 @@ describe("automatico: nunca H.265 (so manual), a ordem de antes", () => {
         assert.deepEqual([both.codec, both.h264Profile, both.h264Backup], ["h264", "640032", "42001f"]);
         assert.ok(!both.reason.includes("H.265"), both.reason);
         assert.deepEqual([chooseCodec(H265_ONLY, "auto", pc()).codec, chooseCodec(H265_ONLY, "auto", pc()).h264Profile], ["h264", "42001f"]);
-        assert.equal(chooseCodec(NO_HW, "auto", pc()).codec, "vp9");
+        // espectador sem H.264 na placa: o Baseline da placa deste PC (decodificar por software e leve), nunca VP9 por software
+        assert.deepEqual([chooseCodec(NO_HW, "auto", pc()).codec, chooseCodec(NO_HW, "auto", pc()).h264Profile], ["h264", "42001f"]);
         assert.deepEqual(chooseCodec(BOTH, "auto", pc({ h264HwEncode: false })), { codec: "vp9", reason: "automático: este PC não codifica H.264 por hardware → VP9" });
     });
 });
@@ -115,11 +116,12 @@ describe("H.265 fixado nas configuracoes: as mesmas redes de seguranca", () => {
         assert.match(d.reason, /^fixado nas configurações \(H\.265 por hardware nos dois lados/);
     });
 
-    test("o espectador decodifica H.265 na placa mas nao H.264: H.265 sem reserva H.264", () => {
+    test("o espectador decodifica H.265 na placa mas nao H.264 (decodifica por software): H.265 com o Baseline da placa de reserva", () => {
         const d = chooseCodec(NO_HW, "h265", pc());
         assert.equal(d.codec, "h265");
-        assert.equal(d.h264Profile, undefined);
-        assert.match(d.reason, /sem reserva H\.264 na placa para este espectador/);
+        assert.equal(d.h264Profile, "42001f");
+        assert.ok(!("h264Backup" in d));
+        assert.match(d.reason, /reserva H\.264 perfil 42001f\)$/);
     });
 
     test("sem a sonda, sem o espectador, ou com a placa travada: o que o automatico escolheria, e o motivo diz que o H.265 estava fixado", () => {
@@ -132,7 +134,8 @@ describe("H.265 fixado nas configuracoes: as mesmas redes de seguranca", () => {
         const stuck = chooseCodec(BOTH, "h265", pc({ h264HwEncode: false }));
         assert.equal(stuck.codec, "vp9", "a placa travada: nem o H.265 fixado");
         assert.match(stuck.reason, /^H\.265 fixado nas configurações, mas o H\.264 da placa está desligado neste PC/);
-        assert.equal(chooseCodec(NO_HW, "h265", pc({ h265HwFmtp: null })).codec, "vp9");
+        assert.equal(chooseCodec(NO_HW, "h265", pc({ h265HwFmtp: null })).codec, "h264");
+        assert.equal(chooseCodec(NO_HW, "h265", pc({ h265HwFmtp: null, h264HwEncode: false })).codec, "vp9");
     });
 
     test("os outros codecs fixados nao mudam (H.264 fixado continua o Baseline)", () => {

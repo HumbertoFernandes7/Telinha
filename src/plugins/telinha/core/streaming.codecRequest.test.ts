@@ -187,7 +187,14 @@ describe("pedido de VP9 de quem assiste (acao \"codec\")", () => {
     });
 
     test("quem nao esta assistindo, ou ja recebe VP9: ignorado (um aviso no maximo por minuto)", async () => {
-        const vp9 = await watcher("vp9", false);
+        // VP9 desde o inicio: fixado (no automatico, este PC codifica H.264 na placa e manda H.264 ate a quem decodifica por software)
+        pluginSettings.set("codec", "vp9");
+        let vp9: TestViewer;
+        try {
+            vp9 = await watcher("vp9", false);
+        } finally {
+            pluginSettings.set("codec", "auto");
+        }
         assert.equal(sendPlanFor(vp9.peerId)?.codec, "vp9");
         const since = logMark();
         await asks(vp9);
