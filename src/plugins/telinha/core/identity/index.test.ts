@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 
 import { eventually } from "@test/fakes/clock";
-import { dataStoreData, dataStoreImpl, makeUser, ME_ID, modals, UserStore } from "@test/fakes/vencord";
+import { dataStoreData, dataStoreImpl, makeUser, ME_ID, modals, restCalls, restControl, UserStore } from "@test/fakes/vencord";
 import { FakeRTCPeerConnection, installWebRtc, type WebRtcEnv } from "@test/fakes/webrtc";
 import { type FakeDiscord, installFakeDiscord, makeIdToken, makeRsaKey, type ShiftableNow, shiftableNow, type TestKey, tokenResponse } from "@test/helpers/wpa-identity";
 import { logged, logMark } from "@test/helpers/wpa-session";
@@ -104,7 +104,7 @@ describe("identidade local (index.ts)", () => {
     test("comeca 'carregando', sem token", () => {
         assert.deepEqual(getLocalIdentityState(), { status: "loading" });
         assert.equal(getLocalIdToken(), null);
-        assert.equal(localIdentityDiagnostics(), `identidade: configurada (app ${DISCORD_CLIENT_ID}); local: carregando; renovação sem janela: não`);
+        assert.equal(localIdentityDiagnostics(), `identidade: configurada (app ${DISCORD_CLIENT_ID}); local: carregando; renovação sem janela: direta pelo Discord (última: ainda não tentada)`);
     });
 
     test("certificado DTLS indisponivel: estado de erro, sem certificado (o Telinha segue sem prova)", async () => {
@@ -113,7 +113,7 @@ describe("identidade local (index.ts)", () => {
         assert.deepEqual(await prepareIdentity(), { certificates: [], fingerprint: null });
         assert.deepEqual(getLocalIdentityState(), { status: "error", error: "certificado DTLS indisponível" });
         assert.equal(logged(/^Identidade: não foi possível preparar o certificado DTLS: Error: sem suporte$/, mark).length, 1);
-        assert.match(localIdentityDiagnostics(), /local: erro \(certificado DTLS indisponível\); renovação sem janela: não; último erro local \d{4}-\d\d-\d\d \d\d:\d\d UTC: certificado DTLS: Error: sem suporte$/);
+        assert.match(localIdentityDiagnostics(), /local: erro \(certificado DTLS indisponível\); renovação sem janela: direta pelo Discord \(última: ainda não tentada\); último erro local \d{4}-\d\d-\d\d \d\d:\d\d UTC: certificado DTLS: Error: sem suporte$/);
         // de novo: continua em erro (so o primeiro carregamento muda o estado)
         await prepareIdentity();
         assert.equal(getLocalIdentityState().status, "error");
@@ -181,7 +181,7 @@ describe("identidade local (index.ts)", () => {
         assert.deepEqual(stored(), { idToken: issued, expiresAt: exp * 1000, fingerprint: cert.fingerprint, refreshToken: "R1" });
         assert.deepEqual(seen.map(s => s.status), ["authorizing", "ready"]);
         assert.equal(logged(/^Identidade do Discord pronta \(válida por ~60 min\)$/, mark).length, 1);
-        assert.match(localIdentityDiagnostics(), /local: pronta \(prova renovada em \d{4}-\d\d-\d\d \d\d:\d\d, aceita até \d{4}-\d\d-\d\d \d\d:\d\d UTC\); renovação sem janela: sim; último erro local .*certificado DTLS/);
+        assert.match(localIdentityDiagnostics(), /local: pronta \(prova renovada em \d{4}-\d\d-\d\d \d\d:\d\d, aceita até \d{4}-\d\d-\d\d \d\d:\d\d UTC\); renovação sem janela: direta pelo Discord \(última: ainda não tentada\); último erro local .*certificado DTLS/);
         assert.equal(await hasAuthorizedBefore(), true);
         off();
         offBroken();
@@ -389,35 +389,113 @@ describe("identidade local (index.ts)", () => {
             assert.equal(discord.tokenRequests.length, requests);
         });
 
-        test("emitido ha mais de 24 h: renova pelo refresh_token, sem janela", async () => {
+        /** RestAPI falso: o Discord ja conhece o app e os avisos foram aceitos; o POST devolve o location com o state do pedido */
+        function directApproves(gate?: Promise<void>) {
+            restControl.handler = async ({ method, request }) => {
+                await gate;
+                if (method === "get") return { body: request.url.endsWith("/disclosures") ? { all_acked: true } : { authorized: true }, status: 200 };
+                const { state } = (request.query as Record<string, string>);
+                return { body: { location: `${OAUTH_REDIRECT_URI}?code=CODE-${state}&state=${state}&iss=https%3A%2F%2Fdiscord.com` }, status: 200 };
+            };
+        }
+
+        /** RestAPI falso: o Discord diz que o app ainda nao foi autorizado */
+        function directRefuses(gate?: Promise<void>) {
+            restControl.handler = async () => {
+                await gate;
+                return { body: { authorized: false }, status: 200 };
+            };
+        }
+
+        test("emitido ha mais de 24 h: renova direto pelo Discord, sem modal e sem passar por 'autorizando'", async () => {
             clock.advance(25 * HOUR);
             const before = issued;
+            restCalls.length = 0;
+            directApproves();
             answerTokens({ refresh_token: "R4" });
+            const seen: LocalIdentityState[] = [];
+            const off = subscribeLocalIdentity(s => seen.push(s));
             assert.equal(await renewIdentity(), true);
-            const body = discord.tokenRequests.at(-1)!;
-            assert.equal(body.get("grant_type"), "refresh_token");
-            assert.equal(body.get("refresh_token"), "R3");
+            off();
+            assert.equal(modals.list().length, 0, "nenhuma janela");
+            assert.deepEqual(restCalls.map(c => `${c.method} ${c.request.url}`), [
+                "get /oauth2/authorize", `get /applications/${DISCORD_CLIENT_ID}/disclosures`, "post /oauth2/authorize"
+            ]);
+            assert.equal(discord.tokenRequests.at(-1)!.get("grant_type"), "authorization_code");
             assert.notEqual(issued, before);
             assert.equal(stored()?.refreshToken, "R4");
             assert.equal(getLocalIdToken(), issued);
+            assert.ok(seen.every(s => s.status !== "authorizing" && s.status !== "error"));
+            assert.match(localIdentityDiagnostics(), /renovação sem janela: direta pelo Discord \(última: ok às \d{4}-\d\d-\d\d \d\d:\d\d UTC\)/);
         });
 
-        test("refresh devolve id_token sem o nonce: guarda o refresh_token novo mesmo assim, e nao tenta de novo por 30 min", async () => {
+        test("direta recusada (ainda nao autorizado) e interativa: abre o modal com prompt none, sem trocar o estado antes", async () => {
             clock.advance(25 * HOUR);
-            const old = stored()!;
-            answerTokens({ refresh_token: "R5" }, () => goodToken({ claims: { nonce: undefined } }));
+            restCalls.length = 0;
+            directRefuses();
+            answerTokens({ refresh_token: "R5" });
+            const mark = logMark();
+            const renewing = renewIdentity({ interactive: true });
+            const modal = await nextModal();
+            assert.equal(modal.props.prompt, "none");
+            approve(modal);
+            assert.equal(await renewing, true);
+            assert.equal(restCalls.length, 1, "so o GET; nenhum POST escondido");
+            assert.equal(logged(/^Identidade: renovação sem janela não deu certo \(ainda não autorizado\)$/, mark).length, 1);
+            assert.equal(getLocalIdToken(), issued);
+        });
+
+        test("direta falha e nao interativa: false, sem modal, estado intacto e diagnostico com o motivo", async () => {
+            clock.advance(25 * HOUR);
+            restCalls.length = 0;
+            directRefuses();
+            const before = getLocalIdentityState();
+            const token = getLocalIdToken();
+            assert.equal(await renewIdentity(), false);
+            assert.equal(modals.list().length, 0);
+            assert.equal(restCalls.length, 1);
+            assert.equal(getLocalIdentityState(), before, "nao vira 'authorizing' nem 'error'");
+            assert.equal(getLocalIdToken(), token);
+            assert.match(localIdentityDiagnostics(), /renovação sem janela: direta pelo Discord \(última: não deu: ainda não autorizado às \d{4}-\d\d-\d\d \d\d:\d\d UTC\); último erro local .* UTC: renovação sem janela: ainda não autorizado/);
+        });
+
+        test("a direta so e tentada de novo depois de 30 min", async () => {
+            clock.advance(25 * HOUR + 1);
+            restCalls.length = 0;
+            directRefuses();
+            assert.equal(await renewIdentity(), false);
+            assert.equal(restCalls.length, 1);
+            clock.advance(29 * 60_000);
+            assert.equal(await renewIdentity(), false);
+            assert.equal(restCalls.length, 1, "dentro de 30 min: nem tenta");
+
+            clock.advance(2 * 60_000);
+            assert.equal(await renewIdentity(), false);
+            assert.equal(restCalls.length, 2, "passados 30 min: tenta de novo");
+        });
+
+        test("erro de rede na direta: nao lanca nem derruba o estado; a troca do code recusada tambem volta ao estado de antes", async () => {
+            clock.advance(25 * HOUR + 1);
+            const before = getLocalIdentityState();
+            restControl.handler = async () => {
+                throw new Error("rede caiu");
+            };
             const mark = logMark();
             assert.equal(await renewIdentity(), false);
-            assert.deepEqual(stored(), { ...old, refreshToken: "R5" }, "o Discord ja invalidou o R4");
-            assert.equal(logged(/^Identidade: renovação sem janela não deu certo \(Error: o token do Discord não passou na própria verificação \(fingerprint-mismatch\)\)$/, mark).length, 1);
-            assert.match(localIdentityDiagnostics(), /último erro local .* UTC: renovação sem janela: /);
+            assert.equal(getLocalIdentityState(), before);
+            assert.equal(logged(/^Identidade: renovação sem janela não deu certo \(erro: .*rede caiu.*\)$/, mark).length, 1);
 
-            const requests = discord.tokenRequests.length;
+            clock.advance(31 * 60_000);
+            directApproves();
+            discord.tokenImpl = () => tokenResponse({ error: "server_error" }, { status: 500 });
             assert.equal(await renewIdentity(), false);
-            assert.equal(discord.tokenRequests.length, requests, "dentro de 30 min: nem tenta");
+            assert.equal(getLocalIdentityState(), before, "falhou depois do POST: continua como estava");
+            assert.equal(modals.list().length, 0);
         });
 
-        test("interativa: reabre o modal com prompt none (no maximo 1x/24 h)", async () => {
+        test("modal: no maximo 1x/24 h, mesmo com a direta tentando de novo", async () => {
+            clock.advance(25 * HOUR + 1);
+            directRefuses();
             discord.tokenImpl = () => tokenResponse({ error: "server_error" }, { status: 500 });
             const first = renewIdentity({ interactive: true });
             const modal = await nextModal();
@@ -425,48 +503,101 @@ describe("identidade local (index.ts)", () => {
             approve(modal);
             assert.equal(await first, false);
 
+            restCalls.length = 0;
+            clock.advance(31 * 60_000);
             assert.equal(await renewIdentity({ interactive: true }), false);
-            assert.equal(modals.list().length, 0, "cancelado/falhou ha pouco: nao reabre");
-        });
+            assert.equal(restCalls.length, 1, "a direta tenta de novo");
+            assert.equal(modals.list().length, 0, "cancelado/falhou ha pouco: o modal nao reabre");
 
-        test("passado o intervalo: tenta o refresh de novo e, se falhar, o modal; o modal da certo", async () => {
             clock.advance(24 * HOUR + 1);
-            let refreshes = 0;
-            discord.tokenImpl = async body => {
-                if (body.get("grant_type") === "refresh_token") {
-                    refreshes++;
-                    return tokenResponse({ error: "invalid_grant" }, { status: 400 });
-                }
-                issued = await goodToken();
-                return tokenResponse({ id_token: issued });
-            };
+            answerTokens({ refresh_token: "R6" });
             const renewing = renewIdentity({ interactive: true });
             approve(await nextModal());
             assert.equal(await renewing, true);
-            assert.equal(refreshes, 1);
-            assert.equal(stored()?.refreshToken, "R5", "refresh recusado sem refresh_token novo: fica o guardado");
             assert.equal(getLocalIdToken(), issued);
         });
 
-        test("falha ao guardar o refresh_token novo nao estoura", async t => {
-            clock.advance(31 * 60_000 + 25 * HOUR);
-            answerTokens({ refresh_token: "R6" }, () => goodToken({ claims: { nonce: undefined } }));
-            t.mock.method(dataStoreImpl, "update", async () => {
-                throw new Error("IndexedDB travado");
-            });
-            assert.equal(await renewIdentity(), false);
-            assert.equal(stored()?.refreshToken, "R5");
+        test("sem nada guardado para a conta: nem tenta a direta", async () => {
+            const keep = stored()!;
+            setStored(null);
+            clock.advance(25 * HOUR);
+            restCalls.length = 0;
+            assert.equal(await renewIdentity({ interactive: true }), false);
+            assert.equal(restCalls.length, 0);
+            assert.equal(modals.list().length, 0);
+            setStored(keep);
+
+
+        test("clicar em Autorizar durante a direta que falha: espera e abre o modal consent", async () => {
+            clock.advance(25 * HOUR + 1);
+            restCalls.length = 0;
+            let release!: () => void;
+            directRefuses(new Promise<void>(resolve => (release = resolve)));
+            answerTokens({ refresh_token: "R7" });
+            const renewing = renewIdentity();
+            await eventually(() => restCalls.length > 0);
+            const click = authorizeIdentity();
+            assert.equal(modals.list().length, 0, "espera a direta");
+            release();
+            const modal = await nextModal();
+            assert.equal(modal.props.prompt, "consent");
+            approve(modal);
+            assert.equal(await click, true);
+            assert.equal(await renewing, false);
+            assert.equal(modals.list().length, 0);
         });
 
-        test("sem refresh_token guardado: so pelo modal", async () => {
-            const keep = stored()!;
-            setStored({ ...keep, refreshToken: undefined });
-            clock.advance(31 * 60_000);
-            const requests = discord.tokenRequests.length;
-            assert.equal(await renewIdentity(), false);
-            assert.equal(discord.tokenRequests.length, requests);
-            setStored(keep);
+        test("clicar em Autorizar durante a direta que da certo: true, sem modal", async () => {
+            clock.advance(25 * HOUR + 1);
+            restCalls.length = 0;
+            let release!: () => void;
+            directApproves(new Promise<void>(resolve => (release = resolve)));
+            answerTokens({ refresh_token: "R8" });
+            const renewing = renewIdentity();
+            await eventually(() => restCalls.length > 0);
+            const click = authorizeIdentity();
+            release();
+            assert.equal(await click, true);
+            assert.equal(await renewing, true);
+            assert.equal(modals.list().length, 0);
+            assert.equal(getLocalIdToken(), issued);
         });
+
+        test("renewIdentity com o modal consent aberto: false, sem segundo modal e sem marcar falha da direta", async () => {
+            clock.advance(25 * HOUR + 1);
+            restCalls.length = 0;
+            directRefuses();
+            const click = authorizeIdentity();
+            const modal = await nextModal();
+            assert.equal(await renewIdentity({ interactive: true }), false);
+            assert.equal(restCalls.length, 0, "nem tenta a direta");
+            assert.equal(modals.list().length, 1, "nenhum segundo modal");
+            modals.close(modal.key);
+            assert.equal(await click, false);
+
+            assert.equal(await renewIdentity(), false);
+            assert.equal(restCalls.length, 1, "depois de cancelar, a direta ainda tenta (nao ficou marcada como falha)");
+        });
+
+        test("Desvincular durante a direta: nada e gravado e o estado continua 'unauthorized'", async () => {
+            clock.advance(25 * HOUR + 1);
+            restCalls.length = 0;
+            let release!: () => void;
+            directApproves(new Promise<void>(resolve => (release = resolve)));
+            answerTokens({ refresh_token: "R9" });
+            const requests = discord.tokenRequests.length;
+            const renewing = renewIdentity();
+            await eventually(() => restCalls.length > 0);
+            await forgetIdentity();
+            release();
+            assert.equal(await renewing, false);
+            assert.equal(stored(), undefined);
+            assert.equal(getLocalIdToken(), null);
+            assert.deepEqual(getLocalIdentityState(), { status: "unauthorized" });
+            assert.equal(discord.tokenRequests.length, requests, "nem troca o code");
+            await authorizeOk("R10"); // deixa a conta autorizada para os testes seguintes
+        });
+    });
     });
 
     test("desvincular com o DataStore falhando: rejeita e nada muda (continua pronta, o token continua indo no hello)", async t => {

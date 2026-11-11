@@ -226,7 +226,7 @@ async function switchRoom(gid: string | null, vc: string | null, reason: string)
             // o certificado precisa estar pronto ANTES do joinRoom: o Trystero cria ofertas logo na entrada
             identity = await withTimeout(prepareIdentity(), IDENTITY_PREPARE_TIMEOUT_MS, NO_IDENTITY);
             if (seq !== joinSeq || !active) return;
-            // so faz algo se ja autorizou e o token falta/esta vencendo (refresh_token; modal "none" no maximo 1x/24 h)
+            // so faz algo se ja autorizou e o token falta/esta vencendo (renovacao direta sem janela: GET authorize so com authorized:true, avisos do app, POST; modal "none" de reserva no maximo 1x/24 h)
             renewIdentity({ interactive: true }).catch(e => log.warn("Identidade: renovação falhou: " + errorText(e)));
         }
         joinNow(roomId, reason, identity);

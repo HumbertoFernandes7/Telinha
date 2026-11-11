@@ -25,6 +25,7 @@ export function createRoot(container: Element | DocumentFragment, options?: unkn
     return (requireLazy("react-dom/client") as typeof import("react-dom/client")).createRoot(container, options as any);
 }
 
+export { RestAPI } from "./rest";
 export {
     ChannelRouter, ChannelRTCStore, ChannelStore, FluxDispatcher, NavigationRouter, PopoutActions, PopoutWindowStore, RelationshipStore,
     SelectedChannelStore, UserStore, VoiceStateStore
