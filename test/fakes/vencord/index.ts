@@ -13,6 +13,7 @@ import { resetDataStore } from "./api/DataStore";
 import { resetNotifications } from "./api/Notifications";
 import { pluginSettings } from "./api/Settings";
 import { resetErrorBoundaries } from "./components/ErrorBoundary";
+import { resetRest } from "./rest";
 import { ChannelStore, FluxDispatcher, GUILD_ID, makeChannel, ME_ID, resetStores, SelectedChannelStore, VoiceStateStore } from "./stores";
 import { resetUi } from "./ui";
 import { resetClipboard } from "./utils/clipboard";
@@ -24,6 +25,7 @@ export { dataStoreData, dataStoreImpl } from "./api/DataStore";
 export { type NotificationRecord, notifications, notificationsImpl } from "./api/Notifications";
 export { pluginSettings } from "./api/Settings";
 export { type CaughtError, caughtErrors } from "./components/ErrorBoundary";
+export { type RestCall, restCalls, restControl, type RestHandler, type RestRequest, type RestResponse } from "./rest";
 export * from "./stores";
 export { Menu, Modal, MODAL_CLOSE_LABEL, ModalHost, modals, OAuth2AuthorizeModal, type OpenModal, Select, type ToastRecord, toasts, Tooltip } from "./ui";
 export { clipboard, clipboardImpl } from "./utils/clipboard";
@@ -76,5 +78,6 @@ export function resetVencordFakes() {
     resetLogger();
     resetErrorBoundaries();
     resetContextMenus();
+    resetRest();
     webpackModules.reset();
 }

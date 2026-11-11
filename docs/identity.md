@@ -140,8 +140,9 @@ Não impede:
   próprio Discord ("Telinha quer acessar sua conta: saber quem você é"). O aviso só aparece com Client ID e
   enquanto a conta não autorizou (ou a última tentativa falhou); autorização vencida não gera aviso.
 - **Renovação**: ao entrar numa sala, quando o token tem mais de ~24 h desde a emissão (ou falta menos de 1 dia
-  para o fim da carência): sem UI pelo `refresh_token` (falhou: só tenta de novo depois de 30 min; o
-  refresh_token novo que o Discord devolve é guardado mesmo se o id_token não servir); senão o modal com
+  para o fim da carência): sem janela, fazendo direto os mesmos pedidos que o modal faz (`GET /oauth2/authorize`, só segue se vier
+  `authorized: true`; avisos do app em `/applications/<id>/disclosures` todos aceitos; `POST /oauth2/authorize`);
+  nunca autoriza quem não consentiu. Se não der (tenta de novo só depois de 30 min), o modal com
   `prompt=none` no máximo 1× a cada 24 h. Nunca no meio da call; nunca para quem nunca autorizou. Enquanto
   a renovação não dá certo, o token antigo continua sendo enviado até o fim da carência; passado esse fim, nunca.
 - **Selo por peer**: "✔ verificado", "não verificado" (sem token, versão antiga, vencido) ou "✖ identidade
