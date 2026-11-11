@@ -9,15 +9,16 @@
 // Lado local:  prepareIdentity() antes do joinRoom (certificado fixo + token guardado),
 //              getLocalIdToken({ fingerprint }) para o hello, authorizeIdentity() no botao "Autorizar o
 //              Telinha no Discord", renewIdentity() ao entrar numa sala quando o token ja esta velho (a
-//              prova vale ate MAX_TOKEN_AGE_MS depois do `exp`; ver docs/identity.md).
+//              prova vale ate MAX_TOKEN_AGE_MS depois do `exp`; ver docs/identity.md). A renovacao faz direto os
+//              pedidos HTTP do modal (directAuthorize.ts), sem janela; so se o Discord nao deixar, abre o modal.
 // Lado remoto: verifyRemoteIdentity({ pc, idToken, claimedUserId }) no onPeerJoin / acao "identity".
 //
 // Sem Client ID (isIdentityConfigured() false) nada disso faz efeito: estado "disabled", sem certificado
 // proprio, sem token, sem rede (comportamento da v0.1.0).
 //
 // Nada roda no carregamento do modulo. Tokens nunca vao para o log nem para o diagnostico. O access_token
-// e descartado na hora (so o id_token interessa); o refresh_token (escopo openid, so le /oauth2/userinfo)
-// fica no DataStore do Vencord (IndexedDB), por conta do Discord, para renovar sem abrir o modal.
+// e descartado na hora (so o id_token interessa); o refresh_token (escopo openid) ainda e guardado no DataStore do
+// Vencord (IndexedDB), mas nao renova nada: o Discord nao devolve id_token nesse caminho.
 
 import * as DataStore from "@api/DataStore";
 import { errorMessage, errorText, log, logThrottled } from "@plugins/telinha/core/log";
@@ -26,11 +27,12 @@ import { UserStore } from "@webpack/common";
 import { AuthorizationCancelled, openAuthorizeModal } from "./authorize";
 import { getLocalCertificate, type LocalCertificate } from "./certificate";
 import { DISCORD_CLIENT_ID, isIdentityConfigured, OAUTH_REDIRECT_URI, OAUTH_SCOPES, tokenAcceptedUntil, tokenNeedsRenewal } from "./config";
+import { authorizeDirect } from "./directAuthorize";
 import { randomUrlSafe } from "./encoding";
 import { nonceForFingerprint } from "./fingerprint";
 import { JwksCache, type StoredJwks } from "./jwks";
 import { decodeJwt } from "./jwt";
-import { buildCodeExchangeBody, buildRefreshBody, createPkcePair, parseAuthorizeLocation, requestToken, type TokenResponse } from "./oauth";
+import { buildCodeExchangeBody, createPkcePair, parseAuthorizeLocation, requestToken, type TokenResponse } from "./oauth";
 import { getRemoteDtlsFingerprint } from "./remoteFingerprint";
 import { type IdentityVerdict, identityVerdict, type PeerIdentityResult, verifyPeerIdentity } from "./verify";
 
@@ -41,8 +43,8 @@ const TOKEN_STORE_KEY = "telinha-identity-tokens-v1";
 const JWKS_STORE_KEY = "telinha-identity-jwks-v1";
 /** renovacao com modal (prompt "none") no maximo 1x neste intervalo: cancelar nao reabre a cada sala */
 const INTERACTIVE_RENEW_INTERVAL_MS = 24 * 60 * 60_000;
-/** refresh_token recusado: nao tenta de novo a cada sala antes disto */
-const REFRESH_RETRY_MS = 30 * 60_000;
+/** renovacao direta (sem janela) que nao deu certo: nao tenta de novo a cada sala antes disto */
+const DIRECT_RETRY_MS = 30 * 60_000;
 
 interface StoredIdentity {
     idToken: string;
@@ -75,8 +77,14 @@ export type LocalIdentityStatus = LocalIdentityState["status"];
 let state: LocalIdentityState = isIdentityConfigured() ? { status: "loading" } : { status: "disabled" };
 let token: StoredIdentity | null = null;
 let inflightAuth: Promise<boolean> | null = null;
+/** renovacao sem janela em andamento (separada do modal: o clique em "Autorizar" nunca fica sem janela por causa dela) */
+let inflightDirect: Promise<boolean> | null = null;
+/** sobe quando a conta/token e trocado (Desvincular): a renovacao direta que comecou antes nao grava nada */
+let identityEpoch = 0;
 let lastInteractiveRenew = -Infinity;
-let lastRefreshFailure = -Infinity;
+let lastDirectFailure = -Infinity;
+/** ultimo resultado da renovacao direta (diagnostico) */
+let lastDirect: { at: number; ok: true; } | { at: number; ok: false; reason: string; } | null = null;
 let jwksCache: JwksCache | null = null;
 /** ultimo erro do lado local (diagnostico; nunca contem tokens) */
 let lastError: { at: number; text: string; } | null = null;
@@ -197,7 +205,7 @@ export async function hasAuthorizedBefore(): Promise<boolean> {
 }
 
 /** Confere o proprio token como um peer conferiria e guarda. Lanca com mensagem clara se nao bater. */
-async function acceptOwnTokens(tokens: TokenResponse, cert: LocalCertificate, userId: string, previousRefresh?: string) {
+async function acceptOwnTokens(tokens: TokenResponse, cert: LocalCertificate, userId: string, previousRefresh?: string, stillValid?: () => boolean) {
     if (!tokens.id_token) throw new Error("o Discord não devolveu id_token (o escopo openid foi concedido?)");
     const result = await verifyPeerIdentity({
         idToken: tokens.id_token,
@@ -207,6 +215,7 @@ async function acceptOwnTokens(tokens: TokenResponse, cert: LocalCertificate, us
         jwks: await jwks().get()
     });
     if (!result.ok) throw new Error(`o token do Discord não passou na própria verificação (${result.reason})`);
+    if (stillValid && !stillValid()) throw new Error("a conta ou a autorização mudou durante a renovação");
     const value: StoredIdentity = {
         idToken: tokens.id_token,
         expiresAt: result.expiresAt,
@@ -223,17 +232,29 @@ async function acceptOwnTokens(tokens: TokenResponse, cert: LocalCertificate, us
 /**
  * Abre o modal "Autorizar" do Discord e troca o code pelo id_token. `silent` usa prompt "none":
  * o Discord confirma sozinho se ja houve autorizacao (senao mostra a tela normal).
+ * `via: "direct"` (com `silent`) faz os mesmos pedidos do modal sem abri-lo (directAuthorize.ts): se o Discord nao
+ * deixar, volta ao estado de antes (nunca "authorizing"/"error") e devolve false.
  * true = pronto; false = cancelado/falhou (estado e log explicam).
  */
-export function authorizeIdentity({ silent = false }: { silent?: boolean; } = {}): Promise<boolean> {
+export function authorizeIdentity({ silent = false, via = "modal" }: { silent?: boolean; via?: "modal" | "direct"; } = {}): Promise<boolean> {
     if (!isIdentityConfigured()) {
         setState({ status: "disabled" });
         return Promise.resolve(false);
     }
-    if (inflightAuth) return inflightAuth;
+    const direct = silent && via === "direct";
+    if (direct) {
+        if (inflightDirect) return inflightDirect;
+        if (inflightAuth) return Promise.resolve(false); // ja ha um modal aberto: nada de segunda tentativa
+    } else {
+        if (inflightAuth) return inflightAuth;
+        // clique/modal com a direta em andamento: espera; se nao deu, abre o modal normalmente (nunca morre sem janela)
+        if (inflightDirect) return inflightDirect.catch(() => false).then(ok => ok || authorizeIdentity({ silent, via }));
+    }
     const run = (async () => {
         const previous = state;
         const userId = myId();
+        const epoch = identityEpoch;
+        const stale = () => identityEpoch !== epoch || myId() !== userId;
         // renovacao silenciosa com o token antigo ainda aceito: segue "pronta" (o hello continua levando o token
         // e uma falha do Discord nao derruba uma prova ainda boa)
         const keepReady = silent && previous.status === "ready" && previous.userId === userId && previous.expiresAt > Date.now();
@@ -242,9 +263,7 @@ export function authorizeIdentity({ silent = false }: { silent?: boolean; } = {}
             const cert = await getLocalCertificate();
             const [pkce, nonce] = await Promise.all([createPkcePair(), nonceForFingerprint(cert.fingerprint)]);
             const oauthState = randomUrlSafe(16);
-            if (!keepReady) setState({ status: "authorizing" });
-
-            const location = await openAuthorizeModal({
+            const request = {
                 clientId: DISCORD_CLIENT_ID,
                 redirectUri: OAUTH_REDIRECT_URI,
                 scopes: [...OAUTH_SCOPES],
@@ -253,7 +272,23 @@ export function authorizeIdentity({ silent = false }: { silent?: boolean; } = {}
                 codeChallenge: pkce.challenge,
                 codeChallengeMethod: "S256",
                 prompt: silent ? "none" : "consent"
-            });
+            } as const;
+
+            let location: string;
+            if (direct) {
+                const result = await authorizeDirect({ ...request, scopes: [...request.scopes] });
+                if (stale()) return false;
+                if (!result.ok) {
+                    lastDirect = { at: Date.now(), ok: false, reason: result.reason };
+                    lastError = { at: Date.now(), text: "renovação sem janela: " + result.reason };
+                    log.info(`Identidade: renovação sem janela não deu certo (${result.reason})`);
+                    return false;
+                }
+                location = result.location;
+            } else {
+                if (!keepReady) setState({ status: "authorizing" });
+                location = await openAuthorizeModal({ ...request, scopes: [...request.scopes] });
+            }
             const parsed = parseAuthorizeLocation(location, { state: oauthState, redirectUri: OAUTH_REDIRECT_URI });
             if (!parsed.ok) throw new Error(parsed.error);
 
@@ -261,9 +296,20 @@ export function authorizeIdentity({ silent = false }: { silent?: boolean; } = {}
                 clientId: DISCORD_CLIENT_ID, code: parsed.code, codeVerifier: pkce.verifier, redirectUri: OAUTH_REDIRECT_URI
             }));
             const stored = await loadStored(userId);
-            await acceptOwnTokens(tokens, cert, userId, stored?.refreshToken);
+            if (direct && stale()) return false;
+            await acceptOwnTokens(tokens, cert, userId, stored?.refreshToken, direct ? () => !stale() : undefined);
+            if (direct) lastDirect = { at: Date.now(), ok: true };
             return true;
         } catch (e) {
+            if (direct) {
+                if (stale()) return false; // Desvincular/troca de conta no meio: nao mexe em nada
+                // renovacao sem janela nunca derruba o estado nem mostra erro: quem chamou cai no modal
+                lastDirect = { at: Date.now(), ok: false, reason: errorText(e) };
+                lastError = { at: Date.now(), text: "renovação sem janela: " + errorText(e) };
+                log.info(`Identidade: renovação sem janela não deu certo (${errorText(e)})`);
+                setState(previous);
+                return false;
+            }
             if (e instanceof AuthorizationCancelled) {
                 setState(previous.status === "authorizing" ? { status: "unauthorized" } : previous);
                 return false;
@@ -275,20 +321,22 @@ export function authorizeIdentity({ silent = false }: { silent?: boolean; } = {}
             return false;
         }
     })();
-    inflightAuth = run;
+    if (direct) inflightDirect = run;
+    else inflightAuth = run;
     // limpa so depois da atribuicao acima: sem usuario o corpo termina sem nenhum await, e um `finally` dentro dele
     // rodaria ANTES dela (o pedido ficava "em andamento" para sempre e "Autorizar" nunca mais abria o modal).
     // Limpa tambem se o pedido falhar de vez (ex.: o proprio log do erro lancar): quem chamou ainda recebe a rejeicao.
     const done = () => {
         if (inflightAuth === run) inflightAuth = null;
+        if (inflightDirect === run) inflightDirect = null;
     };
     void run.then(done, done);
     return run;
 }
 
 /**
- * Renova o token proprio se ja esta velho (tokenNeedsRenewal): primeiro pelo refresh_token (sem UI); se o Discord nao
- * devolver um id_token amarrado ao nosso certificado e `interactive`, reabre o modal com prompt "none".
+ * Renova o token proprio se ja esta velho (tokenNeedsRenewal): primeiro direto pelo Discord, sem janela (os mesmos
+ * pedidos do modal, ver directAuthorize.ts); se nao der e `interactive`, reabre o modal com prompt "none".
  */
 export async function renewIdentity({ interactive = false }: { interactive?: boolean; } = {}): Promise<boolean> {
     if (!isIdentityConfigured()) return false;
@@ -298,26 +346,10 @@ export async function renewIdentity({ interactive = false }: { interactive?: boo
     const userId = myId();
     const stored = userId ? await loadStored(userId) : null;
     if (!stored) return false; // nunca autorizou: so pelo botao
-    if (stored.refreshToken && Date.now() - lastRefreshFailure >= REFRESH_RETRY_MS) {
-        try {
-            const cert = await getLocalCertificate();
-            const tokens = await requestToken(buildRefreshBody({ clientId: DISCORD_CLIENT_ID, refreshToken: stored.refreshToken }));
-            try {
-                await acceptOwnTokens(tokens, cert, userId, stored.refreshToken);
-            } catch (e) {
-                // o Discord troca o refresh_token a cada uso: guarda o novo mesmo se o id_token nao servir (ex.: sem
-                // o nonce), senao a proxima renovacao sem janela usaria um refresh_token ja invalidado
-                if (tokens.refresh_token && tokens.refresh_token !== stored.refreshToken) {
-                    await saveStored(userId, { ...stored, refreshToken: tokens.refresh_token }).catch(() => { });
-                }
-                throw e;
-            }
-            return true;
-        } catch (e) {
-            lastRefreshFailure = Date.now();
-            lastError = { at: Date.now(), text: "renovação sem janela: " + errorText(e) };
-            log.info("Identidade: renovação sem janela não deu certo (" + errorText(e) + ")");
-        }
+    if (inflightAuth) return false; // ja ha um modal aberto: nao tenta nada nem conta como falha da direta
+    if (Date.now() - lastDirectFailure >= DIRECT_RETRY_MS) {
+        if (await authorizeIdentity({ silent: true, via: "direct" })) return true;
+        lastDirectFailure = Date.now();
     }
     if (!interactive || Date.now() - lastInteractiveRenew < INTERACTIVE_RENEW_INTERVAL_MS) return false;
     lastInteractiveRenew = Date.now();
@@ -327,11 +359,13 @@ export async function renewIdentity({ interactive = false }: { interactive?: boo
 /** Esquece o token desta conta ("Desvincular"; o certificado continua). Quem ja verificou continua ate reconectar. */
 export async function forgetIdentity(): Promise<void> {
     const userId = myId();
+    identityEpoch++; // uma renovacao direta em andamento nao grava por cima
     // grava primeiro: se o DataStore falhar, nada muda (a UI avisa "não deu para desvincular" e continua coerente:
     // autorizada, com o token ainda indo no hello)
     if (userId) await saveStored(userId, null);
     token = null;
-    lastInteractiveRenew = lastRefreshFailure = -Infinity;
+    lastInteractiveRenew = lastDirectFailure = -Infinity;
+    lastDirect = null;
     setState(isIdentityConfigured() ? { status: "unauthorized" } : { status: "disabled" });
     log.info("Identidade: Telinha desvinculado desta conta neste PC");
 }
@@ -352,7 +386,8 @@ export function localIdentityDiagnostics(): string {
     const local = s.status === "ready" ? `pronta (prova renovada em ${time(s.issuedAt)}, aceita até ${time(s.expiresAt)} UTC)`
         : s.status === "error" ? `erro (${s.error})`
             : LOCAL_STATUS_TEXT[s.status];
-    return `identidade: configurada (app ${DISCORD_CLIENT_ID}); local: ${local}; renovação sem janela: ${token?.refreshToken ? "sim" : "não"}`
+    const direct = !lastDirect ? "ainda não tentada" : lastDirect.ok ? `ok às ${time(lastDirect.at)} UTC` : `não deu: ${lastDirect.reason} às ${time(lastDirect.at)} UTC`;
+    return `identidade: configurada (app ${DISCORD_CLIENT_ID}); local: ${local}; renovação sem janela: direta pelo Discord (última: ${direct})`
         + (lastError ? `; último erro local ${time(lastError.at)} UTC: ${lastError.text}` : "");
 }
 
