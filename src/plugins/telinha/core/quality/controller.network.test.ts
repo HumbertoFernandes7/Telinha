@@ -396,6 +396,133 @@ describe("rede de um espectador: banda estimada bem abaixo do degrau", () => {
     }
 });
 
+describe("rede de um espectador: alvo do encoder preso no piso (estimador sem sair do chao)", () => {
+    const h264 = (rates: Partial<EncoderRates>) => new EncoderSim({ mimeType: "video/H264", fps: 60, sourceFps: 60, ...rates });
+    /** Com banda de sobra (o degrau ja deu o que pede), a fonte em movimento. */
+    const GOOD_RATES: Partial<EncoderRates> = { availableKbps: 20_000, kbps: 16_000, link: LINK };
+
+    /** O encoder dele (NVENC, H.264), no log de 02/11: tela parada, uma rajada e o GCC preso no piso. */
+    const nvenc = (rates: Partial<EncoderRates>) => h264({ implementation: NVENC_IMPLEMENTATION, powerEfficient: true, ...rates });
+    const STILL: Partial<EncoderRates> = { availableKbps: 20_000, fps: 1, sourceFps: 1, link: { ...LINK, targetKbps: 30, qp: 18, rttMs: 7 } };
+    /** A janela presa: est 233, alvo 30, qp 45-51, perda 0. */
+    const stuck = (sim: EncoderSim, at: number, sourceFps: number, sent = 26 + (at / EVAL_MS) * 7 % 55, rttMs = 7) => sim.set({
+        availableKbps: 233, kbps: sent, fps: Math.min(sourceFps, 12), sourceFps,
+        link: { ...LINK, targetKbps: 30, qp: 45 + (at / EVAL_MS) % 7, rttMs, lossPct: 0 }
+    });
+
+    test("log real: tela parada 90 s, uma rajada e o GCC preso (est 233, alvo 30, fonte 36 fps, 0% de perda) por 5 min: nao desce", async t => {
+        const clock = useFakeClock(t);
+        const sim = nvenc({ ...STILL, kbps: 12 });
+        const h = qualityHarness(clock, { A: sim });
+        await h.join("A");
+        for (let at = 0; at < 90_000; at += EVAL_MS) {
+            sim.set({ kbps: 12 + (at / EVAL_MS) * 11 % 70 });
+            await h.runUntil(at + EVAL_MS);
+        }
+        assert.equal(h.controller.levelFor("A"), "1080p60");
+        const lines = await logsDuring(async () => {
+            stuck(sim, 90_000, 12, 7096, 80);
+            await h.runUntil(92_000);
+            // 36 fps em todas as janelas por 60 s, depois 12/36 em blocos de 10 s
+            for (let at = 92_000; at < 392_000; at += EVAL_MS) {
+                stuck(sim, at, at < 152_000 || Math.floor(at / 10_000) % 2 ? 36 : 12);
+                await h.runUntil(at + EVAL_MS);
+            }
+        });
+        assert.deepEqual(qualityLines(lines), []);
+        assert.equal(h.controller.levelFor("A"), "1080p60");
+    });
+
+    test("caminho estreito de verdade (est 250, alvo 100, qp 48, fonte 60, sem perda): nunca teve banda para o degrau, continua descendo", async t => {
+        const clock = useFakeClock(t);
+        const sim = nvenc({ availableKbps: 250, kbps: 90, link: { ...LINK, targetKbps: 100, qp: 48 } });
+        const h = qualityHarness(clock, { A: sim });
+        await h.join("A");
+        await h.runUntil(120_000);
+        assert.notEqual(h.controller.levelFor("A"), "1080p60");
+    });
+
+    test("dois espectadores presos ao mesmo tempo, depois de terem banda: nao viram upload nem descem", async t => {
+        const clock = useFakeClock(t);
+        const sims = { A: nvenc(GOOD_RATES), B: nvenc(GOOD_RATES) };
+        const h = qualityHarness(clock, sims);
+        await h.join("A");
+        await h.join("B");
+        await h.runUntil(40_000);
+        const lines = await logsDuring(async () => {
+            for (let at = 40_000; at < 240_000; at += EVAL_MS) {
+                stuck(sims.A, at, 36);
+                stuck(sims.B, at, 36);
+                await h.runUntil(at + EVAL_MS);
+            }
+        });
+        assert.deepEqual(qualityLines(lines), []);
+        assert.equal(h.controller.state?.reason, null);
+        assert.deepEqual([h.controller.levelFor("A"), h.controller.levelFor("B")], ["1080p60", "1080p60"]);
+    });
+
+    test("presos, com a captura pela placa e 30 ms por quadro (acima do limite) com os encoders para tras: nao derruba ninguem por placa", async t => {
+        const clock = useFakeClock(t);
+        const sims = { A: nvenc(GOOD_RATES), B: nvenc(GOOD_RATES) };
+        const h = qualityHarness(clock, sims, { gpuCapture: () => true });
+        await h.join("A");
+        await h.join("B");
+        await h.runUntil(40_000);
+        const lines = await logsDuring(async () => {
+            for (let at = 40_000; at < 240_000; at += EVAL_MS) {
+                for (const sim of Object.values(sims)) {
+                    stuck(sim, at, 60);
+                    sim.set({ encodeBusy: 30 * 12 / 1000 });
+                }
+                await h.runUntil(at + EVAL_MS);
+            }
+        });
+        assert.deepEqual(qualityLines(lines), []);
+        assert.deepEqual([h.controller.levelFor("A"), h.controller.levelFor("B")], ["1080p60", "1080p60"]);
+    });
+
+    // fonte 60, H.264 qp 40, est 2000 (< 0,7 x 4500), enviando metade do alvo: so o qp conta, e so com o alvo >= 0,5 x est
+    for (const [ratio, down] of [[0.49, false], [0.51, true]] as const) {
+        test(`fronteira do alvo: ${ratio} x a estimativa ${down ? "desce" : "nao desce"}`, async t => {
+            // antes a estimativa deu os 4500 do degrau (so quem ja teve banda fica isento)
+            const { h, sim } = await viewer(t);
+            const target = 2000 * ratio;
+            sim.set({ mimeType: "video/H264", availableKbps: 2000, kbps: target / 2, link: { ...LINK, targetKbps: target, qp: 40 } });
+            await h.runUntil(160_000);
+            assert.equal(h.controller.levelFor("A"), down ? "720p60" : "1080p60");
+        });
+    }
+
+    test("alvo desconhecido (0) com qp 40 e a fonte em movimento: continua descendo como antes", async t => {
+        const clock = useFakeClock(t);
+        const sim = h264({ availableKbps: 2000, kbps: 600, link: { ...LINK, targetKbps: 0, qp: 40 } });
+        const h = qualityHarness(clock, { A: sim });
+        await h.join("A");
+        await h.runUntil(120_000);
+        assert.equal(h.controller.levelFor("A"), "720p60");
+    });
+
+    test("estouro sustentado (enviado 7096 contra 233 estimados, alvo 30) com 150 ms de espera no pacer: desce por fila", async t => {
+        const { h, sim } = await viewer(t);
+        sim.set({ availableKbps: 233, kbps: 7096, link: { ...LINK, targetKbps: 30, qp: 20, pacerMs: 150 } });
+        const lines = await logsDuring(() => h.runUntil(60_000));
+        const down = qualityLines(lines);
+        assert.equal(down.length, 1);
+        assert.match(down[0], /fila de 150 ms no envio/);
+        assert.equal(h.controller.levelFor("A"), "720p60");
+    });
+
+    test("rede ruim de verdade (10% de perda, est e alvo baixos): continua descendo, um degrau a cada ~14 s, ate 720p30", async t => {
+        const { h, sim } = await viewer(t);
+        sim.set({ availableKbps: 800, kbps: 300, link: { ...LINK, lossPct: 10, targetKbps: 200, qp: 45 } });
+        await h.runUntil(200_000);
+        assert.deepEqual(h.applied.map(a => a.level), ["1080p60", "720p60", "720p30"]);
+        const [, a, b] = h.applied.map(x => x.atMs);
+        assert.ok(a - 40_000 <= 16_000, `1o degrau em ${a - 40_000} ms`);
+        assert.ok(b - a <= 16_000, `2o degrau em ${b - a} ms`);
+    });
+});
+
 describe("rede de um espectador: subir de volta", () => {
     /** A desce por perda aos 54 s (720p60) e a rede volta aos 60 s. */
     async function downByLoss(t: Parameters<typeof useFakeClock>[0]) {
