@@ -100,7 +100,8 @@ const CPU_STREAK = 2;
 //   NET_PACER_MS no pacer deste PC;
 // - banda curta: a banda estimada abaixo do que o degrau pede (LEVELS.minKbps), com o envio usando >= NET_FULL_RATIO
 //   dela (o caminho esta cheio; com menos, e o encoder que pede pouco, ex.: tela parada); ou a banda estimada bem
-//   abaixo do que o degrau pede (< NET_FAR_BELOW_RATIO dele) com o encoder de fato sem banda (encoderStarved).
+//   abaixo do que o degrau pede (< NET_FAR_BELOW_RATIO dele) com o encoder de fato sem banda (encoderStarved); nao conta
+//   (stuckOnFloor) quem ja teve banda para o degrau e agora tem o alvo < TARGET_OF_EST_RATIO da estimativa (GCC no piso).
 // So desce com o problema seguido por mais que um soluco (log de 31/10: dois soluços de ~10 s, e o WebRTC encolhia a
 // imagem de 1080p a 320x180 e levava ~60 s para voltar):
 const NET_LOSS_ALONE_PCT = 5;
@@ -288,6 +289,8 @@ interface NetState {
     enoughFor: QualityLevel | null;
     /** a ultima janela: algum problema / o estimador recuou */
     trouble: boolean;
+    /** a ultima janela: preso no piso do estimador (stuckOnFloor), isento da banda curta e fora da conta da placa */
+    stuckOnFloor: boolean;
     backoff: boolean;
     /** banda estimada, envio (kbps) e se o estimador recuou, da janela anterior (envio e recuo: so no degrau atual) */
     lastEst: number | null;
@@ -310,7 +313,7 @@ interface NetWindow {
 }
 
 const newNet = (): NetState => ({
-    level: null, congestedSince: null, troubleSince: null, enoughFor: null, trouble: false, backoff: false, lastEst: null, lastSent: null,
+    level: null, congestedSince: null, troubleSince: null, enoughFor: null, trouble: false, stuckOnFloor: false, backoff: false, lastEst: null, lastSent: null,
     lastBackoff: false, rtts: [], windows: []
 });
 
@@ -342,6 +345,18 @@ function calmShare(n: NetState, now: number, since: number, ms: number, calm: (w
 
 /** Uma casa decimal com virgula. */
 const dec = (v: number) => v.toFixed(1).replace(".", ",");
+
+/**
+ * O espectador esta preso no piso do estimador? So quem JA teve banda para o degrau (enoughFor) e agora tem o alvo
+ * (targetBitrate) abaixo de TARGET_OF_EST_RATIO da estimativa: o GCC ficou no chao depois de uma rajada vinda de tela
+ * parada (log: est 233, alvo 30, perda 0), a imagem esta limitada pelo alvo, rebaixar nao ajuda e so atrasa a volta. Quem
+ * nunca teve banda para o degrau (caminho estreito de verdade), ou sem alvo medido, desce como antes. (estBelow ja exige est.)
+ */
+function stuckOnFloor(m: WindowMetrics, n: NetState, need: number): boolean {
+    const target = m.targetKbps;
+    if (target == null || target <= 0 || m.availableKbps == null) return false;
+    return !!n.enoughFor && LEVELS[n.enoughFor].minKbps >= need && target < m.availableKbps * TARGET_OF_EST_RATIO;
+}
 
 /**
  * O encoder esta de fato sem banda (NET_FAR_BELOW_RATIO): a fonte em movimento (>= STATIC_SOURCE_FPS) e ele usando o alvo
@@ -810,7 +825,7 @@ export class QualityController {
 
     /**
      * Com a captura pela placa de video (GPU_KEEP_UP): a mediana de quadros codificados / esperados dos mesmos encoders do
-     * gpuNow nesta janela. Fora quem a propria rede limita: com problema agora (trackNet → trouble), ja abaixo do degrau
+     * gpuNow nesta janela. Fora quem a propria rede limita: com problema agora (trackNet → trouble), preso no piso do estimador (stuckOnFloor), ja abaixo do degrau
      * de todos pela banda dele (no piso, 720p30, a banda curta nao e mais problema), limitado por banda pelo WebRTC ou com a
      * rede cheia (netSaturated, como na regra de CPU; ex.: um pico de movimento com a estimativa pouco acima do que o
      * degrau pede). O WebRTC descarta quadros dele para caber na banda (log de 02/11: 4 de 29 fps com 735 kbps estimados),
@@ -822,7 +837,7 @@ export class QualityController {
             const m = v.metrics;
             if (!m.hardware || m.encodeMsPerFrame == null || m.encodedFps < MIN_ENCODED_FPS) continue;
             const level = this.levelFor(v.peerId);
-            if (v.net.trouble || meet(this.global, v.bwLevel) !== this.global || m.bandwidthFraction >= ANY_LIMIT_FRACTION || netSaturated(m, level)) continue;
+            if (v.net.trouble || v.net.stuckOnFloor || meet(this.global, v.bwLevel) !== this.global || m.bandwidthFraction >= ANY_LIMIT_FRACTION || netSaturated(m, level)) continue;
             const { fps } = LEVELS[level];
             ratios.push(m.encodedFps / Math.min(fps, m.sourceFps != null && m.sourceFps > 0 ? m.sourceFps : fps));
         }
@@ -913,7 +928,8 @@ export class QualityController {
             ? `perda de ${dec(m.lossPct)}%` : null;
         const queue = m.pacerMs != null && m.pacerMs > NET_PACER_MS ? `fila de ${Math.round(m.pacerMs)} ms no envio` : null;
         const congestion = loss ?? rtt ?? queue;
-        const short = estBelow && ((est! < need * NET_FAR_BELOW_RATIO && encoderStarved(m)) || m.sentKbps >= est! * NET_FULL_RATIO)
+        n.stuckOnFloor = estBelow && stuckOnFloor(m, n, need);
+        const short = estBelow && !n.stuckOnFloor && ((est! < need * NET_FAR_BELOW_RATIO && encoderStarved(m)) || m.sentKbps >= est! * NET_FULL_RATIO)
             ? `banda estimada ${Math.round(est!)} kbps, o degrau pede ${need}` : null;
         if (est != null && est >= need) n.enoughFor = level;
         n.trouble = !!(congestion || short);
