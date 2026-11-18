@@ -29,6 +29,7 @@ import {
 } from "@test/fakes/vencord";
 import { CspPolicies } from "@test/fakes/vencord/main/csp";
 import { type StatsEntry, videoSenderStats } from "@test/fakes/webrtc";
+import { setPlatform } from "@test/helpers/wpd-audio";
 import { findByCodeLazy, findStoreLazy } from "@webpack";
 import { openModal, showToast } from "@webpack/common";
 
@@ -77,10 +78,11 @@ describe("fakes", () => {
         writeFileSync(helper, "not a real exe");
         setScreenAudioHelperPathForTests(helper);
         t.mock.method(os, "release", () => "10.0.22631");
+        setPlatform(t, "win32");
         const procs = mockSpawn(t, p => setImmediate(() => p.exit(0)));
         const status = await screenAudioStatusMain();
-        assert.equal(status.available, process.platform === "win32");
-        if (process.platform === "win32") assert.deepEqual(procs.spawned.map(p => [p.command, p.args]), [[helper, ["--probe"]]]);
+        assert.equal(status.available, true);
+        assert.deepEqual(procs.spawned.map(p => [p.command, p.args]), [[helper, ["--probe"]]]);
         setScreenAudioHelperPathForTests(null);
     });
 

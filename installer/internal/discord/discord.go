@@ -16,13 +16,15 @@ import (
 	"strings"
 )
 
-// Install is one Discord installation root (e.g. %LOCALAPPDATA%\Discord).
+// Install is one Discord installation root (e.g. %LOCALAPPDATA%\Discord, or /usr/share/discord on Linux).
 type Install struct {
-	Branch   string // stable | ptb | canary | development | custom
-	Name     string // user-facing name, e.g. "Discord PTB"
-	Root     string // folder holding Update.exe and app-* folders
-	Exe      string // main executable name, e.g. "DiscordPTB.exe"
-	Detected bool   // found automatically in %LOCALAPPDATA% (not a --discord-dir override)
+	Branch      string // stable | ptb | canary | development | custom
+	Name        string // user-facing name, e.g. "Discord PTB"
+	Root        string // folder holding Update.exe and app-* folders (Linux: the folder holding resources)
+	Exe         string // main executable name, e.g. "DiscordPTB.exe" ("DiscordPTB" on Linux)
+	Detected    bool   // found automatically in %LOCALAPPDATA% (not a --discord-dir override)
+	Flatpak     string // Linux: flatpak app id (e.g. com.discordapp.Discord); "" = not a flatpak
+	FlatpakUser bool   // Linux: a per-user flatpak install (flatpak --user); false = system-wide
 }
 
 type branchInfo struct{ branch, dir, name, exe string }
@@ -66,8 +68,13 @@ func FromDir(root string) Install {
 
 var appFolderRe = regexp.MustCompile(`^app-\d+(\.\d+)*$`)
 
+// FlatApp is the one "app folder" of a Linux install, which has no app-* folders: resources sits right in the
+// root, and ResourcesDir(root, FlatApp) is <root>/resources.
+const FlatApp = "."
+
 // AppFolders returns the names of the app-<version> folders that contain a resources folder, oldest
-// first (numeric version order, so app-1.0.10000 sorts after app-1.0.9266).
+// first (numeric version order, so app-1.0.10000 sorts after app-1.0.9266). A root without app-* folders but
+// with its own resources folder (Linux) gives [FlatApp].
 func AppFolders(root string) []string {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -84,6 +91,11 @@ func AppFolders(root string) []string {
 		names = append(names, e.Name())
 	}
 	sort.SliceStable(names, func(i, j int) bool { return CompareVersions(names[i], names[j]) < 0 })
+	if len(names) == 0 {
+		if fi, err := os.Stat(filepath.Join(root, "resources")); err == nil && fi.IsDir() {
+			names = []string{FlatApp}
+		}
+	}
 	return names
 }
 

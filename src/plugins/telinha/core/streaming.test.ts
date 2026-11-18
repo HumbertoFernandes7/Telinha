@@ -324,6 +324,41 @@ describe("startStreaming: tela, janela e audio", () => {
         }
     });
 
+    test("Linux (fonte do PipeWire, ':s') com audio: o som do PC sem o Discord pelo PipeWire, nunca o da janela nem o do Chromium", async () => {
+        const audio = installWebAudio();
+        try {
+            const portal = { id: "window:1:0:s", name: "Escolhida na janela do sistema", kind: "window" as const };
+            rig.native.telinha.startScreenAudio = async () => ({ ok: true, id: 9, sampleRate: 48000, channels: 2 });
+            rig.native.telinha.readScreenAudio = () => new Promise(() => { });
+            const chromiumAsks = callsOf("screenAudioChromiumStatus").length;
+            const since = logMark();
+            await startStreaming(windowOptions({ withAudio: true, source: portal }));
+
+            assert.deepEqual(callsOf("prepareDisplayMedia").at(-1)?.args, ["window:1:0:s", "Escolhida na janela do sistema", true]);
+            assert.equal(rig.rtc.mediaDevices.displayMediaCalls.at(-1)?.audio, false, "o getDisplayMedia nao pede o audio da janela");
+            assert.equal(callsOf("screenAudioChromiumStatus").length, chromiumAsks, "o som pelo Chromium nem e perguntado");
+            assert.equal(callsOf("startScreenAudio").length > 0, true);
+            await turns(1);
+            assert.equal(getState().local?.hasAudio, true);
+            assert.equal(rt.local!.stream.getAudioTracks()[0].label, "MediaStreamAudioDestinationNode");
+            const lines = since();
+            assert.ok(lines.includes('Iniciando transmissão: janela "Escolhida na janela do sistema" em 1080p60 com áudio pelo PipeWire'), lines.join("\n"));
+            assert.ok(lines.includes("Áudio da tela: pelo PipeWire (o PC sem o Discord)"), lines.join("\n"));
+            stopStreaming();
+            await turns();
+
+            // sem as ferramentas do PipeWire: so a imagem, e nada de ligar o som pelo Chromium (isso e do Windows)
+            resetScreenAudioHelperBlockForTests();
+            rig.native.telinha.startScreenAudio = async () => ({ ok: false, reason: "as ferramentas do PipeWire (pw-record, pw-dump e pw-link) não estão instaladas (faltou o pw-record)" });
+            await startStreaming(windowOptions({ withAudio: true, source: portal }));
+            await turns(1);
+            assert.equal(getState().local?.hasAudio, false);
+            assert.equal(screenAudioHelperBlock(), null);
+        } finally {
+            audio.restore();
+        }
+    });
+
     test("o audio da tela para no meio: a transmissao continua, com o aviso", async () => {
         const audio = installWebAudio();
         try {

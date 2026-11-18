@@ -52,6 +52,7 @@ func (e *env) code(t *testing.T, err error, want string) *Problem {
 // readOnly makes path read-only (a rename over it fails with access denied) until the end of the test.
 func readOnly(t *testing.T, path string) {
 	t.Helper()
+	testutil.WindowsOnly(t)
 	if err := os.Chmod(path, 0o444); err != nil {
 		t.Fatal(err)
 	}
@@ -76,6 +77,7 @@ func TestConfigLoggingWithoutALogger(t *testing.T) {
 }
 
 func TestConfigPaths(t *testing.T) {
+	testutil.WindowsOnly(t)
 	c := &Config{AppData: `C:\Users\a\AppData\Roaming`}
 	if got := c.OfficialPatchers(); len(got) != 1 || got[0] != `C:\Users\a\AppData\Roaming\Vencord\dist\patcher.js` {
 		t.Fatalf("patchers %v", got)

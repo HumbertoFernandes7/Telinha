@@ -105,4 +105,5 @@ func (a *app) install(ctx context.Context, repair bool, u installUI) (*core.Resu
 func (a *app) finish(code int) {
 	a.log.Printf("finished: exit code %d", code)
 	a.log.Close()
+	platformFinish(a.cfg)
 }

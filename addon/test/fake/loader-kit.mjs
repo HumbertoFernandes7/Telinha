@@ -26,6 +26,11 @@ import { fileURLToPath } from "node:url";
 
 import { makeHome, makePayload } from "./update-kit.mjs";
 
+// Under a Linux Wayland session the loader turns on Chromium's PipeWire capturer: the machine running the tests may be one,
+// so no test inherits it (main.capture.test.mjs opts in per test)
+delete process.env.WAYLAND_DISPLAY;
+delete process.env.XDG_SESSION_TYPE;
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const LOADER_DIR = join(HERE, "..", "..", "loader");
 const nodeRequire = createRequire(import.meta.url);
