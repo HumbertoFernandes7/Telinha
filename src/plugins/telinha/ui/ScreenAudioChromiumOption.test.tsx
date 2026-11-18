@@ -83,7 +83,7 @@ test("o botao reinicia o Discord; sem como reiniciar daqui, o aviso diz como faz
         fireEvent.click(screen.getByRole("button", { name: "Reiniciar o Discord agora" }));
     });
     assert.equal(relaunch.calls, 1);
-    assert.deepEqual(toasts, []);
+    assert.equal(toasts.length, 0);
 
     delete w.DiscordNative;
     act(() => {

@@ -144,7 +144,7 @@ describe("erros e native ausente/antigo", () => {
     });
 
     test("refresh: native antigo sem as funcoes", async () => {
-        main({}, { screenAudioFlagStatus: undefined, screenAudioChromiumStatus: undefined });
+        main({}, { screenAudioFlagStatus: undefined as never, screenAudioChromiumStatus: undefined as never });
         assert.equal(await refreshScreenAudioChromium(), null);
         assert.equal(screenAudioFlagState(), null);
     });
@@ -172,7 +172,7 @@ describe("erros e native ausente/antigo", () => {
 
     test("interruptor: native ausente ou antigo nao faz nada", async () => {
         await setScreenAudioChromiumWanted(true);
-        main({}, { setScreenAudioFlag: undefined });
+        main({}, { setScreenAudioFlag: undefined as never });
         await setScreenAudioChromiumWanted(true);
         assert.equal(calls("setScreenAudioFlag").length, 0);
     });
@@ -194,11 +194,11 @@ describe("erros e native ausente/antigo", () => {
     test("ajudante: native ausente ou sem as funcoes", async () => {
         assert.equal(await onScreenAudioHelperProblem("blocked"), false);
         resetScreenAudioChromiumForTests();
-        main({}, { setScreenAudioFlag: undefined });
+        main({}, { setScreenAudioFlag: undefined as never });
         assert.equal(await onScreenAudioHelperProblem("blocked"), false);
         resetScreenAudioChromiumForTests();
         env!.restore();
-        main({}, { screenAudioFlagStatus: undefined });
+        main({}, { screenAudioFlagStatus: undefined as never });
         assert.equal(await onScreenAudioHelperProblem("blocked"), false);
     });
 
