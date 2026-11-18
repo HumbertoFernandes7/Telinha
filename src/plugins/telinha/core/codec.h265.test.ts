@@ -173,8 +173,10 @@ describe("ordem dos codecs com H.265 (setCodecPreferences e a troca no ar)", () 
         ]);
     });
 
-    test("sem reserva: H.265 e depois a ordem do Chromium; sem H.265 na lista: matched 0", () => {
-        assert.deepEqual(sortCodecs(SENDER, "h265").sorted.slice(0, 3).map(c => c.mimeType), ["video/H265", "video/VP8", "video/H264"]);
+    test("sem reserva H.264: H.265, depois o VP9 (perfil 0 primeiro; o automatico seria ele), depois a ordem do Chromium; sem H.265 na lista: matched 0", () => {
+        const { sorted, matched } = sortCodecs(SENDER, "h265");
+        assert.equal(matched, 1);
+        assert.deepEqual(sorted.slice(0, 4).map(c => `${c.mimeType.slice(6)} ${c.sdpFmtpLine ?? ""}`.trim()), [`H265 ${H265_SEND}`, "VP9 profile-id=0", "VP9 profile-id=2", "VP8"]);
         assert.equal(sortCodecs(SENDER.filter(c => c.mimeType !== "video/H265"), "h265", "42001f").matched, 0);
     });
 

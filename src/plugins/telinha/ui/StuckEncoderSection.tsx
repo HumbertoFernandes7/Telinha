@@ -20,7 +20,9 @@ import { showToast, useEffect, useState } from "@webpack/common";
 const RETRY_TOAST: Record<RetryOutcome, string> = {
     testing: "Pronto: testando a placa de vídeo agora. Se ela não travar no teste, a próxima pessoa que assistir recebe o H.264 dela.",
     restart: "Pronto: a placa de vídeo é testada de novo quando você reiniciar o Discord.",
-    now: "Pronto: a próxima pessoa que assistir recebe o H.264 da placa de vídeo de novo."
+    now: "Pronto: a próxima pessoa que assistir recebe o H.264 da placa de vídeo de novo.",
+    h265Now: "Pronto: este Discord não oferece H.264, então o Telinha está testando o H.265 da placa de vídeo agora. Até ele passar, vai VP9.",
+    h265Later: "Pronto: este Discord não oferece H.264. O Telinha testa o H.265 da placa de vídeo de novo quando a transmissão acabar; até lá, vai VP9."
 };
 
 export function StuckEncoderSection() {

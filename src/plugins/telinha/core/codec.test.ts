@@ -13,9 +13,9 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import {
-    applyCodecPreferences, chooseCodec, type CodecDecision, describeLocalCaps, type EncoderReport, getLocalCaps, h264Candidates, h264HwAcceptsSize,
+    applyCodecPreferences, chooseCodec, type CodecDecision, describeLocalCaps, type EncoderReport, getLocalCaps, h264Candidates, h264HwAcceptsSize, h264Unavailable, hwOnlyWanted,
     isForeignEncoder, isOffHardwareAv1, isOffHardwareH265, isSoftwareH264, isTransientSoftwareH264, type LocalCodecCaps, measureLocalCaps, noteH264Fallback, pickNegotiatedCodec, probeLocalCaps,
-    setH264HighProbeOk, softwareFallback, sortCodecs, whyNoHigh
+    setH264HighProbeOk, softwareFallback, sortCodecs, whyNoHigh, whyNoHwOnlyHere
 } from "./codec";
 import { h264ProfileLevelId, h264Rank, mungeRemoteSdp } from "./sdp";
 
@@ -721,5 +721,119 @@ describe("H.264 High (6400xx) so quando os dois lados tem High na placa", () => 
         assert.equal(h264ProfileLevelId(applied[0].sdpFmtpLine!), "42001f");
         setCaps([h264(1, "42e01f"), plain("VP9")]);
         assert.equal(applyCodecPreferences(ok, "h264", "640032", "42001f"), "H264 primeiro (1 variante(s), capacidades do sender)");
+    });
+});
+
+describe("Discord sem H.264 (1.0.9269 no Windows, sem o OpenH264): o automatico usa o H.265 da placa antes do VP9 por software", () => {
+    const H265_SEND = "level-id=123;profile-id=1;tier-flag=0;tx-mode=SRST";
+    const AV1_SEND = "level-idx=5;profile=0;tier=0";
+    /** Este PC nesse Discord: o sender sem H.264 (h264HwEncode false so por falta de perfil), o H.265 na placa com a sonda ok. */
+    const noH264 = (over: Partial<LocalCodecCaps> = {}) => caps({
+        h264HwEncode: false, h264HwProfile: null, h265HwDecode: true, h265HwFmtp: H265_SEND, h265ProbeOk: true, sendable: new Set(["vp8", "av1", "vp9", "h265"]), ...over
+    });
+    const VIEWER = { h264HwDecode: true, hwDecode: { v: 1, h264High: true, h265: true } };
+    const NO_H265 = { h264HwDecode: true, hwDecode: { v: 1, h264High: true } };
+    const OLD = "o espectador não anuncia H.265 por hardware (não tem, ou é uma versão antiga do Telinha)";
+    const AUTO_H265 = "automático: este Discord não oferece H.264 → H.265 pela placa (H.265 por hardware nos dois lados, com a sonda do H.265 ok; "
+        + "sem reserva H.264 na placa; o VP9 logo depois na negociação)";
+    const OFF = "a placa de vídeo está desligada neste PC (travou, sonda rodando ou quedas para software), e o H.265 vai junto";
+
+    test("h264Unavailable: so com a lista do sender medida (nao vazia) e sem H.264", () => {
+        assert.ok(h264Unavailable(noH264()));
+        assert.ok(!h264Unavailable(caps()));
+        assert.ok(!h264Unavailable(noH264({ sendable: new Set() })), "lista desconhecida: nunca 'sem H.264'");
+    });
+
+    test("automatico com o H.265 da placa ok nos dois lados: H.265, sem reserva H.264 (o VP9 vem logo depois na negociacao)", () => {
+        assert.deepEqual(chooseCodec(VIEWER, "auto", noH264()), { codec: "h265", reason: AUTO_H265 });
+        // quem decodifica H.264 por software mas H.265 na placa tambem recebe H.265
+        assert.deepEqual(chooseCodec({ h264HwDecode: false, hwDecode: { v: 1, h265: true } }, "auto", noH264()), { codec: "h265", reason: AUTO_H265 });
+        // sem VP9 neste cliente: o motivo nao promete o VP9
+        assert.deepEqual(chooseCodec(VIEWER, "auto", noH264({ sendable: new Set(["vp8", "h265"]) })), {
+            codec: "h265", reason: "automático: este Discord não oferece H.264 → H.265 pela placa (H.265 por hardware nos dois lados, com a sonda do H.265 ok; sem reserva H.264 na placa para este espectador)"
+        });
+    });
+
+    test("automatico sem o H.265 (espectador, este PC ou a sonda): VP9, e o motivo diz que este Discord nao oferece H.264 e por que o H.265 nao foi", () => {
+        const why = (no: string) => `automático: este Discord não oferece H.264, e o H.265 da placa não vai (${no}) → VP9`;
+        assert.deepEqual(chooseCodec(NO_H265, "auto", noH264()), { codec: "vp9", reason: why(OLD) });
+        assert.deepEqual(chooseCodec(undefined, "auto", noH264()), { codec: "vp9", reason: why(OLD) });
+        assert.deepEqual(chooseCodec(VIEWER, "auto", noH264({ h265HwFmtp: null })), { codec: "vp9", reason: why("este PC não codifica H.265 por hardware") });
+        assert.deepEqual(chooseCodec(VIEWER, "auto", noH264({ h265ProbeOk: false })), { codec: "vp9", reason: why("a sonda WebCodecs do H.265 não passou neste PC") });
+        assert.deepEqual(chooseCodec(VIEWER, "auto", noH264({ sendable: new Set(["vp8", "vp9"]) })), { codec: "vp9", reason: why("este cliente não envia H.265 (o Chromium dele não oferece)") });
+        assert.deepEqual(chooseCodec(NO_H265, "auto", noH264({ sendable: new Set(["vp8", "h265"]) })), {
+            codec: "vp8", reason: `automático: este Discord não oferece H.264, e o H.265 da placa não vai (${OLD}); VP9 indisponível → VP8`
+        });
+        for (const v of [NO_H265, VIEWER]) assert.ok(!chooseCodec(v, "auto", noH264({ h265ProbeOk: false })).reason.includes("não codifica H.264"));
+    });
+
+    test("H.265 fixado sem H.264: vai, sem reserva H.264; sem as redes de seguranca, o automatico deste Discord (VP9)", () => {
+        assert.deepEqual(chooseCodec(VIEWER, "h265", noH264()), {
+            codec: "h265", reason: "fixado nas configurações (H.265 por hardware nos dois lados, com a sonda do H.265 ok; sem reserva H.264 na placa; o VP9 logo depois na negociação)"
+        });
+        assert.deepEqual(chooseCodec(NO_H265, "h265", noH264()), { codec: "vp9", reason: `H.265 fixado nas configurações, mas ${OLD} → automático: este Discord não oferece H.264 → VP9` });
+        assert.deepEqual(chooseCodec(VIEWER, "h264", noH264()), { codec: "vp9", reason: "H264 (configurações) indisponível neste cliente → VP9" });
+    });
+
+    test("as travas reais da placa (h264HwOff: travou, sonda rodando, quedas) barram o H.265; a falta do perfil H.264 nao", () => {
+        assert.equal(whyNoHwOnlyHere("h265", noH264()), null);
+        assert.equal(whyNoHwOnlyHere("h265", noH264({ h264HwOff: false })), null);
+        assert.equal(whyNoHwOnlyHere("h265", noH264({ h264HwOff: true })), OFF);
+        assert.deepEqual(chooseCodec(VIEWER, "auto", noH264({ h264HwOff: true })), { codec: "vp9", reason: `automático: este Discord não oferece H.264, e o H.265 da placa não vai (${OFF}) → VP9` });
+        assert.equal(chooseCodec(VIEWER, "h265", noH264({ h264HwOff: true })).codec, "vp9", "nem o fixado");
+        // com H.264 neste Discord: exatamente como antes (o h264HwEncode false barra, com ou sem h264HwOff)
+        const withH264 = noH264({ sendable: new Set(["vp8", "h264", "vp9", "h265"]) });
+        assert.equal(whyNoHwOnlyHere("h265", withH264), "o H.264 da placa está desligado neste PC (travou, sonda rodando ou quedas para software), e o H.265 vai junto");
+        // o AV1 fixado sem H.264 segue barrado (depende da reserva H.264), mas o motivo e o Discord; com falha real da placa, o da placa
+        const av1 = noH264({ av1HwFmtp: AV1_SEND, av1ProbeOk: true, av1HwFeature: true });
+        assert.equal(whyNoHwOnlyHere("av1", av1), "este Discord não oferece H.264, e o AV1 fixado ainda depende dele");
+        assert.equal(whyNoHwOnlyHere("av1", { ...av1, h264HwOff: true }), "o H.264 da placa está desligado neste PC (travou, sonda rodando ou quedas para software), e o AV1 vai junto");
+        assert.equal(chooseCodec({ h264HwDecode: true, hwDecode: { v: 1, av1: true, h265: true } }, "av1", av1).codec, "vp9");
+    });
+
+    test("com H.264 neste Discord nada muda: o automatico nunca vai de H.265, e o motivo do VP9 continua culpando este PC", () => {
+        const h265 = { h265HwDecode: true, h265HwFmtp: H265_SEND, h265ProbeOk: true, sendable: new Set<CodecDecision["codec"]>(["vp8", "h264", "vp9", "h265"]) };
+        assert.deepEqual([chooseCodec(VIEWER, "auto", caps(h265)).codec, chooseCodec(VIEWER, "auto", caps(h265)).h264Profile], ["h264", "42001f"]);
+        assert.deepEqual(chooseCodec(VIEWER, "auto", caps({ ...h265, h264HwEncode: false, h264HwProfile: null })), { codec: "vp9", reason: "automático: este PC não codifica H.264 por hardware → VP9" });
+        assert.deepEqual(chooseCodec(VIEWER, "auto", caps({ ...h265, h264HwEncode: false, sendable: new Set() })), { codec: "vp9", reason: "automático: este PC não codifica H.264 por hardware → VP9" });
+    });
+
+    test("describeLocalCaps: o 'codifica: não' do H.264 diz que este Discord nao oferece H.264", () => {
+        assert.equal(describeLocalCaps(noH264()), "Capacidades locais: H.264 por hardware — decodifica: sim, codifica: não (este Discord não oferece H.264); envia: vp8, av1, vp9, h265; "
+            + `H.264 High por hardware — decodifica: não, codifica: não; H.265 por hardware — decodifica: sim, codifica: sim (${H265_SEND})`);
+        assert.match(describeLocalCaps(caps({ h264HwEncode: false, h264HwProfile: null })), /codifica: não; envia: h264, vp8, vp9, av1;/);
+        assert.match(describeLocalCaps(noH264({ sendable: new Set() })), /codifica: não; envia: \?;/);
+    });
+
+    test("hwOnlyWanted: o H.265 vale no automatico so num Discord sem H.264; o AV1 nunca", () => {
+        for (const s of ["auto", null, undefined] as const) assert.ok(hwOnlyWanted("h265", s, noH264()), String(s));
+        assert.ok(hwOnlyWanted("h265", "h265", noH264()));
+        for (const s of ["vp9", "h264", "av1"] as const) assert.ok(!hwOnlyWanted("h265", s, noH264()), s);
+        assert.ok(!hwOnlyWanted("h265", "auto", caps()), "com H.264: so fixado");
+        assert.ok(!hwOnlyWanted("h265", "auto", noH264({ sendable: new Set() })), "antes da medicao: nao");
+        assert.ok(!hwOnlyWanted("av1", "auto", noH264()), "nem a sonda nem o recurso do AV1");
+        assert.ok(hwOnlyWanted("av1", "av1", noH264()));
+    });
+
+    test("negociacao: o H.265 primeiro, o VP9 logo depois (nunca o VP8); sem VP9, a ordem do Chromium; o H.265 negociado na troca no ar", () => {
+        let applied: Codec[] = [];
+        const ok = { setCodecPreferences: (list: Codec[]) => { applied = list; } } as unknown as RTCRtpTransceiver;
+        setCaps([plain("VP8"), plain("AV1", AV1_SEND), plain("VP9", "profile-id=0"), plain("VP9", "profile-id=2"), plain("H265", H265_SEND)]);
+        const d = chooseCodec(VIEWER, "auto", noH264());
+        assert.equal(applyCodecPreferences(ok, d.codec, d.h264Profile, d.h264Backup), "H265 primeiro (1 variante(s), capacidades do sender; sem reserva H.264; VP9 logo depois)");
+        assert.deepEqual(applied.map(c => `${c.mimeType.slice(6)} ${c.sdpFmtpLine ?? ""}`.trim()), [`H265 ${H265_SEND}`, "VP9 profile-id=0", "VP9 profile-id=2", "VP8", `AV1 ${AV1_SEND}`]);
+        setCaps([plain("VP8"), plain("H265", H265_SEND)]);
+        assert.equal(applyCodecPreferences(ok, "h265", null), "H265 primeiro (1 variante(s), capacidades do sender; sem reserva H.264)");
+        assert.deepEqual(applied.map(c => c.mimeType), ["video/H265", "video/VP8"]);
+        // com reserva H.264 (um Discord com H.264): como antes, sem o VP9 no texto
+        setCaps([plain("VP8"), plain("VP9", "profile-id=0"), h264(1, "42001f"), plain("H265", H265_SEND)]);
+        assert.equal(applyCodecPreferences(ok, "h265", "42001f"), "H265 primeiro (1 variante(s), capacidades do sender; reserva H.264 perfil 42001f logo depois)");
+        assert.deepEqual(applied.slice(0, 3).map(c => c.mimeType), ["video/H265", "video/H264", "video/VP8"]);
+        const negotiated = [plain("VP9", "profile-id=0"), plain("H265", `${H265_SEND};x-google-max-bitrate=8000`)];
+        assert.equal(pickNegotiatedCodec(negotiated, d)?.mimeType, "video/H265");
+        // o espectador nao negociou H.265: a troca no ar acha o VP9 (o que o automatico escolheria)
+        assert.equal(pickNegotiatedCodec(negotiated, chooseCodec(NO_H265, "auto", noH264()))?.mimeType, "video/VP9");
+        // o AV1 sem reserva continua com a ordem do Chromium (sem o VP9 na frente)
+        assert.deepEqual(sortCodecs([plain("VP8"), plain("VP9", "profile-id=0"), plain("AV1", AV1_SEND)], "av1").sorted.map(c => c.mimeType), ["video/AV1", "video/VP8", "video/VP9"]);
     });
 });

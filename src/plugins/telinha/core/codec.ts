@@ -25,14 +25,22 @@
 //
 // H.265 (HEVC Main, depois da v0.3.3): ~25-40% menos bits que o H.264 na mesma qualidade, pelo mesmo encoder da placa
 // (MediaFoundation NVENC). O Chromium nao tem H.265 por software (nem encoder, nem decoder): sem a placa dos DOIS lados
-// nao ha imagem. E so MANUAL ("H.265" no formato de video): o automatico nunca o escolhe, porque com pouca banda o
-// controle de taxa dele para no qp 42 e descarta quadros (medido no Chrome 156, RTX 3070: 13 fps a 3 Mbps, onde o H.264
-// High ia a 46). Fixado, ele so vai quando, alem de tudo que o H.264 da placa precisa (h264HwEncode: nada travado, nenhuma
-// sonda rodando, sem as quedas), este PC envia H.265 (sender.getCapabilities) e o codifica na placa (encodingInfo do fmtp
-// Main do sender, h265HwFmtp), a sonda WebCodecs do H.265 deu "ok" neste ambiente (core/stuckEncoder.ts → setH265ProbeOk;
-// ela so roda com o H.265 fixado) E o espectador anuncia que decodifica na placa (caps.hwDecode.h265, protocol.ts passo
-// 11); senao, o que o automatico escolheria. Com H.265, o H.264 que o automatico escolheria vai logo depois na negociacao
-// (h264Profile/h264Backup da decisao): se o outro lado nao negociar H.265, fica a placa em H.264.
+// nao ha imagem. Com H.264 neste Discord, e so MANUAL ("H.265" no formato de video): o automatico nao o escolhe, porque
+// com pouca banda o controle de taxa dele para no qp 42 e descarta quadros (medido no Chrome 156, RTX 3070: 13 fps a 3
+// Mbps, onde o H.264 High ia a 46). Fixado, ele so vai quando, alem de tudo que o H.264 da placa precisa (h264HwEncode:
+// nada travado, nenhuma sonda rodando, sem as quedas), este PC envia H.265 (sender.getCapabilities) e o codifica na placa
+// (encodingInfo do fmtp Main do sender, h265HwFmtp), a sonda WebCodecs do H.265 deu "ok" neste ambiente
+// (core/stuckEncoder.ts → setH265ProbeOk; ela so roda quando o H.265 vale: hwOnlyWanted) E o espectador anuncia que
+// decodifica na placa (caps.hwDecode.h265, protocol.ts passo 11); senao, o que o automatico escolheria. Com H.265, o H.264
+// que o automatico escolheria vai logo depois na negociacao (h264Profile/h264Backup da decisao): se o outro lado nao
+// negociar H.265, fica a placa em H.264.
+//
+// Discord SEM H.264 (18/11, Discord 1.0.9269 no Windows: veio sem o OpenH264 e o Chromium dele tirou o H.264 inteiro do
+// sender; h264Unavailable): o automatico usa o H.265 da placa antes do VP9 por software (libvpx), com as mesmas redes de
+// seguranca do fixado (o encode de quem transmite fica na placa sempre que possivel; a decisao de 02/11 so vale quando ha
+// H.264). Ai o h264HwEncode e false so por falta de perfil, entao o H.265 nao e barrado por ele: so pelas travas reais da
+// placa (h264HwOff: travou, sonda rodando, quedas). Sem reserva H.264, o VP9 vai logo depois do H.265 na negociacao
+// (sortCodecs, sdp.ts): se o outro lado nao negociar H.265, fica o VP9 que o automatico escolheria, nunca o VP8.
 //
 // AV1 (Main, depois da v0.3.3): o mesmo desenho do H.265 (so MANUAL, "AV1" no formato de video; as mesmas redes de
 // seguranca e a mesma reserva H.264), com duas diferencas. (1) O Chromium TEM AV1 por software (libaom), pesado demais para
@@ -46,8 +54,8 @@
 // (av1HwFeature false: "reinicie o Discord"). So a placa de quem transmite codifica: RTX 40/50, Radeon RX 7000, Intel Arc
 // e mais novas. Quem assiste decodifica AV1 na placa a partir da RTX 30 (caps.hwDecode.av1).
 //
-// Para o AV1 (ou o H.265) entrar no automatico um dia, a troca e uma so: AUTO_HW_ONLY abaixo. A sonda (core/stuckEncoder.ts
-// → hwOnlyWanted) e o recurso do loader (core/av1Flag.ts → av1FlagWanted) seguem a mesma lista.
+// Para o AV1 (ou o H.265, tambem com H.264) entrar no automatico um dia, a troca e uma so: AUTO_HW_ONLY abaixo. A sonda
+// (core/stuckEncoder.ts → hwOnlyWanted) e o recurso do loader (core/av1Flag.ts → av1FlagWanted) seguem a mesma lista.
 
 import { H264_PROBE, HW_DECODE_CAPS_VERSION, type HwDecodeCaps } from "@plugins/telinha/protocol";
 import type { CodecSetting } from "@plugins/telinha/settings";
@@ -92,9 +100,26 @@ export interface LocalCodecCaps {
      * false = desligado (sem ele o WebRTC so tem o AV1 por software); null/ausente = desconhecido (o encodingInfo decide)
      */
     av1HwFeature?: boolean | null;
+    /**
+     * o H.264 da placa esta desligado por uma trava de verdade (a placa travou: setH264HwStuck; uma sonda WebCodecs segura
+     * a placa: setH264HwProbing; ou as quedas para software: noteH264Fallback), haja H.264 neste Discord ou nao. Diferente
+     * de !h264HwEncode, que tambem e false quando nao ha perfil H.264 (h264Unavailable). Ausente = nao
+     */
+    h264HwOff?: boolean;
     /** codecs de video que este cliente sabe enviar (vazio = desconhecido) */
     sendable: Set<VideoCodecName>;
 }
+
+/**
+ * Este Discord nao oferece H.264 para envio: a lista do sender foi medida (nao vazia) e nao tem H.264 (Discord 1.0.9269
+ * no Windows, sem o OpenH264). Lista vazia = desconhecida, nunca "sem H.264".
+ */
+export function h264Unavailable(local: LocalCodecCaps): boolean {
+    return local.sendable.size > 0 && !local.sendable.has("h264");
+}
+
+/** O motivo, nos textos. */
+const NO_H264_HERE = "este Discord não oferece H.264";
 
 export interface CodecDecision {
     codec: VideoCodecName;
@@ -122,18 +147,22 @@ export interface ProbeTiming {
 
 /**
  * Os codecs so da placa que o AUTOMATICO tenta antes do H.264 (na ordem), com as mesmas redes de seguranca do fixado.
- * Vazio: o H.265 (02/11: com internet fraca o H.265 da placa perde fps) e o AV1 (ninguem testou o AV1 da placa ainda) sao
- * so manuais. Promover o AV1 = ["av1"] aqui: a sonda dele (core/stuckEncoder.ts → hwOnlyWanted) e o WebRtcAV1HWEncode
- * do loader (core/av1Flag.ts → av1FlagWanted) passam a valer sem ele fixado.
+ * Vazio: com H.264 neste Discord, o H.265 (02/11: com internet fraca o H.265 da placa perde fps) e o AV1 (ninguem testou
+ * o AV1 da placa ainda) sao so manuais. Sem H.264 neste Discord (h264Unavailable), o automatico tenta o H.265 mesmo assim
+ * (chooseCodec), antes do VP9 por software. Promover o AV1 = ["av1"] aqui: a sonda dele (core/stuckEncoder.ts →
+ * hwOnlyWanted) e o WebRtcAV1HWEncode do loader (core/av1Flag.ts → av1FlagWanted) passam a valer sem ele fixado.
  */
 export const AUTO_HW_ONLY: readonly HwOnlyCodec[] = [];
 
 /**
- * O H.265/AV1 vale com este formato de video: fixado nele, ou ele no automatico (AUTO_HW_ONLY). A sonda dele
+ * O H.265/AV1 vale com este formato de video: fixado nele, ou ele no automatico (AUTO_HW_ONLY; o H.265 tambem quando
+ * este Discord nao oferece H.264, h264Unavailable de `local`, a medicao ja feita: probeLocalCaps). A sonda dele
  * (core/stuckEncoder.ts) e o WebRtcAV1HWEncode do loader (core/av1Flag.ts) seguem isto.
  */
-export function hwOnlyWanted(codec: HwOnlyCodec, setting: CodecSetting | null | undefined): boolean {
-    return setting === codec || ((setting ?? "auto") === "auto" && AUTO_HW_ONLY.includes(codec));
+export function hwOnlyWanted(codec: HwOnlyCodec, setting: CodecSetting | null | undefined, local: LocalCodecCaps = localCaps): boolean {
+    if (setting === codec) return true;
+    if ((setting ?? "auto") !== "auto") return false;
+    return AUTO_HW_ONLY.includes(codec) || (codec === "h265" && h264Unavailable(local));
 }
 
 /** Menos que isto de prazo nao vale outra consulta. */
@@ -295,7 +324,7 @@ export async function measureLocalCaps(timing: ProbeTiming = PROBE_TIMING): Prom
  * O "codifica" do High, do H.265 e do AV1 e o do encodingInfo; as sondas deles vem depois.
  */
 export function describeLocalCaps(caps: LocalCodecCaps): string {
-    const encode = caps.h264HwEncode ? `sim${caps.h264HwProfile ? ` (perfil ${caps.h264HwProfile})` : ""}` : "não";
+    const encode = caps.h264HwEncode ? `sim${caps.h264HwProfile ? ` (perfil ${caps.h264HwProfile})` : ""}` : h264Unavailable(caps) ? `não (${NO_H264_HERE})` : "não";
     const high = `H.264 High por hardware — decodifica: ${caps.h264HighHwDecode ? "sim" : "não"}, codifica: ${caps.h264HighHwProfile ? `sim (perfil ${caps.h264HighHwProfile})` : "não"}`;
     // H.265 so quando este Chromium o oferece ou mede (sem ele, a linha de antes)
     const h265 = caps.h265HwDecode || caps.h265HwFmtp || caps.sendable.has("h265")
@@ -312,7 +341,7 @@ export function describeLocalCaps(caps: LocalCodecCaps): string {
 export function probeLocalCaps(report?: (line: string) => void): Promise<LocalCodecCaps> {
     return probing ??= measureLocalCaps().then(caps => {
         measured = caps;
-        localCaps = { ...caps, h264HwEncode: caps.h264HwEncode && !h264HwStuck && !h264HwProbing, h264HighProbeOk, h265ProbeOk, av1ProbeOk, av1HwFeature };
+        localCaps = { ...caps, h264HwEncode: caps.h264HwEncode && !h264HwStuck && !h264HwProbing, h264HwOff: h264HwOffNow(), h264HighProbeOk, h265ProbeOk, av1ProbeOk, av1HwFeature };
         report?.(describeLocalCaps({ ...caps, av1HwFeature }));
         return caps;
     });
@@ -355,10 +384,16 @@ export function setAv1HwFeature(on: boolean | null) {
     if (localCaps.av1HwFeature !== on) localCaps = { ...localCaps, av1HwFeature: on };
 }
 
-/** h264HwEncode de novo a partir do que a sonda mediu, das travas (placa travada, sonda WebCodecs rodando) e das quedas. */
+/** As travas de verdade do H.264 da placa agora (placa travada, sonda WebCodecs rodando, quedas): LocalCodecCaps.h264HwOff. */
+function h264HwOffNow(): boolean {
+    return h264HwStuck || h264HwProbing || h264Fallbacks >= H264_FALLBACKS_TO_DISABLE;
+}
+
+/** h264HwEncode (e h264HwOff) de novo a partir do que a sonda mediu, das travas (placa travada, sonda WebCodecs rodando) e das quedas. */
 function recomputeHwEncode() {
-    const hw = !h264HwStuck && !h264HwProbing && !!measured?.h264HwEncode && h264Fallbacks < H264_FALLBACKS_TO_DISABLE;
-    if (localCaps.h264HwEncode !== hw) localCaps = { ...localCaps, h264HwEncode: hw };
+    const off = h264HwOffNow();
+    const hw = !off && !!measured?.h264HwEncode;
+    if (localCaps.h264HwEncode !== hw || !!localCaps.h264HwOff !== off) localCaps = { ...localCaps, h264HwEncode: hw, h264HwOff: off };
 }
 
 /**
@@ -403,9 +438,9 @@ export interface H264FallbackTally {
 export function noteH264Fallback(): H264FallbackTally {
     h264Fallbacks++;
     let disabledNow = false;
-    if (h264Fallbacks >= H264_FALLBACKS_TO_DISABLE && localCaps.h264HwEncode) {
-        localCaps = { ...localCaps, h264HwEncode: false };
-        disabledNow = true;
+    if (h264Fallbacks >= H264_FALLBACKS_TO_DISABLE) {
+        disabledNow = localCaps.h264HwEncode;
+        localCaps = { ...localCaps, h264HwEncode: false, h264HwOff: true };
     }
     return { count: h264Fallbacks, disabledNow };
 }
@@ -429,11 +464,15 @@ export function noteH264Fallback(): H264FallbackTally {
  * High (whyNoHigh): no automatico, com H.264 por hardware nos dois lados, vai High (6400xx, com o Baseline da placa como
  * reserva) so se este PC codifica High por hardware com a sonda do High ok E o espectador anuncia High por hardware.
  * Fixado em H.264 nas configuracoes continua o Baseline de antes.
- * H.265 (whyNoH265): so MANUAL (decisao do dono, 02/11: com internet fraca o H.265 da placa perde fps; o automatico nunca o
- * escolhe). Fixado em H.265: vai so com as redes de seguranca (a placa dos dois lados, a sonda do H.265 ok, o H.264 da placa
- * ligado), com o H.264 que o automatico escolheria como reserva na negociacao; sem elas, o que o automatico escolheria, e o
- * motivo diz isso. AV1 (whyNoHwOnly): o mesmo do H.265, so com o AV1 fixado; sem as redes de seguranca, o que o
- * automatico escolheria (nunca o AV1 por software). AUTO_HW_ONLY (vazio) e a lista dos que o automatico tentaria antes.
+ * H.265 (whyNoH265): com H.264 neste Discord, so MANUAL (decisao do dono, 02/11: com internet fraca o H.265 da placa perde
+ * fps; o automatico nao o escolhe). Fixado em H.265: vai so com as redes de seguranca (a placa dos dois lados, a sonda do
+ * H.265 ok, o H.264 da placa ligado), com o H.264 que o automatico escolheria como reserva na negociacao; sem elas, o que o
+ * automatico escolheria, e o motivo diz isso. Sem H.264 neste Discord (h264Unavailable; decisao do dono, 18/11): o
+ * automatico vai de H.265 com as mesmas redes de seguranca (as travas reais da placa no lugar do h264HwEncode) antes do VP9
+ * por software, sem reserva H.264 (o VP9 logo depois na negociacao); sem elas, VP9, e o motivo diz que este Discord nao
+ * oferece H.264 e por que o H.265 nao foi. AV1 (whyNoHwOnly): o mesmo do H.265 com H.264, so com o AV1 fixado; sem as
+ * redes de seguranca, o que o automatico escolheria (nunca o AV1 por software). AUTO_HW_ONLY (vazio) e a lista dos que o
+ * automatico tentaria antes.
  */
 export function chooseCodec(viewerCaps: ViewerCodecCaps | undefined, setting: CodecSetting, local: LocalCodecCaps = localCaps): CodecDecision {
     const canSend = (c: VideoCodecName) => local.sendable.size === 0 || local.sendable.has(c);
@@ -456,8 +495,15 @@ export function chooseCodec(viewerCaps: ViewerCodecCaps | undefined, setting: Co
     }
 
     const auto = chooseBaseAuto(viewerCaps, local);
-    // o automatico nunca escolhe H.265 nem AV1 (so fixados) enquanto AUTO_HW_ONLY estiver vazio
+    // com H.264 neste Discord, o automatico nunca escolhe H.265 nem AV1 (so fixados) enquanto AUTO_HW_ONLY estiver vazio
     for (const codec of AUTO_HW_ONLY) if (!whyNoHwOnly(codec, viewerCaps, local)) return hwOnlyDecision(codec, auto, "automático");
+    // sem H.264 neste Discord: o H.265 da placa (com as redes de seguranca dele) antes do VP9 por software; `auto` aqui e
+    // o VP9 (ou o VP8), nunca o H.264, entao vai sem reserva H.264
+    if (h264Unavailable(local)) {
+        const no = whyNoHwOnly("h265", viewerCaps, local);
+        if (!no) return hwOnlyDecision("h265", auto, `automático: ${NO_H264_HERE} → H.265 pela placa`);
+        return fallback(`automático: ${NO_H264_HERE}, e o H.265 da placa não vai (${no})`);
+    }
     return auto;
 }
 
@@ -474,8 +520,9 @@ function chooseBaseAuto(viewerCaps: ViewerCodecCaps | undefined, local: LocalCod
             reason: `automático: o espectador decodifica H.264 por software e este PC codifica H.264 na placa${local.h264HwProfile ? ` (perfil ${local.h264HwProfile})` : ""}`
         };
     }
-    // so chega aqui quando ESTE PC nao codifica (ou nao envia) H.264 na placa: o motivo culpa este PC, nao o espectador
-    const why = "automático: este PC não codifica H.264 por hardware";
+    // so chega aqui quando ESTE PC nao codifica (ou nao envia) H.264 na placa: o motivo culpa este PC (ou este Discord, sem
+    // H.264 nenhum), nao o espectador
+    const why = h264Unavailable(local) ? `automático: ${NO_H264_HERE}` : "automático: este PC não codifica H.264 por hardware";
     return canSend("vp9") ? { codec: "vp9", reason: `${why} → VP9` } : { codec: "vp8", reason: `${why}; VP9 indisponível → VP8` };
 }
 
@@ -485,12 +532,14 @@ export const HW_ONLY_LABEL: Record<HwOnlyCodec, string> = { h265: "H.265", av1: 
 /**
  * A decisao H.265/AV1 com as redes de seguranca ja conferidas: `auto` (o que o automatico escolheria) vira a reserva H.264
  * na negociacao quando e o H.264 da placa; senao, sem reserva H.264 (o espectador sem H.264 na placa ainda decodifica o
- * codec na placa). `how`: "fixado nas configurações" ou "automático".
+ * codec na placa; no H.265, o VP9 vai logo depois na negociacao: sortCodecs). `how`: "fixado nas configurações" ou
+ * "automático..."
  */
 function hwOnlyDecision(codec: HwOnlyCodec, auto: CodecDecision, how: string): CodecDecision {
     const label = HW_ONLY_LABEL[codec];
     if (auto.codec !== "h264") {
-        return { codec, reason: `${how} (${label} por hardware nos dois lados, com a sonda do ${label} ok; sem reserva H.264 na placa para este espectador)` };
+        const next = codec === "h265" && auto.codec === "vp9" ? "; o VP9 logo depois na negociação" : " para este espectador";
+        return { codec, reason: `${how} (${label} por hardware nos dois lados, com a sonda do ${label} ok; sem reserva H.264 na placa${next})` };
     }
     return {
         codec, h264Profile: auto.h264Profile, ...(auto.h264Backup ? { h264Backup: auto.h264Backup } : {}),
@@ -504,6 +553,8 @@ function hwOnlyDecision(codec: HwOnlyCodec, auto: CodecDecision, how: string): C
  * cliente, (AV1) o recurso do Chromium nesta partida, este PC, a placa (o H.264 dela desligado leva junto: travou, sonda
  * rodando, quedas), a sonda deste PC. AV1: sem a medicao pronta (sendable vazio) ou com o recurso desconhecido (null: build
  * do fork ou loader antigo), o motivo diz que nao deu para confirmar, nunca "este PC nao codifica" nem "este cliente nao envia".
+ * H.265 num Discord sem H.264 (h264Unavailable): o h264HwEncode e false so por falta de perfil H.264, entao a placa so
+ * barra pelas travas de verdade (h264HwOff); com H.264, exatamente como antes (o AV1 sempre como antes).
  */
 export function whyNoHwOnlyHere(codec: HwOnlyCodec, local: LocalCodecCaps): string | null {
     const label = HW_ONLY_LABEL[codec];
@@ -517,7 +568,13 @@ export function whyNoHwOnlyHere(codec: HwOnlyCodec, local: LocalCodecCaps): stri
         return local.av1HwFeature === true ? "este PC não codifica AV1 por hardware (só placas RTX 40/50, Radeon RX 7000, Intel Arc ou mais novas)"
             : "não deu para confirmar o AV1 da placa nesta partida (este Discord não tem a opção do AV1 pela placa)";
     }
-    if (!local.h264HwEncode) return `o H.264 da placa está desligado neste PC (travou, sonda rodando ou quedas para software), e o ${label} vai junto`;
+    if (codec === "h265" && h264Unavailable(local)) {
+        if (local.h264HwOff) return `a placa de vídeo está desligada neste PC (travou, sonda rodando ou quedas para software), e o ${label} vai junto`;
+    } else if (!local.h264HwEncode) {
+        // AV1 fixado num Discord sem H.264: o AV1 ainda exige o H.264 da placa (reserva); a causa e o Discord, nao uma falha da placa
+        if (h264Unavailable(local) && !local.h264HwOff) return `${NO_H264_HERE}, e o ${label} fixado ainda depende dele`;
+        return `o H.264 da placa está desligado neste PC (travou, sonda rodando ou quedas para software), e o ${label} vai junto`;
+    }
     if (!(codec === "av1" ? local.av1ProbeOk : local.h265ProbeOk)) return `a sonda WebCodecs do ${label} não passou neste PC`;
     return null;
 }
@@ -577,13 +634,15 @@ export function whyNoHigh(viewerCaps: ViewerCodecCaps | undefined, local: LocalC
  * Variantes do codec escolhido primeiro; o resto fica como alternativa (ordem original nos empates). H.264: o perfil por
  * hardware (h264Profile), depois o reserva (h264Backup, o Baseline da placa quando vai High), depois os outros
  * packetization-mode=1, depois o resto (sdp.ts → h264Rank). VP9: perfil 0 na frente. H.265 e AV1: Main na frente e, com
- * `h264Profile` (o H.264 reserva), as variantes H.264 nessa ordem logo depois; `matched` conta so as H.265/AV1.
+ * `h264Profile` (o H.264 reserva), as variantes H.264 nessa ordem logo depois; `matched` conta so as H.265/AV1. H.265 sem
+ * reserva H.264 (o automatico dele seria o VP9: ex.: este Discord sem H.264): o VP9 logo depois, nunca o VP8 que o
+ * Chromium lista primeiro. O AV1 sem reserva continua com a ordem do Chromium.
  */
 export function sortCodecs<C extends Codec>(codecs: readonly C[], codec: VideoCodecName, h264Profile?: string | null, h264Backup?: string | null): { sorted: C[]; matched: number; } {
     if (isHwOnlyCodec(codec)) {
         const mime = `video/${CODEC_RTP_NAME[codec]}`.toLowerCase();
         const hw = codecs.filter(c => c.mimeType.toLowerCase() === mime).sort((a, b) => hwOnlyRank(codec, a.sdpFmtpLine ?? "") - hwOnlyRank(codec, b.sdpFmtpLine ?? ""));
-        const reserve = h264Profile ? sortCodecs(codecs, "h264", h264Profile, h264Backup) : null;
+        const reserve = h264Profile ? sortCodecs(codecs, "h264", h264Profile, h264Backup) : codec === "h265" ? sortCodecs(codecs, "vp9") : null;
         const front = [...hw, ...(reserve ? reserve.sorted.slice(0, reserve.matched) : [])];
         return { sorted: [...front, ...codecs.filter(c => !front.includes(c))], matched: hw.length };
     }
@@ -626,7 +685,9 @@ export function applyCodecPreferences(transceiver: RTCRtpTransceiver, codec: Vid
             const first = h264ProfileLevelId(sorted[0].sdpFmtpLine ?? "");
             const firstOk = codec === "h264" && isPacketizationMode1(sorted[0].sdpFmtpLine ?? "");
             if (isHwOnlyCodec(codec)) {
-                const reserve = h264Profile ? `reserva H.264 perfil ${h264Profile}${h264Backup ? `/${h264Backup}` : ""} logo depois` : "sem reserva H.264";
+                const vp9Next = codec === "h265" && caps.some(c => /^video\/vp9$/i.test(c.mimeType));
+                const reserve = h264Profile ? `reserva H.264 perfil ${h264Profile}${h264Backup ? `/${h264Backup}` : ""} logo depois`
+                    : vp9Next ? "sem reserva H.264; VP9 logo depois" : "sem reserva H.264";
                 return `${CODEC_RTP_NAME[codec]} primeiro (${matched} variante(s), capacidades do ${name}; ${reserve})`;
             }
             const profile = firstOk && sameH264Profile(first, h264Profile) ? ` (perfil ${h264Profile})`
@@ -793,5 +854,5 @@ export function softwareFallback(
     local: LocalCodecCaps = localCaps
 ): CodecDecision | null {
     if (alreadyChecked || !isSoftwareH264(report) || isTransientSoftwareH264(report)) return null;
-    return chooseCodec(viewerCaps, setting, { ...local, h264HwEncode: false });
+    return chooseCodec(viewerCaps, setting, { ...local, h264HwEncode: false, h264HwOff: true });
 }
