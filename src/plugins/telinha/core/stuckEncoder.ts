@@ -1032,7 +1032,7 @@ export function stuckInThisSession() {
  * envio travou nesta sessao, ou ha uma transmissao no ar: a sonda roda na proxima abertura do Discord; "now" = nao ha
  * sonda possivel (sem Worker, ou a placa nem codifica H.264): o H.264 automatico volta ja, como antes.
  */
-export type RetryOutcome = "testing" | "restart" | "now";
+export type RetryOutcome = "testing" | "restart" | "now" | "h265Now" | "h265Later";
 
 /**
  * Botao "Tentar a placa de vídeo de novo": esquece o travamento E o resultado das sondas, para o H.264 da placa so voltar
@@ -1074,16 +1074,25 @@ export function forgetStuckEncoder(): RetryOutcome {
                 await settleUpgrades(env, 0);
             });
         }
+    } else if (h264Unavailable(getLocalCaps())) {
+        // num Discord sem H.264 o H.265 do automatico depende so da sonda dele (esquecida acima): com transmissao no ar a
+        // sonda espera ela acabar (onStreamStopped); sem transmissao, roda agora
+        setH264HwStuck(false);
+        if (streamBusy()) outcome = "h265Later";
+        else {
+            outcome = "h265Now";
+            if (!probeRunning) void environment().then(env => settleUpgrades(env, 0));
+        }
     } else {
         outcome = "now";
         setH264HwStuck(false);
-        // num Discord sem H.264 o H.265 do automatico depende so da sonda dele (esquecida acima): roda de novo agora
-        if (h264Unavailable(getLocalCaps()) && !probeRunning) void environment().then(env => settleUpgrades(env, 0));
     }
     log.info("Você pediu para tentar o H.264 da placa de vídeo de novo: " + {
         testing: "testando a placa agora (sonda WebCodecs); o H.264 só volta se ela não travar no teste",
         restart: "a placa é testada de novo quando o Discord reiniciar",
-        now: "vale a partir da próxima pessoa que assistir"
+        now: "vale a partir da próxima pessoa que assistir",
+        h265Now: "este Discord não oferece H.264: testando o H.265 da placa agora; até passar, VP9",
+        h265Later: "este Discord não oferece H.264: o H.265 da placa é testado de novo quando a transmissão acabar; até lá, VP9"
     }[outcome]);
     return outcome;
 }

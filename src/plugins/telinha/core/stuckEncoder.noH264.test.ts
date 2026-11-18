@@ -22,7 +22,7 @@ import { type FakeWorker, healthyProbe, installWorker, type WorkerEnv } from "@t
 
 import { chooseCodec, getLocalCaps, setH264HwStuck } from "./codec";
 import { ENCODER_PROBE_TIMING } from "./encoderProbe";
-import { type EncoderEnv, forgetStuckEncoder, h265ProbeRecord, onCodecSettingChanged, PROBE_START, settleH265, startLocalCaps, stuckEncoderDiagnostics } from "./stuckEncoder";
+import { type EncoderEnv, forgetStuckEncoder, h265ProbeRecord, noteStreamStarting, onCodecSettingChanged, onStreamStopped, PROBE_START, settleH265, startLocalCaps, stuckEncoderDiagnostics } from "./stuckEncoder";
 
 const NV_ENV: EncoderEnv = { vendorId: "10de", deviceId: "2484", driver: "32.0.16.2101", chrome: "152.0.7977.167", discord: "1.0.9269" };
 const H265_SEND = "level-id=123;profile-id=1;tier-flag=0;tx-mode=SRST";
@@ -102,12 +102,29 @@ describe("Discord sem H.264, formato de video no automatico", () => {
         setH264HwStuck(false);
     });
 
-    test("o botao 'Tentar a placa de vídeo de novo' (sem H.264 para testar: 'now'): a sonda do H.265 roda de novo na hora", async () => {
+    test("o botao 'Tentar a placa de vídeo de novo' (sem H.264 para testar: 'h265Now'): a sonda do H.265 roda de novo na hora", async () => {
         workers = installWorker(healthyProbe());
-        assert.equal(forgetStuckEncoder(), "now");
+        assert.equal(forgetStuckEncoder(), "h265Now");
         await eventually(() => getLocalCaps().h265ProbeOk === true);
         assert.deepEqual(workers.instances.map(w => configOf(w).codec), [CODEC]);
         assert.equal(chooseCodec(BOTH, "auto").codec, "h265");
+        workers.restore();
+        workers = null;
+    });
+
+    test("o botao com transmissao no ar: 'h265Later' (nada de sonda agora); quando ela acaba, a sonda do H.265 roda", async () => {
+        workers = installWorker(healthyProbe());
+        noteStreamStarting(true);
+        try {
+            assert.equal(forgetStuckEncoder(), "h265Later");
+            await new Promise(resolve => setTimeout(resolve, 30));
+            assert.equal(workers.instances.length, 0, "com a transmissao no ar a sonda nao roda");
+            assert.equal(getLocalCaps().h265ProbeOk, false);
+        } finally {
+            noteStreamStarting(false);
+        }
+        await onStreamStopped();
+        await eventually(() => getLocalCaps().h265ProbeOk === true);
         workers.restore();
         workers = null;
     });

@@ -14,7 +14,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { chooseCodec, getLocalCaps, hwOnlyWanted, noteH264Fallback, probeLocalCaps, setH264HwProbing, setH264HwStuck, setH265ProbeOk } from "./codec";
+import { chooseCodec, getLocalCaps, hwOnlyWanted, noteH264Fallback, probeLocalCaps, setH264HwProbing, setH264HwStuck, setH265ProbeOk, softwareFallback, whyNoHwOnlyHere } from "./codec";
 
 type Codec = RTCRtpCodec;
 
@@ -95,5 +95,20 @@ describe("Discord sem H.264: a medicao, a sonda do H.265 no automatico e as trav
         assert.deepEqual(chooseCodec(VIEWER, "auto"), vp9Because(OFF));
         setH264HwStuck(false);
         assert.equal(getLocalCaps().h264HwOff, true, "as quedas continuam valendo");
+    });
+
+    test("o atalho 'a placa saiu' (softwareFallback) marca h264HwOff: sem H.264 neste Discord ele vai VP9, nao H.265", () => {
+        const local = { ...getLocalCaps(), h264HwOff: false, h265ProbeOk: true };
+        assert.equal(chooseCodec(VIEWER, "auto", local).codec, "h265", "sem a queda, o H.265");
+        const openh264 = { mimeType: "video/H264", implementation: "OpenH264", powerEfficient: false, framesEncoded: 30 };
+        const next = softwareFallback(openh264, false, VIEWER, "auto", local);
+        assert.equal(next?.codec, "vp9");
+        assert.ok(!local.h264HwOff, "nao mexe no objeto recebido");
+    });
+
+    test("AV1 fixado sem H.264 neste Discord: o motivo e o Discord (nao uma falha da placa); com a placa desligada de verdade, o motivo da placa", () => {
+        const base = { ...getLocalCaps(), av1HwFmtp: "level-idx=5;profile=0;tier=0", av1HwFeature: true as const, av1ProbeOk: true };
+        assert.equal(whyNoHwOnlyHere("av1", { ...base, h264HwOff: false }), "este Discord não oferece H.264, e o AV1 fixado ainda depende dele");
+        assert.match(whyNoHwOnlyHere("av1", { ...base, h264HwOff: true })!, /^o H\.264 da placa está desligado neste PC \(travou/);
     });
 });

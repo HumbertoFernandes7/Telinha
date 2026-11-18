@@ -570,7 +570,11 @@ export function whyNoHwOnlyHere(codec: HwOnlyCodec, local: LocalCodecCaps): stri
     }
     if (codec === "h265" && h264Unavailable(local)) {
         if (local.h264HwOff) return `a placa de vídeo está desligada neste PC (travou, sonda rodando ou quedas para software), e o ${label} vai junto`;
-    } else if (!local.h264HwEncode) return `o H.264 da placa está desligado neste PC (travou, sonda rodando ou quedas para software), e o ${label} vai junto`;
+    } else if (!local.h264HwEncode) {
+        // AV1 fixado num Discord sem H.264: o AV1 ainda exige o H.264 da placa (reserva); a causa e o Discord, nao uma falha da placa
+        if (h264Unavailable(local) && !local.h264HwOff) return `${NO_H264_HERE}, e o ${label} fixado ainda depende dele`;
+        return `o H.264 da placa está desligado neste PC (travou, sonda rodando ou quedas para software), e o ${label} vai junto`;
+    }
     if (!(codec === "av1" ? local.av1ProbeOk : local.h265ProbeOk)) return `a sonda WebCodecs do ${label} não passou neste PC`;
     return null;
 }
@@ -850,5 +854,5 @@ export function softwareFallback(
     local: LocalCodecCaps = localCaps
 ): CodecDecision | null {
     if (alreadyChecked || !isSoftwareH264(report) || isTransientSoftwareH264(report)) return null;
-    return chooseCodec(viewerCaps, setting, { ...local, h264HwEncode: false });
+    return chooseCodec(viewerCaps, setting, { ...local, h264HwEncode: false, h264HwOff: true });
 }

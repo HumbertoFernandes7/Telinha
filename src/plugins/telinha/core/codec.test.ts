@@ -784,9 +784,10 @@ describe("Discord sem H.264 (1.0.9269 no Windows, sem o OpenH264): o automatico 
         // com H.264 neste Discord: exatamente como antes (o h264HwEncode false barra, com ou sem h264HwOff)
         const withH264 = noH264({ sendable: new Set(["vp8", "h264", "vp9", "h265"]) });
         assert.equal(whyNoHwOnlyHere("h265", withH264), "o H.264 da placa está desligado neste PC (travou, sonda rodando ou quedas para software), e o H.265 vai junto");
-        // o AV1 fixado sem H.264: como antes (este pedido nao mexe no AV1)
+        // o AV1 fixado sem H.264 segue barrado (depende da reserva H.264), mas o motivo e o Discord; com falha real da placa, o da placa
         const av1 = noH264({ av1HwFmtp: AV1_SEND, av1ProbeOk: true, av1HwFeature: true });
-        assert.equal(whyNoHwOnlyHere("av1", av1), "o H.264 da placa está desligado neste PC (travou, sonda rodando ou quedas para software), e o AV1 vai junto");
+        assert.equal(whyNoHwOnlyHere("av1", av1), "este Discord não oferece H.264, e o AV1 fixado ainda depende dele");
+        assert.equal(whyNoHwOnlyHere("av1", { ...av1, h264HwOff: true }), "o H.264 da placa está desligado neste PC (travou, sonda rodando ou quedas para software), e o AV1 vai junto");
         assert.equal(chooseCodec({ h264HwDecode: true, hwDecode: { v: 1, av1: true, h265: true } }, "av1", av1).codec, "vp9");
     });
 

@@ -1704,7 +1704,7 @@ function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: 
         return;
     }
     if (name === "H.264" && (enc.powerEfficient === false || /openh264/i.test(enc.implementation ?? ""))) {
-        fallBack(peerId, local, send, chooseCodec(rt.peers.get(peerId)?.presence?.caps, settings.store.codec as CodecSetting, { ...getLocalCaps(), h264HwEncode: false }), why);
+        fallBack(peerId, local, send, chooseCodec(rt.peers.get(peerId)?.presence?.caps, settings.store.codec as CodecSetting, { ...getLocalCaps(), h264HwEncode: false, h264HwOff: true }), why);
         return;
     }
     containStuck(peerId, local, send, why);
@@ -2063,7 +2063,7 @@ export function onCodecRequest(peerId: PeerId, request: CodecRequestMessage) {
     // H.265/AV1: o decodificador dele pode nao ser o da placa; vai a reserva H.264 (nada fica marcado neste PC)
     const next = hwOnly
         ? chooseWithout(hwOnly, peerId)
-        : chooseCodec(rt.peers.get(peerId)?.presence?.caps, settings.store.codec as CodecSetting, { ...getLocalCaps(), h264HwEncode: false });
+        : chooseCodec(rt.peers.get(peerId)?.presence?.caps, settings.store.codec as CodecSetting, { ...getLocalCaps(), h264HwEncode: false, h264HwOff: true });
     if (next.codec === send.decision.codec) {
         log.warn(`${why}: continua em H.264 porque o codec está fixado nas configurações`);
         return;
