@@ -79,10 +79,10 @@ describe("constantes do contrato", () => {
 });
 
 describe("screenAudioStatusMain: pre-requisitos e probe", () => {
-    test("fora do Windows nem tenta abrir o helper", async t => {
-        helperHost(t, { platform: "linux" });
+    test("fora do Windows e do Linux nem tenta abrir o helper", async t => {
+        helperHost(t, { platform: "darwin" });
         const procs = mockSpawn(t);
-        assert.deepEqual(await screenAudioStatusMain(), { available: false, reason: "o áudio da tela inteira só funciona no Windows" });
+        assert.deepEqual(await screenAudioStatusMain(), { available: false, reason: "o áudio da tela inteira só funciona no Windows e no Linux" });
         assert.equal(procs.spawned.length, 0);
     });
 
@@ -294,10 +294,10 @@ describe("screenAudioStatusMain: pre-requisitos e probe", () => {
 });
 
 describe("startScreenAudioMain: validacao e arranque", () => {
-    test("recusa fora do Windows, sem exe e com Windows antigo; nunca abre processo", async t => {
+    test("recusa fora do Windows e do Linux, sem exe e com Windows antigo; nunca abre processo", async t => {
         const host = helperHost(t, { platform: "darwin" });
         const procs = mockSpawn(t);
-        assert.deepEqual(await startScreenAudioMain(100), { ok: false, reason: "o áudio da tela inteira só funciona no Windows" });
+        assert.deepEqual(await startScreenAudioMain(100), { ok: false, reason: "o áudio da tela inteira só funciona no Windows e no Linux" });
 
         host.setPlatform("win32");
         host.setExe(false);
@@ -834,5 +834,116 @@ describe("gancho de saida do processo (process.once('exit'))", () => {
         assert.deepEqual(await readScreenAudioMain(second.id, 0), ALREADY_STOPPED);
         assert.equal(exitHooks.length, 1);
         second.proc.exit(0);
+    });
+});
+
+describe("Linux: o som do PC sem o Discord pelo PipeWire", () => {
+    const pwNode = (id: number, props: Record<string, unknown>) => ({ id, type: "PipeWire:Interface:Node", info: { props } });
+    const pwPort = (id: number, nodeId: number, direction: string, channel: string) => ({ id, type: "PipeWire:Interface:Port", info: { direction, props: { "node.id": nodeId, "audio.channel": channel } } });
+    /** O pw-dump mostra o no do pw-record (pelo nome que ele recebeu) com as duas entradas, um player e a voz da call. */
+    const dumpWithNode = (record: FakeChildProcess) => {
+        const name = /node\.name = "([^"]+)"/.exec(record.args[10])![1];
+        return JSON.stringify([
+            pwNode(10, { "node.name": name }), pwPort(11, 10, "input", "FL"), pwPort(12, 10, "input", "FR"),
+            pwNode(20, { "media.class": "Stream/Output/Audio", "application.name": "mpv" }), pwPort(21, 20, "output", "FL"), pwPort(22, 20, "output", "FR"),
+            pwNode(30, { "media.class": "Stream/Output/Audio", "application.process.binary": "Discord" }), pwPort(31, 30, "output", "FL")
+        ], null, 2) + "\n";
+    };
+
+    test("sonda: `pw-dump 0` (sem o exe); saida 0 = disponivel e fica em cache; falha diz a ultima linha; sem a ferramenta, sem helperProblem", async t => {
+        helperHost(t, { platform: "linux", exe: false });
+        let mode: "ok" | "down" | "missing" = "down";
+        const procs = mockSpawn(t, p => {
+            if (mode === "missing") setImmediate(() => p.fail(Object.assign(new Error("spawn pw-dump ENOENT"), { code: "ENOENT" })));
+            else answer(p, mode === "ok" ? { code: 0, stdout: "[]\n" } : { code: 255, stderr: "\ncan't connect: Host is down\n\n" });
+        });
+        assert.deepEqual(await screenAudioStatusMain(), { available: false, reason: "a captura de áudio do PipeWire parou (código 255 — can't connect: Host is down)" });
+        assert.equal(procs.spawned[0].command, "pw-dump");
+        assert.deepEqual(procs.spawned[0].args, ["0"]);
+
+        mode = "missing";
+        assert.deepEqual(await screenAudioStatusMain(), { available: false, reason: "as ferramentas do PipeWire (pw-record, pw-dump e pw-link) não estão instaladas (faltou o pw-dump)" });
+
+        mode = "ok";
+        assert.deepEqual(await screenAudioStatusMain(), { available: true, reason: "áudio do PC sem o Discord (PipeWire)" });
+        assert.equal((await screenAudioStatusMain()).available, true);
+        assert.equal(procs.spawned.length, 3, "o sucesso fica em cache");
+    });
+
+    test("captura: pw-record + pw-dump; pronto quando o no aparece; liga so o player (o Discord nao); o PCM chega; parar mata os dois", async t => {
+        helperHost(t, { platform: "linux", exe: false });
+        const procs = mockSpawn(t);
+        const promise = startScreenAudioMain(4242);
+        const [record, dump] = procs.spawned;
+        assert.equal(record.command, "pw-record");
+        assert.match(record.args[10], /node\.name = "telinha-screen-audio-\d+-\d+"/);
+        assert.deepEqual(record.options, { windowsHide: true, shell: false, stdio: ["pipe", "pipe", "pipe"] });
+        assert.deepEqual([dump.command, dump.args], ["pw-dump", ["--monitor", "--no-colors"]]);
+
+        let settled = false;
+        void promise.then(() => (settled = true));
+        await flushPromises();
+        assert.equal(settled, false, "sem o no no PipeWire ainda nao esta pronto");
+
+        await feed(dump, dumpWithNode(record));
+        const result = await promise;
+        assert.ok(result.ok);
+        assert.deepEqual(procs.spawned.filter(p => p.command === "pw-link").map(p => p.args), [["21", "11"], ["22", "12"]]);
+
+        await feed(record, pcm(3));
+        const read = await readScreenAudioMain(result.id, 0);
+        assert.deepEqual(floatsOf(read.pcm!), [1, -1, 2, -2, 3, -3]);
+
+        stopScreenAudioMain();
+        assert.equal(dump.killed, true, "o pw-dump para junto");
+        record.exit(null, "SIGTERM");
+    });
+
+    test("sem o pw-record (ENOENT, no evento ou na hora): motivo do PipeWire, sem helperProblem (nada de som pelo Chromium)", async t => {
+        helperHost(t, { platform: "linux", exe: false });
+        const enoent = () => Object.assign(new Error("spawn pw-record ENOENT"), { code: "ENOENT" });
+        const reason = "as ferramentas do PipeWire (pw-record, pw-dump e pw-link) não estão instaladas (faltou o pw-record)";
+        const procs = mockSpawn(t, p => {
+            if (p.command === "pw-record") setImmediate(() => p.fail(enoent()));
+        });
+        assert.deepEqual(await startScreenAudioMain(4242), { ok: false, reason });
+        assert.equal(procs.spawned[1].killed, true, "o pw-dump da tentativa para");
+
+        mockSpawn(t, () => {
+            throw enoent();
+        });
+        assert.deepEqual(await startScreenAudioMain(4242), { ok: false, reason });
+    });
+
+    test("o pw-record sai antes de pronto: a ultima linha dele vira o motivo", async t => {
+        helperHost(t, { platform: "linux", exe: false });
+        const procs = mockSpawn(t);
+        const promise = startScreenAudioMain(4242);
+        const [record] = procs.spawned;
+        await feedErr(record, "pw-record: aviso qualquer\nerror: can't connect: Host is down\n");
+        record.exit(255);
+        assert.deepEqual(await promise, { ok: false, reason: "a captura de áudio do PipeWire parou (código 255 — error: can't connect: Host is down)" });
+    });
+
+    test("o pw-dump para no meio: a captura acaba com o motivo (a leitura avisa) e o pw-record e encerrado", async t => {
+        helperHost(t, { platform: "linux", exe: false });
+        const procs = mockSpawn(t);
+        const promise = startScreenAudioMain(4242);
+        const [record, dump] = procs.spawned;
+        await feed(dump, dumpWithNode(record));
+        const result = await promise;
+        assert.ok(result.ok);
+        dump.exit(1);
+        const reason = "o PipeWire parou de avisar os fluxos de áudio (pw-dump saiu com código 1)";
+        assert.deepEqual(await readScreenAudioMain(result.id, 0), { pcm: null, ended: true, reason });
+        await flushPromises();
+        assert.equal(record.stdinEnded, true, "o pw-record recebe o pedido de parada");
+        record.exit(null, "SIGTERM");
+        assert.deepEqual(await readScreenAudioMain(result.id, 0), { pcm: null, ended: true, reason }, "a saida do pw-record nao troca o motivo");
+
+        // antes de pronto: a partida falha com o mesmo motivo
+        const second = startScreenAudioMain(4242);
+        procs.spawned.at(-1)!.exit(1);
+        assert.deepEqual(await second, { ok: false, reason });
     });
 });

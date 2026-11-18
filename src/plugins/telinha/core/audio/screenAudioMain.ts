@@ -9,6 +9,7 @@
 // Audio da tela inteira sem o Discord: roda o telinha-audio.exe (native-audio/), que captura tudo o que o
 // Windows toca EXCETO a arvore de processos do Discord (este processo main + renderer, onde o
 // discord_voice.node toca as vozes da call, + o servico de audio do Chromium), e entrega o PCM ao renderer.
+// No Linux o mesmo PCM vem do pw-record do PipeWire, com o Discord de fora (screenAudioPipeWire.ts); sem exe.
 //
 // Transporte: long poll por IPC (readScreenAudio). O renderer nao tem Node e os natives do Vencord sao
 // ipcMain.handle; um WebSocket local exigiria liberar ws://127.0.0.1 no CSP (so vale apos reiniciar), abrir
@@ -23,6 +24,7 @@ import { existsSync } from "fs";
 import { release } from "os";
 import { isAbsolute, join } from "path";
 
+import { pipeWireExitReason, type PipeWireLinker, pipeWireSpawnReason, PW_DUMP, PW_RECORD, pwRecordArgs, startPipeWireLinks } from "./screenAudioPipeWire";
 import {
     SCREEN_AUDIO_BYTES_PER_FRAME,
     SCREEN_AUDIO_CHANNELS,
@@ -57,6 +59,8 @@ interface Capture {
     waiter: (() => void) | null;
     lastReadAt: number;
     idleTimer: ReturnType<typeof setInterval> | null;
+    /** Linux: quem liga os fluxos de audio ao no do pw-record */
+    links: PipeWireLinker | null;
 }
 
 let current: Capture | null = null;
@@ -92,7 +96,9 @@ function windowsBuild(): number {
 }
 
 function basicCheck(): string | null {
-    if (process.platform !== "win32") return "o áudio da tela inteira só funciona no Windows";
+    // Linux: as ferramentas do PipeWire sao conferidas ao abrir (o ENOENT vira motivo)
+    if (process.platform === "linux") return null;
+    if (process.platform !== "win32") return "o áudio da tela inteira só funciona no Windows e no Linux";
     const build = windowsBuild();
     if (build < MIN_WINDOWS_BUILD) return `o áudio da tela inteira exige Windows 10 versão 2004 ou mais novo (este é o build ${build || "?"})`;
     if (!existsSync(helperPath())) return missingHelperReason();
@@ -148,6 +154,7 @@ function installExitHook() {
     process.once("exit", () => {
         const cap = current;
         current = null;
+        cap?.links?.stop();
         try {
             cap?.child.kill();
         } catch { }
@@ -166,6 +173,7 @@ function finish(cap: Capture, reason: string) {
     cap.reason = reason;
     if (cap.idleTimer) clearInterval(cap.idleTimer);
     cap.idleTimer = null;
+    cap.links?.stop();
     wake(cap);
 }
 
@@ -221,13 +229,18 @@ function probeFailure(e: NodeJS.ErrnoException): ScreenAudioStatus {
     return { available: false, reason: spawnErrorReason(e), ...(helperProblem ? { helperProblem } : {}) };
 }
 
+/** Linux: o `pw-dump 0` (so o objeto do nucleo) conta se as ferramentas existem e o PipeWire responde. */
 function probe(): Promise<ScreenAudioStatus> {
+    const linux = process.platform === "linux";
+    const failure = (e: NodeJS.ErrnoException): ScreenAudioStatus => linux ? { available: false, reason: pipeWireSpawnReason(e, PW_DUMP) } : probeFailure(e);
     return new Promise(resolve => {
         let child: ChildProcessWithoutNullStreams;
         try {
-            child = spawn(helperPath(), ["--probe"], { windowsHide: true, shell: false, stdio: ["pipe", "pipe", "pipe"] });
+            child = linux
+                ? spawn(PW_DUMP, ["0"], { windowsHide: true, shell: false, stdio: ["pipe", "pipe", "pipe"] })
+                : spawn(helperPath(), ["--probe"], { windowsHide: true, shell: false, stdio: ["pipe", "pipe", "pipe"] });
         } catch (e) {
-            resolve(probeFailure(e as NodeJS.ErrnoException));
+            resolve(failure(e as NodeJS.ErrnoException));
             return;
         }
         let stderr = "";
@@ -236,7 +249,7 @@ function probe(): Promise<ScreenAudioStatus> {
             try {
                 child.kill();
             } catch { }
-            done({ available: false, reason: "o ajudante de áudio não respondeu" });
+            done({ available: false, reason: linux ? "o PipeWire não respondeu" : "o ajudante de áudio não respondeu" });
         }, PROBE_TIMEOUT_MS);
         const done = (status: ScreenAudioStatus) => {
             if (settled) return;
@@ -244,7 +257,7 @@ function probe(): Promise<ScreenAudioStatus> {
             clearTimeout(timer);
             resolve(status);
         };
-        child.on("error", e => done(probeFailure(e)));
+        child.on("error", e => done(failure(e)));
         child.stdin.on("error", () => { });
         child.stdout.on("error", () => { });
         child.stdout.resume();
@@ -253,12 +266,23 @@ function probe(): Promise<ScreenAudioStatus> {
             if (stderr.length < STDERR_MAX_CHARS) stderr += b.toString("utf8");
         });
         child.on("exit", (code, signal) => {
+            if (linux) {
+                done(code === 0
+                    ? { available: true, reason: "áudio do PC sem o Discord (PipeWire)" }
+                    : { available: false, reason: pipeWireExitReason(code, signal, lastLine(stderr)) });
+                return;
+            }
             const lastError = stderr.split(/\r?\n/).find(l => l.startsWith("error ")) ?? null;
             if (code === 0) done({ available: true, reason: "áudio do PC sem o Discord (process loopback do Windows)" });
             else done({ available: false, reason: exitReason(code, signal, lastError) });
         });
         child.stdin.end();
     });
+}
+
+/** A ultima linha com texto do stderr (o pw-* nao tem o "error <etapa>" do exe). */
+function lastLine(text: string): string | null {
+    return text.split(/\r?\n/).map(l => l.trim()).filter(Boolean).at(-1)?.slice(0, 300) ?? null;
 }
 
 export function screenAudioStatusMain(): Promise<ScreenAudioStatus> {
@@ -277,6 +301,7 @@ export function screenAudioStatusMain(): Promise<ScreenAudioStatus> {
 /**
  * Inicia a captura de todo o audio do PC menos a arvore de `excludePid` (o native.ts passa process.pid,
  * o processo main do Discord). Para uma captura anterior. Nunca rejeita: devolve { ok: false, reason }.
+ * Linux: o pw-record + as ligacoes do screenAudioPipeWire.ts (o Discord sai pelo nome, nao pelo PID).
  */
 export function startScreenAudioMain(excludePid: number): Promise<ScreenAudioStart> {
     stopScreenAudioMain();
@@ -291,15 +316,18 @@ export function startScreenAudioMain(excludePid: number): Promise<ScreenAudioSta
 
     installExitHook();
 
+    const linux = process.platform === "linux";
+    // o nome do no do PipeWire nunca repete entre capturas (as ligacoes acham o no por ele)
+    const nodeName = `telinha-screen-audio-${process.pid}-${nextId}`;
     let child: ChildProcessWithoutNullStreams;
     try {
-        child = spawn(helperPath(), ["--exclude", String(excludePid), "--parent", String(process.pid)], {
-            windowsHide: true,
-            shell: false,
-            stdio: ["pipe", "pipe", "pipe"]
-        });
+        child = spawn(
+            linux ? PW_RECORD : helperPath(),
+            linux ? pwRecordArgs(nodeName) : ["--exclude", String(excludePid), "--parent", String(process.pid)],
+            { windowsHide: true, shell: false, stdio: ["pipe", "pipe", "pipe"] }
+        );
     } catch (e) {
-        return Promise.resolve(spawnFailure(e as NodeJS.ErrnoException));
+        return Promise.resolve(linux ? { ok: false, reason: pipeWireSpawnReason(e as NodeJS.ErrnoException, PW_RECORD) } : spawnFailure(e as NodeJS.ErrnoException));
     }
 
     const cap: Capture = {
@@ -314,7 +342,8 @@ export function startScreenAudioMain(excludePid: number): Promise<ScreenAudioSta
         lastError: null,
         waiter: null,
         lastReadAt: Date.now(),
-        idleTimer: null
+        idleTimer: null,
+        links: null
     };
     current = cap;
 
@@ -333,11 +362,21 @@ export function startScreenAudioMain(excludePid: number): Promise<ScreenAudioSta
             }
             resolve(result);
         };
-        const readyTimer = setTimeout(() => settle({ ok: false, reason: "o ajudante de áudio não ficou pronto a tempo" }), READY_TIMEOUT_MS);
+        const readyTimer = setTimeout(() => settle({ ok: false, reason: linux ? "o PipeWire não abriu a captura a tempo" : "o ajudante de áudio não ficou pronto a tempo" }), READY_TIMEOUT_MS);
+        const markReady = () => {
+            if (ready) return;
+            ready = true;
+            cap.lastReadAt = Date.now();
+            cap.idleTimer = setInterval(() => {
+                if (Date.now() - cap.lastReadAt > IDLE_STOP_MS) stopScreenAudioMain(cap.id, "o Telinha parou de ler o áudio");
+            }, 1000);
+            cap.idleTimer.unref?.();
+            settle({ ok: true, id: cap.id, sampleRate: SCREEN_AUDIO_RATE, channels: SCREEN_AUDIO_CHANNELS });
+        };
 
         // Sem estes handlers um EPIPE viraria excecao nao tratada no processo main do Discord.
         child.on("error", e => {
-            const failure = spawnFailure(e);
+            const failure: ScreenAudioStart = linux ? { ok: false, reason: pipeWireSpawnReason(e, PW_RECORD) } : spawnFailure(e);
             settle(failure);
             if (!failure.ok) finish(cap, failure.reason);
         });
@@ -356,24 +395,30 @@ export function startScreenAudioMain(excludePid: number): Promise<ScreenAudioSta
             while ((nl = stderr.indexOf("\n")) >= 0) {
                 const line = stderr.slice(0, nl).trim();
                 stderr = stderr.slice(nl + 1);
-                if (line.startsWith("error ")) cap.lastError = line.slice(0, 300);
-                if (!ready && line.startsWith("ready ")) {
-                    ready = true;
-                    cap.lastReadAt = Date.now();
-                    cap.idleTimer = setInterval(() => {
-                        if (Date.now() - cap.lastReadAt > IDLE_STOP_MS) stopScreenAudioMain(cap.id, "o Telinha parou de ler o áudio");
-                    }, 1000);
-                    cap.idleTimer.unref?.();
-                    settle({ ok: true, id: cap.id, sampleRate: SCREEN_AUDIO_RATE, channels: SCREEN_AUDIO_CHANNELS });
-                }
+                // o pw-record nao tem o "error <etapa>": vale a ultima linha com texto
+                if (line.startsWith("error ") || (linux && line)) cap.lastError = line.slice(0, 300);
+                if (!linux && line.startsWith("ready ")) markReady();
             }
         });
 
         child.on("exit", (code, signal) => {
-            const reason = exitReason(code, signal, cap.lastError);
+            const reason = linux ? pipeWireExitReason(code, signal, cap.lastError) : exitReason(code, signal, cap.lastError);
             settle({ ok: false, reason });
             finish(cap, reason);
         });
+
+        // Linux: pronto quando o no do pw-record aparece no PipeWire (dai em diante as ligacoes acompanham os fluxos)
+        if (linux) {
+            cap.links = startPipeWireLinks(nodeName, {
+                onReady: markReady,
+                // depois de pronto, como o exe que sai: a captura fica encerrada com o motivo (a proxima leitura o leva)
+                onFail: reason => {
+                    if (!ready) return settle({ ok: false, reason });
+                    finish(cap, reason);
+                    stopChild(child);
+                }
+            });
+        }
     });
 }
 
