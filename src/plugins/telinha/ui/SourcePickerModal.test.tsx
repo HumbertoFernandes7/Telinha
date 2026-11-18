@@ -15,6 +15,7 @@ import "@test/fakes/dom";
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, test } from "node:test";
 
+import { resetScreenAudioChromiumForTests } from "@plugins/telinha/core/screenAudioChromium";
 import { getState, resetState, setState } from "@plugins/telinha/store";
 import type { CaptureSource } from "@plugins/telinha/types";
 import { installWebAudio, type WebAudioEnv } from "@test/fakes/audio";
@@ -55,6 +56,7 @@ describe("openSourcePicker: antes de abrir", () => {
 describe("SourcePickerModal: a lista e as opcoes", () => {
     beforeEach(() => {
         resetVencordFakes();
+        resetScreenAudioChromiumForTests();
         resetState();
         SelectedChannelStore.setVoiceChannel(VOICE_CHANNEL_ID);
     });
@@ -285,6 +287,44 @@ describe("SourcePickerModal: a lista e as opcoes", () => {
             await settle();
             screen.getByText(/Sem som na tela inteira: falha ao consultar o ajudante de áudio: .*helper travou\. A tela vai só com imagem\./);
             assert.equal(audioSwitch().disabled, true);
+        });
+    });
+
+    describe("som da tela inteira pelo Chromium do Discord", () => {
+        let webAudio: WebAudioEnv;
+        beforeEach(() => void (webAudio = installWebAudio()));
+        afterEach(() => webAudio.restore());
+        const flag = (patch: Record<string, unknown> = {}) => async () => ({ loader: true, saved: false, requested: false, applied: null, disableFeatures: null, saveError: null, ...patch });
+
+        test("Chromium disponivel com o ajudante indisponivel: a opcao fica liberada", async t => {
+            openWith(t, sources(SCREEN), { screenAudioChromiumStatus: async () => ({ available: true, reason: "ok" }), screenAudioFlagStatus: flag({ saved: true, requested: true, applied: true }) });
+            await settle();
+            screen.getByText("Vai todo o som do PC, menos o do Discord (seus amigos não ouvem a própria voz). O som sai pelo próprio Discord.");
+            assert.equal(audioSwitch().disabled, false);
+            assert.equal(audioSwitch().checked, true);
+        });
+
+        test("nenhum dos dois, pedido salvo: mostra o motivo do Chromium (reabra o Discord)", async t => {
+            openWith(t, sources(SCREEN), {
+                screenAudioChromiumStatus: async () => ({ available: false, reason: "o som da tela pelo Chromium foi pedido para a próxima partida: reabra o Discord para ativar" }),
+                screenAudioFlagStatus: flag({ saved: true })
+            });
+            await settle();
+            screen.getByText("Sem som na tela inteira: o som da tela pelo Chromium foi pedido para a próxima partida: reabra o Discord para ativar. A tela vai só com imagem.");
+            assert.equal(audioSwitch().disabled, true);
+        });
+
+        test("nenhum dos dois e sem pedido: o motivo do ajudante, como antes", async t => {
+            openWith(t, sources(SCREEN));
+            await settle();
+            screen.getByText("Sem som na tela inteira: o ajudante de áudio (telinha-audio.exe) não foi instalado. A tela vai só com imagem.");
+        });
+
+        test("sonda do ajudante bloqueado: liga o pedido uma vez e avisa", async t => {
+            const { native } = openWith(t, sources(SCREEN), { screenAudioStatus: async () => ({ available: false, reason: "bloqueado", helperProblem: "blocked" }) });
+            await settle();
+            assert.deepEqual(native.calls.filter(c => c.name === "setScreenAudioFlag").map(c => c.args), [[true]]);
+            assert.ok(toasts.some(x => x.text.startsWith("O Windows bloqueou o ajudante de áudio do Telinha")));
         });
     });
 

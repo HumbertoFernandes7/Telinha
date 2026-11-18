@@ -194,6 +194,7 @@ describe("pagina do plugin e 'Copiar diagnostico'", () => {
         assert.ok(text.endsWith(text.slice(tag)) && !text.slice(tag + 2).includes("\n"), "a etiqueta e a ultima linha");
         assert.doesNotMatch(text, /\b(?:\d{1,3}\.){3}\d{1,3}\b/, "nenhum IP no diagnostico");
         assert.ok(native.calls.some(c => c.name === "updateStatus"), "a versao foi lida de novo no main antes de copiar");
+        assert.match(text, /\nSom da tela pelo Chromium \(loopbackWithoutChrome\): nesta partida não pedido; salvo para a próxima: desligado; indisponível \(.+\)\n/, "a linha do som da tela pelo Chromium");
     });
 
     test("uma versao que nao entrou: o motivo e as ultimas linhas 'update' do main.log vao junto, antes da identidade", async () => {

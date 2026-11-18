@@ -16,16 +16,18 @@ import { describe, test,type TestContext } from "node:test";
 
 import { mockSpawn } from "@test/fakes/childProcess";
 import { eventually, flushPromises, useFakeClock } from "@test/fakes/clock";
-import { desktopCapturer, FakeSession, fakeSource, ipcEvent } from "@test/fakes/electron";
+import { app, desktopCapturer, FakeSession, fakeSource, ipcEvent } from "@test/fakes/electron";
 import { ConnectSrc, CspPolicies } from "@test/fakes/vencord/main/csp";
 import { feed, feedErr, helperHost, pcm, powershellHost, setPlatform } from "@test/helpers/wpd-audio";
 
 import {
     finishDisplayMedia,
     listSources,
+    LOOPBACK_WITHOUT_CHROME,
     prepareDisplayMedia,
     readScreenAudio,
     resetDisplayMedia,
+    screenAudioChromiumStatus,
     screenAudioStatus,
     startScreenAudio,
     stopScreenAudio
@@ -161,18 +163,15 @@ describe("prepareDisplayMedia", () => {
 });
 
 describe("handler de display media", () => {
-    test("tela inteira: entrega o video escolhido e nunca audio (o audio da tela vem do helper)", async t => {
+    test("tela inteira sem o som pelo Chromium (sem loader): entrega so o video (o audio da tela vem do helper)", async t => {
         const session = newSession(t);
         const ev = ipcEvent(session);
         prepareDisplayMedia(ev, SCREEN, "Tela 1", true);
         const result = await session.requestDisplayMedia({ audioRequested: true });
         assert.deepEqual(result?.streams, { video: { id: SCREEN, name: "Tela 1" } });
-        assert.deepEqual(finishDisplayMedia(ev), {
-            handlerCalled: true,
-            audioRequested: true,
-            audio: null,
-            error: null
-        });
+        const report = finishDisplayMedia(ev);
+        assert.equal(report?.audio?.device, null);
+        assert.match(report?.audio?.reason ?? "", /^tela inteira sem o som pelo Chromium: o carregador do add-on/);
     });
 
     test("finishDisplayMedia entrega o relatorio uma vez, remove o handler e some o pedido", async t => {
@@ -371,6 +370,141 @@ describe("audio da janela (decisao pelo PID)", () => {
         assert.deepEqual(result?.streams, { video: { id: WINDOW, name: "Janela" } });
         assert.deepEqual(finishDisplayMedia(ev)?.audio, { device: null, reason: "busca do processo da janela demorou demais; transmitindo sem áudio" });
         assert.equal(hung.spawned.length, 1);
+    });
+});
+
+describe("som da tela pelo Chromium (trava do loopbackWithoutChrome)", () => {
+    const g = globalThis as { __TelinhaAddon?: unknown; };
+    const FILE = process.platform === "win32" ? "C:\\nao-existe\\telinha-teste\\capture-flags.json" : "/nao-existe/telinha-teste/capture-flags.json";
+    const BROWSER = { pid: process.pid, type: "Browser" };
+    const GPU = { pid: 51_234, type: "GPU" };
+    const NETWORK = { pid: 51_300, type: "Utility", serviceName: "network.mojom.NetworkService", name: "Network Service" };
+    const AUDIO = { pid: 51_400, type: "Utility", serviceName: "audio.mojom.AudioService", name: "Audio Service" };
+
+    /** O que o loader do add-on publicou nesta partida (core/screenAudioFlagMain.ts) + o app.getAppMetrics(). */
+    function setup(t: TestContext, state: unknown, metrics: unknown[] = [BROWSER, GPU, NETWORK]) {
+        g.__TelinhaAddon = { capture: { file: FILE, build: 26300, screenAudioInChromium: state } };
+        app.appMetrics = metrics;
+        t.after(() => {
+            delete g.__TelinhaAddon;
+            app.appMetrics = [BROWSER, GPU];
+            app.getAppMetricsImpl = null;
+        });
+    }
+    const APPLIED = { asked: true, applied: true, disableFeatures: "AudioServiceOutOfProcess,RestrictOwnAudioAddChromiumBack" };
+
+    async function screenCapture(t: TestContext) {
+        const session = newSession(t);
+        const ev = ipcEvent(session);
+        prepareDisplayMedia(ev, SCREEN, "Tela 1", true);
+        const result = await session.requestDisplayMedia({ audioRequested: true });
+        return { streams: result?.streams as Streams, report: finishDisplayMedia(ev) };
+    }
+
+    test("trava passa (aplicado nesta partida e o servico de audio no main): a tela vai com loopbackWithoutChrome", async t => {
+        setup(t, APPLIED);
+        assert.deepEqual(screenAudioChromiumStatus(ipcEvent()), {
+            available: true, reason: "o serviço de áudio roda dentro do processo principal do Discord: o som da tela sai sem o Discord"
+        });
+        const { streams, report } = await screenCapture(t);
+        assert.equal(LOOPBACK_WITHOUT_CHROME, "loopbackWithoutChrome");
+        assert.deepEqual(streams, { video: { id: SCREEN, name: "Tela 1" }, audio: "loopbackWithoutChrome" });
+        assert.equal(report?.audio?.device, "loopbackWithoutChrome");
+        assert.match(report?.audio?.reason ?? "", /^tela inteira pelo Chromium do Discord \(sem o Discord\)/);
+    });
+
+    test("trava passa, mas o Chromium nao pediu audio: so o video", async t => {
+        setup(t, APPLIED);
+        const session = newSession(t);
+        const ev = ipcEvent(session);
+        prepareDisplayMedia(ev, SCREEN, "Tela 1", true);
+        const result = await session.requestDisplayMedia({ audioRequested: false });
+        assert.deepEqual(result?.streams, { video: { id: SCREEN, name: "Tela 1" } });
+        assert.equal(finishDisplayMedia(ev)?.audio, null);
+    });
+
+    test("trava passa, mas o Telinha nao quer audio (wantAudio false): so o video", async t => {
+        setup(t, APPLIED);
+        const session = newSession(t);
+        const ev = ipcEvent(session);
+        prepareDisplayMedia(ev, SCREEN, "Tela 1", false);
+        const result = await session.requestDisplayMedia({ audioRequested: true });
+        assert.deepEqual(result?.streams, { video: { id: SCREEN, name: "Tela 1" } });
+        assert.equal(finishDisplayMedia(ev)?.audio, null);
+    });
+
+    // [titulo, estado do loader, motivo esperado]
+    const notApplied: [string, unknown, RegExp][] = [
+        ["nao foi pedido", { asked: false, applied: null, disableFeatures: null }, /não está ligado nesta partida/],
+        ["pedido mas nao aplicado (outro programa mexeu no disable-features)", { asked: true, applied: false, disableFeatures: "X" }, /abriu sem as opções.*reabra o Discord/],
+        ["applied em texto (nao e true)", { asked: true, applied: "true", disableFeatures: null }, /não está ligado nesta partida/],
+        ["loader antigo (sem a chave)", undefined, /carregador do add-on.*não sabe/]
+    ];
+    for (const [title, state, reason] of notApplied) {
+        test(`trava falha, applied diferente de true (${title}): caminho do helper, nunca loopbackWithoutChrome`, async t => {
+            setup(t, state);
+            const status = screenAudioChromiumStatus(ipcEvent());
+            assert.equal(status.available, false);
+            assert.match(status.reason, reason);
+            const { streams, report } = await screenCapture(t);
+            assert.ok(!streams.audio, "sem audio no getDisplayMedia");
+            assert.equal(report?.audio?.device, null);
+            assert.match(report?.audio?.reason ?? "", reason);
+        });
+    }
+
+    // [titulo, processos do getAppMetrics]
+    const audioOutside: [string, unknown[]][] = [
+        ["servico de audio num Utility (serviceName)", [BROWSER, GPU, NETWORK, AUDIO]],
+        ["so o nome diz audio", [BROWSER, { pid: 9, type: "Utility", serviceName: "x.mojom.Y", name: "Audio Service" }]],
+        ["so o serviceName diz audio, outra caixa", [BROWSER, { pid: 9, type: "Utility", serviceName: "AUDIO.mojom.AudioService" }]],
+        ["Utility sem nome nenhum (nao da para provar que nao e o de audio)", [BROWSER, { pid: 9, type: "Utility" }]]
+    ];
+    for (const [title, metrics] of audioOutside) {
+        test(`trava falha, ${title}: caminho do helper, nunca loopbackWithoutChrome`, async t => {
+            setup(t, APPLIED, metrics);
+            const status = screenAudioChromiumStatus(ipcEvent());
+            assert.equal(status.available, false);
+            assert.match(status.reason, /serviço de áudio/);
+            const { streams, report } = await screenCapture(t);
+            assert.ok(!streams.audio, "a voz da call nunca vai para a live");
+            assert.equal(report?.audio?.device, null);
+        });
+    }
+
+    test("o servico de audio separado diz o processo e manda reabrir o Discord", t => {
+        setup(t, APPLIED, [BROWSER, AUDIO]);
+        assert.equal(screenAudioChromiumStatus(ipcEvent()).reason, "o serviço de áudio do Discord ainda roda separado (processo 51400); reabra o Discord por completo, inclusive da bandeja");
+    });
+
+    test("um processo com audio no nome mas que nao e Utility nao reprova (o Browser/GPU nao sao o servico)", t => {
+        setup(t, APPLIED, [{ pid: process.pid, type: "Browser", name: "audio" }, GPU]);
+        assert.equal(screenAudioChromiumStatus(ipcEvent()).available, true);
+    });
+
+    test("getAppMetrics que lanca ou que nao devolve lista: trava falha", async t => {
+        setup(t, APPLIED);
+        app.getAppMetricsImpl = () => {
+            throw new Error("sem metricas");
+        };
+        const thrown = screenAudioChromiumStatus(ipcEvent());
+        assert.equal(thrown.available, false);
+        assert.match(thrown.reason, /não consegui ver os processos do Discord.*sem metricas/);
+        const { streams } = await screenCapture(t);
+        assert.ok(!streams.audio);
+
+        app.getAppMetricsImpl = () => null as unknown as unknown[];
+        assert.equal(screenAudioChromiumStatus(ipcEvent()).available, false);
+    });
+
+    test("a janela continua igual: applicationLoopback do processo, mesmo com a trava passando", async t => {
+        setup(t, APPLIED);
+        powershellHost(t, { stdout: "TELINHA|4321|0|chrome\r\n" });
+        const session = newSession(t);
+        const ev = ipcEvent(session);
+        prepareDisplayMedia(ev, WINDOW, "Janela", true);
+        const result = await session.requestDisplayMedia({ audioRequested: true });
+        assert.deepEqual(result?.streams, { video: { id: WINDOW, name: "Janela" }, audio: "applicationLoopback:4321" });
     });
 });
 

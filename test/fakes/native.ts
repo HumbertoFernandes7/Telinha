@@ -18,7 +18,7 @@ export interface NativeCall {
 
 type AnyFn = (...args: any[]) => any;
 
-/** Defaults: two sources, capture handler ok, no whole-screen audio helper, an empty log file that accepts every batch. */
+/** Defaults: two sources, capture handler ok, no whole-screen audio helper nor Chromium screen audio, an empty log file that accepts every batch. */
 export function defaultTelinhaNatives(): Record<string, AnyFn> {
     return {
         appendDiagLog: async () => true,
@@ -36,7 +36,10 @@ export function defaultTelinhaNatives(): Record<string, AnyFn> {
         screenAudioStatus: async () => ({ available: false, reason: "o ajudante de áudio (telinha-audio.exe) não foi instalado" }),
         startScreenAudio: async () => ({ ok: false, reason: "sem ajudante de áudio (fake)" }),
         readScreenAudio: async () => ({ pcm: null, ended: true, reason: "fake" }),
-        stopScreenAudio: async () => undefined
+        stopScreenAudio: async () => undefined,
+        screenAudioFlagStatus: async () => ({ loader: true, saved: false, requested: false, applied: null, disableFeatures: null, saveError: null }),
+        setScreenAudioFlag: async (on: boolean) => ({ loader: true, saved: on, requested: false, applied: null, disableFeatures: null, saveError: null }),
+        screenAudioChromiumStatus: async () => ({ available: false, reason: "som da tela pelo Chromium desligado (fake)" })
     };
 }
 

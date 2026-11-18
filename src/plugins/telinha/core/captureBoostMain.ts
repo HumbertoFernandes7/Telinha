@@ -97,6 +97,8 @@ export interface LoaderCapture {
     av1HwEncode?: unknown;
     /** o WebRtcAV1HWEncode estava no enable-features quando o app ficou pronto; null = nao foi pedido */
     av1Applied?: unknown;
+    /** o que o loader fez com o pedido do som da tela pelo Chromium: { asked, applied, disableFeatures } (loader desta versao em diante) */
+    screenAudioInChromium?: unknown;
 }
 
 /** O que o loader desta partida publicou (null: sem loader do add-on, ou um loader antigo). */
@@ -116,15 +118,17 @@ const text = (v: unknown, max: number) => (typeof v === "string" && v ? v.slice(
 export interface CaptureFlags {
     wgcTexture: boolean;
     av1HwEncode: boolean;
+    /** o som da tela pelo proprio Chromium (disable-features: AudioServiceOutOfProcess, RestrictOwnAudioAddChromiumBack) */
+    screenAudioInChromium: boolean;
 }
 
 /** O capture-flags.json agora (ausente, ilegivel ou sem `true` = desligado). */
 export function readCaptureFlags(file: string): CaptureFlags {
     try {
         const raw = JSON.parse(readFileSync(file, "utf8"));
-        return { wgcTexture: raw?.wgcTexture === true, av1HwEncode: raw?.av1HwEncode === true };
+        return { wgcTexture: raw?.wgcTexture === true, av1HwEncode: raw?.av1HwEncode === true, screenAudioInChromium: raw?.screenAudioInChromium === true };
     } catch {
-        return { wgcTexture: false, av1HwEncode: false };
+        return { wgcTexture: false, av1HwEncode: false, screenAudioInChromium: false };
     }
 }
 
@@ -136,7 +140,9 @@ export function writeCaptureFlags(file: string, patch: Partial<CaptureFlags>) {
     const next = { format: 1, ...readCaptureFlags(file), ...patch };
     const tmp = `${file}.${process.pid}.tmp`;
     try {
-        writeFileSync(tmp, JSON.stringify({ format: 1, wgcTexture: next.wgcTexture === true, av1HwEncode: next.av1HwEncode === true }) + "\n");
+        // a chave do som da tela so entra quando ligada (ausente = desligada): um arquivo sem ela fica como sempre foi
+        const out = { format: 1, wgcTexture: next.wgcTexture === true, av1HwEncode: next.av1HwEncode === true, ...(next.screenAudioInChromium === true ? { screenAudioInChromium: true } : {}) };
+        writeFileSync(tmp, JSON.stringify(out) + "\n");
         renameSync(tmp, file);
     } catch (e) {
         try {

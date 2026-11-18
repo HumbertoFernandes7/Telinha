@@ -26,13 +26,41 @@ import {
     SCREEN_AUDIO_CHANNELS,
     SCREEN_AUDIO_MAX_WAIT_MS,
     SCREEN_AUDIO_RATE,
+    type ScreenAudioHelperProblem,
     type ScreenAudioNativeApi,
     type ScreenAudioRead,
     type ScreenAudioStatus
 } from "./types";
 import { PCM_PLAYER_PROCESSOR, PCM_PLAYER_SOURCE } from "./worklet";
 
-export type { ScreenAudioStatus } from "./types";
+export type { ScreenAudioHelperProblem, ScreenAudioStatus } from "./types";
+
+/** O erro do startScreenAudioCapture quando o telinha-audio.exe foi barrado ou nao existe (helperProblem). */
+export class ScreenAudioHelperError extends Error {
+    constructor(message: string, readonly helperProblem: ScreenAudioHelperProblem) {
+        super(message);
+        this.name = "ScreenAudioHelperError";
+    }
+}
+
+/** A ultima vez que o helper nao abriu por bloqueio/ausencia nesta partida (a deixa para o som pelo Chromium); null = nao houve. */
+export interface ScreenAudioHelperBlock {
+    problem: ScreenAudioHelperProblem;
+    reason: string;
+    at: number;
+}
+
+let lastHelperBlock: ScreenAudioHelperBlock | null = null;
+
+/** O ultimo bloqueio/ausencia do telinha-audio.exe nesta partida, ou null. Quem decide ligar o som pelo Chromium le daqui. */
+export function screenAudioHelperBlock(): ScreenAudioHelperBlock | null {
+    return lastHelperBlock;
+}
+
+/** So para testes. */
+export function resetScreenAudioHelperBlockForTests() {
+    lastHelperBlock = null;
+}
 
 export interface ScreenAudioCapture {
     track: MediaStreamTrack;
@@ -259,7 +287,14 @@ export async function startScreenAudioCapture(opts: ScreenAudioOptions = {}): Pr
         output?.close();
         output?.track.stop();
         if (startResult.status === "rejected") throw new Error("Sem áudio da tela: " + errorText(startResult.reason));
-        if (started && !started.ok) throw new Error("Sem áudio da tela: " + started.reason + ".");
+        if (started && !started.ok) {
+            const message = "Sem áudio da tela: " + started.reason + ".";
+            if (started.helperProblem === "blocked" || started.helperProblem === "missing") {
+                lastHelperBlock = { problem: started.helperProblem, reason: started.reason, at: Date.now() };
+                throw new ScreenAudioHelperError(message, started.helperProblem);
+            }
+            throw new Error(message);
+        }
         throw new Error("Sem áudio da tela: não foi possível criar a faixa de áudio (" + errorText((outputResult as PromiseRejectedResult).reason) + ").");
     }
 

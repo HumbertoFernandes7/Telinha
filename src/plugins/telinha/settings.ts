@@ -19,6 +19,7 @@ import { onCodecSettingChanged } from "@plugins/telinha/core/stuckEncoder";
 import { onJitterCushionChanged } from "@plugins/telinha/core/viewing";
 import { captureBoostStatusElement } from "@plugins/telinha/ui/CaptureBoostStatus";
 import { codecStatusElement } from "@plugins/telinha/ui/CodecStatus";
+import { screenAudioChromiumElement } from "@plugins/telinha/ui/ScreenAudioChromiumOption";
 import { OptionType } from "@utils/types";
 
 export type CodecSetting = "auto" | "h264" | "h265" | "vp8" | "vp9" | "av1";
@@ -183,6 +184,12 @@ export const settings = definePluginSettings({
     captureBoostStatus: {
         type: OptionType.COMPONENT,
         component: () => captureBoostStatusElement()
+    },
+    // core/screenAudioChromium.ts: interruptor + estado do som da tela pelo proprio Discord (nada fica salvo nesta chave;
+    // o pedido vai para o capture-flags.json pelo main)
+    screenAudioChromium: {
+        type: OptionType.COMPONENT,
+        component: () => screenAudioChromiumElement()
     }
 });
 

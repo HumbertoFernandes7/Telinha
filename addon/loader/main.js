@@ -396,6 +396,13 @@ const WGC_TEXTURE_MIN_BUILD = 26100;
  * when AV1 is the send codec. No Windows build requirement: the GPU's AV1 encoder MFT decides on its own.
  */
 const AV1_HW_ENCODE_FEATURE = "WebRtcAV1HWEncode";
+/**
+ * "Som da tela pelo Chromium": the screen's sound is captured by Chromium's own `loopbackWithoutChrome` device (process
+ * loopback EXCLUDING the process tree of the process running the audio service). For that to exclude all of Discord (the
+ * call's voice plays in the renderer), the audio service has to run INSIDE the main process: these two go into
+ * `disable-features` (not enable-features), merged with the value Discord already passes.
+ */
+const SCREEN_AUDIO_DISABLE_FEATURES = ["AudioServiceOutOfProcess", "RestrictOwnAudioAddChromiumBack"];
 
 function windowsBuild() {
     if (process.platform !== "win32") return 0;
@@ -416,18 +423,23 @@ function withFeature(value, feature) {
  * its own feature that way without merging: every later value gets ours too. One wrapper per process, with every feature
  * asked for (`telinhaKeeps`): a hand-off to another loader version finds it there and only widens it if it asks for more.
  */
-function keepFeaturesOnAppend(commandLine, features) {
+function keepFeaturesOnAppend(commandLine, features, disableFeatures = []) {
     const current = commandLine.appendSwitch;
     const kept = Array.isArray(current.telinhaKeeps) ? current.telinhaKeeps : [];
-    if (features.every(f => kept.includes(f))) return;
+    const keptDisabled = Array.isArray(current.telinhaKeepsDisabled) ? current.telinhaKeepsDisabled : [];
+    if (features.every(f => kept.includes(f)) && disableFeatures.every(f => keptDisabled.includes(f))) return;
     // our own wrapper is replaced by a wider one, never stacked
     const original = Array.isArray(current.telinhaKeeps) && typeof current.telinhaOriginal === "function" ? current.telinhaOriginal : current;
     const all = [...new Set([...kept, ...features])];
+    const allDisabled = [...new Set([...keptDisabled, ...disableFeatures])];
     const appendSwitch = function appendSwitch(name, value, ...rest) {
-        if (String(name).replace(/^-+/, "").toLowerCase() === "enable-features" && value != null) for (const feature of all) value = withFeature(value, feature);
+        const switchName = String(name).replace(/^-+/, "").toLowerCase();
+        if (switchName === "enable-features" && value != null) for (const feature of all) value = withFeature(value, feature);
+        if (switchName === "disable-features" && value != null) for (const feature of allDisabled) value = withFeature(value, feature);
         return original.call(this, name, value, ...rest);
     };
     appendSwitch.telinhaKeeps = all;
+    appendSwitch.telinhaKeepsDisabled = allDisabled;
     appendSwitch.telinhaOriginal = original;
     commandLine.appendSwitch = appendSwitch;
 }
@@ -448,7 +460,10 @@ function applyCaptureFlags() {
         reason: null,
         // the same two for the GPU's AV1 encoder (AV1_HW_ENCODE_FEATURE); the plugin reads av1HwEncode as "this loader knows it"
         av1HwEncode: false,
-        av1Applied: null
+        av1Applied: null,
+        // "Som da tela pelo Chromium": asked = the file asked for it at this start; applied = both features were in
+        // disable-features at app ready (null = not asked for); disableFeatures = the final value
+        screenAudioInChromium: { asked: false, applied: null, disableFeatures: null }
     };
     state.capture = capture;
     try {
@@ -460,6 +475,8 @@ function applyCaptureFlags() {
         }
         capture.wgcTexture = flags?.wgcTexture === true;
         capture.av1HwEncode = flags?.av1HwEncode === true;
+        capture.screenAudioInChromium.asked = flags?.screenAudioInChromium === true;
+        const screenAudio = capture.screenAudioInChromium;
         const features = [];
         if (capture.wgcTexture && capture.build < WGC_TEXTURE_MIN_BUILD) {
             capture.applied = false;
@@ -469,18 +486,26 @@ function applyCaptureFlags() {
             features.push(WGC_TEXTURE_FEATURE);
         }
         if (capture.av1HwEncode) features.push(AV1_HW_ENCODE_FEATURE);
-        if (!features.length) {
+        if (!features.length && !screenAudio.asked) {
             if (capture.reason && !capture.wgcTexture) log(`capture: ${capture.reason}`);
             return;
         }
         const { app } = require("electron");
         const commandLine = app.commandLine;
         let value = commandLine.getSwitchValue("enable-features");
-        for (const feature of features) value = withFeature(value, feature);
-        commandLine.appendSwitch("enable-features", value);
-        keepFeaturesOnAppend(commandLine, features);
+        if (features.length) {
+            for (const feature of features) value = withFeature(value, feature);
+            commandLine.appendSwitch("enable-features", value);
+        }
+        if (screenAudio.asked) {
+            let disabled = commandLine.getSwitchValue("disable-features");
+            for (const feature of SCREEN_AUDIO_DISABLE_FEATURES) disabled = withFeature(disabled, feature);
+            commandLine.appendSwitch("disable-features", disabled);
+        }
+        keepFeaturesOnAppend(commandLine, features, screenAudio.asked ? SCREEN_AUDIO_DISABLE_FEATURES : []);
         if (capture.wgcTexture && features.includes(WGC_TEXTURE_FEATURE)) log(`capture: GPU capture asked for: ${WGC_TEXTURE_FEATURE} added to enable-features (Windows build ${capture.build})`);
         if (capture.av1HwEncode) log(`capture: AV1 hardware encode asked for: ${AV1_HW_ENCODE_FEATURE} added to enable-features`);
+        if (screenAudio.asked) log(`capture: screen audio in Chromium asked for: ${SCREEN_AUDIO_DISABLE_FEATURES.join(",")} added to disable-features`);
         // Electron builds Chromium's feature list from the command line after this script ran, before "ready"
         app.whenReady().then(() => {
             capture.enableFeatures = String(commandLine.getSwitchValue("enable-features") ?? "");
@@ -495,11 +520,18 @@ function applyCaptureFlags() {
                 capture.av1Applied = names.includes(AV1_HW_ENCODE_FEATURE);
                 outcome.push(`AV1 hardware encode ${capture.av1Applied ? "applied" : "NOT applied"}`);
             }
+            if (screenAudio.asked) {
+                screenAudio.disableFeatures = String(commandLine.getSwitchValue("disable-features") ?? "");
+                const disabledNames = featureNames(screenAudio.disableFeatures);
+                screenAudio.applied = SCREEN_AUDIO_DISABLE_FEATURES.every(f => disabledNames.includes(f));
+                outcome.push(`screen audio in Chromium ${screenAudio.applied ? "applied" : "NOT applied"}`);
+            }
             log(`capture: enable-features at app ready: ${capture.enableFeatures || "(empty)"} -> ${outcome.join("; ")}`);
         }).catch(() => { });
     } catch (err) {
         if (capture.wgcTexture && capture.applied === null) capture.applied = false;
         if (capture.av1HwEncode) capture.av1Applied = false;
+        if (capture.screenAudioInChromium.asked && capture.screenAudioInChromium.applied === null) capture.screenAudioInChromium.applied = false;
         capture.reason = `could not turn it on (${firstLine(err)})`;
         log(`capture: ${capture.wgcTexture ? "GPU capture" : "AV1 hardware encode"} not applied: ${capture.reason}`);
     }

@@ -19,11 +19,20 @@ export interface ScreenAudioStatus {
     available: boolean;
     /** Motivo em pt-BR (para a UI) quando indisponivel; descricao curta quando disponivel. */
     reason: string;
+    /** a sonda do helper falhou por bloqueio/ausencia do exe (a deixa para o som pelo Chromium) */
+    helperProblem?: ScreenAudioHelperProblem;
 }
+
+/**
+ * O telinha-audio.exe nao serve neste PC: "blocked" = o Windows/antivirus (Smart App Control) barrou o spawn (EACCES/EPERM/
+ * UNKNOWN); "missing" = o exe nao esta la (ENOENT, ou nunca foi instalado). E a deixa para ligar o som da tela pelo
+ * Chromium do Discord (core/screenAudioFlagMain.ts), que nao precisa do exe.
+ */
+export type ScreenAudioHelperProblem = "blocked" | "missing";
 
 export type ScreenAudioStart =
     | { ok: true; id: number; sampleRate: number; channels: number; }
-    | { ok: false; reason: string; };
+    | { ok: false; reason: string; helperProblem?: ScreenAudioHelperProblem; };
 
 export interface ScreenAudioRead {
     /** Frames inteiros de float32 estereo intercalado; null se nada chegou dentro da espera. */
