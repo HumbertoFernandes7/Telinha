@@ -22,7 +22,7 @@ const OWN = "telinha-screen-audio-1-1";
 const node = (id: number, props: Record<string, unknown>): PwObject => ({ id, type: "PipeWire:Interface:Node", info: { props } });
 const port = (id: number, nodeId: number, direction: "input" | "output", channel: string): PwObject =>
     ({ id, type: "PipeWire:Interface:Port", info: { direction, props: { "node.id": nodeId, "audio.channel": channel } } });
-const stream = (id: number, props: Record<string, unknown> = {}) => node(id, { "media.class": "Stream/Output/Audio", ...props });
+const stream = (id: number, props: Record<string, unknown> = {}) => node(id, { "media.class": "Stream/Output/Audio", "application.process.binary": "firefox", ...props });
 
 /** O no do Telinha (10) com as entradas FL (11) e FR (12), como o pw-record abre. */
 const own = () => [node(10, { "node.name": OWN, "media.class": "Stream/Input/Audio" }), port(11, 10, "input", "FL"), port(12, 10, "input", "FR")];
@@ -55,6 +55,8 @@ describe("motivos em pt-BR", () => {
         assert.equal(pipeWireExitReason(255, null, "can't connect: Host is down"), "a captura de áudio do PipeWire parou (código 255 — can't connect: Host is down)");
         assert.equal(pipeWireExitReason(null, null, null), "a captura de áudio do PipeWire parou (código ?)");
         assert.equal(pipeWireExitReason(null, "SIGTERM", "x"), "a captura de áudio do PipeWire foi encerrada");
+        assert.equal(pipeWireSpawnReason({} as NodeJS.ErrnoException, "pw-link"), "não foi possível abrir o pw-link:  [object Object]");
+        assert.equal(pipeWireSpawnReason(undefined as unknown as NodeJS.ErrnoException, "pw-link"), "não foi possível abrir o pw-link:  undefined");
     });
 });
 
@@ -108,6 +110,53 @@ describe("plannedLinks", () => {
         const s = stream(60);
         const ports = ["MONO", "FC", "RL", "SL", "RR", "SR", "LFE", "AUX0"].map((ch, i) => port(61 + i, 60, "output", ch));
         assert.deepEqual(plannedLinks([...own(), s, ...ports], OWN), [[61, 11], [61, 12], [62, 11], [62, 12], [63, 11], [64, 11], [65, 12], [66, 12]]);
+    });
+
+    test("fluxos de modulos do PipeWire (node.link-group) ficam de fora: re-tocam a mistura com a voz da call", () => {
+        for (const name of ["echo-cancel-playback", "loopback-123-output", "effect_output.filter", "combine-stream"]) {
+            const s = stream(80, { "node.name": name, "node.link-group": "loopback-123", "application.process.binary": "pipewire" });
+            assert.deepEqual(plannedLinks([...own(), s, port(81, 80, "output", "FL")], OWN), [], name);
+        }
+        // o link-group sozinho basta, mesmo com um binario de aplicativo comum
+        assert.deepEqual(plannedLinks([...own(), stream(82, { "node.link-group": "x" }), port(83, 82, "output", "FL")], OWN), []);
+    });
+
+    test("sem application.process.binary (ausente, vazio ou nao texto): fica de fora", () => {
+        for (const binary of [undefined, "", "  ", 42]) {
+            const s = node(84, { "media.class": "Stream/Output/Audio", "application.name": "mpv", "application.process.binary": binary });
+            assert.deepEqual(plannedLinks([...own(), s, port(85, 84, "output", "FL")], OWN), [], String(binary));
+        }
+    });
+
+    test("binario do proprio servidor de som (pipewire, pipewire-pulse, wireplumber): fica de fora", () => {
+        for (const binary of ["pipewire", "pipewire-pulse", "wireplumber", "PipeWire-Pulse"]) {
+            assert.deepEqual(plannedLinks([...own(), stream(86, { "application.process.binary": binary }), port(87, 86, "output", "FL")], OWN), [], binary);
+        }
+    });
+
+    test("mixers conhecidos (easyeffects, pulseeffects, jamesdsp) ficam de fora por binario, nome do app ou node.name", () => {
+        const cases: Record<string, unknown>[] = [
+            { "application.process.binary": "easyeffects" },
+            { "application.process.binary": "gst-launch", "node.name": "easyeffects_sink" },
+            { "application.name": "PulseEffects" },
+            { "node.name": "ee_soe_output_level", "application.process.binary": "JamesDSP" }
+        ];
+        for (const props of cases) assert.deepEqual(plannedLinks([...own(), stream(88, props), port(89, 88, "output", "FL")], OWN), [], JSON.stringify(props));
+    });
+
+    test("o processo do Discord por PID (numero ou texto) fica de fora, mesmo com outro nome; outros PIDs continuam", () => {
+        const withPid = (pid: unknown) => [...own(), stream(90, { "application.process.id": pid }), port(91, 90, "output", "FL")];
+        assert.deepEqual(plannedLinks(withPid(4242), OWN, 4242), []);
+        assert.deepEqual(plannedLinks(withPid("4242"), OWN, 4242), []);
+        assert.deepEqual(plannedLinks(withPid(4243), OWN, 4242), [[91, 11]]);
+        assert.deepEqual(plannedLinks(withPid(undefined), OWN, 4242), [[91, 11]]);
+        assert.deepEqual(plannedLinks(withPid({}), OWN, 4242), [[91, 11]]);
+        assert.deepEqual(plannedLinks(withPid(4242), OWN), [[91, 11]], "sem excludePid so vale o nome");
+    });
+
+    test("um aplicativo comum (firefox) continua ligado, ao lado dos excluidos", () => {
+        const echo = [stream(92, { "node.link-group": "g" }), port(93, 92, "output", "FL")];
+        assert.deepEqual(plannedLinks([...own(), ...firefox(), ...echo, ...discordVoice()], OWN, 1), [[21, 11], [22, 12]]);
     });
 
     test("objetos sem info ou sem props sao ignorados", () => {
@@ -167,6 +216,97 @@ describe("startPipeWireLinks", () => {
         assert.deepEqual(events.fails, ["as ferramentas do PipeWire (pw-record, pw-dump e pw-link) não estão instaladas (faltou o pw-link)"]);
         assert.equal(procs.spawned[0].killed, true, "o pw-dump para junto");
         assert.equal(links().length, 2);
+    });
+
+    test("ligacao que falha (saida != 0) e refeita no proximo lote, no maximo 3 vezes; sucesso nao repete", async t => {
+        const { procs, send, links } = start(t);
+        const last = () => procs.spawned.filter(p => p.command === "pw-link").at(-1)!;
+        await send([...own(), stream(20), port(21, 20, "output", "FL")]);
+        assert.equal(links().length, 1);
+        last().exit(1);
+        await send([port(21, 20, "output", "FL")]); // segunda tentativa
+        assert.equal(links().length, 2);
+        last().exit(null, "SIGTERM");
+        await send([port(21, 20, "output", "FL")]); // terceira
+        assert.equal(links().length, 3);
+        last().exit(1);
+        await send([port(21, 20, "output", "FL")]); // acabaram as tentativas
+        assert.equal(links().length, 3);
+
+        // a porta some e volta: o contador recomeca
+        await send([{ id: 21, info: null }]);
+        await send([port(21, 20, "output", "FL")]);
+        assert.equal(links().length, 4);
+        last().exit(0);
+        await send([port(21, 20, "output", "FL")]);
+        assert.equal(links().length, 4, "saida 0 = ligou");
+    });
+
+    test("pw-link que sai com erro depois da porta sumir ou do stop nao pede nada de novo", async t => {
+        const a = start(t);
+        await a.send([...own(), stream(20), port(21, 20, "output", "FL")]);
+        const [first] = a.procs.spawned.filter(p => p.command === "pw-link");
+        await a.send([{ id: 21, info: null }]);
+        first.exit(1);
+        await a.send([{ id: 5, info: null }]);
+        assert.equal(a.links().length, 1);
+
+        const b = start(t);
+        await b.send([...own(), stream(20), port(21, 20, "output", "FL")]);
+        const [only] = b.procs.spawned.filter(p => p.command === "pw-link");
+        b.linker.stop();
+        only.exit(1);
+        await b.send([port(21, 20, "output", "FL")]);
+        assert.equal(b.links().length, 1);
+    });
+
+    test("excludePid chega ao filtro: o fluxo com o PID do Discord nao e ligado", async t => {
+        const procs = mockSpawn(t);
+        startPipeWireLinks(OWN, { onReady: () => { }, onFail: () => { } }, 4242);
+        procs.spawned[0].writeStdout(dumpText([...own(), stream(20, { "application.process.id": "4242" }), port(21, 20, "output", "FL")]));
+        await flushPromises();
+        assert.deepEqual(procs.spawned.filter(p => p.command === "pw-link").map(p => p.args), []);
+    });
+
+    test("stop(): kill que lanca nao quebra; dados depois do stop sao ignorados", async t => {
+        const { linker, dump, events, links } = start(t);
+        dump.kill = () => {
+            throw new Error("EPERM");
+        };
+        linker.stop();
+        dump.writeStdout(dumpText([...own(), ...firefox()]));
+        await flushPromises();
+        assert.deepEqual(links(), []);
+        assert.deepEqual(events, { ready: 0, fails: [] });
+    });
+
+    test("pw-link que lanca na hora derruba com o motivo; lote que nao e array e item sem id numerico sao ignorados", async t => {
+        const procs = mockSpawn(t, p => {
+            if (p.command === "pw-link") throw Object.assign(new Error("spawn pw-link ENOENT"), { code: "ENOENT" });
+        });
+        const fails: string[] = [];
+        startPipeWireLinks(OWN, { onReady: () => { }, onFail: r => fails.push(r) });
+        const dump = procs.spawned[0];
+        dump.writeStdout(JSON.stringify({ nada: true }) + "\n" + JSON.stringify([null, { id: "x" }, { id: 20, info: null }]) + "\n");
+        await flushPromises();
+        assert.deepEqual(fails, []);
+        dump.writeStdout(dumpText([...own(), ...firefox()]));
+        await flushPromises();
+        assert.deepEqual(fails, ["as ferramentas do PipeWire (pw-record, pw-dump e pw-link) não estão instaladas (faltou o pw-link)"]);
+        assert.equal(procs.spawned.filter(p => p.command === "pw-link").length, 1);
+    });
+
+    test("stop no meio do laco de ligacoes: as seguintes nao sao pedidas e nao ha pronto", async t => {
+        const ref = { stop: () => { } };
+        const procs = mockSpawn(t, p => {
+            if (p.command === "pw-link") ref.stop();
+        });
+        const events = { ready: 0 };
+        ref.stop = startPipeWireLinks(OWN, { onReady: () => events.ready++, onFail: () => { } }).stop;
+        procs.spawned[0].writeStdout(dumpText([...own(), ...firefox()]));
+        await flushPromises();
+        assert.equal(procs.spawned.filter(p => p.command === "pw-link").length, 1);
+        assert.equal(events.ready, 0);
     });
 
     test("o pw-dump sai, falta ou manda lixo: um aviso so, com o motivo", async t => {

@@ -45,6 +45,7 @@ const MAX_QUEUE_BYTES = SCREEN_AUDIO_RATE * SCREEN_AUDIO_BYTES_PER_FRAME / 2; //
 const IDLE_STOP_MS = 5000; // renderer parou de ler (recarregou/travou): encerra o helper
 const KILL_GRACE_MS = 800;
 const STDERR_MAX_CHARS = 16 * 1024;
+const PROBE_STDOUT_MAX_CHARS = 16 * 1024 * 1024;
 
 interface Capture {
     id: number;
@@ -229,7 +230,17 @@ function probeFailure(e: NodeJS.ErrnoException): ScreenAudioStatus {
     return { available: false, reason: spawnErrorReason(e), ...(helperProblem ? { helperProblem } : {}) };
 }
 
-/** Linux: o `pw-dump 0` (so o objeto do nucleo) conta se as ferramentas existem e o PipeWire responde. */
+/** Linux: o PipeWire so serve se o som do PC passa por ele: ao menos um no Audio/Sink na lista completa do pw-dump. */
+function hasAudioSink(json: string): boolean {
+    try {
+        const objects: unknown = JSON.parse(json);
+        return Array.isArray(objects) && objects.some(o => o?.info?.props?.["media.class"] === "Audio/Sink");
+    } catch {
+        return false;
+    }
+}
+
+/** Linux: o `pw-dump` (todos os objetos) conta se as ferramentas existem, o PipeWire responde e ha saida de audio nele. */
 function probe(): Promise<ScreenAudioStatus> {
     const linux = process.platform === "linux";
     const failure = (e: NodeJS.ErrnoException): ScreenAudioStatus => linux ? { available: false, reason: pipeWireSpawnReason(e, PW_DUMP) } : probeFailure(e);
@@ -237,13 +248,14 @@ function probe(): Promise<ScreenAudioStatus> {
         let child: ChildProcessWithoutNullStreams;
         try {
             child = linux
-                ? spawn(PW_DUMP, ["0"], { windowsHide: true, shell: false, stdio: ["pipe", "pipe", "pipe"] })
+                ? spawn(PW_DUMP, [], { windowsHide: true, shell: false, stdio: ["pipe", "pipe", "pipe"] })
                 : spawn(helperPath(), ["--probe"], { windowsHide: true, shell: false, stdio: ["pipe", "pipe", "pipe"] });
         } catch (e) {
             resolve(failure(e as NodeJS.ErrnoException));
             return;
         }
         let stderr = "";
+        let stdout = "";
         let settled = false;
         const timer = setTimeout(() => {
             try {
@@ -261,15 +273,20 @@ function probe(): Promise<ScreenAudioStatus> {
         child.stdin.on("error", () => { });
         child.stdout.on("error", () => { });
         child.stdout.resume();
+        // Linux: a lista inteira do pw-dump (JSON); passou do limite, fica truncada e a sonda diz que nao ha saida (falha fechado)
+        if (linux) child.stdout.on("data", (b: Buffer) => {
+            if (stdout.length < PROBE_STDOUT_MAX_CHARS) stdout += b.toString("utf8");
+        });
         child.stderr.on("error", () => { });
         child.stderr.on("data", (b: Buffer) => {
             if (stderr.length < STDERR_MAX_CHARS) stderr += b.toString("utf8");
         });
-        child.on("exit", (code, signal) => {
+        // Linux espera o "close": o stdout so esta completo depois dele
+        child.on(linux ? "close" : "exit", (code: number | null, signal: NodeJS.Signals | null) => {
             if (linux) {
-                done(code === 0
-                    ? { available: true, reason: "áudio do PC sem o Discord (PipeWire)" }
-                    : { available: false, reason: pipeWireExitReason(code, signal, lastLine(stderr)) });
+                if (code !== 0) done({ available: false, reason: pipeWireExitReason(code, signal, lastLine(stderr)) });
+                else if (!hasAudioSink(stdout)) done({ available: false, reason: "o som do PC não passa pelo PipeWire (sem saída de áudio no PipeWire)" });
+                else done({ available: true, reason: "áudio do PC sem o Discord (PipeWire)" });
                 return;
             }
             const lastError = stderr.split(/\r?\n/).find(l => l.startsWith("error ")) ?? null;
@@ -301,7 +318,7 @@ export function screenAudioStatusMain(): Promise<ScreenAudioStatus> {
 /**
  * Inicia a captura de todo o audio do PC menos a arvore de `excludePid` (o native.ts passa process.pid,
  * o processo main do Discord). Para uma captura anterior. Nunca rejeita: devolve { ok: false, reason }.
- * Linux: o pw-record + as ligacoes do screenAudioPipeWire.ts (o Discord sai pelo nome, nao pelo PID).
+ * Linux: o pw-record + as ligacoes do screenAudioPipeWire.ts (o Discord sai pelo nome e pelo PID).
  */
 export function startScreenAudioMain(excludePid: number): Promise<ScreenAudioStart> {
     stopScreenAudioMain();
@@ -417,7 +434,7 @@ export function startScreenAudioMain(excludePid: number): Promise<ScreenAudioSta
                     finish(cap, reason);
                     stopChild(child);
                 }
-            });
+            }, excludePid);
         }
     });
 }

@@ -845,21 +845,24 @@ describe("Linux: o som do PC sem o Discord pelo PipeWire", () => {
         const name = /node\.name = "([^"]+)"/.exec(record.args[10])![1];
         return JSON.stringify([
             pwNode(10, { "node.name": name }), pwPort(11, 10, "input", "FL"), pwPort(12, 10, "input", "FR"),
-            pwNode(20, { "media.class": "Stream/Output/Audio", "application.name": "mpv" }), pwPort(21, 20, "output", "FL"), pwPort(22, 20, "output", "FR"),
-            pwNode(30, { "media.class": "Stream/Output/Audio", "application.process.binary": "Discord" }), pwPort(31, 30, "output", "FL")
+            pwNode(20, { "media.class": "Stream/Output/Audio", "application.name": "mpv", "application.process.binary": "mpv" }), pwPort(21, 20, "output", "FL"), pwPort(22, 20, "output", "FR"),
+            pwNode(30, { "media.class": "Stream/Output/Audio", "application.process.binary": "Discord" }), pwPort(31, 30, "output", "FL"),
+            pwNode(40, { "media.class": "Stream/Output/Audio", "application.process.binary": "firefox", "application.process.id": "4242" }), pwPort(41, 40, "output", "FL")
         ], null, 2) + "\n";
     };
+    const SINK_DUMP = JSON.stringify([pwNode(1, { "media.class": "Audio/Source" }), pwNode(2, { "media.class": "Audio/Sink" })], null, 2) + "\n";
+    const NO_SINK_REASON = "o som do PC não passa pelo PipeWire (sem saída de áudio no PipeWire)";
 
-    test("sonda: `pw-dump 0` (sem o exe); saida 0 = disponivel e fica em cache; falha diz a ultima linha; sem a ferramenta, sem helperProblem", async t => {
+    test("sonda: `pw-dump` (lista tudo, sem o exe); saida 0 com uma saida de audio = disponivel e fica em cache; falha diz a ultima linha; sem a ferramenta, sem helperProblem", async t => {
         helperHost(t, { platform: "linux", exe: false });
         let mode: "ok" | "down" | "missing" = "down";
         const procs = mockSpawn(t, p => {
             if (mode === "missing") setImmediate(() => p.fail(Object.assign(new Error("spawn pw-dump ENOENT"), { code: "ENOENT" })));
-            else answer(p, mode === "ok" ? { code: 0, stdout: "[]\n" } : { code: 255, stderr: "\ncan't connect: Host is down\n\n" });
+            else answer(p, mode === "ok" ? { code: 0, stdout: SINK_DUMP } : { code: 255, stderr: "\ncan't connect: Host is down\n\n" });
         });
         assert.deepEqual(await screenAudioStatusMain(), { available: false, reason: "a captura de áudio do PipeWire parou (código 255 — can't connect: Host is down)" });
         assert.equal(procs.spawned[0].command, "pw-dump");
-        assert.deepEqual(procs.spawned[0].args, ["0"]);
+        assert.deepEqual(procs.spawned[0].args, []);
 
         mode = "missing";
         assert.deepEqual(await screenAudioStatusMain(), { available: false, reason: "as ferramentas do PipeWire (pw-record, pw-dump e pw-link) não estão instaladas (faltou o pw-dump)" });
@@ -868,6 +871,64 @@ describe("Linux: o som do PC sem o Discord pelo PipeWire", () => {
         assert.deepEqual(await screenAudioStatusMain(), { available: true, reason: "áudio do PC sem o Discord (PipeWire)" });
         assert.equal((await screenAudioStatusMain()).available, true);
         assert.equal(procs.spawned.length, 3, "o sucesso fica em cache");
+    });
+
+    test("sonda: PipeWire responde mas sem nenhum Audio/Sink (PulseAudio com o PipeWire so para o portal): indisponivel, sem cache", async t => {
+        helperHost(t, { platform: "linux", exe: false });
+        let stdout = "[]\n";
+        const procs = mockSpawn(t, p => answer(p, { code: 0, stdout }));
+        for (const bad of ["[]\n", JSON.stringify([{ id: 1, info: null }, null, { id: 2, info: { props: { "media.class": "Audio/Source" } } }]), "{\"x\":1}", "lixo [", ""]) {
+            stdout = bad;
+            assert.deepEqual(await screenAudioStatusMain(), { available: false, reason: NO_SINK_REASON }, bad);
+        }
+        stdout = SINK_DUMP;
+        assert.equal((await screenAudioStatusMain()).available, true);
+        assert.equal(procs.spawned.length, 6, "so o sucesso fica em cache");
+    });
+
+    test("sonda: lista enorme do pw-dump e truncada (so o inicio conta): sem saida de audio", async t => {
+        helperHost(t, { platform: "linux", exe: false });
+        // um pedaco depois do limite e ignorado, mesmo sendo uma lista valida com a saida
+        const procs = mockSpawn(t, p => {
+            setImmediate(async () => {
+                await feed(p, " ".repeat(16 * 1024 * 1024));
+                await feed(p, SINK_DUMP);
+                p.exit(0);
+            });
+        });
+        assert.deepEqual(await screenAudioStatusMain(), { available: false, reason: NO_SINK_REASON });
+        assert.equal(procs.spawned.length, 1);
+    });
+
+    test("sonda: saida != 0 sem texto no stderr e PipeWire que nao responde em 6 s (mata o pw-dump)", async t => {
+        helperHost(t, { platform: "linux", exe: false });
+        const clock = useFakeClock(t);
+        let hang = false;
+        const procs = mockSpawn(t, p => {
+            if (hang) p.exitOnKill = false;
+            else answer(p, { code: 1 });
+        });
+        const noText = screenAudioStatusMain();
+        clock.tick(1);
+        assert.deepEqual(await noText, { available: false, reason: "a captura de áudio do PipeWire parou (código 1)" });
+
+        hang = true;
+        const status = screenAudioStatusMain();
+        clock.tick(6000);
+        assert.deepEqual(await status, { available: false, reason: "o PipeWire não respondeu" });
+        assert.equal(procs.spawned[1].killed, true);
+    });
+
+    test("captura: o pw-record nao abre em 5 s: 'o PipeWire nao abriu a captura a tempo'", async t => {
+        helperHost(t, { platform: "linux", exe: false });
+        const clock = useFakeClock(t);
+        const procs = mockSpawn(t, p => {
+            p.exitOnKill = false;
+        });
+        const promise = startScreenAudioMain(4242);
+        clock.tick(5000);
+        assert.deepEqual(await promise, { ok: false, reason: "o PipeWire não abriu a captura a tempo" });
+        assert.equal(procs.spawned[1].killed, true, "o pw-dump para junto");
     });
 
     test("captura: pw-record + pw-dump; pronto quando o no aparece; liga so o player (o Discord nao); o PCM chega; parar mata os dois", async t => {
