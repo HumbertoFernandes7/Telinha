@@ -28,6 +28,7 @@ import {
     SCREEN_AUDIO_CHANNELS,
     SCREEN_AUDIO_MAX_WAIT_MS,
     SCREEN_AUDIO_RATE,
+    type ScreenAudioHelperProblem,
     type ScreenAudioRead,
     type ScreenAudioStart,
     type ScreenAudioStatus
@@ -35,7 +36,7 @@ import {
 
 export const SCREEN_AUDIO_HELPER = "telinha-audio.exe";
 
-const MIN_WINDOWS_BUILD = 19041; // Windows 10 2004: process loopback
+export const MIN_WINDOWS_BUILD = 19041; // Windows 10 2004: process loopback
 const READY_TIMEOUT_MS = 5000;
 const PROBE_TIMEOUT_MS = 6000;
 const MAX_QUEUE_BYTES = SCREEN_AUDIO_RATE * SCREEN_AUDIO_BYTES_PER_FRAME / 2; // 500 ms; o excesso mais antigo e descartado
@@ -94,8 +95,25 @@ function basicCheck(): string | null {
     if (process.platform !== "win32") return "o áudio da tela inteira só funciona no Windows";
     const build = windowsBuild();
     if (build < MIN_WINDOWS_BUILD) return `o áudio da tela inteira exige Windows 10 versão 2004 ou mais novo (este é o build ${build || "?"})`;
-    if (!existsSync(helperPath())) return `o ajudante de áudio (${SCREEN_AUDIO_HELPER}) não foi instalado junto com o Telinha`;
+    if (!existsSync(helperPath())) return missingHelperReason();
     return null;
+}
+
+function missingHelperReason() {
+    return `o ajudante de áudio (${SCREEN_AUDIO_HELPER}) não foi instalado junto com o Telinha`;
+}
+
+/** O spawn falhou porque o exe foi barrado ("blocked") ou nao existe ("missing"); null = outro motivo. */
+export function spawnErrorProblem(e: NodeJS.ErrnoException): ScreenAudioHelperProblem | null {
+    if (e?.code === "ENOENT") return "missing";
+    if (e?.code === "EACCES" || e?.code === "EPERM" || e?.code === "UNKNOWN") return "blocked";
+    return null;
+}
+
+/** O ScreenAudioStart de falha de um spawn, com o helperProblem quando ha. */
+function spawnFailure(e: NodeJS.ErrnoException): ScreenAudioStart {
+    const helperProblem = spawnErrorProblem(e);
+    return { ok: false, reason: spawnErrorReason(e), ...(helperProblem ? { helperProblem } : {}) };
 }
 
 /**
@@ -197,13 +215,19 @@ function stopChild(child: ChildProcessWithoutNullStreams) {
 }
 
 /** Roda `--probe` uma vez (cacheado quando funciona). */
+/** A sonda nao conseguiu abrir o exe: o motivo, com o helperProblem (bloqueado/ausente) quando ha. */
+function probeFailure(e: NodeJS.ErrnoException): ScreenAudioStatus {
+    const helperProblem = spawnErrorProblem(e);
+    return { available: false, reason: spawnErrorReason(e), ...(helperProblem ? { helperProblem } : {}) };
+}
+
 function probe(): Promise<ScreenAudioStatus> {
     return new Promise(resolve => {
         let child: ChildProcessWithoutNullStreams;
         try {
             child = spawn(helperPath(), ["--probe"], { windowsHide: true, shell: false, stdio: ["pipe", "pipe", "pipe"] });
         } catch (e) {
-            resolve({ available: false, reason: spawnErrorReason(e as NodeJS.ErrnoException) });
+            resolve(probeFailure(e as NodeJS.ErrnoException));
             return;
         }
         let stderr = "";
@@ -220,7 +244,7 @@ function probe(): Promise<ScreenAudioStatus> {
             clearTimeout(timer);
             resolve(status);
         };
-        child.on("error", e => done({ available: false, reason: spawnErrorReason(e) }));
+        child.on("error", e => done(probeFailure(e)));
         child.stdin.on("error", () => { });
         child.stdout.on("error", () => { });
         child.stdout.resume();
@@ -239,7 +263,7 @@ function probe(): Promise<ScreenAudioStatus> {
 
 export function screenAudioStatusMain(): Promise<ScreenAudioStatus> {
     const problem = basicCheck();
-    if (problem) return Promise.resolve({ available: false, reason: problem });
+    if (problem) return Promise.resolve({ available: false, reason: problem, ...(problem === missingHelperReason() ? { helperProblem: "missing" as const } : {}) });
     if (current && !current.ended) return Promise.resolve({ available: true, reason: "capturando" });
     if (probeOk) return probeOk;
     const p = probe();
@@ -258,7 +282,10 @@ export function startScreenAudioMain(excludePid: number): Promise<ScreenAudioSta
     stopScreenAudioMain();
 
     const problem = basicCheck();
-    if (problem) return Promise.resolve({ ok: false, reason: problem });
+    if (problem) {
+        const failure: ScreenAudioStart = problem === missingHelperReason() ? { ok: false, reason: problem, helperProblem: "missing" } : { ok: false, reason: problem };
+        return Promise.resolve(failure);
+    }
     if (!Number.isInteger(excludePid) || excludePid <= 0 || excludePid > 0xFFFFFFFF)
         return Promise.resolve({ ok: false, reason: `PID inválido (${excludePid})` });
 
@@ -272,7 +299,7 @@ export function startScreenAudioMain(excludePid: number): Promise<ScreenAudioSta
             stdio: ["pipe", "pipe", "pipe"]
         });
     } catch (e) {
-        return Promise.resolve({ ok: false, reason: spawnErrorReason(e as NodeJS.ErrnoException) });
+        return Promise.resolve(spawnFailure(e as NodeJS.ErrnoException));
     }
 
     const cap: Capture = {
@@ -310,9 +337,9 @@ export function startScreenAudioMain(excludePid: number): Promise<ScreenAudioSta
 
         // Sem estes handlers um EPIPE viraria excecao nao tratada no processo main do Discord.
         child.on("error", e => {
-            const reason = spawnErrorReason(e);
-            settle({ ok: false, reason });
-            finish(cap, reason);
+            const failure = spawnFailure(e);
+            settle(failure);
+            if (!failure.ok) finish(cap, failure.reason);
         });
         child.stdin.on("error", () => { });
         child.stdout.on("error", () => { });

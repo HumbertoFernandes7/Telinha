@@ -28,7 +28,7 @@ import {
     ACCESS_LABEL, decideWatch, isValidPassword, MAX_PASSWORD_ATTEMPTS, normalizePassword, PASSWORD_MAX_CHARS, PASSWORD_NONCE_TTL_MS, PasswordChallenges,
     type ProofState, verifyPasswordProof, type WatchAccessInput, type WatchDecision
 } from "./access";
-import { startScreenAudioCapture } from "./audio/screenAudio";
+import { ScreenAudioHelperError, startScreenAudioCapture } from "./audio/screenAudio";
 import { captureEndedText, noteCaptureStarted, noteCaptureStopped, textureCaptureActive } from "./captureBoost";
 import { copyOnArrival, startCaptureCopy } from "./captureCopy";
 import {
@@ -41,7 +41,7 @@ import { isIdentityConfigured } from "./identity/config";
 import { type ApprovalInput, identityRequiresApproval } from "./identity/policy";
 import { currentLiveWeight, liveWeightTick, startLiveWeight, stopLiveWeight } from "./liveWeight";
 import { errorText, log, logThrottled, notePrivateTitle } from "./log";
-import { getNative } from "./nativeApi";
+import { getNative, type TelinhaNative } from "./nativeApi";
 import { containPeerConnection, isContained, type SendPlan } from "./peerConnection";
 import { me, sendPresence } from "./presence";
 import { CaptureMonitor } from "./quality/captureMonitor";
@@ -49,6 +49,7 @@ import { isQuality, QUALITIES, RESOLUTION_WIDTH, sourceSizeNote } from "./qualit
 import { QualityController } from "./quality/controller";
 import { encodingFor, LEVELS, levelText, scaledSize } from "./quality/levels";
 import { isHardwareEncoder } from "./quality/stats";
+import { onScreenAudioHelperProblem } from "./screenAudioChromium";
 import { h264ProfileLevelId, type HwOnlyCodec, isH264High, isHwOnlyCodec, sameH264Profile } from "./sdp";
 import { formatDuration } from "./statsLog";
 import {
@@ -304,6 +305,40 @@ function validateOptions(opts: StreamOptions) {
     return { source, profile: QUALITY[opts.quality], access };
 }
 
+/** O som da tela pelo Chromium do Discord (native.ts → screenAudioChromiumStatus) vale agora? Native antigo ou erro = nao. */
+async function chromiumScreenAudio(native: TelinhaNative): Promise<{ available: boolean; reason: string; }> {
+    const ask = (native as Partial<TelinhaNative>).screenAudioChromiumStatus;
+    if (typeof ask !== "function") return { available: false, reason: "a parte nativa desta partida não sabe o som da tela pelo Chromium" };
+    try {
+        const status = await ask();
+        return { available: status?.available === true, reason: typeof status?.reason === "string" ? status.reason : "sem resposta da parte nativa" };
+    } catch (e) {
+        return { available: false, reason: "não consegui conferir o som da tela pelo Chromium: " + errorText(e) };
+    }
+}
+
+const CHROMIUM_AUDIO_CUT_TEXT = "O som da tela foi desligado por segurança: o Discord não isolou o próprio som. Reabra o Discord.";
+/** A segunda checagem do som pelo Chromium, depois da captura comecar (o servico de audio pode subir num Utility so no getDisplayMedia). */
+const CHROMIUM_AUDIO_RECHECK_MS = 3000;
+
+/** Para e tira do stream as faixas de audio (a transmissao segue so com video). */
+function dropAudioTracks(stream: MediaStream) {
+    for (const t of stream.getAudioTracks()) {
+        t.stop();
+        stream.removeTrack(t);
+    }
+}
+
+/** A trava do som pelo Chromium passou de novo? Se nao, corta o audio do stream e avisa. Devolve true se cortou. */
+async function recheckChromiumAudio(native: TelinhaNative, stream: MediaStream, isCurrent: () => boolean, when: string): Promise<boolean> {
+    if (!stream.getAudioTracks().length || !isCurrent()) return false;
+    const again = await chromiumScreenAudio(native);
+    if (again.available || !stream.getAudioTracks().length || !isCurrent()) return false;
+    log.warn(`Som da tela pelo Chromium: a trava reprovou ${when} (${again.reason}); removendo a faixa de áudio e transmitindo só o vídeo`);
+    dropAudioTracks(stream);
+    return true;
+}
+
 export async function startStreaming(opts: StreamOptions): Promise<void> {
     if (starting) {
         // vai para lastError como as outras recusas (a barra e o seletor de fonte mostram o motivo); a partida em curso o limpa ao terminar
@@ -334,11 +369,21 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
         // o nome fica no log local; no diagnostico compartilhado sai como "[janela]" (log.ts → maskPrivate). Tela inteira
         // ("Tela 1"): so a linha abaixo, que a regra da linha da captura ja cobre
         if (kind === "window") notePrivateTitle(source.name);
-        log.info(`Iniciando transmissão: ${kind === "screen" ? "tela" : "janela"} "${source.name}" em ${opts.quality}${wantAudio || wantScreenAudio ? " com áudio" : " sem áudio"}`);
 
         // Nada de await longo entre o clique e o getDisplayMedia: a busca do PID para o audio roda no
-        // main em paralelo e o handler espera por ela (ver native.ts).
-        await native.prepareDisplayMedia(source.id, source.name, wantAudio);
+        // main em paralelo e o handler espera por ela (ver native.ts). Tela inteira com audio: a pergunta do som pelo
+        // Chromium vai junto com o preparo (um so vai-e-volta de IPC); o main refaz a mesma trava no preparo e so entrega
+        // o loopbackWithoutChrome se ela passar, e o handler so da audio se o getDisplayMedia pedir (so pedimos se passou)
+        const [chromium] = await Promise.all([
+            wantScreenAudio ? chromiumScreenAudio(native) : null,
+            native.prepareDisplayMedia(source.id, source.name, wantAudio || wantScreenAudio)
+        ]);
+        // tela inteira: o audio pelo Chromium do Discord (loopbackWithoutChrome) ou, sem ele, pelo telinha-audio.exe
+        const screenViaChromium = wantScreenAudio && chromium?.available === true;
+        const audioPath = !(wantAudio || wantScreenAudio) ? " sem áudio"
+            : wantAudio ? " com áudio" : screenViaChromium ? " com áudio pelo Chromium do Discord" : " com áudio pelo ajudante telinha-audio.exe";
+        log.info(`Iniciando transmissão: ${kind === "screen" ? "tela" : "janela"} "${source.name}" em ${opts.quality}${audioPath}`);
+        if (wantScreenAudio && chromium && !screenViaChromium) log.info(`Som da tela pelo Chromium indisponível: ${chromium.reason}`);
 
         let stream: MediaStream;
         let handlerCalled: boolean | null = null;
@@ -349,7 +394,7 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
                     height: { ideal: profile.height, max: profile.height },
                     frameRate: { ideal: profile.fps, max: profile.fps }
                 },
-                audio: wantAudio ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false } : false
+                audio: wantAudio || screenViaChromium ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false } : false
             });
         } catch (e) {
             const report = await native.finishDisplayMedia().catch(() => null);
@@ -375,7 +420,11 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
             throw new Error(late);
         }
         if (onAir) deferredJoins = new Set();
-        if (wantScreenAudio) {
+        // o som pelo Chromium: a trava de novo agora que a captura abriu (se o servico de audio subiu num Utility so agora, a
+        // voz da call vazaria na live); reprovou = tira a faixa e segue so com video
+        let audioCutText: string | null = null;
+        if (screenViaChromium && await recheckChromiumAudio(native, stream, () => true, "logo depois da captura abrir")) audioCutText = CHROMIUM_AUDIO_CUT_TEXT;
+        if (wantScreenAudio && !screenViaChromium) {
             try {
                 const screenAudio = await startScreenAudioCapture({
                     onEnded: reason => setLastError(`A transmissão continua, mas sem áudio: ${reason}.`)
@@ -383,6 +432,12 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
                 stream.addTrack(screenAudio.track);
             } catch (e) {
                 log.warn(`${e instanceof Error ? e.message : String(e)} Transmitindo a tela sem áudio.`);
+                // o exe foi barrado (Smart App Control/antivirus) ou nao existe: fica registrado em screenAudioHelperBlock()
+                // (audio/screenAudio.ts), a deixa para ligar o som da tela pelo Chromium (setScreenAudioFlag) na proxima partida
+                if (e instanceof ScreenAudioHelperError) {
+                    log.info(`Ajudante de áudio ${e.helperProblem === "blocked" ? "bloqueado" : "ausente"}: o som da tela pelo Chromium do Discord dispensaria o telinha-audio.exe`);
+                    await onScreenAudioHelperProblem(e.helperProblem);
+                }
             }
         }
         // captura pela placa de video: a copia na hora (cada quadro copiado na chegada para uma textura nossa antes dos
@@ -403,13 +458,17 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
         if (copy) copy.track.contentHint = "motion";
         if (audio) audio.contentHint = "music";
         if (wantAudio) log.info(`Áudio: ${audio ? "capturando" : "sem faixa de áudio"} — ${report?.audio?.reason ?? "sem decisão do handler"}`);
-        else if (wantScreenAudio) log.info(`Áudio da tela: ${audio ? "capturando o PC sem o Discord" : "sem faixa de áudio"}`);
+        else if (screenViaChromium) {
+            log.info(audio
+                ? "Áudio da tela: pelo Chromium do Discord (sem o Discord)"
+                : `Áudio da tela: o Chromium do Discord não entregou faixa de áudio; transmitindo a tela sem áudio — ${report?.audio?.reason ?? "sem decisão do handler"}`);
+        } else if (wantScreenAudio) log.info(`Áudio da tela: ${audio ? "pelo ajudante telinha-audio.exe (o PC sem o Discord)" : "sem faixa de áudio"}`);
 
         const s = video.getSettings();
         const info: StreamInfo = {
             kind,
             title: source.name.slice(0, 200),
-            hasAudio: !!audio,
+            hasAudio: !!audio && !audioCutText,
             width: Math.round(s.width ?? profile.width),
             height: Math.round(s.height ?? profile.height),
             fps: Math.round(s.frameRate ?? profile.fps)
@@ -434,6 +493,19 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
             if (rt.local === local) dropCopy(local);
         });
         rt.lastError = null;
+        if (audioCutText) setLastError(audioCutText);
+        else if (screenViaChromium && audio) {
+            // a segunda checagem, uma vez, uns segundos depois
+            setTimeout(() => {
+                void recheckChromiumAudio(native, stream, () => rt.local === local, "3 s depois da captura abrir").then(cut => {
+                    if (!cut || rt.local !== local) return;
+                    local.info = { ...local.info, hasAudio: false };
+                    setLastError(CHROMIUM_AUDIO_CUT_TEXT);
+                    sendPresence();
+                    publish();
+                }).catch(() => { });
+            }, CHROMIUM_AUDIO_RECHECK_MS);
+        }
         warnPinnedAv1();
         startExtras(local, video);
 

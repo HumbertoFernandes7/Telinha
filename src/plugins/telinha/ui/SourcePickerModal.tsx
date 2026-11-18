@@ -10,6 +10,7 @@ import { FormSwitch } from "@components/FormSwitch";
 import { Paragraph } from "@components/Paragraph";
 import { getScreenAudioStatus, listSources, recaptureLock, screenAudioSupported, startStreaming } from "@plugins/telinha/actions";
 import { HINT_2K, qualityOf, splitQuality } from "@plugins/telinha/core/quality/choice";
+import { onScreenAudioHelperProblem, refreshScreenAudioChromium, type ScreenAudioChromium, screenAudioFlagState } from "@plugins/telinha/core/screenAudioChromium";
 import { getState, useTelinhaState } from "@plugins/telinha/store";
 import type { AccessMode, CaptureSource, FrameRate, Quality, Resolution } from "@plugins/telinha/types";
 import { RenderModalProps } from "@vencord/discord-types";
@@ -21,6 +22,7 @@ import { cl, defaultAccess, defaultQuality, errorText, FPS_OPTIONS, inVoiceChann
 type Kind = CaptureSource["kind"];
 
 const WINDOW_AUDIO_NOTE = "Envia junto o som do aplicativo dessa janela.";
+const CHROMIUM_AUDIO_NOTE = "Vai todo o som do PC, menos o do Discord (seus amigos não ouvem a própria voz). O som sai pelo próprio Discord.";
 const SCREEN_AUDIO_NOTE = "Vai todo o som do PC, menos o do Discord (seus amigos não ouvem a própria voz).";
 const SCREEN_AUDIO_CHECKING = "Verificando se este PC consegue compartilhar o som da tela inteira…";
 
@@ -68,6 +70,8 @@ function SourcePickerModal({ modalProps, switching, initialQuality }: { modalPro
     const [startError, setStartError] = useState<string | null>(null);
     // null = ainda verificando; so a tela inteira depende disso (janela usa o som do proprio processo)
     const [screenAudio, setScreenAudio] = useState<ScreenAudioState | null>(null);
+    // o som da tela pelo proprio Chromium do Discord (core/screenAudioChromium.ts); null = ainda verificando
+    const [chromium, setChromium] = useState<ScreenAudioChromium | null>(null);
 
     const load = async (first = false) => {
         setLoading(true);
@@ -95,7 +99,12 @@ function SourcePickerModal({ modalProps, switching, initialQuality }: { modalPro
             .catch((e): ScreenAudioState => ({ available: false, reason: errorText(e) }))
             .then(status => {
                 if (!cancelled) setScreenAudio(status);
+                // a sonda do ajudante falhou por bloqueio/ausencia: liga o pedido do som pelo Chromium (uma vez; avisa)
+                if (status.helperProblem) void onScreenAudioHelperProblem(status.helperProblem);
             });
+        void refreshScreenAudioChromium().then(status => {
+            if (!cancelled) setChromium(status ?? { available: false, reason: "" });
+        });
         return () => {
             cancelled = true;
         };
@@ -107,13 +116,20 @@ function SourcePickerModal({ modalProps, switching, initialQuality }: { modalPro
     const selected = sources?.find(s => s.id === selectedId) ?? null;
 
     const audioKind: Kind = selected?.kind ?? tab;
-    const screenAudioReady = screenAudioSupported && screenAudio?.available === true;
+    const chromiumReady = chromium?.available === true;
+    const screenAudioReady = screenAudioSupported && (screenAudio?.available === true || chromiumReady);
     const audioUnavailable = audioKind === "screen" && !screenAudioReady;
     let audioDescription = WINDOW_AUDIO_NOTE;
     if (audioKind === "screen") {
-        if (screenAudioReady) audioDescription = SCREEN_AUDIO_NOTE;
-        else if (!screenAudio) audioDescription = SCREEN_AUDIO_CHECKING;
-        else audioDescription = `Sem som na tela inteira: ${screenAudio.reason || "o ajudante de áudio não está disponível"}. A tela vai só com imagem.`;
+        if (screenAudioReady) audioDescription = chromiumReady ? CHROMIUM_AUDIO_NOTE : SCREEN_AUDIO_NOTE;
+        else if (!screenAudio || !chromium) audioDescription = SCREEN_AUDIO_CHECKING;
+        else {
+            // pedido salvo (ou aplicado sem passar na trava): o motivo do Chromium ("reabra o Discord"); senao, o do ajudante
+            const flag = screenAudioFlagState();
+            const chromiumWanted = !!flag && (flag.saved || flag.requested) && !!chromium.reason;
+            const why = chromiumWanted ? chromium.reason : screenAudio.reason || "o ajudante de áudio não está disponível";
+            audioDescription = `Sem som na tela inteira: ${why}. A tela vai só com imagem.`;
+        }
     }
 
     const ready = switching || accessReady(access, password);

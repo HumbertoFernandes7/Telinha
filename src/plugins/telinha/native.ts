@@ -21,6 +21,9 @@ import {
 import { appendDiagLogMain, clearDiagLogMain, readDiagLogMain } from "./core/diagLogMain";
 import { type GpuBoostRecordEntry, readGpuBoostRecordMain, writeGpuBoostRecordMain } from "./core/discordGpuBoostMain";
 import { type LiveWeightReport, type LiveWeightStart, readLiveWeightMain, startLiveWeightMain, stopLiveWeightMain } from "./core/liveWeightMain";
+import { type ScreenAudioChromiumStatus, screenAudioChromiumStatusMain } from "./core/screenAudioChromiumMain";
+import { deviceFitsSource, isValidLoopbackDevice, LOOPBACK_WITHOUT_CHROME } from "./core/screenAudioDevice";
+import { type ScreenAudioFlagStatus, screenAudioFlagStatusMain, setScreenAudioFlagMain } from "./core/screenAudioFlagMain";
 import { getWindowProcessInfo } from "./nativeWindowPid";
 import { RELAY_URLS } from "./protocol";
 
@@ -42,7 +45,10 @@ export interface NativeSourceList {
     error?: string;
 }
 
-/** Decisao de audio do getDisplayMedia (so janelas; o audio da tela inteira vem do telinha-audio.exe, ver abaixo). */
+/**
+ * Decisao de audio do getDisplayMedia: janela = applicationLoopback:<pid>; tela inteira = loopbackWithoutChrome, so com a
+ * trava do som da tela pelo Chromium (screenAudioChromiumStatusMain); sem ela, o audio da tela vem do telinha-audio.exe.
+ */
 export interface AudioDecision {
     device: string | null;
     reason: string;
@@ -57,7 +63,6 @@ export interface CaptureReport {
 }
 
 const SOURCE_ID_RE = /^(screen|window):-?\d{1,20}:-?\d{1,10}$/;
-const APP_LOOPBACK_RE = /^applicationLoopback:([1-9]\d{0,9})$/;
 const PENDING_TTL_MS = 15_000;
 const AUDIO_WAIT_MS = 6_000;
 
@@ -77,16 +82,20 @@ function errorText(e: unknown) {
     return e instanceof Error ? `${e.name}: ${e.message}` : String(e);
 }
 
-/** O Chromium da CHECK-crash com um id `applicationLoopback:` malformado: so passam formatos exatos. */
-function isValidLoopbackDevice(device: string) {
-    const match = APP_LOOPBACK_RE.exec(device);
-    return !!match && Number(match[1]) <= 0xFFFFFFFF;
+/** Tela inteira com audio pedido: loopbackWithoutChrome so se a trava passar; senao, sem audio no getDisplayMedia (fica o helper). */
+function resolveScreenAudio(): AudioDecision {
+    const status = screenAudioChromiumStatusMain();
+    return status.available
+        ? { device: LOOPBACK_WITHOUT_CHROME, reason: "tela inteira pelo Chromium do Discord (sem o Discord): " + status.reason }
+        : { device: null, reason: "tela inteira sem o som pelo Chromium: " + status.reason };
+}
+
+/** Uma excecao na trava rejeita a promessa: o handler cai no fallback sem dispositivo (withTimeout), nunca no loopback. */
+async function resolveAudio(sourceId: string): Promise<AudioDecision> {
+    return sourceId.startsWith("screen:") ? resolveScreenAudio() : resolveWindowAudio(sourceId);
 }
 
 async function resolveWindowAudio(sourceId: string): Promise<AudioDecision> {
-    if (!sourceId.startsWith("window:"))
-        return { device: null, reason: "tela inteira: o áudio vem do ajudante telinha-audio.exe, não do getDisplayMedia" };
-
     const info = await getWindowProcessInfo(sourceId);
     if (!info)
         return { device: null, reason: "processo da janela não encontrado; transmitindo sem áudio" };
@@ -141,7 +150,10 @@ function installHandler(targetSession: Electron.Session) {
         const streams: Electron.Streams = { video: { id: req.sourceId, name: req.sourceName } };
 
         if (request.audioRequested && req.audio) {
-            const decision = await withTimeout(req.audio, AUDIO_WAIT_MS, { device: null, reason: "busca do processo da janela demorou demais; transmitindo sem áudio" });
+            let decision = await withTimeout(req.audio, AUDIO_WAIT_MS, { device: null, reason: "busca do processo da janela demorou demais; transmitindo sem áudio" });
+            // trava final: um dispositivo que nao combina com a fonte nunca vai para o Chromium
+            if (decision.device && !deviceFitsSource(req.sourceId, decision.device))
+                decision = { device: null, reason: `dispositivo de áudio recusado (${decision.device.slice(0, 40)}); transmitindo sem áudio` };
             report.audio = decision;
             // Tipado como "loopback" | "loopbackWithMute", mas o Electron repassa qualquer string ao Chromium como id do dispositivo
             if (decision.device) streams.audio = decision.device as "loopback";
@@ -210,7 +222,8 @@ export function prepareDisplayMedia(event: IpcMainInvokeEvent, sourceId: string,
     pending = {
         sourceId,
         sourceName: typeof sourceName === "string" && sourceName ? sourceName.slice(0, 200) : sourceId,
-        audio: wantAudio === true && sourceId.startsWith("window:") ? resolveWindowAudio(sourceId) : null,
+        // janela: busca do PID; tela inteira: a trava do som da tela pelo Chromium (sem ela, device null e o audio fica com o helper)
+        audio: wantAudio === true ? resolveAudio(sourceId) : null,
         createdAt: Date.now()
     };
     lastReport = null;
@@ -413,6 +426,28 @@ export function av1FlagStatus(_: IpcMainInvokeEvent): Av1FlagStatus {
 /** Liga/desliga o WebRtcAV1HWEncode para a proxima partida do Discord (%APPDATA%\Telinha\capture-flags.json). */
 export function setAv1Flag(_: IpcMainInvokeEvent, on: boolean): Av1FlagStatus {
     return setAv1FlagMain(on === true);
+}
+
+// #endregion
+
+// #region som da tela pelo Chromium (core/screenAudioFlagMain.ts)
+
+/** O disable-features do som da tela pelo Chromium: o que vale nesta partida do Discord e o que esta salvo para a proxima. */
+export function screenAudioFlagStatus(_: IpcMainInvokeEvent): ScreenAudioFlagStatus {
+    return screenAudioFlagStatusMain();
+}
+
+/** Liga/desliga o pedido para a proxima partida do Discord (%APPDATA%\Telinha\capture-flags.json). */
+export function setScreenAudioFlag(_: IpcMainInvokeEvent, on: boolean): ScreenAudioFlagStatus {
+    return setScreenAudioFlagMain(on === true);
+}
+
+/**
+ * O renderer pergunta antes de transmitir a tela inteira com audio: o som pelo Chromium (loopbackWithoutChrome) vale agora?
+ * Sem ele, o audio da tela vem do telinha-audio.exe. Uma excecao chega ao renderer como rejeicao (= indisponivel).
+ */
+export function screenAudioChromiumStatus(_: IpcMainInvokeEvent): ScreenAudioChromiumStatus {
+    return screenAudioChromiumStatusMain();
 }
 
 // #endregion

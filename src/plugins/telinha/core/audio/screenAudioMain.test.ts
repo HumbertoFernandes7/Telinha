@@ -303,11 +303,16 @@ describe("startScreenAudioMain: validacao e arranque", () => {
         host.setExe(false);
         const noExe = await startScreenAudioMain(100);
         assert.equal(noExe.ok === false && /não foi instalado junto com o Telinha/.test(noExe.reason), true);
+        assert.equal(noExe.ok === false && noExe.helperProblem, "missing", "sem o exe: a deixa para o som pelo Chromium");
+
+        const probeNoExe = await screenAudioStatusMain();
+        assert.equal(probeNoExe.available === false && probeNoExe.helperProblem, "missing", "a sonda sem o exe tambem e a deixa");
 
         host.setExe(true);
         host.setBuild(10240);
         const old = await startScreenAudioMain(100);
         assert.equal(old.ok === false && /build 10240/.test(old.reason), true);
+        assert.ok(!(old.ok === false && old.helperProblem), "Windows antigo nao e bloqueio do exe");
         assert.equal(procs.spawned.length, 0);
     });
 
@@ -334,7 +339,22 @@ describe("startScreenAudioMain: validacao e arranque", () => {
         const r = await startScreenAudioMain(4242);
         assert.equal(r.ok, false);
         assert.match(r.ok ? "" : r.reason, /bloqueou o ajudante/);
+        assert.equal(r.ok ? null : r.helperProblem, "blocked");
         assert.deepEqual(await readScreenAudioMain(1, 0), ALREADY_STOPPED);
+    });
+
+    test("helperProblem do spawn: EACCES/EPERM/UNKNOWN = blocked, ENOENT = missing, outro codigo = nenhum", async t => {
+        helperHost(t);
+        const cases: [string, string | null][] = [["EACCES", "blocked"], ["EPERM", "blocked"], ["UNKNOWN", "blocked"], ["ENOENT", "missing"], ["E2BIG", null]];
+        for (const [code, problem] of cases) {
+            const procs = mockSpawn(t);
+            const promise = startScreenAudioMain(1);
+            procs.spawned.at(-1)!.fail(Object.assign(new Error("spawn"), { code }));
+            const r = await promise;
+            assert.equal(r.ok, false, code);
+            assert.equal(r.ok ? undefined : r.helperProblem, problem ?? undefined, code);
+            procs.spawned.at(-1)!.exit(1);
+        }
     });
 
     test("abre `--exclude <pid> --parent <pid do main>` escondido, sem shell, e fica pronto no 'ready'", async t => {

@@ -28,7 +28,7 @@ import { installNative, type NativeEnv } from "@test/fakes/native";
 import { FakeMediaStream } from "@test/fakes/webrtc";
 import { pcm } from "@test/helpers/wpd-audio";
 
-import { getScreenAudioStatus, isScreenAudioAvailable, startScreenAudioCapture } from "./screenAudio";
+import { getScreenAudioStatus, isScreenAudioAvailable, resetScreenAudioHelperBlockForTests, screenAudioHelperBlock, ScreenAudioHelperError, startScreenAudioCapture } from "./screenAudio";
 import { PCM_PLAYER_PROCESSOR, PCM_PLAYER_SOURCE } from "./worklet";
 
 type AnyFn = (...args: any[]) => any;
@@ -160,6 +160,26 @@ describe("startScreenAudioCapture: falhas (a transmissao segue sem audio)", () =
         const node = env.audio.workletNodes[0];
         assert.deepEqual(node.port.posted.map(p => p.data), [{ type: "stop" }]);
         assert.deepEqual(env.stops(), []);
+    });
+
+    test("o helper foi barrado (helperProblem): ScreenAudioHelperError e o bloqueio fica registrado", async t => {
+        resetScreenAudioHelperBlockForTests();
+        t.after(resetScreenAudioHelperBlockForTests);
+        setup(t, { natives: { startScreenAudio: async () => ({ ok: false, reason: "o Windows ou o antivírus bloqueou o ajudante de áudio (telinha-audio.exe)", helperProblem: "blocked" }) } });
+        const err = await startScreenAudioCapture().then(() => null, e => e);
+        assert.ok(err instanceof ScreenAudioHelperError);
+        assert.equal(err.helperProblem, "blocked");
+        assert.equal(err.message, "Sem áudio da tela: o Windows ou o antivírus bloqueou o ajudante de áudio (telinha-audio.exe).");
+        assert.equal(screenAudioHelperBlock()?.problem, "blocked");
+        assert.equal(screenAudioHelperBlock()?.reason, "o Windows ou o antivírus bloqueou o ajudante de áudio (telinha-audio.exe)");
+    });
+
+    test("outro motivo de recusa (sem helperProblem): Error comum e nada fica registrado", async t => {
+        resetScreenAudioHelperBlockForTests();
+        setup(t, { natives: { startScreenAudio: async () => ({ ok: false, reason: "o Windows é antigo" }) } });
+        const plain = await startScreenAudioCapture().then(() => null, e => e);
+        assert.ok(!(plain instanceof ScreenAudioHelperError));
+        assert.ok(!screenAudioHelperBlock(), "so bloqueio/ausencia do exe fica registrado");
     });
 
     test("o start rejeita: a mensagem carrega o erro e a saida e desfeita", async t => {
