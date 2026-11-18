@@ -15,9 +15,8 @@ import { installNative, type NativeEnv } from "@test/fakes/native";
 import { resetVencordFakes, toasts } from "@test/fakes/vencord";
 
 import {
-    onScreenAudioHelperProblem, refreshScreenAudioChromium, resetScreenAudioChromiumForTests, screenAudioChromiumDiagnostics, screenAudioChromiumLine,
-    screenAudioChromiumNeedsRestart, setScreenAudioChromiumWanted
-} from "./screenAudioChromium";
+    onScreenAudioHelperProblem, refreshScreenAudioChromium, resetScreenAudioChromiumForTests, screenAudioChromiumDiagnostics, screenAudioChromiumLine, screenAudioChromiumNeedsRestart, screenAudioFlagState, setScreenAudioChromiumWanted,
+subscribeScreenAudioChromium } from "./screenAudioChromium";
 import type { ScreenAudioFlagStatus } from "./screenAudioFlagMain";
 
 let env: NativeEnv | null = null;
@@ -135,5 +134,132 @@ describe("interruptor e linhas", () => {
         main({ saved: true, requested: true, applied: true }, { screenAudioChromiumStatus: async () => ({ available: true, reason: "ok" }) });
         await refreshScreenAudioChromium();
         assert.match(screenAudioChromiumDiagnostics(), /nesta partida aplicado; salvo para a próxima: ligado; disponível$/);
+    });
+});
+
+describe("erros e native ausente/antigo", () => {
+    test("refresh: native ausente nao lanca e devolve null", async () => {
+        assert.equal(await refreshScreenAudioChromium(), null);
+        assert.equal(screenAudioFlagState(), null);
+    });
+
+    test("refresh: native antigo sem as funcoes", async () => {
+        main({}, { screenAudioFlagStatus: undefined, screenAudioChromiumStatus: undefined });
+        assert.equal(await refreshScreenAudioChromium(), null);
+        assert.equal(screenAudioFlagState(), null);
+    });
+
+    test("refresh: valor invalido do estado vira null; chromium com available/reason invalidos", async () => {
+        main({}, { screenAudioFlagStatus: async () => ({ loader: "sim" }), screenAudioChromiumStatus: async () => ({ available: "yes", reason: 5 }) });
+        assert.deepEqual(await refreshScreenAudioChromium(), { available: false, reason: "" });
+        assert.equal(screenAudioFlagState(), null);
+        env!.restore();
+        main({}, { screenAudioFlagStatus: async () => null, screenAudioChromiumStatus: async () => null });
+        assert.deepEqual(await refreshScreenAudioChromium(), { available: false, reason: "" });
+        env!.restore();
+        main({}, { screenAudioFlagStatus: async () => ({ loader: true, saved: "x" }) });
+        await refreshScreenAudioChromium();
+        assert.equal(screenAudioFlagState(), null);
+    });
+
+    test("refresh: as duas funcoes lancam", async () => {
+        main({}, { screenAudioFlagStatus: async () => { throw new Error("ipc caiu"); }, screenAudioChromiumStatus: async () => { throw new Error("outro erro"); } });
+        const r = await refreshScreenAudioChromium();
+        assert.equal(r?.available, false);
+        assert.match(r!.reason, /não consegui conferir o som da tela pelo Chromium: .*outro erro/);
+        assert.equal(screenAudioFlagState(), null);
+    });
+
+    test("interruptor: native ausente ou antigo nao faz nada", async () => {
+        await setScreenAudioChromiumWanted(true);
+        main({}, { setScreenAudioFlag: undefined });
+        await setScreenAudioChromiumWanted(true);
+        assert.equal(calls("setScreenAudioFlag").length, 0);
+    });
+
+    test("interruptor: saveError e erro lancado nao quebram; valor invalido mantem o estado", async () => {
+        main({}, { setScreenAudioFlag: async () => status({ saveError: "disco cheio" }) });
+        await setScreenAudioChromiumWanted(true);
+        assert.equal(calls("setScreenAudioFlag").length, 1);
+        env!.restore();
+        main({}, { setScreenAudioFlag: async () => { throw new Error("falhou"); } });
+        await setScreenAudioChromiumWanted(true);
+        assert.equal(screenAudioFlagState()?.loader, true);
+        env!.restore();
+        main({}, { setScreenAudioFlag: async () => "lixo" });
+        await setScreenAudioChromiumWanted(false);
+        assert.equal(screenAudioFlagState()?.saved, false);
+    });
+
+    test("ajudante: native ausente ou sem as funcoes", async () => {
+        assert.equal(await onScreenAudioHelperProblem("blocked"), false);
+        resetScreenAudioChromiumForTests();
+        main({}, { setScreenAudioFlag: undefined });
+        assert.equal(await onScreenAudioHelperProblem("blocked"), false);
+        resetScreenAudioChromiumForTests();
+        env!.restore();
+        main({}, { screenAudioFlagStatus: undefined });
+        assert.equal(await onScreenAudioHelperProblem("blocked"), false);
+    });
+
+    test("ajudante: estado invalido, leitura que lanca, gravacao invalida ou que lanca", async () => {
+        main({}, { screenAudioFlagStatus: async () => "lixo" });
+        assert.equal(await onScreenAudioHelperProblem("blocked"), false);
+        resetScreenAudioChromiumForTests();
+        env!.restore();
+        main({}, { screenAudioFlagStatus: async () => { throw new Error("ipc"); } });
+        assert.equal(await onScreenAudioHelperProblem("blocked"), false);
+        resetScreenAudioChromiumForTests();
+        env!.restore();
+        main({}, { setScreenAudioFlag: async () => "lixo" });
+        assert.equal(await onScreenAudioHelperProblem("blocked"), false);
+        assert.equal(toasts.length, 0);
+        resetScreenAudioChromiumForTests();
+        env!.restore();
+        main({}, { setScreenAudioFlag: async () => { throw new Error("falhou"); } });
+        assert.equal(await onScreenAudioHelperProblem("blocked"), false);
+    });
+
+    test("ajudante: gravou mas saveError vem junto no log (sem saved)", async () => {
+        main({}, { setScreenAudioFlag: async () => status({ saved: false }) });
+        assert.equal(await onScreenAudioHelperProblem("missing"), false);
+    });
+
+    test("subscribe avisa e cancela", async () => {
+        main();
+        let n = 0;
+        const off = subscribeScreenAudioChromium(() => n++);
+        await refreshScreenAudioChromium();
+        assert.equal(n, 1);
+        off();
+        await refreshScreenAudioChromium();
+        assert.equal(n, 1);
+    });
+});
+
+describe("linhas: todos os estados", () => {
+    test("linha", () => {
+        assert.match(screenAudioChromiumLine(null), /ainda não lido/);
+        assert.match(screenAudioChromiumLine(status({ saveError: "sem permissão" })), /sem permissão\.$/);
+        assert.match(screenAudioChromiumLine(status({ requested: true, applied: true, saved: false })), /desligado para a próxima/);
+        assert.match(screenAudioChromiumLine(status({ requested: true, applied: false })), /não ligou nesta partida/);
+        assert.equal(screenAudioChromiumNeedsRestart(null), false);
+        assert.equal(screenAudioChromiumNeedsRestart(status({ loader: false })), false);
+        assert.equal(screenAudioChromiumNeedsRestart(status({ saved: true, saveError: "x" })), false);
+        assert.equal(screenAudioChromiumNeedsRestart(status({ requested: true, applied: true, saved: false })), true);
+    });
+
+    test("diagnostico: sem loader, pedido nao aplicado, pedido sem resposta, saveError", async () => {
+        main({ loader: false });
+        await refreshScreenAudioChromium();
+        assert.match(screenAudioChromiumDiagnostics(), /nesta partida sem o loader do add-on; salvo para a próxima: sem o loader do add-on/);
+        env!.restore();
+        main({ requested: true, applied: false });
+        await refreshScreenAudioChromium();
+        assert.match(screenAudioChromiumDiagnostics(), /pedido mas NÃO aplicado/);
+        env!.restore();
+        main({ requested: true, applied: null, saveError: "disco cheio" });
+        await refreshScreenAudioChromium();
+        assert.match(screenAudioChromiumDiagnostics(), /nesta partida pedido; .*; disco cheio;/);
     });
 });

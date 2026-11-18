@@ -269,6 +269,17 @@ describe("capture-flags.json asks for the screen's sound in Chromium (screenAudi
         assert.match(state.capture.screenAudioInChromium.disableFeatures, /DiscordOwn/);
     });
 
+    test("getSwitchValue answering nothing for disable-features at app ready: the value is \"\" and it is NOT applied", async t => {
+        const { state, electron, commandLine, tree } = boot(t, { flags: { screenAudioInChromium: true } });
+        const real = commandLine.getSwitchValue;
+        commandLine.getSwitchValue = name => (name === "disable-features" ? undefined : real(name));
+        await ready(electron);
+        assert.equal(state.capture.screenAudioInChromium.disableFeatures, "");
+        assert.equal(state.capture.screenAudioInChromium.applied, false);
+        assert.match(tree.mainLog(), /-> screen audio in Chromium NOT applied/);
+        assert.deepEqual(state.errors, []);
+    });
+
     test("something replaces disable-features behind the wrapper: NOT applied, no boot problem", async t => {
         const { state, electron, commandLine, tree } = boot(t, { flags: { screenAudioInChromium: true } });
         commandLine.switches.set("disable-features", "SomethingElse");

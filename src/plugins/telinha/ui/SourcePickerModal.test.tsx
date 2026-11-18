@@ -421,4 +421,13 @@ describe("SourcePickerModal: Trocar com a captura bloqueada (streaming.ts → re
         assert.equal(modal.button("Trocar").disabled, false);
         assert.ok(!screen.queryByText(STUCK), "nao deveria existir: texto STUCK");
     });
+    test("duplo clique no cartao com a captura bloqueada: nao troca e mostra o motivo", async t => {
+        const modal = live(t, STARTING);
+        await settle();
+        fireEvent.doubleClick(card("Navegador"));
+        await settle();
+        assert.ok(screen.getAllByText(STARTING).length >= 1);
+        assert.equal(modal.button("Trocar").disabled, true);
+        assert.deepEqual(toasts, []);
+    });
 });

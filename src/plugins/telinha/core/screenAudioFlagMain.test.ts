@@ -110,6 +110,34 @@ describe("o lado main do som da tela pelo Chromium (core/screenAudioFlagMain.ts,
         assert.throws(() => readFileSync(file), "nada gravado");
     });
 
+    test("campos estranhos do loader: build nao numerico, textos vazios/longos, reason nao string", () => {
+        g.__TelinhaAddon = { capture: { file, build: "x", wgcTexture: false, applied: null, av1HwEncode: false, av1Applied: null, screenAudioInChromium: { asked: true, applied: true, disableFeatures: "f".repeat(600), reason: "r".repeat(400) } } };
+        const st = screenAudioFlagStatusMain();
+        assert.equal(st.build, 0);
+        assert.equal(st.disableFeatures?.length, 500);
+        assert.equal(st.loaderReason?.length, 300);
+        loader({ asked: true, applied: true, disableFeatures: "", reason: "" });
+        assert.equal(screenAudioFlagStatusMain().disableFeatures, null);
+        assert.equal(screenAudioFlagStatusMain().loaderReason, null);
+        loader({ asked: true, applied: true, disableFeatures: "x", reason: 7 });
+        assert.equal(screenAudioFlagStatusMain().loaderReason, null);
+    });
+
+    test("a gravacao lanca algo que nao e Error: o texto vira o motivo", () => {
+        let reads = 0;
+        const capture = {
+            build: 26300, wgcTexture: false, applied: null, av1HwEncode: false, av1Applied: null,
+            screenAudioInChromium: { asked: false, applied: null, disableFeatures: null },
+            get file() {
+                if (++reads === 7) throw "boom";
+                return file;
+            }
+        };
+        g.__TelinhaAddon = { capture };
+        const st = setScreenAudioFlagMain(true);
+        assert.equal(st.saveError, "não consegui salvar o pedido do som da tela pelo Chromium (boom)");
+    });
+
     test("a gravacao falha (a pasta sumiu): o erro em pt-BR, sem lancar", () => {
         loader();
         rmSync(dir, { recursive: true, force: true });

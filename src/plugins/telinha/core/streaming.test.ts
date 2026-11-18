@@ -456,6 +456,35 @@ describe("startStreaming: tela, janela e audio", () => {
         }
     });
 
+    test("ajudante de audio ausente: o log diz ausente e o aviso e o da ausencia", async () => {
+        resetScreenAudioHelperBlockForTests();
+        resetScreenAudioChromiumForTests();
+        const audio = installWebAudio();
+        try {
+            rig.native.telinha.startScreenAudio = async () => ({ ok: false, reason: "o ajudante de áudio (telinha-audio.exe) não foi instalado", helperProblem: "missing" });
+            const since = logMark();
+            await startStreaming(screenOptions({ withAudio: true }));
+            await turns(1);
+            assert.equal(screenAudioHelperBlock()?.problem, "missing");
+            assert.ok(since().includes("Ajudante de áudio ausente: o som da tela pelo Chromium do Discord dispensaria o telinha-audio.exe"));
+            assert.ok(toasts.some(x => x.text.startsWith("O ajudante de áudio do Telinha não está instalado.")));
+        } finally {
+            audio.restore();
+            resetScreenAudioHelperBlockForTests();
+            resetScreenAudioChromiumForTests();
+        }
+    });
+
+    test("som da tela pelo Chromium sem faixa e sem relatorio do handler: o log diz 'sem decisao do handler'", async () => {
+        rig.native.telinha.screenAudioChromiumStatus = async () => ({ available: true, reason: "ok" });
+        rig.native.telinha.finishDisplayMedia = async () => null;
+        rig.rtc.mediaDevices.getDisplayMediaImpl = () => Promise.resolve(captureStream());
+        const since = logMark();
+        await startStreaming(screenOptions({ withAudio: true }));
+        await turns(1);
+        assert.ok(since().includes("Áudio da tela: o Chromium do Discord não entregou faixa de áudio; transmitindo a tela sem áudio — sem decisão do handler"), "o log não trouxe a linha");
+    });
+
     test("sem o ajudante de audio: transmite a tela so com imagem, com um aviso no log", async () => {
         const since = logMark();
         await startStreaming(screenOptions({ withAudio: true }));

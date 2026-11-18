@@ -497,6 +497,19 @@ describe("som da tela pelo Chromium (trava do loopbackWithoutChrome)", () => {
         assert.equal(screenAudioChromiumStatus(ipcEvent()).available, false);
     });
 
+    test("a trava lanca por dentro (estado do loader ilegivel): a promessa rejeita e a tela vai sem audio, nunca no loopback", async t => {
+        setup(t, APPLIED);
+        Object.defineProperty((g.__TelinhaAddon as { capture: object; }).capture, "build", {
+            get() {
+                throw new Error("loader quebrado");
+            }
+        });
+        const { streams, report } = await screenCapture(t);
+        assert.ok(!streams.audio);
+        assert.equal(report?.audio?.device, null);
+        assert.match(report?.audio?.reason ?? "", /demorou demais/);
+    });
+
     test("Windows abaixo do build 19041: a trava falha com o motivo, mesmo aplicado, e a tela vai sem audio", async t => {
         setup(t, APPLIED);
         (g.__TelinhaAddon as { capture: { build: number; }; }).capture.build = 18363;
@@ -513,6 +526,11 @@ describe("som da tela pelo Chromium (trava do loopbackWithoutChrome)", () => {
         assert.equal(deviceFitsSource("window:1:0", "applicationLoopback:1234"), true);
         assert.equal(deviceFitsSource("window:1:0", "loopbackWithoutChrome"), false);
         assert.equal(deviceFitsSource("window:1:0", "loopback"), false);
+        assert.equal(deviceFitsSource("window:1:0", "applicationLoopback:0"), false);
+        assert.equal(deviceFitsSource("window:1:0", "applicationLoopback:4294967296"), false);
+        assert.equal(deviceFitsSource("window:1:0", "applicationLoopback:4294967295"), true);
+        assert.equal(deviceFitsSource("other:1", "applicationLoopback:1234"), false);
+        assert.equal(deviceFitsSource("other:1", "loopbackWithoutChrome"), false);
     });
 
     test("a janela continua igual: applicationLoopback do processo, mesmo com a trava passando", async t => {

@@ -16,11 +16,12 @@ import { afterEach, beforeEach, test } from "node:test";
 import { resetScreenAudioChromiumForTests } from "@plugins/telinha/core/screenAudioChromium";
 import type { ScreenAudioFlagStatus } from "@plugins/telinha/core/screenAudioFlagMain";
 import { installNative, type NativeEnv } from "@test/fakes/native";
-import { fireEvent, render, screen, settle } from "@test/fakes/render";
-import { resetVencordFakes } from "@test/fakes/vencord";
+import { act, fireEvent, render, screen, settle } from "@test/fakes/render";
+import { resetVencordFakes, toasts } from "@test/fakes/vencord";
 
 import { screenAudioChromiumElement,ScreenAudioChromiumOption } from "./ScreenAudioChromiumOption";
 
+const w = window as { DiscordNative?: unknown; };
 let env: NativeEnv | null = null;
 
 function main(patch: Partial<ScreenAudioFlagStatus> = {}) {
@@ -34,6 +35,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+    delete w.DiscordNative;
     env?.restore();
     env = null;
     resetScreenAudioChromiumForTests();
@@ -69,4 +71,23 @@ test("sem o loader do add-on: o interruptor fica desabilitado", async () => {
     render(<ScreenAudioChromiumOption />);
     await settle();
     assert.equal((screen.getByRole("switch") as HTMLInputElement).disabled, true);
+});
+
+test("o botao reinicia o Discord; sem como reiniciar daqui, o aviso diz como fazer", async () => {
+    main({ saved: true });
+    const relaunch = { calls: 0 };
+    w.DiscordNative = { app: { relaunch: () => relaunch.calls++ } };
+    render(<ScreenAudioChromiumOption />);
+    await settle();
+    act(() => {
+        fireEvent.click(screen.getByRole("button", { name: "Reiniciar o Discord agora" }));
+    });
+    assert.equal(relaunch.calls, 1);
+    assert.deepEqual(toasts, []);
+
+    delete w.DiscordNative;
+    act(() => {
+        fireEvent.click(screen.getByRole("button", { name: "Reiniciar o Discord agora" }));
+    });
+    assert.deepEqual(toasts.map(t => t.text), ["Feche o Discord por completo (inclusive da bandeja) e abra de novo"]);
 });
