@@ -18,6 +18,7 @@ import { captureBoostDiagnostics, refreshGpuCapture, startCaptureBoost } from ".
 import { setDiagnosticsSource } from "./core/diagShare";
 import { localIdentityDiagnostics } from "./core/identity";
 import { liveWeightDiagnostics } from "./core/liveWeight";
+import { refreshScreenAudioChromium, screenAudioChromiumDiagnostics } from "./core/screenAudioChromium";
 import { peerIdentityDiagnostics } from "./core/session";
 import { stuckEncoderDiagnostics } from "./core/stuckEncoder";
 import { refreshUpdateLog, refreshUpdateStatus, startUpdateChecks, stopUpdateChecks, updateDiagnostics } from "./core/update";
@@ -51,8 +52,8 @@ function identityDiagnostics(): string {
  * main.log, asked from the main process), then format. Also what core/diagShare.ts sends to a friend who asked for it.
  */
 const diagnostics = {
-    refresh: () => Promise.all([refreshUpdateStatus(), refreshUpdateLog(), refreshGpuCapture(), refreshAv1Flag()]).catch(() => null),
-    format: () => `${formatDiagnostics()}\n${updateDiagnostics()}\n${identityDiagnostics()}\n${stuckEncoderDiagnostics()}\n${av1FlagDiagnostics()}\n${captureBoostDiagnostics()}`
+    refresh: () => Promise.all([refreshUpdateStatus(), refreshUpdateLog(), refreshGpuCapture(), refreshAv1Flag(), refreshScreenAudioChromium()]).catch(() => null),
+    format: () => `${formatDiagnostics()}\n${updateDiagnostics()}\n${identityDiagnostics()}\n${stuckEncoderDiagnostics()}\n${av1FlagDiagnostics()}\n${screenAudioChromiumDiagnostics()}\n${captureBoostDiagnostics()}`
         + `\n${liveWeightDiagnostics()}\n\n${formatVoiceTagDiagnostics()}`
 };
 
@@ -148,6 +149,7 @@ export default definePlugin({
         void startCaptureBoost();
         // AV1 fixado: o core/codec.ts fica sabendo se o WebRtcAV1HWEncode ligou nesta partida, e o arquivo volta a bater
         void startAv1Flag();
+        void refreshScreenAudioChromium();
         runAction("startSession", () => startSession(), () => { });
     },
 

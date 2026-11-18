@@ -27,7 +27,7 @@ import type { AccessMode, CaptureSource, PeerId, Quality, RemotePeer, StreamOpti
 export const screenAudioSupported = true as const;
 
 /** O ajudante de audio da tela inteira esta disponivel? Se nao, `reason` (pt-BR) explica por que a tela vai sem som. */
-export function getScreenAudioStatus(): Promise<{ available: boolean; reason?: string; }> {
+export function getScreenAudioStatus(): Promise<{ available: boolean; reason?: string; helperProblem?: "blocked" | "missing"; }> {
     return fetchScreenAudioStatus();
 }
 

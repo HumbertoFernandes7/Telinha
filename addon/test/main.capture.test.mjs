@@ -71,7 +71,8 @@ describe("capture-flags.json asks for the GPU capture (Windows 11 24H2+)", () =>
         discordBootstrap(electron);
         assert.equal(features(), `${DISCORD_FEATURE},${FEATURE}`, "Discord's later call keeps ours (and replaces the rest, as without us)");
         assert.deepEqual({ ...state.capture, file: state.capture.file.toLowerCase() }, {
-            file: flagsFile.toLowerCase(), build: 26300, wgcTexture: true, applied: null, enableFeatures: null, reason: null, av1HwEncode: false, av1Applied: null
+            file: flagsFile.toLowerCase(), build: 26300, wgcTexture: true, applied: null, enableFeatures: null, reason: null, av1HwEncode: false, av1Applied: null,
+            screenAudioInChromium: { asked: false, applied: null, disableFeatures: null, reason: null }
         });
         assert.match(tree.mainLog(), new RegExp(`capture: GPU capture asked for: ${FEATURE} added to enable-features \\(Windows build 26300\\)`));
 
@@ -130,6 +131,15 @@ describe("capture-flags.json asks for the GPU capture (Windows 11 24H2+)", () =>
         await tick();
         assert.equal(state.capture.applied, null);
         assert.deepEqual(state.errors.map(e => e.split(":")[0]), ["csp"]);
+    });
+
+    test("app.commandLine missing with only the screen audio asked: its own reason, capture.reason untouched, no AV1 wording", t => {
+        const { state, tree } = boot(t, { flags: { screenAudioInChromium: true }, before: e => delete e.app.commandLine });
+        assert.equal(state.capture.screenAudioInChromium.applied, false);
+        assert.match(state.capture.screenAudioInChromium.reason, /^could not turn it on \(/);
+        assert.equal(state.capture.reason, null);
+        assert.match(tree.mainLog(), /capture: screen audio in Chromium not applied: could not turn it on/);
+        assert.doesNotMatch(tree.mainLog(), /AV1 hardware encode not applied/);
     });
 
     test("app.commandLine missing (a broken Electron): not applied, logged, no boot problem, Vencord still loads", t => {
@@ -217,6 +227,88 @@ describe("capture-flags.json asks for the GPU's AV1 encoder (AV1 pinned in the p
             assert.deepEqual([state.capture.av1HwEncode, state.capture.av1Applied], [false, null]);
         });
     }
+});
+
+describe("capture-flags.json asks for the screen's sound in Chromium (screenAudioInChromium)", () => {
+    const SA = ["AudioServiceOutOfProcess", "RestrictOwnAudioAddChromiumBack"];
+    const disabled = commandLine => commandLine.getSwitchValue("disable-features");
+
+    test("both go into disable-features, merged with what Discord already passes (theirs are kept)", async t => {
+        const { state, electron, commandLine, tree } = boot(t, {
+            flags: { format: 1, screenAudioInChromium: true },
+            before: e => e.app.commandLine.appendSwitch("disable-features", "FromDiscord,Other")
+        });
+        assert.equal(disabled(commandLine), `FromDiscord,Other,${SA.join(",")}`);
+        assert.equal(commandLine.getSwitchValue("enable-features"), "", "enable-features untouched");
+        assert.deepEqual(state.capture.screenAudioInChromium, { asked: true, applied: null, disableFeatures: null, reason: null });
+        assert.match(tree.mainLog(), /capture: screen audio in Chromium asked for: AudioServiceOutOfProcess,RestrictOwnAudioAddChromiumBack added to disable-features/);
+        await ready(electron);
+        assert.deepEqual(state.capture.screenAudioInChromium, { asked: true, applied: true, disableFeatures: `FromDiscord,Other,${SA.join(",")}`, reason: null });
+        assert.match(tree.mainLog(), /-> screen audio in Chromium applied$/m);
+        assert.deepEqual(state.errors, []);
+    });
+
+    test("no duplicates when the features are already disabled", t => {
+        const { commandLine } = boot(t, {
+            flags: { screenAudioInChromium: true },
+            before: e => e.app.commandLine.appendSwitch("disable-features", `A,${SA[0]}`)
+        });
+        assert.equal(disabled(commandLine), `A,${SA[0]},${SA[1]}`);
+    });
+
+    test("a later disable-features from Discord's bootstrap keeps ours (and enable-features keeps its own)", async t => {
+        const { state, electron, commandLine } = boot(t, { flags: { wgcTexture: true, screenAudioInChromium: true } });
+        discordBootstrap(electron);
+        commandLine.appendSwitch("disable-features", "DiscordOwn");
+        assert.equal(disabled(commandLine), `DiscordOwn,${SA.join(",")}`);
+        assert.equal(commandLine.getSwitchValue("enable-features"), `${DISCORD_FEATURE},${FEATURE}`);
+        assert.deepEqual(commandLine.appendSwitch.telinhaKeepsDisabled, SA);
+        assert.deepEqual(commandLine.appendSwitch.telinhaKeeps, [FEATURE]);
+        await ready(electron);
+        assert.equal(state.capture.screenAudioInChromium.applied, true);
+        assert.match(state.capture.screenAudioInChromium.disableFeatures, /DiscordOwn/);
+    });
+
+    test("getSwitchValue answering nothing for disable-features at app ready: the value is \"\" and it is NOT applied", async t => {
+        const { state, electron, commandLine, tree } = boot(t, { flags: { screenAudioInChromium: true } });
+        const real = commandLine.getSwitchValue;
+        commandLine.getSwitchValue = name => (name === "disable-features" ? undefined : real(name));
+        await ready(electron);
+        assert.equal(state.capture.screenAudioInChromium.disableFeatures, "");
+        assert.equal(state.capture.screenAudioInChromium.applied, false);
+        assert.match(tree.mainLog(), /-> screen audio in Chromium NOT applied/);
+        assert.deepEqual(state.errors, []);
+    });
+
+    test("something replaces disable-features behind the wrapper: NOT applied, no boot problem", async t => {
+        const { state, electron, commandLine, tree } = boot(t, { flags: { screenAudioInChromium: true } });
+        commandLine.switches.set("disable-features", "SomethingElse");
+        await ready(electron);
+        assert.equal(state.capture.screenAudioInChromium.applied, false);
+        assert.match(tree.mainLog(), /-> screen audio in Chromium NOT applied/);
+        assert.deepEqual(state.errors, []);
+    });
+
+    for (const flags of [{}, { screenAudioInChromium: false }, { screenAudioInChromium: "true" }, { screenAudioInChromium: 1 }]) {
+        test(`not asked for, or a value that is not true: ${JSON.stringify(flags)} changes nothing`, t => {
+            const { state, commandLine } = boot(t, { flags });
+            assert.deepEqual(commandLine.appended, []);
+            assert.equal(commandLine.appendSwitch.telinhaKeepsDisabled, undefined);
+            assert.deepEqual(state.capture.screenAudioInChromium, { asked: false, applied: null, disableFeatures: null, reason: null });
+        });
+    }
+
+    test("a hand-off to a loader that asks for it widens the one wrapper (never stacks)", t => {
+        const { commandLine, tree, flagsFile } = boot(t, { flags: { wgcTexture: true } });
+        const first = commandLine.appendSwitch;
+        writeFileSync(flagsFile, JSON.stringify({ wgcTexture: true, screenAudioInChromium: true }));
+        tree.load().boot({ vencordPatcher: tree.patcher, vanilla: t.mock.fn() });
+        const second = commandLine.appendSwitch;
+        assert.notEqual(second, first);
+        assert.deepEqual(second.telinhaKeeps, [FEATURE]);
+        assert.deepEqual(second.telinhaKeepsDisabled, SA);
+        assert.equal(second.telinhaOriginal, first.telinhaOriginal, "the original is not wrapped twice");
+    });
 });
 
 describe("the GPU capture stays off", () => {

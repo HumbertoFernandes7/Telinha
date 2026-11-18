@@ -20,16 +20,18 @@ import { getState } from "@plugins/telinha/store";
 import type { Quality, StreamOptions } from "@plugins/telinha/types";
 import { installWebAudio } from "@test/fakes/audio";
 import { defaultTelinhaNatives, installNative } from "@test/fakes/native";
-import { FRIEND_ID, OTHER_ID, pluginSettings } from "@test/fakes/vencord";
+import { FRIEND_ID, OTHER_ID, pluginSettings, toasts } from "@test/fakes/vencord";
 import { audioTrack, captureStream, FakeMediaStream, type FakeMediaStreamTrack, videoSenderStats } from "@test/fakes/webrtc";
 import {
     canvas2d, connectViewer, createRig, destroyRig, enterCall, leaveCall, logMark, media, removalsFrom, repliesTo, screenOptions, seconds, setMembers,
     type StreamingRig, streamsTo, turns, videoSenderOf, windowOptions
 } from "@test/helpers/wpb-streaming";
 
+import { resetScreenAudioHelperBlockForTests, screenAudioHelperBlock } from "./audio/screenAudio";
 import { refreshGpuCapture, resetCaptureBoostForTests } from "./captureBoost";
 import { rt } from "./context";
 import { BLACK_WARNING } from "./quality/captureMonitor";
+import { resetScreenAudioChromiumForTests } from "./screenAudioChromium";
 import {
     approveViewer, getStreamAccess, getStreamPassword, kickViewer, QUALITY, sendPlanFor, startStreaming, stopStreaming, tick
 } from "./streaming";
@@ -304,12 +306,15 @@ describe("startStreaming: tela, janela e audio", () => {
             const since = logMark();
             await startStreaming(screenOptions({ withAudio: true }));
 
-            assert.deepEqual(callsOf("prepareDisplayMedia").at(-1)?.args, ["screen:0:0", "Tela inteira", false], "o getDisplayMedia nao pede audio para a tela");
-            assert.equal(rig.rtc.mediaDevices.displayMediaCalls.at(-1)?.audio, false);
+            // o main recebe o pedido de audio (refaz a trava), mas sem o som pelo Chromium o getDisplayMedia nao pede audio
+            assert.deepEqual(callsOf("prepareDisplayMedia").at(-1)?.args, ["screen:0:0", "Tela inteira", true]);
+            assert.equal(rig.rtc.mediaDevices.displayMediaCalls.at(-1)?.audio, false, "o getDisplayMedia nao pede audio para a tela");
             await turns(1);
             assert.equal(getState().local?.hasAudio, true);
             assert.equal(rt.local!.stream.getAudioTracks()[0].label, "MediaStreamAudioDestinationNode");
-            assert.ok(since().includes("Áudio da tela: capturando o PC sem o Discord"));
+            const lines = since();
+            assert.ok(lines.includes('Iniciando transmissão: tela "Tela inteira" em 1080p60 com áudio pelo ajudante telinha-audio.exe'), lines.join("\n"));
+            assert.ok(lines.includes("Áudio da tela: pelo ajudante telinha-audio.exe (o PC sem o Discord)"), lines.join("\n"));
 
             stopStreaming();
             await turns();
@@ -335,6 +340,149 @@ describe("startStreaming: tela, janela e audio", () => {
         } finally {
             audio.restore();
         }
+    });
+
+    test("som da tela pelo Chromium disponivel: o getDisplayMedia pede o audio e o ajudante nem e chamado", async () => {
+        rig.native.telinha.screenAudioChromiumStatus = async () => ({ available: true, reason: "serviço de áudio no principal" });
+        rig.native.telinha.finishDisplayMedia = async () => ({
+            handlerCalled: true, audioRequested: true, audio: { device: "loopbackWithoutChrome", reason: "tela inteira pelo Chromium do Discord (sem o Discord): ok" }, error: null
+        });
+        const since = logMark();
+        const helperCalls = callsOf("startScreenAudio").length;
+        await startStreaming(screenOptions({ withAudio: true }));
+
+        assert.deepEqual(callsOf("prepareDisplayMedia").at(-1)?.args, ["screen:0:0", "Tela inteira", true]);
+        assert.deepEqual(rig.rtc.mediaDevices.displayMediaCalls.at(-1)?.audio, { echoCancellation: false, noiseSuppression: false, autoGainControl: false });
+        assert.equal(callsOf("startScreenAudio").length, helperCalls, "o ajudante telinha-audio.exe nao e chamado");
+        await turns(1);
+        assert.equal(getState().local?.hasAudio, true);
+        assert.equal(rt.local!.stream.getAudioTracks()[0].contentHint, "music");
+        const lines = since();
+        assert.ok(lines.includes('Iniciando transmissão: tela "Tela inteira" em 1080p60 com áudio pelo Chromium do Discord'), lines.join("\n"));
+        assert.ok(lines.includes("Áudio da tela: pelo Chromium do Discord (sem o Discord)"), lines.join("\n"));
+    });
+
+    test("som da tela pelo Chromium: a segunda checagem logo depois da captura reprova, tira a faixa de audio e o video segue", async () => {
+        let n = 0;
+        rig.native.telinha.screenAudioChromiumStatus = async () => (++n === 1 ? { available: true, reason: "ok" } : { available: false, reason: "o serviço de áudio subiu separado" });
+        rig.native.telinha.finishDisplayMedia = async () => ({ handlerCalled: true, audioRequested: true, audio: { device: "loopbackWithoutChrome", reason: "ok" }, error: null });
+        const since = logMark();
+        await startStreaming(screenOptions({ withAudio: true }));
+        await turns(1);
+        assert.notEqual(getState().local, null, "a transmissao segue");
+        assert.equal(getState().local?.hasAudio, false);
+        assert.equal(rt.local!.stream.getAudioTracks().length, 0, "a faixa de audio saiu do stream");
+        assert.equal(rt.local!.stream.getVideoTracks().length, 1, "o video segue");
+        assert.ok(since().some(l => l.includes("a trava reprovou logo depois da captura abrir (o serviço de áudio subiu separado)")));
+        assert.equal(getState().lastError, "O som da tela foi desligado por segurança: o Discord não isolou o próprio som. Reabra o Discord.");
+    });
+
+    test("som da tela pelo Chromium: a checagem de 3 s depois reprova (uma vez): a faixa para e sai, o video segue", async () => {
+        let n = 0;
+        rig.native.telinha.screenAudioChromiumStatus = async () => (++n <= 2 ? { available: true, reason: "ok" } : { available: false, reason: "voz da call no mesmo processo" });
+        rig.native.telinha.finishDisplayMedia = async () => ({ handlerCalled: true, audioRequested: true, audio: { device: "loopbackWithoutChrome", reason: "ok" }, error: null });
+        await startStreaming(screenOptions({ withAudio: true }));
+        await turns(1);
+        const [track] = rt.local!.stream.getAudioTracks();
+        assert.ok(track, "no comeco ainda ha audio");
+        await seconds(rig, 3);
+        assert.equal(track.readyState, "ended", "a faixa parou");
+        assert.equal(rt.local!.stream.getAudioTracks().length, 0);
+        assert.equal(getState().local?.hasAudio, false);
+        assert.equal(rt.local!.stream.getVideoTracks().length, 1);
+        assert.equal(n, 3, "a pergunta inicial, a checagem imediata e a de 3 s");
+        assert.match(getState().lastError ?? "", /^O som da tela foi desligado por segurança/);
+    });
+
+    test("som da tela pelo Chromium sem faixa de audio: loga e transmite a tela so com imagem, sem cair no ajudante", async () => {
+        rig.native.telinha.screenAudioChromiumStatus = async () => ({ available: true, reason: "ok" });
+        rig.native.telinha.finishDisplayMedia = async () => ({ handlerCalled: true, audioRequested: true, audio: { device: null, reason: "tela inteira sem o som pelo Chromium: trava" }, error: null });
+        rig.rtc.mediaDevices.getDisplayMediaImpl = () => Promise.resolve(captureStream());
+        const since = logMark();
+        const helperCalls = callsOf("startScreenAudio").length;
+        await startStreaming(screenOptions({ withAudio: true }));
+        await turns(1);
+        assert.notEqual(getState().local, null, "a transmissao segue");
+        assert.equal(getState().local?.hasAudio, false);
+        assert.equal(callsOf("startScreenAudio").length, helperCalls, "nao cai no ajudante");
+        const lines = since();
+        assert.ok(lines.includes("Áudio da tela: o Chromium do Discord não entregou faixa de áudio; transmitindo a tela sem áudio — tela inteira sem o som pelo Chromium: trava"), lines.join("\n"));
+    });
+
+    test("som da tela pelo Chromium indisponivel (ou native antigo/que falha): segue pelo ajudante, com o motivo no log", async () => {
+        const cases: [string, ((...a: any[]) => any) | undefined, string][] = [
+            ["indisponivel", async () => ({ available: false, reason: "reabra o Discord para ativar" }), "reabra o Discord para ativar"],
+            ["native antigo", undefined, "a parte nativa desta partida não sabe o som da tela pelo Chromium"],
+            ["resposta vazia", async () => null, "sem resposta da parte nativa"],
+            ["native que falha", async () => {
+                throw new Error("ipc caiu");
+            }, "não consegui conferir o som da tela pelo Chromium: Error: ipc caiu"]
+        ];
+        for (const [label, impl, reason] of cases) {
+            rig.native.restore();
+            rig.native = installNative({ screenAudioChromiumStatus: impl as any });
+            const since = logMark();
+            await startStreaming(screenOptions({ withAudio: true }));
+            assert.equal(rig.rtc.mediaDevices.displayMediaCalls.at(-1)?.audio, false, label);
+            assert.equal(callsOf("startScreenAudio").length, 1, label);
+            const lines = since();
+            assert.ok(lines.includes(`Som da tela pelo Chromium indisponível: ${reason}`), `${label}\n${lines.join("\n")}`);
+            assert.ok(lines.includes('Iniciando transmissão: tela "Tela inteira" em 1080p60 com áudio pelo ajudante telinha-audio.exe'), label);
+            stopStreaming();
+            await turns();
+        }
+    });
+
+    test("ajudante de audio bloqueado: segue sem audio e deixa o bloqueio registrado (a deixa para o som pelo Chromium)", async () => {
+        resetScreenAudioHelperBlockForTests();
+        resetScreenAudioChromiumForTests();
+        const audio = installWebAudio();
+        try {
+            rig.native.telinha.startScreenAudio = async () => ({ ok: false, reason: "o Windows ou o antivírus bloqueou o ajudante de áudio (telinha-audio.exe)", helperProblem: "blocked" });
+            const since = logMark();
+            await startStreaming(screenOptions({ withAudio: true }));
+            await turns(1);
+            assert.equal(getState().local?.hasAudio, false);
+            assert.equal(screenAudioHelperBlock()?.problem, "blocked");
+            assert.equal(screenAudioHelperBlock()?.reason, "o Windows ou o antivírus bloqueou o ajudante de áudio (telinha-audio.exe)");
+            assert.ok(since().includes("Ajudante de áudio bloqueado: o som da tela pelo Chromium do Discord dispensaria o telinha-audio.exe"));
+            assert.deepEqual(callsOf("setScreenAudioFlag").map(c => c.args), [[true]], "liga o pedido do som pelo Chromium uma vez");
+            assert.ok(since().some(l => l.includes("liguei o pedido do som da tela pelo Chromium")));
+            assert.ok(toasts.some(x => x.text.startsWith("O Windows bloqueou o ajudante de áudio do Telinha. Reabra o Discord")), "avisa sem bloquear");
+        } finally {
+            audio.restore();
+            resetScreenAudioHelperBlockForTests();
+            resetScreenAudioChromiumForTests();
+        }
+    });
+
+    test("ajudante de audio ausente: o log diz ausente e o aviso e o da ausencia", async () => {
+        resetScreenAudioHelperBlockForTests();
+        resetScreenAudioChromiumForTests();
+        const audio = installWebAudio();
+        try {
+            rig.native.telinha.startScreenAudio = async () => ({ ok: false, reason: "o ajudante de áudio (telinha-audio.exe) não foi instalado", helperProblem: "missing" });
+            const since = logMark();
+            await startStreaming(screenOptions({ withAudio: true }));
+            await turns(1);
+            assert.equal(screenAudioHelperBlock()?.problem, "missing");
+            assert.ok(since().includes("Ajudante de áudio ausente: o som da tela pelo Chromium do Discord dispensaria o telinha-audio.exe"));
+            assert.ok(toasts.some(x => x.text.startsWith("O ajudante de áudio do Telinha não está instalado.")));
+        } finally {
+            audio.restore();
+            resetScreenAudioHelperBlockForTests();
+            resetScreenAudioChromiumForTests();
+        }
+    });
+
+    test("som da tela pelo Chromium sem faixa e sem relatorio do handler: o log diz 'sem decisao do handler'", async () => {
+        rig.native.telinha.screenAudioChromiumStatus = async () => ({ available: true, reason: "ok" });
+        rig.native.telinha.finishDisplayMedia = async () => null;
+        rig.rtc.mediaDevices.getDisplayMediaImpl = () => Promise.resolve(captureStream());
+        const since = logMark();
+        await startStreaming(screenOptions({ withAudio: true }));
+        await turns(1);
+        assert.ok(since().includes("Áudio da tela: o Chromium do Discord não entregou faixa de áudio; transmitindo a tela sem áudio — sem decisão do handler"), "o log não trouxe a linha");
     });
 
     test("sem o ajudante de audio: transmite a tela so com imagem, com um aviso no log", async () => {

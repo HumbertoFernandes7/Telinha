@@ -288,6 +288,19 @@ Chromium's 50 % rule on top, the capture fell to ~10 fps). WGC screen capture, a
   false }`. The plugin's natives write it (temporary file + rename) when either option changes, and again at plugin start
   if it disagrees with the settings. Each option writes its own key and keeps the other one as it is (a file from before
   `av1HwEncode` reads as AV1 off). Missing, unreadable or anything but `true` = off.
+- **`screenAudioInChromium`** (optional, written only while `true`): the screen's sound captured by Chromium's own
+  `loopbackWithoutChrome` device (process loopback excluding the process tree where the audio service runs). For the
+  exclusion to cover all of Discord (the call's voice plays in the renderer) the audio service must run inside the main
+  process, so the loader appends `AudioServiceOutOfProcess,RestrictOwnAudioAddChromiumBack` to **`disable-features`**,
+  merged with the value Discord already passes (never replacing it, no duplicates), and the same wrapper keeps them in
+  `disable-features` against a later replacing append (`telinhaKeepsDisabled`, next to `telinhaKeeps`). State:
+  `capture.screenAudioInChromium = { asked, applied, disableFeatures, reason }` (`applied` = both were in `disable-features` at
+  ready; `null` = not asked for; `reason` = why it could not be turned on, kept apart from `capture.reason`). `main.log`: `capture: screen audio in Chromium asked for: … added to disable-features`,
+  and `-> screen audio in Chromium applied` / `NOT applied` in the `app ready` line. The optional key
+  **`screenAudioInChromiumUserOff`** (written only while `true`, by the plugin when the user turns the option off in the
+  settings, removed when they turn it on) is plugin-only: the loader ignores it; it stops the plugin's automatic
+  turn-on after a blocked helper. Plugin side:
+  `core/screenAudioFlagMain.ts` (`screenAudioFlagStatus` / `setScreenAudioFlag` natives).
 - **Loader** (`main.js` `applyCaptureFlags`, first thing in `prepare()`, so never with `--vanilla`): it appends
   `enable-features` = the current value (`app.commandLine.getSwitchValue`) + the features asked for
   (`WebRtcAllowWgcUsingTexture` only on build 26100+; `WebRtcAV1HWEncode` on any build), and wraps

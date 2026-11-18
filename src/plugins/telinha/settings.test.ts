@@ -33,7 +33,8 @@ import { migrateAccessSettings, migrateGpuCaptureSettings, migrateGpuPrioritySet
 // defaultQuality ("Qualidade padrão", ate a v0.3.x) virou defaultResolution + defaultFps: migrateQualitySettings
 const STORED_KEYS = [
     "groupPassword", "rejectOutsiders", "defaultAccess", "requireVerifiedIdentity", "defaultResolution", "defaultFps", "autoQuality", "jitterCushion",
-    "shareAudioByDefault", "playSounds", "codec", "codecStatus", "autoUpdate", "shareDiagnostics", "gpuCapture", "gpuPriorityMode", "captureBoostStatus"
+    "shareAudioByDefault", "playSounds", "codec", "codecStatus", "autoUpdate", "shareDiagnostics", "gpuCapture", "gpuPriorityMode", "captureBoostStatus",
+    "screenAudioChromium"
 ];
 
 describe("as opcoes", () => {
