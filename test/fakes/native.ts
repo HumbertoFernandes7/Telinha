@@ -37,7 +37,7 @@ export function defaultTelinhaNatives(): Record<string, AnyFn> {
         startScreenAudio: async () => ({ ok: false, reason: "sem ajudante de áudio (fake)" }),
         readScreenAudio: async () => ({ pcm: null, ended: true, reason: "fake" }),
         stopScreenAudio: async () => undefined,
-        screenAudioFlagStatus: async () => ({ loader: true, saved: false, requested: false, applied: null, disableFeatures: null, saveError: null }),
+        screenAudioFlagStatus: async () => ({ loader: true, saved: false, userOff: false, build: 26300, requested: false, applied: null, disableFeatures: null, loaderReason: null, saveError: null }),
         setScreenAudioFlag: async (on: boolean) => ({ loader: true, saved: on, requested: false, applied: null, disableFeatures: null, saveError: null }),
         screenAudioChromiumStatus: async () => ({ available: false, reason: "som da tela pelo Chromium desligado (fake)" })
     };

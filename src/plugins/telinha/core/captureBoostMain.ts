@@ -89,6 +89,8 @@ export interface GpuCaptureStatus {
 
 export interface LoaderCapture {
     file: string;
+    /** build do Windows visto pelo loader */
+    build?: unknown;
     wgcTexture?: unknown;
     applied?: unknown;
     reason?: unknown;
@@ -120,15 +122,17 @@ export interface CaptureFlags {
     av1HwEncode: boolean;
     /** o som da tela pelo proprio Chromium (disable-features: AudioServiceOutOfProcess, RestrictOwnAudioAddChromiumBack) */
     screenAudioInChromium: boolean;
+    /** o usuario desligou o som da tela pelo Chromium no interruptor: a ligacao automatica nao religa (so o plugin le; o loader ignora) */
+    screenAudioInChromiumUserOff: boolean;
 }
 
 /** O capture-flags.json agora (ausente, ilegivel ou sem `true` = desligado). */
 export function readCaptureFlags(file: string): CaptureFlags {
     try {
         const raw = JSON.parse(readFileSync(file, "utf8"));
-        return { wgcTexture: raw?.wgcTexture === true, av1HwEncode: raw?.av1HwEncode === true, screenAudioInChromium: raw?.screenAudioInChromium === true };
+        return { wgcTexture: raw?.wgcTexture === true, av1HwEncode: raw?.av1HwEncode === true, screenAudioInChromium: raw?.screenAudioInChromium === true, screenAudioInChromiumUserOff: raw?.screenAudioInChromiumUserOff === true };
     } catch {
-        return { wgcTexture: false, av1HwEncode: false, screenAudioInChromium: false };
+        return { wgcTexture: false, av1HwEncode: false, screenAudioInChromium: false, screenAudioInChromiumUserOff: false };
     }
 }
 
@@ -141,7 +145,7 @@ export function writeCaptureFlags(file: string, patch: Partial<CaptureFlags>) {
     const tmp = `${file}.${process.pid}.tmp`;
     try {
         // a chave do som da tela so entra quando ligada (ausente = desligada): um arquivo sem ela fica como sempre foi
-        const out = { format: 1, wgcTexture: next.wgcTexture === true, av1HwEncode: next.av1HwEncode === true, ...(next.screenAudioInChromium === true ? { screenAudioInChromium: true } : {}) };
+        const out = { format: 1, wgcTexture: next.wgcTexture === true, av1HwEncode: next.av1HwEncode === true, ...(next.screenAudioInChromium === true ? { screenAudioInChromium: true } : {}), ...(next.screenAudioInChromiumUserOff === true ? { screenAudioInChromiumUserOff: true } : {}) };
         writeFileSync(tmp, JSON.stringify(out) + "\n");
         renameSync(tmp, file);
     } catch (e) {

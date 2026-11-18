@@ -362,6 +362,38 @@ describe("startStreaming: tela, janela e audio", () => {
         assert.ok(lines.includes("Áudio da tela: pelo Chromium do Discord (sem o Discord)"), lines.join("\n"));
     });
 
+    test("som da tela pelo Chromium: a segunda checagem logo depois da captura reprova, tira a faixa de audio e o video segue", async () => {
+        let n = 0;
+        rig.native.telinha.screenAudioChromiumStatus = async () => (++n === 1 ? { available: true, reason: "ok" } : { available: false, reason: "o serviço de áudio subiu separado" });
+        rig.native.telinha.finishDisplayMedia = async () => ({ handlerCalled: true, audioRequested: true, audio: { device: "loopbackWithoutChrome", reason: "ok" }, error: null });
+        const since = logMark();
+        await startStreaming(screenOptions({ withAudio: true }));
+        await turns(1);
+        assert.notEqual(getState().local, null, "a transmissao segue");
+        assert.equal(getState().local?.hasAudio, false);
+        assert.equal(rt.local!.stream.getAudioTracks().length, 0, "a faixa de audio saiu do stream");
+        assert.equal(rt.local!.stream.getVideoTracks().length, 1, "o video segue");
+        assert.ok(since().some(l => l.includes("a trava reprovou logo depois da captura abrir (o serviço de áudio subiu separado)")));
+        assert.equal(getState().lastError, "O som da tela foi desligado por segurança: o Discord não isolou o próprio som. Reabra o Discord.");
+    });
+
+    test("som da tela pelo Chromium: a checagem de 3 s depois reprova (uma vez): a faixa para e sai, o video segue", async () => {
+        let n = 0;
+        rig.native.telinha.screenAudioChromiumStatus = async () => (++n <= 2 ? { available: true, reason: "ok" } : { available: false, reason: "voz da call no mesmo processo" });
+        rig.native.telinha.finishDisplayMedia = async () => ({ handlerCalled: true, audioRequested: true, audio: { device: "loopbackWithoutChrome", reason: "ok" }, error: null });
+        await startStreaming(screenOptions({ withAudio: true }));
+        await turns(1);
+        const [track] = rt.local!.stream.getAudioTracks();
+        assert.ok(track, "no comeco ainda ha audio");
+        await seconds(rig, 3);
+        assert.equal(track.readyState, "ended", "a faixa parou");
+        assert.equal(rt.local!.stream.getAudioTracks().length, 0);
+        assert.equal(getState().local?.hasAudio, false);
+        assert.equal(rt.local!.stream.getVideoTracks().length, 1);
+        assert.equal(n, 3, "a pergunta inicial, a checagem imediata e a de 3 s");
+        assert.match(getState().lastError ?? "", /^O som da tela foi desligado por segurança/);
+    });
+
     test("som da tela pelo Chromium sem faixa de audio: loga e transmite a tela so com imagem, sem cair no ajudante", async () => {
         rig.native.telinha.screenAudioChromiumStatus = async () => ({ available: true, reason: "ok" });
         rig.native.telinha.finishDisplayMedia = async () => ({ handlerCalled: true, audioRequested: true, audio: { device: null, reason: "tela inteira sem o som pelo Chromium: trava" }, error: null });

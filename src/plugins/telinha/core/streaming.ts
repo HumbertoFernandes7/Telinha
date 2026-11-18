@@ -317,6 +317,28 @@ async function chromiumScreenAudio(native: TelinhaNative): Promise<{ available: 
     }
 }
 
+const CHROMIUM_AUDIO_CUT_TEXT = "O som da tela foi desligado por segurança: o Discord não isolou o próprio som. Reabra o Discord.";
+/** A segunda checagem do som pelo Chromium, depois da captura comecar (o servico de audio pode subir num Utility so no getDisplayMedia). */
+const CHROMIUM_AUDIO_RECHECK_MS = 3000;
+
+/** Para e tira do stream as faixas de audio (a transmissao segue so com video). */
+function dropAudioTracks(stream: MediaStream) {
+    for (const t of stream.getAudioTracks()) {
+        t.stop();
+        stream.removeTrack(t);
+    }
+}
+
+/** A trava do som pelo Chromium passou de novo? Se nao, corta o audio do stream e avisa. Devolve true se cortou. */
+async function recheckChromiumAudio(native: TelinhaNative, stream: MediaStream, isCurrent: () => boolean, when: string): Promise<boolean> {
+    if (!stream.getAudioTracks().length || !isCurrent()) return false;
+    const again = await chromiumScreenAudio(native);
+    if (again.available || !stream.getAudioTracks().length || !isCurrent()) return false;
+    log.warn(`Som da tela pelo Chromium: a trava reprovou ${when} (${again.reason}); removendo a faixa de áudio e transmitindo só o vídeo`);
+    dropAudioTracks(stream);
+    return true;
+}
+
 export async function startStreaming(opts: StreamOptions): Promise<void> {
     if (starting) {
         // vai para lastError como as outras recusas (a barra e o seletor de fonte mostram o motivo); a partida em curso o limpa ao terminar
@@ -398,6 +420,10 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
             throw new Error(late);
         }
         if (onAir) deferredJoins = new Set();
+        // o som pelo Chromium: a trava de novo agora que a captura abriu (se o servico de audio subiu num Utility so agora, a
+        // voz da call vazaria na live); reprovou = tira a faixa e segue so com video
+        let audioCutText: string | null = null;
+        if (screenViaChromium && await recheckChromiumAudio(native, stream, () => true, "logo depois da captura abrir")) audioCutText = CHROMIUM_AUDIO_CUT_TEXT;
         if (wantScreenAudio && !screenViaChromium) {
             try {
                 const screenAudio = await startScreenAudioCapture({
@@ -442,7 +468,7 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
         const info: StreamInfo = {
             kind,
             title: source.name.slice(0, 200),
-            hasAudio: !!audio,
+            hasAudio: !!audio && !audioCutText,
             width: Math.round(s.width ?? profile.width),
             height: Math.round(s.height ?? profile.height),
             fps: Math.round(s.frameRate ?? profile.fps)
@@ -467,6 +493,19 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
             if (rt.local === local) dropCopy(local);
         });
         rt.lastError = null;
+        if (audioCutText) setLastError(audioCutText);
+        else if (screenViaChromium && audio) {
+            // a segunda checagem, uma vez, uns segundos depois
+            setTimeout(() => {
+                void recheckChromiumAudio(native, stream, () => rt.local === local, "3 s depois da captura abrir").then(cut => {
+                    if (!cut || rt.local !== local) return;
+                    local.info = { ...local.info, hasAudio: false };
+                    setLastError(CHROMIUM_AUDIO_CUT_TEXT);
+                    sendPresence();
+                    publish();
+                }).catch(() => { });
+            }, CHROMIUM_AUDIO_RECHECK_MS);
+        }
         warnPinnedAv1();
         startExtras(local, video);
 

@@ -21,7 +21,7 @@ import {
 import { appendDiagLogMain, clearDiagLogMain, readDiagLogMain } from "./core/diagLogMain";
 import { type GpuBoostRecordEntry, readGpuBoostRecordMain, writeGpuBoostRecordMain } from "./core/discordGpuBoostMain";
 import { type LiveWeightReport, type LiveWeightStart, readLiveWeightMain, startLiveWeightMain, stopLiveWeightMain } from "./core/liveWeightMain";
-import { type ScreenAudioFlagStatus, screenAudioFlagStatusMain, setScreenAudioFlagMain } from "./core/screenAudioFlagMain";
+import { type ScreenAudioFlagStatus, screenAudioFlagStatusMain, screenAudioWindowsProblem, setScreenAudioFlagMain } from "./core/screenAudioFlagMain";
 import { getWindowProcessInfo } from "./nativeWindowPid";
 import { RELAY_URLS } from "./protocol";
 
@@ -111,6 +111,8 @@ export function screenAudioChromiumStatusMain(): ScreenAudioChromiumStatus {
     const flag = screenAudioFlagStatusMain();
     if (!flag.loader)
         return { available: false, reason: "o carregador do add-on desta partida do Discord não sabe ligar o som da tela pelo Chromium (atualize o Telinha e reabra o Discord)" };
+    const old = screenAudioWindowsProblem(flag.build);
+    if (old) return { available: false, reason: old };
     if (flag.applied !== true) {
         if (flag.requested && flag.applied === false)
             return { available: false, reason: "o Discord abriu sem as opções do som da tela pelo Chromium (outro programa pode ter mudado o disable-features); reabra o Discord" };
@@ -147,7 +149,7 @@ function resolveScreenAudio(): AudioDecision {
 }
 
 /** O dispositivo so passa se combina com a fonte: applicationLoopback valido numa janela, loopbackWithoutChrome numa tela. */
-function deviceFitsSource(sourceId: string, device: string) {
+export function deviceFitsSource(sourceId: string, device: string) {
     return sourceId.startsWith("screen:") ? device === LOOPBACK_WITHOUT_CHROME : sourceId.startsWith("window:") && isValidLoopbackDevice(device);
 }
 

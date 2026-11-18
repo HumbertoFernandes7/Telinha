@@ -50,15 +50,46 @@ describe("o lado main do som da tela pelo Chromium (core/screenAudioFlagMain.ts,
         setAv1FlagMain(false);
         assert.deepEqual(saved(), { format: 1, wgcTexture: false, av1HwEncode: false, screenAudioInChromium: true }, "as outras opcoes nao apagam o pedido");
         assert.equal(setScreenAudioFlagMain("true" as never).saved, false, "so true liga (o IPC pode trazer qualquer coisa)");
-        assert.deepEqual(saved(), { format: 1, wgcTexture: false, av1HwEncode: false });
+        assert.deepEqual(saved(), { format: 1, wgcTexture: false, av1HwEncode: false, screenAudioInChromiumUserOff: true });
+    });
+
+    test("desligar grava screenAudioInChromiumUserOff; ligar de novo apaga a chave", () => {
+        loader();
+        assert.equal(setScreenAudioFlagMain(false).userOff, true);
+        assert.deepEqual(saved(), { format: 1, wgcTexture: false, av1HwEncode: false, screenAudioInChromiumUserOff: true });
+        assert.equal(setScreenAudioFlagMain(true).userOff, false);
+        assert.deepEqual(saved(), { format: 1, wgcTexture: false, av1HwEncode: false, screenAudioInChromium: true });
+        setGpuCaptureMain(true);
+        assert.equal(saved().screenAudioInChromiumUserOff, undefined, "as outras gravacoes nao trazem a chave de volta");
+    });
+
+    test("Windows abaixo do build 19041: ligar nao grava e volta com saveError; 19041 serve; desligar sempre grava", () => {
+        const at = (build: number) => {
+            g.__TelinhaAddon = { capture: { file, build, wgcTexture: false, applied: null, av1HwEncode: false, av1Applied: null, screenAudioInChromium: { asked: false, applied: null, disableFeatures: null } } };
+        };
+        at(19040);
+        const st = setScreenAudioFlagMain(true);
+        assert.equal(st.saved, false);
+        assert.equal(st.saveError, "o som da tela pelo Chromium exige Windows 10 versão 2004 ou mais novo (este é o build 19040)");
+        assert.throws(() => readFileSync(file), "nada gravado");
+        at(19041);
+        assert.equal(setScreenAudioFlagMain(true).saved, true);
+        at(0);
+        assert.match(setScreenAudioFlagMain(true).saveError ?? "", /build \?\)$/);
+        assert.equal(setScreenAudioFlagMain(false).saveError, null);
+    });
+
+    test("o motivo do loader fica em loaderReason", () => {
+        loader({ asked: true, applied: false, disableFeatures: null, reason: "could not turn it on (x)" });
+        assert.equal(screenAudioFlagStatusMain().loaderReason, "could not turn it on (x)");
     });
 
     test("o estado desta partida vem do loader: pedido, aplicado e o disable-features final", () => {
         loader({ asked: true, applied: true, disableFeatures: "A,AudioServiceOutOfProcess,RestrictOwnAudioAddChromiumBack" });
         writeFileSync(file, JSON.stringify({ format: 1, screenAudioInChromium: true }));
         assert.deepEqual(screenAudioFlagStatus(ipcEvent()), {
-            loader: true, saved: true, requested: true, applied: true,
-            disableFeatures: "A,AudioServiceOutOfProcess,RestrictOwnAudioAddChromiumBack", saveError: null
+            loader: true, saved: true, userOff: false, build: 26300, requested: true, applied: true,
+            disableFeatures: "A,AudioServiceOutOfProcess,RestrictOwnAudioAddChromiumBack", loaderReason: null, saveError: null
         });
         loader({ asked: true, applied: "x", disableFeatures: 5 });
         const st = screenAudioFlagStatusMain();
@@ -69,11 +100,11 @@ describe("o lado main do som da tela pelo Chromium (core/screenAudioFlagMain.ts,
     test("nao pedido nesta partida: applied null, e o salvo vale so para a proxima", () => {
         loader();
         setScreenAudioFlagMain(true);
-        assert.deepEqual(screenAudioFlagStatusMain(), { loader: true, saved: true, requested: false, applied: null, disableFeatures: null, saveError: null });
+        assert.deepEqual(screenAudioFlagStatusMain(), { loader: true, saved: true, userOff: false, build: 26300, requested: false, applied: null, disableFeatures: null, loaderReason: null, saveError: null });
     });
 
     test("sem o loader, ou um loader de antes desta versao (sem screenAudioInChromium): nao grava nada, loader false", () => {
-        assert.deepEqual(setScreenAudioFlagMain(true), { loader: false, saved: false, requested: false, applied: null, disableFeatures: null, saveError: null });
+        assert.deepEqual(setScreenAudioFlagMain(true), { loader: false, saved: false, userOff: false, build: 0, requested: false, applied: null, disableFeatures: null, loaderReason: null, saveError: null });
         g.__TelinhaAddon = { capture: { file, build: 26300, wgcTexture: true, applied: true, av1HwEncode: false } };
         assert.equal(setScreenAudioFlagMain(true).loader, false);
         assert.throws(() => readFileSync(file), "nada gravado");

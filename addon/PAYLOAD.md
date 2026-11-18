@@ -294,9 +294,12 @@ Chromium's 50 % rule on top, the capture fell to ~10 fps). WGC screen capture, a
   process, so the loader appends `AudioServiceOutOfProcess,RestrictOwnAudioAddChromiumBack` to **`disable-features`**,
   merged with the value Discord already passes (never replacing it, no duplicates), and the same wrapper keeps them in
   `disable-features` against a later replacing append (`telinhaKeepsDisabled`, next to `telinhaKeeps`). State:
-  `capture.screenAudioInChromium = { asked, applied, disableFeatures }` (`applied` = both were in `disable-features` at
-  ready; `null` = not asked for). `main.log`: `capture: screen audio in Chromium asked for: … added to disable-features`,
-  and `-> screen audio in Chromium applied` / `NOT applied` in the `app ready` line. Plugin side:
+  `capture.screenAudioInChromium = { asked, applied, disableFeatures, reason }` (`applied` = both were in `disable-features` at
+  ready; `null` = not asked for; `reason` = why it could not be turned on, kept apart from `capture.reason`). `main.log`: `capture: screen audio in Chromium asked for: … added to disable-features`,
+  and `-> screen audio in Chromium applied` / `NOT applied` in the `app ready` line. The optional key
+  **`screenAudioInChromiumUserOff`** (written only while `true`, by the plugin when the user turns the option off in the
+  settings, removed when they turn it on) is plugin-only: the loader ignores it; it stops the plugin's automatic
+  turn-on after a blocked helper. Plugin side:
   `core/screenAudioFlagMain.ts` (`screenAudioFlagStatus` / `setScreenAudioFlag` natives).
 - **Loader** (`main.js` `applyCaptureFlags`, first thing in `prepare()`, so never with `--vanilla`): it appends
   `enable-features` = the current value (`app.commandLine.getSwitchValue`) + the features asked for

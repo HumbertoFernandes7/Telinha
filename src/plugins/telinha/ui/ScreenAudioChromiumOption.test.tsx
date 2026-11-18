@@ -24,7 +24,7 @@ import { screenAudioChromiumElement,ScreenAudioChromiumOption } from "./ScreenAu
 let env: NativeEnv | null = null;
 
 function main(patch: Partial<ScreenAudioFlagStatus> = {}) {
-    let st: ScreenAudioFlagStatus = { loader: true, saved: false, requested: false, applied: null, disableFeatures: null, saveError: null, ...patch };
+    let st: ScreenAudioFlagStatus = { loader: true, saved: false, userOff: false, build: 26300, requested: false, applied: null, disableFeatures: null, loaderReason: null, saveError: null, ...patch };
     env = installNative({ screenAudioFlagStatus: async () => st, setScreenAudioFlag: async (on: boolean) => (st = { ...st, saved: on }) });
 }
 

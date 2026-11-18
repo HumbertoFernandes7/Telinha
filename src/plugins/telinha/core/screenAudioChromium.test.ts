@@ -21,7 +21,7 @@ import {
 import type { ScreenAudioFlagStatus } from "./screenAudioFlagMain";
 
 let env: NativeEnv | null = null;
-const status = (patch: Partial<ScreenAudioFlagStatus> = {}): ScreenAudioFlagStatus => ({ loader: true, saved: false, requested: false, applied: null, disableFeatures: null, saveError: null, ...patch });
+const status = (patch: Partial<ScreenAudioFlagStatus> = {}): ScreenAudioFlagStatus => ({ loader: true, saved: false, userOff: false, build: 26300, loaderReason: null, requested: false, applied: null, disableFeatures: null, saveError: null, ...patch });
 const calls = (name: string) => env!.calls.filter(c => c.name === name);
 
 function main(initial: Partial<ScreenAudioFlagStatus> = {}, extra: Record<string, (...a: any[]) => any> = {}) {
@@ -68,6 +68,21 @@ describe("ligacao automatica", () => {
         assert.equal(await onScreenAudioHelperProblem("blocked"), false);
         assert.equal(calls("setScreenAudioFlag").length, 0);
         assert.equal(toasts.length, 0);
+    });
+
+    test("o usuario desligou pelo interruptor: a ligacao automatica nao religa", async () => {
+        main({ userOff: true });
+        assert.equal(await onScreenAudioHelperProblem("blocked"), false);
+        assert.equal(calls("setScreenAudioFlag").length, 0);
+        assert.equal(toasts.length, 0);
+    });
+
+    test("duas chamadas concorrentes: uma gravacao e um aviso", async () => {
+        main();
+        const results = await Promise.all([onScreenAudioHelperProblem("blocked"), onScreenAudioHelperProblem("blocked")]);
+        assert.deepEqual(results.sort(), [false, true]);
+        assert.equal(calls("setScreenAudioFlag").length, 1);
+        assert.equal(toasts.length, 1);
     });
 
     test("sem o loader do add-on: nao grava, nao avisa", async () => {

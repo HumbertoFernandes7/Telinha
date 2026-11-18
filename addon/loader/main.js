@@ -463,7 +463,7 @@ function applyCaptureFlags() {
         av1Applied: null,
         // "Som da tela pelo Chromium": asked = the file asked for it at this start; applied = both features were in
         // disable-features at app ready (null = not asked for); disableFeatures = the final value
-        screenAudioInChromium: { asked: false, applied: null, disableFeatures: null }
+        screenAudioInChromium: { asked: false, applied: null, disableFeatures: null, reason: null }
     };
     state.capture = capture;
     try {
@@ -532,8 +532,12 @@ function applyCaptureFlags() {
         if (capture.wgcTexture && capture.applied === null) capture.applied = false;
         if (capture.av1HwEncode) capture.av1Applied = false;
         if (capture.screenAudioInChromium.asked && capture.screenAudioInChromium.applied === null) capture.screenAudioInChromium.applied = false;
-        capture.reason = `could not turn it on (${firstLine(err)})`;
-        log(`capture: ${capture.wgcTexture ? "GPU capture" : "AV1 hardware encode"} not applied: ${capture.reason}`);
+        const failure = `could not turn it on (${firstLine(err)})`;
+        // each option keeps its own reason: the screen audio one never lands in capture.reason (read by the GPU capture diagnostics)
+        if (capture.wgcTexture || capture.av1HwEncode) capture.reason = failure;
+        if (capture.screenAudioInChromium.asked) capture.screenAudioInChromium.reason = failure;
+        const names = [capture.wgcTexture && "GPU capture", capture.av1HwEncode && "AV1 hardware encode", capture.screenAudioInChromium.asked && "screen audio in Chromium"].filter(Boolean);
+        log(`capture: ${names.join(" + ") || "capture flags"} not applied: ${failure}`);
     }
 }
 

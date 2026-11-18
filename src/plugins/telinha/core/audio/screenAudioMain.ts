@@ -36,7 +36,7 @@ import {
 
 export const SCREEN_AUDIO_HELPER = "telinha-audio.exe";
 
-const MIN_WINDOWS_BUILD = 19041; // Windows 10 2004: process loopback
+export const MIN_WINDOWS_BUILD = 19041; // Windows 10 2004: process loopback
 const READY_TIMEOUT_MS = 5000;
 const PROBE_TIMEOUT_MS = 6000;
 const MAX_QUEUE_BYTES = SCREEN_AUDIO_RATE * SCREEN_AUDIO_BYTES_PER_FRAME / 2; // 500 ms; o excesso mais antigo e descartado

@@ -89,7 +89,9 @@ export async function setScreenAudioChromiumWanted(on: boolean): Promise<void> {
  * ainda nao esta salvo, uma vez) e avisa. Nunca desliga. Nunca lanca. Devolve true se gravou agora.
  */
 export async function onScreenAudioHelperProblem(problem: ScreenAudioHelperProblem): Promise<boolean> {
+    // marca ANTES do primeiro await: duas chamadas juntas (streaming + sonda do seletor) gravam e avisam uma vez so
     if (autoTried) return false;
+    autoTried = true;
     const native = getNativeOrNull();
     if (typeof native?.screenAudioFlagStatus !== "function" || typeof native.setScreenAudioFlag !== "function") return false;
     try {
@@ -99,12 +101,14 @@ export async function onScreenAudioHelperProblem(problem: ScreenAudioHelperProbl
             return false;
         }
         flag = before;
+        if (before.userOff) {
+            log.info("Som da tela pelo Chromium: o usuário desligou a opção nas configurações; não ligo sozinho");
+            return false;
+        }
         if (before.saved) {
-            autoTried = true;
             log.info("Som da tela pelo Chromium: o pedido já está salvo; não gravo de novo");
             return false;
         }
-        autoTried = true;
         const after = await native.setScreenAudioFlag(true);
         flag = isFlag(after) ? after : flag;
         if (!flag?.saved) {

@@ -294,7 +294,7 @@ describe("SourcePickerModal: a lista e as opcoes", () => {
         let webAudio: WebAudioEnv;
         beforeEach(() => void (webAudio = installWebAudio()));
         afterEach(() => webAudio.restore());
-        const flag = (patch: Record<string, unknown> = {}) => async () => ({ loader: true, saved: false, requested: false, applied: null, disableFeatures: null, saveError: null, ...patch });
+        const flag = (patch: Record<string, unknown> = {}) => async () => ({ loader: true, saved: false, userOff: false, build: 26300, requested: false, applied: null, disableFeatures: null, loaderReason: null, saveError: null, ...patch });
 
         test("Chromium disponivel com o ajudante indisponivel: a opcao fica liberada", async t => {
             openWith(t, sources(SCREEN), { screenAudioChromiumStatus: async () => ({ available: true, reason: "ok" }), screenAudioFlagStatus: flag({ saved: true, requested: true, applied: true }) });
@@ -318,6 +318,13 @@ describe("SourcePickerModal: a lista e as opcoes", () => {
             openWith(t, sources(SCREEN));
             await settle();
             screen.getByText("Sem som na tela inteira: o ajudante de áudio (telinha-audio.exe) não foi instalado. A tela vai só com imagem.");
+        });
+
+        test("sonda do ajudante bloqueado com o interruptor desligado pelo usuario: nao religa", async t => {
+            const { native } = openWith(t, sources(SCREEN), { screenAudioStatus: async () => ({ available: false, reason: "bloqueado", helperProblem: "blocked" }), screenAudioFlagStatus: flag({ userOff: true }) });
+            await settle();
+            assert.equal(native.calls.filter(c => c.name === "setScreenAudioFlag").length, 0);
+            assert.equal(toasts.length, 0);
         });
 
         test("sonda do ajudante bloqueado: liga o pedido uma vez e avisa", async t => {

@@ -21,6 +21,7 @@ import { ConnectSrc, CspPolicies } from "@test/fakes/vencord/main/csp";
 import { feed, feedErr, helperHost, pcm, powershellHost, setPlatform } from "@test/helpers/wpd-audio";
 
 import {
+    deviceFitsSource,
     finishDisplayMedia,
     listSources,
     LOOPBACK_WITHOUT_CHROME,
@@ -495,6 +496,24 @@ describe("som da tela pelo Chromium (trava do loopbackWithoutChrome)", () => {
 
         app.getAppMetricsImpl = () => null as unknown as unknown[];
         assert.equal(screenAudioChromiumStatus(ipcEvent()).available, false);
+    });
+
+    test("Windows abaixo do build 19041: a trava falha com o motivo, mesmo aplicado, e a tela vai sem audio", async t => {
+        setup(t, APPLIED);
+        (g.__TelinhaAddon as { capture: { build: number; }; }).capture.build = 18363;
+        const status = screenAudioChromiumStatus(ipcEvent());
+        assert.deepEqual(status, { available: false, reason: "o som da tela pelo Chromium exige Windows 10 versão 2004 ou mais novo (este é o build 18363)" });
+        const { streams } = await screenCapture(t);
+        assert.ok(!streams.audio);
+    });
+
+    test("a recusa final (deviceFitsSource): tela so aceita loopbackWithoutChrome, janela so applicationLoopback valido", () => {
+        assert.equal(deviceFitsSource(SCREEN, "loopbackWithoutChrome"), true);
+        assert.equal(deviceFitsSource(SCREEN, "applicationLoopback:1234"), false);
+        assert.equal(deviceFitsSource(SCREEN, "loopback"), false);
+        assert.equal(deviceFitsSource("window:1:0", "applicationLoopback:1234"), true);
+        assert.equal(deviceFitsSource("window:1:0", "loopbackWithoutChrome"), false);
+        assert.equal(deviceFitsSource("window:1:0", "loopback"), false);
     });
 
     test("a janela continua igual: applicationLoopback do processo, mesmo com a trava passando", async t => {
