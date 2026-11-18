@@ -153,8 +153,9 @@ function fmtpIndex(lines: string[], pt: string) {
  * packetization-mode=1; VP9 perfil 0 primeiro). Ex.: o outro lado lista 42e01f (OpenH264 aqui) antes de 42001f (placa de
  * video): 42001f vai na frente. Com High (640032) e reserva 42001f: 6400xx, depois 42001f, depois o resto.
  * H.265: H.265 Main, depois as variantes H.264 na ordem do H.264 reserva (`h264Profile`/`h264Backup`), depois o resto.
- * Sem H.265 do outro lado, o H.264 reserva vai na frente (nunca o VP8 que o Chromium lista primeiro). AV1: o mesmo, com o
- * AV1 Main no lugar do H.265 Main.
+ * Sem H.265 do outro lado, o H.264 reserva vai na frente (nunca o VP8 que o Chromium lista primeiro). H.265 sem reserva
+ * H.264 (o automatico seria o VP9, ex.: este Discord sem H.264; codec.ts → sortCodecs): o VP9 (perfil 0 primeiro) no lugar
+ * do H.264 reserva. AV1: o mesmo, com o AV1 Main no lugar do H.265 Main (sem reserva, a ordem do outro lado).
  */
 function reorderVideoCodecs(lines: string[], codec: VideoCodecName, h264Profile: string | null | undefined, h264Backup: string | null | undefined, notes: string[]): string | null {
     const parts = lines[0].split(" ");
@@ -168,15 +169,18 @@ function reorderVideoCodecs(lines: string[], codec: VideoCodecName, h264Profile:
         const name = CODEC_RTP_NAME[codec];
         const hw = pick(name, pt => hwOnlyRank(codec, fmtp(pt)));
         const reserve = h264Profile && !sameH264Profile(h264Profile, h264Backup) ? h264Backup : null;
-        const h264 = h264Profile ? pick("H264", pt => h264Rank(fmtp(pt), h264Profile, reserve)) : [];
-        if (!hw.length) notes.push(`${name} ausente no SDP do outro lado; ${h264.length ? "fica o H.264 reserva" : "fica o codec padrão"}`);
+        const vp9Next = !h264Profile && codec === "h265";
+        const backup = h264Profile ? pick("H264", pt => h264Rank(fmtp(pt), h264Profile, reserve))
+            : vp9Next ? pick("VP9", pt => (/profile-id=[1-3]/.test(fmtp(pt)) ? 1 : 0)) : [];
+        const reserveName = vp9Next ? "VP9" : "H.264";
+        if (!hw.length) notes.push(`${name} ausente no SDP do outro lado; ${backup.length ? `fica o ${reserveName} reserva` : "fica o codec padrão"}`);
         else if (hwOnlyRank(codec, fmtp(hw[0])) !== 0) notes.push(`${HW_ONLY_MAIN[codec]} ausente no SDP do outro lado; fica outra variante ${codec === "av1" ? "AV1" : "H.265"}`);
-        const front = [...hw, ...h264];
+        const front = [...hw, ...backup];
         const next = [...front, ...pts.filter(pt => !front.includes(pt))];
         if (!front.length || next.every((pt, i) => pt === pts[i])) return null;
         lines[0] = [...parts.slice(0, 3), ...next].join(" ");
-        const reserveText = `H264 reserva${h264Profile ? ` (perfil ${h264Profile})` : ""}`;
-        return hw.length ? `${name} primeiro${h264.length ? `, ${reserveText} logo depois` : ""}` : `${reserveText} primeiro`;
+        const reserveText = vp9Next ? "VP9 reserva" : `H264 reserva${h264Profile ? ` (perfil ${h264Profile})` : ""}`;
+        return hw.length ? `${name} primeiro${backup.length ? `, ${reserveText} logo depois` : ""}` : `${reserveText} primeiro`;
     }
 
     const wantedName = CODEC_RTP_NAME[codec];

@@ -82,13 +82,26 @@ describe("mungeRemoteSdp: H.265 com o H.264 reserva", () => {
         assert.deepEqual(res.notes, ["H.265 Main ausente no SDP do outro lado; fica outra variante H.265"]);
     });
 
-    test("H.265 sem reserva H.264 (fixado, espectador sem H.264 na placa): so o H.265 sobe; sem nada: o codec padrao", () => {
+    test("H.265 sem reserva H.264 (o automatico seria o VP9: ex.: um Discord sem H.264): o H.265, depois o VP9 (perfil 0 primeiro), nunca o VP8", () => {
         const res = mungeRemoteSdp(sdpOf(video()), plan({ codec: "h265" }));
-        assert.deepEqual(payloads(res.sdp).slice(0, 3), ["49", "51", "96"]);
-        assert.deepEqual(res.changes, ["mid 1: H265 primeiro"]);
-        const bare = mungeRemoteSdp(sdpOf(video(CHROMIUM.filter(([, , n]) => n !== "H265"))), plan({ codec: "h265" }));
+        assert.deepEqual(payloads(res.sdp).slice(0, 5), ["49", "51", "98", "100", "96"]);
+        assert.deepEqual(res.changes, ["mid 1: H265 primeiro, VP9 reserva logo depois"]);
+        // o outro lado sem H.265: o VP9 na frente (o que o automatico escolheria), com uma observacao
+        const noH265 = mungeRemoteSdp(sdpOf(video(CHROMIUM.filter(([, , n]) => n !== "H265"))), plan({ codec: "h265" }));
+        assert.deepEqual(payloads(noH265.sdp).slice(0, 2), ["98", "100"]);
+        assert.deepEqual(noH265.changes, ["mid 1: VP9 reserva primeiro"]);
+        assert.deepEqual(noH265.notes, ["H265 ausente no SDP do outro lado; fica o VP9 reserva"]);
+        // sem H.265 nem VP9: o codec padrao
+        const bare = mungeRemoteSdp(sdpOf(video(CHROMIUM.filter(([, , n]) => n !== "H265" && n !== "VP9"))), plan({ codec: "h265" }));
         assert.deepEqual(bare.changes, []);
         assert.deepEqual(bare.notes, ["H265 ausente no SDP do outro lado; fica o codec padrão"]);
+        assert.deepEqual(mungeRemoteSdp(res.sdp, plan({ codec: "h265" })).changes, [], "de novo: intacto");
+    });
+
+    test("o AV1 sem reserva H.264 continua como antes: so o AV1 sobe, sem o VP9", () => {
+        const withAv1 = mungeRemoteSdp(sdpOf(video()), plan({ codec: "av1" }));
+        assert.deepEqual(payloads(withAv1.sdp).slice(0, 2), ["45", "96"]);
+        assert.deepEqual(withAv1.changes, ["mid 1: AV1 primeiro"]);
     });
 
     test("com a banda: x-google-* tambem no H.265", () => {
