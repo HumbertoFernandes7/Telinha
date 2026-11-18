@@ -71,7 +71,7 @@ Ainda falta:
 
 ## Requisitos
 
-- Windows 10 (versão 2004 ou superior) ou Windows 11.
+- Windows 10 (versão 2004 ou superior) ou Windows 11. No Linux, veja [Linux (experimental)](#linux-experimental).
 - Discord desktop com o **Vencord oficial já instalado** ([vencord.dev/download](https://vencord.dev/download/)).
 - **Todo mundo que transmite ou assiste precisa ter o Telinha.**
 - Funciona com a aceleração de hardware do Discord **ligada ou desligada** (desligada usa mais CPU).
@@ -95,6 +95,33 @@ O instalador registra o que fez em `%APPDATA%\Telinha\logs\installer.log`.
 **Se usar o "Reparar" do instalador do próprio Vencord** (ou reinstalar o Vencord), o Discord volta ao Vencord puro e o Telinha deixa de carregar: **rode o `TelinhaInstaller.exe` de novo** para colocá-lo de volta.
 
 Instalou uma das versões de teste antigas (o ZIP com `instalar.cmd`)? Veja a [nota no fim](#versões-de-teste-antigas) antes.
+
+### Linux (experimental)
+
+Testado no Debian 13 (GNOME, Wayland) com o Discord do Flathub e o Vencord oficial. Também procura o Discord dos pacotes `.deb`/`.rpm`/`.tar.gz` (`/usr/share`, `/usr/lib`, `/opt`, `~/.local/share`) e o Flatpak instalado só para o usuário (`--user`). Snap não funciona: os arquivos dele não podem ser alterados.
+
+1. Tenha o Discord e o **Vencord oficial** instalados ([vencord.dev/download](https://vencord.dev/download/)). Se o Vencord perguntar, **não** instale o OpenAsar: no Flatpak ele impede o Discord de abrir.
+2. Ainda não há um instalador pronto para baixar: compile-o com [Go](https://go.dev/dl/) 1.26 ou mais novo:
+
+   ```sh
+   cd installer && go build -o TelinhaInstaller .
+   ```
+
+3. Instale (com `sudo`, porque os arquivos do Discord pertencem ao root; o Telinha vai para `~/.config/Telinha` do seu usuário, ao lado do `~/.config/Vencord`):
+
+   ```sh
+   sudo ./TelinhaInstaller --install
+   ```
+
+   No Flatpak, o instalador também dá ao Discord acesso a `~/.config/Telinha` (`flatpak override --filesystem`), como o instalador do Vencord faz com o Vencord. `./TelinhaInstaller --status` mostra o que está instalado e `sudo ./TelinhaInstaller --uninstall` devolve o Discord ao Vencord original.
+
+No Linux:
+
+- **No Wayland, a tela ou a janela é escolhida na janela do próprio sistema** (o portal do GNOME/KDE), que abre ao clicar em "Transmitir com Telinha". Ela aparece no seletor do Telinha, na aba Janelas, como "Escolhida na janela do sistema". O Telinha liga sozinho a captura pelo PipeWire do Chromium (`WebRTCPipeWireCapturer`), que o Discord deixa desligada.
+- **Ainda sem som** na transmissão (o áudio da tela usa o `telinha-audio.exe`, só do Windows).
+- Sem a placa de vídeo codificando H.264, a transmissão sai em VP9 pelo processador. Assistir funciona normalmente, com a placa de vídeo decodificando.
+- As opções da placa de vídeo (captura, prioridade, peso da live) são do Windows e ficam sem efeito.
+- Quando o Flatpak do Discord atualiza, o Discord volta sem Vencord e sem Telinha: reinstale o Vencord e rode `sudo ./TelinhaInstaller --install` de novo.
 
 ## Como usar
 
@@ -262,6 +289,7 @@ As primeiras versões de teste (`teste-1` e `teste-2`) eram um fork do Vencord 1
 It is a plugin for [Vencord](https://github.com/Vendicated/Vencord) (a Discord client mod): early, but an official release ([latest version](https://github.com/HumbertoFernandes7/Telinha/releases/latest)). You keep the **official Vencord**: install Telinha with [**`TelinhaInstaller.exe`**](https://github.com/HumbertoFernandes7/Telinha/releases/latest/download/TelinhaInstaller.exe) (direct download of the latest release; notes on the [latest release page](https://github.com/HumbertoFernandes7/Telinha/releases/latest)). SmartScreen will warn because it is not code-signed yet: "More info" > "Run anyway". Click Install and reopen Discord; Telinha comes enabled. It does not modify Vencord's files; running the installer again and choosing Uninstall puts Vencord back exactly as before. Telinha updates itself: when Discord opens (and every 6 hours) it checks GitHub, downloads a new version in the background, verifies its SHA-256 and applies it on the next Discord restart, rolling back on its own if the new version fails to start ("Atualizar automaticamente" in the plugin settings turns this into a notice only). If you use the Vencord installer's "Repair", run the Telinha installer again. It needs official Vencord to be installed first.
 
 - **Requirements:** Windows 10 2004+/11, Discord desktop with official Vencord. Everyone who streams or watches needs Telinha.
+- **Linux (experimental):** build the installer (`cd installer && go build -o TelinhaInstaller .`) and run `sudo ./TelinhaInstaller --install`; it finds packaged and Flatpak Discords and lets the Flatpak use `~/.config/Telinha`. On Wayland the screen or window is picked in the system's portal (Telinha turns on Chromium's PipeWire capturer). No stream audio on Linux yet. See [Linux (experimental)](#linux-experimental).
 - **Verified so far:** screen/window capture in stock Discord on Windows, window audio, a direct connection between two homes (720p, ~57 fps, 0% loss), viewing in a separate Discord window, and the installer + add-on on top of the official Vencord on a real PC (streaming with whole-screen audio working).
 - **Available, not yet tested between two real PCs:** watching right inside the call view (an "Assistir" button on the person's tile, which can still pop out into a separate window) and the viewer controls: a "Quem está assistindo" (who is watching) list with Expulsar (kick) and Liberar (unblock), a warning when two connections claim the same Discord account (neither gets the stream), "Quem pode assistir" (who can watch), chosen when you start streaming: everyone in the call, only your Discord friends, only people you approve, or a per-stream password; and Discord-verified identity (a one-time "Autorizar" in Discord's own window, so nobody can pretend to be someone else in the call).
 - **Privacy:** a direct connection means people in the call can see each other's IP. Only people in the same voice channel are accepted by default, there is an optional group password, and logs never contain IP addresses.
