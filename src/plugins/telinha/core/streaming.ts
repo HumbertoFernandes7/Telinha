@@ -110,7 +110,8 @@ const DEGRADATION_TEXT: Record<string, string> = {
     "maintain-framerate": "prioriza fps (o WebRTC pode reduzir a resolução sozinho)"
 };
 
-const SOURCE_ID_RE = /^(screen|window):-?\d{1,20}:-?\d{1,10}$/;
+// o ":s" e o da fonte do PipeWire (Linux/Wayland), como em native.ts
+const SOURCE_ID_RE = /^(screen|window):-?\d{1,20}:-?\d{1,10}(?::s)?$/;
 
 /** Pedido de aprovacao (Permitir/Recusar) sem resposta: recusado sozinho depois disto. */
 export const APPROVAL_TIMEOUT_MS = 60_000;
