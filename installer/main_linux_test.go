@@ -4,6 +4,7 @@ package main
 
 import (
 	"errors"
+	"os/user"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -14,10 +15,10 @@ import (
 )
 
 func TestFlatpakAllow(t *testing.T) {
-	defer func(f func(*syscall.Credential, ...string) ([]byte, error)) { runFlatpak = f }(runFlatpak)
+	defer func(f func(*syscall.Credential, []string, ...string) ([]byte, error)) { runFlatpak = f }(runFlatpak)
 	var calls [][]string
 	var fail bool
-	runFlatpak = func(_ *syscall.Credential, args ...string) ([]byte, error) {
+	runFlatpak = func(_ *syscall.Credential, _ []string, args ...string) ([]byte, error) {
 		calls = append(calls, args)
 		if fail {
 			return []byte("error: no such app"), errors.New("exit status 1")
@@ -57,5 +58,30 @@ func TestDefaultAppDataFollowsXDG(t *testing.T) {
 	t.Setenv("HOME", "/home/someone")
 	if got := defaultAppData(); got != "/home/someone/.config" {
 		t.Fatalf("defaultAppData() = %q", got)
+	}
+}
+
+// Under sudo, flatpak --user must see the user's HOME and XDG folders, not root's.
+func TestUserEnv(t *testing.T) {
+	t.Setenv("HOME", "/root")
+	t.Setenv("XDG_DATA_HOME", "/root/.local/share")
+	t.Setenv("XDG_CONFIG_HOME", "/root/.config")
+	t.Setenv("TELINHA_KEEP", "yes")
+	env := userEnv(&user.User{Username: "u", HomeDir: "/home/u"})
+	got := map[string]string{}
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		if _, dup := got[k]; dup {
+			t.Fatalf("%s set twice: %q", k, env)
+		}
+		got[k] = v
+	}
+	if got["HOME"] != "/home/u" || got["USER"] != "u" || got["LOGNAME"] != "u" || got["TELINHA_KEEP"] != "yes" {
+		t.Fatalf("env: %q", env)
+	}
+	for _, k := range []string{"XDG_DATA_HOME", "XDG_CONFIG_HOME"} {
+		if _, ok := got[k]; ok {
+			t.Fatalf("%s leaked from root: %q", k, env)
+		}
 	}
 }

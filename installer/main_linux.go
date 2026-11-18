@@ -26,8 +26,9 @@ var (
 	attachConsole = func() {}
 	hideConsole   = func() {}
 	// runFlatpak runs the flatpak command (tests replace it)
-	runFlatpak = func(cred *syscall.Credential, args ...string) ([]byte, error) {
+	runFlatpak = func(cred *syscall.Credential, env []string, args ...string) ([]byte, error) {
 		cmd := exec.Command("flatpak", args...)
+		cmd.Env = env // nil = inherit
 		if cred != nil {
 			cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
 		}
@@ -79,18 +80,35 @@ func setupPlatform(cfg *core.Config) { cfg.GrantAccess = flatpakAllow }
 func flatpakAllow(in discord.Install, dir string) error {
 	scope := "--system"
 	var cred *syscall.Credential
+	var env []string
 	if in.FlatpakUser {
 		scope = "--user"
 		// under sudo, --user would change root's overrides: run it as the user who owns the install
 		if u := sudoUser(); u != nil {
 			cred = credential(u)
+			if cred != nil {
+				env = userEnv(u)
+			}
 		}
 	}
 	args := []string{"override", scope, "--filesystem=" + dir, in.Flatpak}
-	if out, err := runFlatpak(cred, args...); err != nil {
+	if out, err := runFlatpak(cred, env, args...); err != nil {
 		return fmt.Errorf("flatpak %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// userEnv is root's environment seen as the user: sudo may leave HOME (and the XDG folders) pointing at root's.
+func userEnv(u *user.User) []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		switch strings.SplitN(kv, "=", 2)[0] {
+		case "HOME", "USER", "LOGNAME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME":
+		default:
+			env = append(env, kv)
+		}
+	}
+	return append(env, "HOME="+u.HomeDir, "USER="+u.Username, "LOGNAME="+u.Username)
 }
 
 func credential(u *user.User) *syscall.Credential {

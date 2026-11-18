@@ -50,7 +50,8 @@ func TestFindLinux(t *testing.T) {
 
 	mkResources(t, filepath.Join(sys, "discord"))
 	mkResources(t, filepath.Join(opt, "discord-canary"))
-	mkResources(t, filepath.Join(home, ".local", "share", "DiscordPTB"))
+	// the first name FindLinux tries for PTB: NTFS ignores case, so another spelling would be reported as that one
+	mkResources(t, filepath.Join(home, ".local", "share", "discord-ptb"))
 	flatpak := filepath.Join(sysFlatpak, "com.discordapp.Discord", "current", "active", "files", "discord")
 	mkResources(t, flatpak)
 	userFlatpak := filepath.Join(home, ".local", "share", "flatpak", "app", "com.discordapp.DiscordCanary", "current", "active", "files", "discord-canary")
@@ -73,7 +74,7 @@ func TestFindLinux(t *testing.T) {
 	want := []found{
 		{"stable", filepath.Join(sys, "discord"), "Discord", "", false},
 		{"stable", flatpak, "Discord", "com.discordapp.Discord", false},
-		{"ptb", filepath.Join(home, ".local", "share", "DiscordPTB"), "DiscordPTB", "", false},
+		{"ptb", filepath.Join(home, ".local", "share", "discord-ptb"), "DiscordPTB", "", false},
 		{"canary", filepath.Join(opt, "discord-canary"), "DiscordCanary", "", false},
 		{"canary", userFlatpak, "DiscordCanary", "com.discordapp.DiscordCanary", true},
 	}

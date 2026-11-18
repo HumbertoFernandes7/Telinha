@@ -190,11 +190,7 @@ func (a *app) cliStatus() int {
 		fmt.Println("Discord: não encontrado")
 	}
 	for _, t := range s.Targets {
-		app := " " + t.App
-		if t.App == discord.FlatApp {
-			app = "" // Linux: resources sits in the root
-		}
-		line := fmt.Sprintf("%s [%s]%s: %s, %s", t.Name, t.Root, app, t.Kind, t.State)
+		line := fmt.Sprintf("%s [%s]%s: %s, %s", t.Name, t.Root, targetAppLabel(t.App), t.Kind, t.State)
 		if t.Patcher != "" {
 			line += ", Vencord: " + t.Patcher
 		}
@@ -214,4 +210,12 @@ func (a *app) cliStatus() int {
 		fmt.Println("Windows sem suporte:", err)
 	}
 	return exitOK
+}
+
+// targetAppLabel is the app-* folder as shown after the root ("" on Linux, where resources sits in the root).
+func targetAppLabel(app string) string {
+	if app == discord.FlatApp {
+		return ""
+	}
+	return " " + app
 }
