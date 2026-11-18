@@ -17,16 +17,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Process is one running process.
-type Process struct {
-	PID  uint32
-	Name string // executable file name, e.g. "Discord.exe"
-	Path string // full image path, "" when it could not be read
-}
-
-// System is the real implementation (the core package takes an interface so tests can fake it).
-type System struct{}
-
 // List returns all running processes.
 func (System) List() ([]Process, error) {
 	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)

@@ -24,16 +24,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
-
-	"golang.org/x/sys/windows"
 
 	"github.com/HumbertoFernandes7/Telinha/installer/internal/core"
 	"github.com/HumbertoFernandes7/Telinha/installer/internal/discord"
 	"github.com/HumbertoFernandes7/Telinha/installer/internal/logx"
 	"github.com/HumbertoFernandes7/Telinha/installer/internal/payload"
 	"github.com/HumbertoFernandes7/Telinha/installer/internal/winproc"
-	"github.com/HumbertoFernandes7/Telinha/installer/internal/winver"
 )
 
 // version is set by build.cmd (-ldflags "-X main.version=...").
@@ -109,29 +107,17 @@ type app struct {
 }
 
 // The calls below look at the machine the installer runs on. They are variables so the tests can aim the
-// installer at fake folders and a fake process table instead.
+// installer at fake folders and a fake process table instead. The per-OS ones (the folders, the Windows
+// version check, the console) are in main_windows.go and main_linux.go.
 var (
-	knownFolderPath = windows.KnownFolderPath
 	// systemProcesses lists and closes the running processes (the real thing kills Discord).
 	systemProcesses core.Processes = procAdapter{}
-	// checkWindows returns an error when this Windows is too old (nil when it is new enough).
-	checkWindows = winver.Check
-	// attachConsole / hideConsole are the console tricks of main; tests must not run the real ones.
-	attachConsole = attachParentConsole
-	hideConsole   = hideOwnConsole
 )
-
-func knownFolder(id *windows.KNOWNFOLDERID, env string) string {
-	if p, err := knownFolderPath(id, 0); err == nil && p != "" {
-		return p
-	}
-	return os.Getenv(env)
-}
 
 func newApp(o *options, extraLog io.Writer) (*app, error) {
 	appData := o.appdata
 	if appData == "" {
-		appData = knownFolder(windows.FOLDERID_RoamingAppData, "APPDATA")
+		appData = defaultAppData()
 	}
 	if appData == "" {
 		return nil, fmt.Errorf("não foi possível achar a pasta %%APPDATA%%")
@@ -149,9 +135,10 @@ func newApp(o *options, extraLog io.Writer) (*app, error) {
 			cfg.Installs = append(cfg.Installs, discord.FromDir(d))
 		}
 	} else {
-		cfg.Installs = discord.Find(knownFolder(windows.FOLDERID_LocalAppData, "LOCALAPPDATA"))
+		cfg.Installs = findDiscord()
 	}
-	lf := logx.Open(cfg.Home()+`\logs`, extraLog)
+	setupPlatform(cfg)
+	lf := logx.Open(filepath.Join(cfg.Home(), "logs"), extraLog)
 	cfg.Log = lf.Logger
 	mode := "gui"
 	if o.cli() {

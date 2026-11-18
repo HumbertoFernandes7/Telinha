@@ -34,6 +34,8 @@ type Config struct {
 	Procs              Processes
 	Log                *log.Logger
 	InstallerVersion   string
+	// GrantAccess lets a sandboxed Discord (a Linux flatpak) read and write dir, the Telinha home; nil = no sandbox
+	GrantAccess func(in discord.Install, dir string) error
 }
 
 func (c *Config) logf(format string, args ...any) {
@@ -55,9 +57,13 @@ func (c *Config) Home() string { return filepath.Join(c.AppData, "Telinha") }
 // AddonDir is %APPDATA%\Telinha\addon.
 func (c *Config) AddonDir() string { return filepath.Join(c.Home(), "addon") }
 
-// BackupPath is %APPDATA%\Telinha\backup\<FlavorDir>\<app-ver>.app.asar.
+// BackupPath is %APPDATA%\Telinha\backup\<FlavorDir>\<app-ver>.app.asar (Linux: <FlavorDir>/app.asar).
 func (c *Config) BackupPath(inst discord.Install, app string) string {
-	return filepath.Join(c.Home(), "backup", filepath.Base(inst.Root), app+".app.asar")
+	name := app + ".app.asar"
+	if app == discord.FlatApp {
+		name = "app.asar"
+	}
+	return filepath.Join(c.Home(), "backup", filepath.Base(inst.Root), name)
 }
 
 // RecordPath is %APPDATA%\Telinha\install.json.

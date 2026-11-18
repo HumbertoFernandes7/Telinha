@@ -222,10 +222,19 @@ func (c *Config) Apply(st *Staged, chosen []Target) (*Result, error) {
 			errs = append(errs, fmt.Errorf("%s: %w", t.Name, err))
 			continue
 		}
+		if t.Install.Flatpak != "" && c.GrantAccess != nil {
+			// without it the stub can't see the loader and starts plain Vencord (PAYLOAD.md 3.1)
+			if err := c.GrantAccess(t.Install, c.Home()); err != nil {
+				c.logf("apply %s: sandbox access: %v", t.Name, err)
+				errs = append(errs, fmt.Errorf("%s: %w", t.Name, err))
+			} else {
+				c.logf("apply %s: flatpak %s may now use %s", t.Name, t.Install.Flatpak, c.Home())
+			}
+		}
 		if changed {
 			res.Targets = append(res.Targets, *rt)
 		} else {
-			res.Unchanged = append(res.Unchanged, rt.Flavor+`\`+rt.App)
+			res.Unchanged = append(res.Unchanged, filepath.Join(rt.Flavor, rt.App))
 		}
 		rec := c.recordFor(st, m)
 		rec.Targets = mergeTargets(rec.Targets, *rt)
@@ -352,7 +361,7 @@ func (c *Config) Uninstall() (*UninstallResult, error) {
 				c.logf("uninstall %s %s: %v", in.Name, app, err)
 				errs = append(errs, fmt.Errorf("%s %s: %w", in.Name, app, err))
 			} else if res2 {
-				res.Restored = append(res.Restored, filepath.Base(in.Root)+`\`+app)
+				res.Restored = append(res.Restored, filepath.Join(filepath.Base(in.Root), app))
 			}
 		}
 	}
