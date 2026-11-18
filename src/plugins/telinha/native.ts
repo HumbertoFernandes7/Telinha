@@ -21,6 +21,7 @@ import {
 import { appendDiagLogMain, clearDiagLogMain, readDiagLogMain } from "./core/diagLogMain";
 import { type GpuBoostRecordEntry, readGpuBoostRecordMain, writeGpuBoostRecordMain } from "./core/discordGpuBoostMain";
 import { type LiveWeightReport, type LiveWeightStart, readLiveWeightMain, startLiveWeightMain, stopLiveWeightMain } from "./core/liveWeightMain";
+import { deviceFitsSource, isValidLoopbackDevice, LOOPBACK_WITHOUT_CHROME } from "./core/screenAudioDevice";
 import { type ScreenAudioFlagStatus, screenAudioFlagStatusMain, screenAudioWindowsProblem, setScreenAudioFlagMain } from "./core/screenAudioFlagMain";
 import { getWindowProcessInfo } from "./nativeWindowPid";
 import { RELAY_URLS } from "./protocol";
@@ -61,12 +62,6 @@ export interface CaptureReport {
 }
 
 const SOURCE_ID_RE = /^(screen|window):-?\d{1,20}:-?\d{1,10}$/;
-const APP_LOOPBACK_RE = /^applicationLoopback:([1-9]\d{0,9})$/;
-/**
- * O dispositivo do Chromium (Windows) que captura o som do PC EXCLUINDO a arvore do processo onde roda o servico de audio.
- * So e seguro com o servico de audio dentro do main do Discord: fora dele, a voz da call (renderer) vazaria na live.
- */
-export const LOOPBACK_WITHOUT_CHROME = "loopbackWithoutChrome";
 const PENDING_TTL_MS = 15_000;
 const AUDIO_WAIT_MS = 6_000;
 
@@ -84,12 +79,6 @@ const sessionsWithHandler = new Set<Electron.Session>();
 
 function errorText(e: unknown) {
     return e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-}
-
-/** O Chromium da CHECK-crash com um id `applicationLoopback:` malformado: so passam formatos exatos. */
-function isValidLoopbackDevice(device: string) {
-    const match = APP_LOOPBACK_RE.exec(device);
-    return !!match && Number(match[1]) <= 0xFFFFFFFF;
 }
 
 /** O som da tela pelo Chromium do Discord da para usar AGORA? `reason` em pt-BR (para o log e a UI). */
@@ -146,11 +135,6 @@ function resolveScreenAudio(): AudioDecision {
     return status.available
         ? { device: LOOPBACK_WITHOUT_CHROME, reason: "tela inteira pelo Chromium do Discord (sem o Discord): " + status.reason }
         : { device: null, reason: "tela inteira sem o som pelo Chromium: " + status.reason };
-}
-
-/** O dispositivo so passa se combina com a fonte: applicationLoopback valido numa janela, loopbackWithoutChrome numa tela. */
-export function deviceFitsSource(sourceId: string, device: string) {
-    return sourceId.startsWith("screen:") ? device === LOOPBACK_WITHOUT_CHROME : sourceId.startsWith("window:") && isValidLoopbackDevice(device);
 }
 
 /** Uma excecao na trava rejeita a promessa: o handler cai no fallback sem dispositivo (withTimeout), nunca no loopback. */

@@ -20,11 +20,10 @@ import { app, desktopCapturer, FakeSession, fakeSource, ipcEvent } from "@test/f
 import { ConnectSrc, CspPolicies } from "@test/fakes/vencord/main/csp";
 import { feed, feedErr, helperHost, pcm, powershellHost, setPlatform } from "@test/helpers/wpd-audio";
 
+import { deviceFitsSource, LOOPBACK_WITHOUT_CHROME } from "./core/screenAudioDevice";
 import {
-    deviceFitsSource,
     finishDisplayMedia,
     listSources,
-    LOOPBACK_WITHOUT_CHROME,
     prepareDisplayMedia,
     readScreenAudio,
     resetDisplayMedia,
