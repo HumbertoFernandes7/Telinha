@@ -119,7 +119,8 @@ export const settings = definePluginSettings({
     codec: {
         type: OptionType.SELECT,
         displayName: "Formato de vídeo (codec)",
-        description: "Codec de vídeo ao transmitir. Automático: H.264 quando o seu PC codifica e o do amigo decodifica por hardware; senão VP9. "
+        description: "Codec de vídeo ao transmitir. Automático: H.264 quando o seu PC codifica e o do amigo decodifica por hardware; "
+            + "num Discord sem H.264, H.265 quando a placa de vídeo dos dois lados tem; senão VP9. "
             + "H.265 só ajuda com internet boa; com internet fraca pode perder fps. "
             + "AV1: só com placa RTX 40/50 (ou Radeon RX 7000, Intel Arc) de quem transmite e RTX 30 ou mais nova de quem assiste; depois de escolher, reinicie o Discord. "
             + "Os dois só vão com a placa de vídeo dos dois lados; senão, vai o do automático. "

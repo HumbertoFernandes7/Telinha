@@ -404,6 +404,14 @@ const AV1_HW_ENCODE_FEATURE = "WebRtcAV1HWEncode";
  */
 const SCREEN_AUDIO_DISABLE_FEATURES = ["AudioServiceOutOfProcess", "RestrictOwnAudioAddChromiumBack"];
 
+/**
+ * Linux under Wayland: Chromium only reaches screens and windows through PipeWire (the system's xdg-desktop-portal picker),
+ * and Discord does not turn that capturer on, so desktopCapturer.getSources() finds nothing. Vesktop turns it on too.
+ */
+const PIPEWIRE_CAPTURER_FEATURE = "WebRTCPipeWireCapturer";
+
+const isWayland = () => process.platform === "linux" && (process.env.XDG_SESSION_TYPE === "wayland" || !!process.env.WAYLAND_DISPLAY);
+
 function windowsBuild() {
     if (process.platform !== "win32") return 0;
     return Number(String(require("os").release()).split(".")[2]) || 0;
@@ -486,6 +494,7 @@ function applyCaptureFlags() {
             features.push(WGC_TEXTURE_FEATURE);
         }
         if (capture.av1HwEncode) features.push(AV1_HW_ENCODE_FEATURE);
+        if (isWayland()) features.push(PIPEWIRE_CAPTURER_FEATURE);
         if (!features.length && !screenAudio.asked) {
             if (capture.reason && !capture.wgcTexture) log(`capture: ${capture.reason}`);
             return;
@@ -505,6 +514,7 @@ function applyCaptureFlags() {
         keepFeaturesOnAppend(commandLine, features, screenAudio.asked ? SCREEN_AUDIO_DISABLE_FEATURES : []);
         if (capture.wgcTexture && features.includes(WGC_TEXTURE_FEATURE)) log(`capture: GPU capture asked for: ${WGC_TEXTURE_FEATURE} added to enable-features (Windows build ${capture.build})`);
         if (capture.av1HwEncode) log(`capture: AV1 hardware encode asked for: ${AV1_HW_ENCODE_FEATURE} added to enable-features`);
+        if (features.includes(PIPEWIRE_CAPTURER_FEATURE)) log(`capture: Wayland: ${PIPEWIRE_CAPTURER_FEATURE} added to enable-features`);
         if (screenAudio.asked) log(`capture: screen audio in Chromium asked for: ${SCREEN_AUDIO_DISABLE_FEATURES.join(",")} added to disable-features`);
         // Electron builds Chromium's feature list from the command line after this script ran, before "ready"
         app.whenReady().then(() => {
@@ -520,6 +530,7 @@ function applyCaptureFlags() {
                 capture.av1Applied = names.includes(AV1_HW_ENCODE_FEATURE);
                 outcome.push(`AV1 hardware encode ${capture.av1Applied ? "applied" : "NOT applied"}`);
             }
+            if (features.includes(PIPEWIRE_CAPTURER_FEATURE)) outcome.push(`PipeWire capturer ${names.includes(PIPEWIRE_CAPTURER_FEATURE) ? "applied" : "NOT applied"}`);
             if (screenAudio.asked) {
                 screenAudio.disableFeatures = String(commandLine.getSwitchValue("disable-features") ?? "");
                 const disabledNames = featureNames(screenAudio.disableFeatures);

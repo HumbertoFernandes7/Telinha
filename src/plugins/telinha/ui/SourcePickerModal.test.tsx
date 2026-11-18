@@ -29,6 +29,8 @@ import { openSourcePicker } from "./SourcePickerModal";
 const SCREEN: CaptureSource = { id: "screen:0:0", name: "Tela inteira", kind: "screen" };
 const GAME: CaptureSource = { id: "window:1234:0", name: "Jogo", kind: "window" };
 const CHAT: CaptureSource = { id: "window:77:0", name: "Navegador", kind: "window" };
+/** Linux/Wayland: a fonte unica do PipeWire, ja escolhida no seletor do sistema */
+const PORTAL: CaptureSource = { id: "window:1:0:s", name: "Escolhida na janela do sistema", kind: "window" };
 
 const sources = (...list: CaptureSource[]) => async () => ({ sources: list });
 const tab = (name: RegExp) => screen.getByRole("tab", { name });
@@ -276,6 +278,25 @@ describe("SourcePickerModal: a lista e as opcoes", () => {
             fireEvent.click(card("Jogo"));
             fireEvent.click(tab(/^Telas/));
             screen.getByText("Envia junto o som do aplicativo dessa janela.");
+        });
+
+        test("Linux (fonte do PipeWire): o som do PC sem o Discord, mesmo sendo uma janela, antes e depois de escolher", async t => {
+            openWith(t, sources(PORTAL), { screenAudioStatus: async () => ({ available: true, reason: "áudio do PC sem o Discord (PipeWire)" }) });
+            await settle();
+            const note = "Vai todo o som do PC, menos o do Discord (seus amigos não ouvem a própria voz), mesmo escolhendo uma janela.";
+            screen.getByText(note);
+            assert.equal(audioSwitch().disabled, false);
+            fireEvent.click(card("Escolhida na janela do sistema"));
+            screen.getByText(note);
+            assert.equal(audioSwitch().checked, true);
+        });
+
+        test("Linux sem o PipeWire: o som fica bloqueado com o motivo (nao vira o som da janela)", async t => {
+            openWith(t, sources(PORTAL), { screenAudioStatus: async () => ({ available: false, reason: "o PipeWire não respondeu" }) });
+            await settle();
+            assert.equal(audioSwitch().disabled, true);
+            assert.equal(audioSwitch().checked, false);
+            screen.getByText("Sem som na tela inteira: o PipeWire não respondeu. A tela vai só com imagem.");
         });
 
         test("o ajudante falha ao responder: a tela inteira fica sem som e o motivo aparece", async t => {

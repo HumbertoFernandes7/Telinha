@@ -26,6 +26,9 @@ import type { AccessMode, CaptureSource, PeerId, Quality, RemotePeer, StreamOpti
  */
 export const screenAudioSupported = true as const;
 
+/** A fonte do PipeWire (Linux/Wayland): o som vai como o da tela inteira (o PC sem o Discord), nunca o de uma janela. */
+export const { isPipeWireSource } = streaming;
+
 /** O ajudante de audio da tela inteira esta disponivel? Se nao, `reason` (pt-BR) explica por que a tela vai sem som. */
 export function getScreenAudioStatus(): Promise<{ available: boolean; reason?: string; helperProblem?: "blocked" | "missing"; }> {
     return fetchScreenAudioStatus();

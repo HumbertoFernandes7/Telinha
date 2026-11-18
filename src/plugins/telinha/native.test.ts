@@ -120,6 +120,22 @@ describe("listSources", () => {
         assert.deepEqual(sources.map(s => s.id), ["screen:-1:-2", "window:99:0"]);
     });
 
+    test("Linux/Wayland: a fonte unica do PipeWire (id com :s, sem nome) passa com o nome do seletor do sistema", async t => {
+        setPlatform(t, "linux");
+        desktopCapturer.reset();
+        desktopCapturer.sources = [fakeSource("window:1:0:s", "")];
+        const { sources } = await listSources(ipcEvent(), 320, 180);
+        assert.deepEqual(sources.map(s => [s.id, s.name, s.kind]), [["window:1:0:s", "Escolhida na janela do sistema", "window"]]);
+        assert.equal(prepareDisplayMedia(ipcEvent(newSession(t)), "window:1:0:s", "Escolhida na janela do sistema", false), true);
+        // fora do Linux, ou com varias fontes, sem nome continua de fora
+        desktopCapturer.sources = [fakeSource("window:1:0:s", ""), fakeSource("window:2:0", "")];
+        assert.deepEqual((await listSources(ipcEvent(), 320, 180)).sources, []);
+        setPlatform(t, "win32");
+        desktopCapturer.sources = [fakeSource("window:1:0:s", "")];
+        assert.deepEqual((await listSources(ipcEvent(), 320, 180)).sources, []);
+        desktopCapturer.reset();
+    });
+
     test("sem fontes: lista vazia sem erro", async () => {
         desktopCapturer.reset();
         desktopCapturer.sources = [];

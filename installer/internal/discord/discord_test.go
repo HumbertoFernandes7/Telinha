@@ -41,6 +41,7 @@ func TestFindAndAppFolders(t *testing.T) {
 }
 
 func TestFromDir(t *testing.T) {
+	testutil.WindowsOnly(t)
 	if in := FromDir(`C:\x\DiscordCanary\`); in.Branch != "canary" || in.Exe != "DiscordCanary.exe" || in.Detected {
 		t.Fatalf("%+v", in)
 	}

@@ -123,6 +123,21 @@ describe("SourcePickerModal: Transmitir de verdade (nucleo por tras)", () => {
         assert.deepEqual(scene.native.calls.filter(c => c.name === "prepareDisplayMedia").at(-1)?.args, ["screen:0:0", "Tela inteira", false]);
     });
 
+    test("Linux (fonte do PipeWire) sem o PipeWire: transmite so a imagem, sem pedir o som da janela", async () => {
+        const list = scene.native.telinha.listSources;
+        scene.native.telinha.listSources = async () => ({ sources: [{ id: "window:1:0:s", name: "Escolhida na janela do sistema", kind: "window" }] });
+        try {
+            const modal = await pick("Escolhida na janela do sistema");
+            assert.equal(audioSwitch().disabled, true);
+            modal.click("Transmitir");
+            await until(() => modals.list().length === 0);
+            assert.equal(getState().local?.hasAudio, false);
+            assert.deepEqual(scene.native.calls.filter(c => c.name === "prepareDisplayMedia").at(-1)?.args, ["window:1:0:s", "Escolhida na janela do sistema", false]);
+        } finally {
+            scene.native.telinha.listSources = list;
+        }
+    });
+
     test("duplo clique no cartao transmite na hora, sem apertar Transmitir", async () => {
         openInHost(openSourcePicker);
         await settle();

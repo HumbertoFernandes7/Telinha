@@ -29,20 +29,28 @@ const FEATURE = "WebRtcAllowWgcUsingTexture";
 const AV1 = "WebRtcAV1HWEncode";
 const tick = () => new Promise(r => setImmediate(r));
 
-/** Windows build `build` (os.release()) on win32, or another platform. */
-function useOs(t, { build = 26300, platform = "win32" } = {}) {
+/** Windows build `build` (os.release()) on win32, or another platform; `wayland`: a Linux Wayland session's variables. */
+function useOs(t, { build = 26300, platform = "win32", wayland = false } = {}) {
     t.mock.method(os, "release", () => `10.0.${build}`);
     const before = Object.getOwnPropertyDescriptor(process, "platform");
     Object.defineProperty(process, "platform", { ...before, value: platform });
     t.after(() => Object.defineProperty(process, "platform", before));
+    // the machine running the tests may itself be a Wayland session: the variables are always set here
+    for (const [name, value] of [["XDG_SESSION_TYPE", wayland ? "wayland" : undefined], ["WAYLAND_DISPLAY", wayland ? "wayland-0" : undefined]]) {
+        const had = Object.hasOwn(process.env, name);
+        const old = process.env[name];
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+        t.after(() => had ? (process.env[name] = old) : delete process.env[name]);
+    }
 }
 
 /**
  * One boot of a loader copy. `flags`: the capture-flags.json content (an object is written as JSON, a string as is, null =
  * no file); `before(electron)`: runs before the boot (a switch already on the command line...); `patcher`: the fake Vencord.
  */
-function boot(t, { flags = { wgcTexture: true }, build, platform, argv = [], before, patcher = vencordLike() } = {}) {
-    useOs(t, { build, platform });
+function boot(t, { flags = { wgcTexture: true }, build, platform, wayland, argv = [], before, patcher = vencordLike() } = {}) {
+    useOs(t, { build, platform, wayland });
     const tree = makeLoaderTree({ installed: loaderPayload({ replace: { "updater.js": STUB_UPDATER } }), base: BASE });
     const flagsFile = join(tree.home, "capture-flags.json");
     if (flags !== null) writeFileSync(flagsFile, typeof flags === "string" ? flags : JSON.stringify(flags));
@@ -349,6 +357,21 @@ describe("the GPU capture stays off", () => {
         assert.deepEqual(commandLine.appended, []);
         assert.equal(state.capture.build, 0);
         assert.match(state.capture.reason, /^Windows build \?: /);
+    });
+
+    test("Linux under Wayland: the PipeWire capturer goes into enable-features, even with no capture-flags.json", async t => {
+        const { state, features, electron, tree } = boot(t, { platform: "linux", wayland: true, flags: null });
+        assert.equal(features(), "WebRTCPipeWireCapturer");
+        discordBootstrap(electron);
+        assert.equal(features(), `${DISCORD_FEATURE},WebRTCPipeWireCapturer`, "Discord's later call keeps it");
+        await ready(electron);
+        assert.match(tree.mainLog(), /capture: Wayland: WebRTCPipeWireCapturer added to enable-features/);
+        assert.match(tree.mainLog(), /PipeWire capturer applied/);
+        assert.equal(state.capture.applied, null, "the GPU capture was not asked for");
+    });
+
+    test("Linux without Wayland (X11) and Windows: no PipeWire capturer", t => {
+        assert.deepEqual(boot(t, { platform: "linux", flags: null }).commandLine.appended, []);
     });
 
     test("--vanilla: the loader stays out of the way (no hooks, no flags)", t => {

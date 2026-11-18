@@ -8,7 +8,7 @@ import { Button } from "@components/Button";
 import ErrorBoundary from "@components/ErrorBoundary";
 import { FormSwitch } from "@components/FormSwitch";
 import { Paragraph } from "@components/Paragraph";
-import { getScreenAudioStatus, listSources, recaptureLock, screenAudioSupported, startStreaming } from "@plugins/telinha/actions";
+import { getScreenAudioStatus, isPipeWireSource, listSources, recaptureLock, screenAudioSupported, startStreaming } from "@plugins/telinha/actions";
 import { HINT_2K, qualityOf, splitQuality } from "@plugins/telinha/core/quality/choice";
 import { onScreenAudioHelperProblem, refreshScreenAudioChromium, type ScreenAudioChromium, screenAudioFlagState } from "@plugins/telinha/core/screenAudioChromium";
 import { getState, useTelinhaState } from "@plugins/telinha/store";
@@ -24,6 +24,7 @@ type Kind = CaptureSource["kind"];
 const WINDOW_AUDIO_NOTE = "Envia junto o som do aplicativo dessa janela.";
 const CHROMIUM_AUDIO_NOTE = "Vai todo o som do PC, menos o do Discord (seus amigos não ouvem a própria voz). O som sai pelo próprio Discord.";
 const SCREEN_AUDIO_NOTE = "Vai todo o som do PC, menos o do Discord (seus amigos não ouvem a própria voz).";
+const PIPEWIRE_AUDIO_NOTE = "Vai todo o som do PC, menos o do Discord (seus amigos não ouvem a própria voz), mesmo escolhendo uma janela.";
 const SCREEN_AUDIO_CHECKING = "Verificando se este PC consegue compartilhar o som da tela inteira…";
 
 type ScreenAudioState = Awaited<ReturnType<typeof getScreenAudioStatus>>;
@@ -115,13 +116,15 @@ function SourcePickerModal({ modalProps, switching, initialQuality }: { modalPro
     const visible = tab === "screen" ? screens : windows;
     const selected = sources?.find(s => s.id === selectedId) ?? null;
 
-    const audioKind: Kind = selected?.kind ?? tab;
+    // Linux (fonte do PipeWire): o som e o do PC sem o Discord, como na tela inteira, mesmo escolhendo uma janela
+    const pipeWire = (selected ? [selected] : sources ?? []).some(s => isPipeWireSource(s.id));
+    const audioKind: Kind = pipeWire ? "screen" : selected?.kind ?? tab;
     const chromiumReady = chromium?.available === true;
     const screenAudioReady = screenAudioSupported && (screenAudio?.available === true || chromiumReady);
     const audioUnavailable = audioKind === "screen" && !screenAudioReady;
     let audioDescription = WINDOW_AUDIO_NOTE;
     if (audioKind === "screen") {
-        if (screenAudioReady) audioDescription = chromiumReady ? CHROMIUM_AUDIO_NOTE : SCREEN_AUDIO_NOTE;
+        if (screenAudioReady) audioDescription = pipeWire ? PIPEWIRE_AUDIO_NOTE : chromiumReady ? CHROMIUM_AUDIO_NOTE : SCREEN_AUDIO_NOTE;
         else if (!screenAudio || !chromium) audioDescription = SCREEN_AUDIO_CHECKING;
         else {
             // pedido salvo (ou aplicado sem passar na trava): o motivo do Chromium ("reabra o Discord"); senao, o do ajudante
@@ -156,7 +159,7 @@ function SourcePickerModal({ modalProps, switching, initialQuality }: { modalPro
             await startStreaming({
                 source,
                 quality: qualityOf(resolution, fps),
-                withAudio: audio && (source.kind !== "screen" || screenAudioReady),
+                withAudio: audio && ((source.kind !== "screen" && !isPipeWireSource(source.id)) || screenAudioReady),
                 ...(switching ? {} : { access, ...(access === "password" ? { password } : {}) })
             });
             modalProps.onClose();

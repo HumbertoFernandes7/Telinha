@@ -80,6 +80,7 @@ func TestWriteAfterCloseIsDropped(t *testing.T) {
 
 // Nothing can be written anywhere: the installer must go on without a log, and say where it tried last.
 func TestNoWritablePlaceAtAll(t *testing.T) {
+	testutil.WindowsOnly(t)
 	root := testutil.TempDir(t)
 	blocker := filepath.Join(root, "blocker")
 	testutil.Write(t, blocker, []byte("a file, not a folder"))

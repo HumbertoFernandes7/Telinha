@@ -46,6 +46,7 @@ func TestCompareVersionsAllBranches(t *testing.T) {
 }
 
 func TestFolderHelpers(t *testing.T) {
+	testutil.WindowsOnly(t)
 	root := testutil.TempDir(t)
 	if Newest(filepath.Join(root, "missing")) != "" || len(AppFolders(filepath.Join(root, "missing"))) != 0 {
 		t.Fatal("a missing root has no app folders")
@@ -65,6 +66,7 @@ func TestFolderHelpers(t *testing.T) {
 }
 
 func TestFromDirNormalises(t *testing.T) {
+	testutil.WindowsOnly(t)
 	for dir, branch := range map[string]string{
 		`C:\x\discordptb`:         "ptb",
 		`C:\x\DISCORDCANARY\`:     "canary",

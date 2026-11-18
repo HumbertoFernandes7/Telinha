@@ -62,7 +62,10 @@ export interface CaptureReport {
     error: string | null;
 }
 
-const SOURCE_ID_RE = /^(screen|window):-?\d{1,20}:-?\d{1,10}$/;
+// Linux/Wayland (PipeWire): o Electron devolve UMA fonte, ja escolhida no seletor do sistema, como "window:<n>:<n>:s"
+const SOURCE_ID_RE = /^(screen|window):-?\d{1,20}:-?\d{1,10}(?::s)?$/;
+/** Nome da fonte do PipeWire, que chega sem nome (o PipeWire nao lista nada: a escolha foi no seletor do sistema). */
+const PORTAL_SOURCE_NAME = "Escolhida na janela do sistema";
 const PENDING_TTL_MS = 15_000;
 const AUDIO_WAIT_MS = 6_000;
 
@@ -189,11 +192,13 @@ export async function listSources(_: IpcMainInvokeEvent, thumbWidth: number, thu
             fetchWindowIcons: false
         });
 
+        // sem nome so passa a fonte unica do PipeWire (Linux); no Windows sao janelas invisiveis
+        const portal = process.platform === "linux" && raw.length === 1;
         const sources: NativeSource[] = raw
-            .filter(src => SOURCE_ID_RE.test(src.id) && src.name)
+            .filter(src => SOURCE_ID_RE.test(src.id) && (src.name || portal))
             .map(src => ({
                 id: src.id,
-                name: src.name,
+                name: src.name || PORTAL_SOURCE_NAME,
                 kind: src.id.startsWith("screen:") ? "screen" : "window",
                 thumbnail: src.thumbnail && !src.thumbnail.isEmpty()
                     ? "data:image/jpeg;base64," + src.thumbnail.toJPEG(70).toString("base64")

@@ -110,7 +110,11 @@ const DEGRADATION_TEXT: Record<string, string> = {
     "maintain-framerate": "prioriza fps (o WebRTC pode reduzir a resolução sozinho)"
 };
 
-const SOURCE_ID_RE = /^(screen|window):-?\d{1,20}:-?\d{1,10}$/;
+// o ":s" e o da fonte do PipeWire (Linux/Wayland), como em native.ts
+const SOURCE_ID_RE = /^(screen|window):-?\d{1,20}:-?\d{1,10}(?::s)?$/;
+
+/** A fonte unica do PipeWire (Linux/Wayland), ja escolhida no seletor do sistema: o som vem do PipeWire, nunca da janela. */
+export const isPipeWireSource = (id: string) => id.endsWith(":s");
 
 /** Pedido de aprovacao (Permitir/Recusar) sem resposta: recusado sozinho depois disto. */
 export const APPROVAL_TIMEOUT_MS = 60_000;
@@ -357,9 +361,11 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
     const early = rt.local && recaptureLock(qualityLockOf(rt.local), rt.local.source.id === source.id);
     if (early) throw new Error(early);
     const kind = source.id.startsWith("screen:") ? "screen" : "window";
+    // Linux (fonte do PipeWire, ":s"): o seletor do sistema nao diz de qual processo e a janela; vai o PC sem o Discord
+    const pipeWire = isPipeWireSource(source.id);
     // janela: audio so do processo da janela (getDisplayMedia); tela inteira: audio do PC sem o Discord (telinha-audio.exe)
-    const wantAudio = !!opts.withAudio && kind === "window";
-    const wantScreenAudio = !!opts.withAudio && kind === "screen";
+    const wantAudio = !!opts.withAudio && kind === "window" && !pipeWire;
+    const wantScreenAudio = !!opts.withAudio && (kind === "screen" || pipeWire);
     starting = true;
     // a sonda WebCodecs do H.264 da placa (stuckEncoder.ts) nao comeca no meio de uma partida
     noteStreamStarting(true);
@@ -375,13 +381,14 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
         // Chromium vai junto com o preparo (um so vai-e-volta de IPC); o main refaz a mesma trava no preparo e so entrega
         // o loopbackWithoutChrome se ela passar, e o handler so da audio se o getDisplayMedia pedir (so pedimos se passou)
         const [chromium] = await Promise.all([
-            wantScreenAudio ? chromiumScreenAudio(native) : null,
+            wantScreenAudio && !pipeWire ? chromiumScreenAudio(native) : null,
             native.prepareDisplayMedia(source.id, source.name, wantAudio || wantScreenAudio)
         ]);
         // tela inteira: o audio pelo Chromium do Discord (loopbackWithoutChrome) ou, sem ele, pelo telinha-audio.exe
         const screenViaChromium = wantScreenAudio && chromium?.available === true;
+        const helperName = pipeWire ? "pelo PipeWire" : "pelo ajudante telinha-audio.exe";
         const audioPath = !(wantAudio || wantScreenAudio) ? " sem áudio"
-            : wantAudio ? " com áudio" : screenViaChromium ? " com áudio pelo Chromium do Discord" : " com áudio pelo ajudante telinha-audio.exe";
+            : wantAudio ? " com áudio" : screenViaChromium ? " com áudio pelo Chromium do Discord" : ` com áudio ${helperName}`;
         log.info(`Iniciando transmissão: ${kind === "screen" ? "tela" : "janela"} "${source.name}" em ${opts.quality}${audioPath}`);
         if (wantScreenAudio && chromium && !screenViaChromium) log.info(`Som da tela pelo Chromium indisponível: ${chromium.reason}`);
 
@@ -462,7 +469,7 @@ export async function startStreaming(opts: StreamOptions): Promise<void> {
             log.info(audio
                 ? "Áudio da tela: pelo Chromium do Discord (sem o Discord)"
                 : `Áudio da tela: o Chromium do Discord não entregou faixa de áudio; transmitindo a tela sem áudio — ${report?.audio?.reason ?? "sem decisão do handler"}`);
-        } else if (wantScreenAudio) log.info(`Áudio da tela: ${audio ? "pelo ajudante telinha-audio.exe (o PC sem o Discord)" : "sem faixa de áudio"}`);
+        } else if (wantScreenAudio) log.info(`Áudio da tela: ${audio ? `${helperName} (o PC sem o Discord)` : "sem faixa de áudio"}`);
 
         const s = video.getSettings();
         const info: StreamInfo = {
@@ -1697,7 +1704,7 @@ function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: 
         return;
     }
     if (name === "H.264" && (enc.powerEfficient === false || /openh264/i.test(enc.implementation ?? ""))) {
-        fallBack(peerId, local, send, chooseCodec(rt.peers.get(peerId)?.presence?.caps, settings.store.codec as CodecSetting, { ...getLocalCaps(), h264HwEncode: false }), why);
+        fallBack(peerId, local, send, chooseCodec(rt.peers.get(peerId)?.presence?.caps, settings.store.codec as CodecSetting, { ...getLocalCaps(), h264HwEncode: false, h264HwOff: true }), why);
         return;
     }
     containStuck(peerId, local, send, why);
@@ -2056,7 +2063,7 @@ export function onCodecRequest(peerId: PeerId, request: CodecRequestMessage) {
     // H.265/AV1: o decodificador dele pode nao ser o da placa; vai a reserva H.264 (nada fica marcado neste PC)
     const next = hwOnly
         ? chooseWithout(hwOnly, peerId)
-        : chooseCodec(rt.peers.get(peerId)?.presence?.caps, settings.store.codec as CodecSetting, { ...getLocalCaps(), h264HwEncode: false });
+        : chooseCodec(rt.peers.get(peerId)?.presence?.caps, settings.store.codec as CodecSetting, { ...getLocalCaps(), h264HwEncode: false, h264HwOff: true });
     if (next.codec === send.decision.codec) {
         log.warn(`${why}: continua em H.264 porque o codec está fixado nas configurações`);
         return;

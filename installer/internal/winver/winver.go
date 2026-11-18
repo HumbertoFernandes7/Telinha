@@ -4,11 +4,7 @@
 // (the per-process audio loopback used for whole-screen audio is not available before that).
 package winver
 
-import (
-	"fmt"
-
-	"golang.org/x/sys/windows"
-)
+import "fmt"
 
 // MinBuild is Windows 10 version 2004.
 const MinBuild = 19041
@@ -17,15 +13,6 @@ const MinBuild = 19041
 func Supported(major, build uint32) bool {
 	return major > 10 || (major == 10 && build >= MinBuild)
 }
-
-// Current returns the real Windows version (RtlGetVersion is not affected by compatibility shims).
-func Current() (major, minor, build uint32) {
-	v := windows.RtlGetVersion()
-	return v.MajorVersion, v.MinorVersion, v.BuildNumber
-}
-
-// Check returns an error when this Windows is too old.
-func Check() error { return check(Current) }
 
 // check is Check with the version source injected (the tests feed it old versions).
 func check(current func() (major, minor, build uint32)) error {

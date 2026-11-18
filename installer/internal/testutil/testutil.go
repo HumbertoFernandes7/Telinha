@@ -179,3 +179,12 @@ func TempDir(t testing.TB) string {
 	t.Cleanup(func() { os.RemoveAll(d) })
 	return d
 }
+
+// WindowsOnly skips a test that checks Windows path or file rules (drive letters, backslashes, the read-only attribute,
+// %TEMP%) when it runs elsewhere.
+func WindowsOnly(t testing.TB) {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		t.Skip("checks Windows path and file rules")
+	}
+}

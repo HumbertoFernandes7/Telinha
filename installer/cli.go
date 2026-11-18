@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/HumbertoFernandes7/Telinha/installer/internal/core"
+	"github.com/HumbertoFernandes7/Telinha/installer/internal/discord"
 )
 
 const (
@@ -104,7 +106,7 @@ func (a *app) cliInstall(repair bool) int {
 	}
 	fmt.Printf("Telinha %s ativo em: %s\n", res.Version, targetNames(chosen))
 	for _, t := range res.Targets {
-		fmt.Printf("  stub escrito: %s\\%s (antes: %s)\n", t.Flavor, t.App, t.Previous)
+		fmt.Printf("  stub escrito: %s (antes: %s)\n", filepath.Join(t.Flavor, t.App), t.Previous)
 	}
 	for _, u := range res.Unchanged {
 		fmt.Printf("  já estava em dia: %s\n", u)
@@ -188,7 +190,7 @@ func (a *app) cliStatus() int {
 		fmt.Println("Discord: não encontrado")
 	}
 	for _, t := range s.Targets {
-		line := fmt.Sprintf("%s [%s] %s: %s, %s", t.Name, t.Root, t.App, t.Kind, t.State)
+		line := fmt.Sprintf("%s [%s]%s: %s, %s", t.Name, t.Root, targetAppLabel(t.App), t.Kind, t.State)
 		if t.Patcher != "" {
 			line += ", Vencord: " + t.Patcher
 		}
@@ -208,4 +210,12 @@ func (a *app) cliStatus() int {
 		fmt.Println("Windows sem suporte:", err)
 	}
 	return exitOK
+}
+
+// targetAppLabel is the app-* folder as shown after the root ("" on Linux, where resources sits in the root).
+func targetAppLabel(app string) string {
+	if app == discord.FlatApp {
+		return ""
+	}
+	return " " + app
 }
