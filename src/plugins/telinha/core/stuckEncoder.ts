@@ -1068,7 +1068,7 @@ export function noteAv1Failed(detail: string) {
 }
 
 /** Falhas no envio (sem travar) que desligam o H.265/AV1 de vez: a 1a so tira aquele espectador e fica salva como suspeita (noteHwOnlySendFailure). */
-export const HW_ONLY_FAILURES_TO_CONFIRM = 2;
+const HW_ONLY_FAILURES_TO_CONFIRM = 2;
 
 /** As falhas no envio de cada codec nesta sessao do Discord: quantas e se alguma foi "broken" (nao so "offHw"). */
 const sendFailures: Record<HwOnlyCodec, { count: number; broken: boolean; }> = { h265: { count: 0, broken: false }, av1: { count: 0, broken: false } };

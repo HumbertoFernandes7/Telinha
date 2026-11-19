@@ -187,7 +187,7 @@ interface ViewerSend {
  * Uma falha do H.265/AV1 ate este tempo depois de um setParameters nosso que mudou o tamanho (scaleResolutionDownBy) e
  * suspeita de reconfiguracao do encoder (live de 18/11: o H.265 caiu 1 s depois de 720p → 1080p), so registrada no log.
  */
-export const RESIZE_SUSPECT_MS = 5000;
+const RESIZE_SUSPECT_MS = 5000;
 
 /** Janela da checagem do H.264 que nao sai (checkStall). Contadores de quadros da captura (capturedFrames). */
 interface StallWatch {
