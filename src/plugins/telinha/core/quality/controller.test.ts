@@ -409,6 +409,18 @@ describe("qualidade automatica: limite da placa de video com a captura pela plac
         assert.deepEqual(h.controller.state?.viewers.L, { level: "720p30", reason: "bandwidth" }, "L desce pela banda dele");
     });
 
+    // H.265 faminto (6 de 29,5 fps, sem qp) com a estimativa entre 70% e 100% do degrau (2000 de 2500: sem banda curta): ele
+    // descarta quadros por banda. Nao e stuckOnFloor (faminto), mas tambem nao e a placa: fora da mediana do gpuKeepUp
+    for (const [mimeType, down] of [["video/H265", false], ["video/H264", true]] as const) {
+        test(`ligada, ${mimeType === "video/H265" ? "H.265 faminto" : "H.264 com os mesmos numeros (nao faminto)"} com a banda estimada em 80% do degrau: ${down ? "conta como a placa e desce todos" : "descarte por banda, nao derruba os outros por placa"}`, async t => {
+            const hungry = nvenc(6, { mimeType, availableKbps: 2000, kbps: 600 });
+            const h = await twoViewers(t, true, { L: hungry, S: nvenc(SOURCE_FPS) });
+            const lines = await logsDuring(() => h.runUntil(60_000));
+            assert.equal(qualityLines(lines).some(l => l.includes("(placa de vídeo:")), down);
+            assert.equal(h.controller.levelFor("S"), down ? "720p30" : "1080p30");
+        });
+    }
+
     test("ligada, todos limitados pela propria rede: sem encoder para medir, a placa nao desce", async t => {
         const starved = { availableKbps: 700, kbps: 650 };
         const h = await twoViewers(t, true, { L: nvenc(8, starved), S: nvenc(8, starved) });

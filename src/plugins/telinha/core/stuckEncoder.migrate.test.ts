@@ -95,6 +95,9 @@ describe("o registro antigo de uma falha so no envio", () => {
             { ...LEGACY, source: "probe" },
             { at: AT, env: NV_ENV, verdict: "broken", detail: "confirmado na 2ª rodada", codec: CODEC },
             { ...LEGACY, detail: "o encoder da placa de vídeo travou numa transmissão em H.265" },
+            // o envio parado do checkStall (o encoder sem soltar quadro) sempre gravou na hora: fica
+            { ...LEGACY, detail: "O encoder H.265 para theeux (abc123) não codificou nenhum quadro em 8 s, com a conexão no ar e a captura entregando quadros (720 quadros da captura, 0 codificados), fora da placa de" },
+            { ...LEGACY, verdict: "offHw", detail: "O AV1 para theeux (abc123) codificou quadros, mas nenhum saiu deste PC em 8 s, com a conexão no ar" },
             { ...LEGACY, v: HW_ONLY_RECORD_VERSION },
             { ...LEGACY, verdict: "ok" },
             { ...LEGACY, verdict: "unknown" }

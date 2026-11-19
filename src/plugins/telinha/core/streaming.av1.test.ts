@@ -81,6 +81,7 @@ beforeEach(() => {
 });
 
 /** O log da 1a falha do AV1 na sessao: so aquele espectador sai. */
+const STALLED = "o envio parou (sem vídeo para o espectador): o AV1 fica desligado neste PC até o driver, o Chromium ou a placa mudarem (o H.264 não leva a culpa)";
 const FIRST = "só este espectador sai do AV1 (1ª falha nesta sessão: os próximos continuam recebendo AV1); desliga de vez só se falhar de novo";
 const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
@@ -269,7 +270,7 @@ test("quem assiste nao decodificou o AV1 e pediu VP9: vai a reserva H.264 so par
     assert.equal(getLocalCaps().av1ProbeOk, true);
 });
 
-test("AV1 com o Baseline da placa de reserva (o espectador decodifica H.264 por software) fora da placa antes de soltar algo (checkStall): culpa do AV1, vai o H.264 Baseline da placa", async () => {
+test("AV1 com o Baseline da placa de reserva (o espectador decodifica H.264 por software) fora da placa antes de soltar algo (checkStall): envio parado grava na hora (sem a contagem leve), vai o H.264 Baseline da placa", async () => {
     const v = await watcher("semres", { v: 1, av1: true }, false);
     assert.deepEqual(plan(v.peerId), { codec: "av1", h264Profile: "42001f", bitrate: undefined, label: undefined });
     let source = 0;
@@ -277,11 +278,13 @@ test("AV1 com o Baseline da placa de reserva (o espectador decodifica H.264 por 
     const since = logMark();
     await seconds(rig, H264_STALL_MS / 1000 + 2);
     const lines = since();
-    assert.ok(lines.some(l => l.includes(`, fora da placa de vídeo: ${FIRST}`) && l.endsWith(`trocando para H264 só para ${v.label}.`)), lines.join("\n"));
+    assert.ok(lines.some(l => l.includes(`, fora da placa de vídeo: ${STALLED}`) && l.endsWith(`trocando para H264 só para ${v.label}.`)), lines.join("\n"));
     assert.equal(plan(v.peerId).codec, "h264", "o automatico sem o AV1: H.264 Baseline da placa");
     assert.equal(stuckRecord(), null);
     await turns();
-    assert.equal(av1ProbeRecord()?.verdict, "ok", "libaom parado (stall), 1a falha: so este espectador sai, nada salvo");
+    assert.equal(av1ProbeRecord()?.verdict, "offHw", "envio parado: grava na hora, na 1a vez");
+    assert.equal(av1ProbeRecord()?.source, "stream");
+    assert.equal(getLocalCaps().av1ProbeOk, false);
 });
 
 test("AV1 por software abaixo de 270p parado (checkStall): o libaom e de proposito, nao e a placa; nada marcado, mas so este espectador vai para o H.264", async () => {

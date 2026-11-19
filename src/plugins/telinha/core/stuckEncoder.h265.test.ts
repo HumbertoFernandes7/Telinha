@@ -22,7 +22,7 @@ import { pluginSettings } from "@test/fakes/vencord";
 import { DEFAULT_VIDEO_CODECS, installWebRtc, rtpCapabilities, type WebRtcEnv } from "@test/fakes/webrtc";
 import { type FakeWorker, healthyProbe, installWorker, stuckProbe, type WorkerEnv } from "@test/fakes/worker";
 
-import { chooseCodec, getLocalCaps, setH264HwStuck } from "./codec";
+import { chooseCodec, getLocalCaps, setH264HwStuck, setH265ProbeOk } from "./codec";
 import { ENCODER_PROBE_TIMING } from "./encoderProbe";
 import {
     type EncoderEnv, forgetStuckEncoder, h265ProbeCodec, h265ProbeRecord, HW_ONLY_RECORD_VERSION, noteH265Failed, noteHwOnlySendFailure, noteStreamStarting, noteStuckEncoder, onCodecSettingChanged,
@@ -401,5 +401,106 @@ describe("falhas no envio sem travar (noteHwOnlySendFailure): so a 2a da sessao 
         assert.ok(detail.endsWith("z [2ª falha nesta sessão]"), detail);
         resetHwOnlySendFailuresForTests();
         pluginSettings.set("hwH265Probe", null);
+    });
+});
+
+// A 1a falha no envio fica salva como SUSPEITA no registro do codec (campo `suspect`): nao desliga nada, sobrevive ao Discord
+// reiniciar, e a proxima falha (mesma sessao ou seguinte, no MESMO ambiente) confirma.
+describe("a 1a falha no envio fica salva como suspeita; a proxima, em outra sessao, confirma", () => {
+    const raw = () => pluginSettings.get("hwH265Probe") as Record<string, unknown> | null;
+    const suspectOf = () => raw()?.suspect as { env: EncoderEnv; verdict: string; detail: string; } | undefined;
+    const newSession = () => resetHwOnlySendFailuresForTests();
+
+    test("sem registro: a suspeita e salva (unknown + suspect), nao desliga o H.265 e nao aparece como resultado da sonda", async () => {
+        newSession();
+        pluginSettings.set("hwH265Probe", null);
+        setH265ProbeOk(true);
+        assert.equal(noteHwOnlySendFailure("h265", "o WebRTC trocou o H.265 por VP9 numa transmissão (a)"), "first");
+        await eventually(() => suspectOf() !== undefined);
+        assert.deepEqual({ ...raw()!, at: 0, suspect: { ...suspectOf()!, at: 0 } }, {
+            at: 0, env: NV_ENV, verdict: "unknown", detail: "", codec: null, source: "stream", v: HW_ONLY_RECORD_VERSION,
+            suspect: { at: 0, env: NV_ENV, verdict: "broken", detail: "o WebRTC trocou o H.265 por VP9 numa transmissão (a)" }
+        });
+        assert.equal(h265ProbeRecord(), null, "a suspeita nao e resultado de sonda (nem 'inconclusiva' no diagnostico)");
+        assert.equal(getLocalCaps().h265ProbeOk, true, "o H.265 continua ligado");
+        assert.match(h265Line()!, /suspeita salva \(1ª falha, ainda ligado\) em \S+: o WebRTC trocou o H\.265 por VP9 numa transmissão \(a\); /);
+        assert.ok(!/salva: inconclusiva/.test(h265Line()!));
+        assert.equal(stuckRecord(), null);
+    });
+
+    test("outra sessao (a contagem em memoria morreu), mesmo ambiente: a proxima falha confirma e grava 'travou' (a suspeita some)", async () => {
+        newSession();
+        assert.equal(noteHwOnlySendFailure("h265", "o WebRTC trocou o H.265 por VP9 numa transmissão (b)", "offHw"), "confirmed", "o 'broken' da suspeita vale");
+        assert.equal(getLocalCaps().h265ProbeOk, false, "desliga agora");
+        await eventually(() => h265ProbeRecord()?.verdict === "broken");
+        assert.equal(h265ProbeRecord()?.detail, "o WebRTC trocou o H.265 por VP9 numa transmissão (b) [2ª falha, confirmada de uma sessão anterior]");
+        assert.equal(h265ProbeRecord()?.source, "stream");
+        assert.equal(raw()?.suspect, undefined);
+        assert.equal(stuckRecord(), null, "o H.264 nao leva a culpa");
+    });
+
+    test("ambiente diferente (driver mudou): a suspeita antiga nao conta, a contagem recomeca com o ambiente de agora", async () => {
+        newSession();
+        for (const verdict of ["unknown", "ok"]) {
+            const old = { ...NV_ENV, driver: "31.0.1" };
+            pluginSettings.set("hwH265Probe", {
+                at: AT, env: old, verdict, detail: "", codec: CODEC, source: "stream", v: 2,
+                suspect: { at: AT, env: old, verdict: "broken", detail: "antiga" }
+            });
+            assert.equal(noteHwOnlySendFailure("h265", "nova"), "first", verdict);
+            await eventually(() => suspectOf()?.detail === "nova");
+            assert.deepEqual(suspectOf()!.env, NV_ENV);
+            assert.equal(raw()!.verdict, "unknown", "o registro de outro ambiente (mesmo um ok) e trocado pela suspeita nova");
+            newSession();
+        }
+    });
+
+    test("o ok da sonda sobrevive a suspeita (campo separado) e um ok novo da sonda nao a apaga; so a 2a falha ou o botao", async () => {
+        pluginSettings.set("hwH265Probe", { at: AT, env: NV_ENV, verdict: "ok", detail: "x", codec: CODEC, source: "probe", v: 2 });
+        newSession();
+        assert.equal(noteHwOnlySendFailure("h265", "falha 1", "offHw"), "first");
+        await eventually(() => suspectOf() !== undefined);
+        assert.equal(h265ProbeRecord()?.verdict, "ok", "o ok fica");
+        assert.equal(raw()!.detail, "x");
+        assert.equal(suspectOf()!.verdict, "offHw");
+        workers = installWorker(healthyProbe());
+        await runH265Probe(NV_ENV, CODEC, 0);
+        workers.restore();
+        assert.equal(h265ProbeRecord()?.verdict, "ok");
+        assert.equal(suspectOf()?.detail, "falha 1", "o ok novo da sonda nao apaga a suspeita");
+        newSession();
+        assert.equal(noteHwOnlySendFailure("h265", "falha 2", "offHw"), "confirmed");
+        await eventually(() => h265ProbeRecord()?.verdict === "offHw");
+        assert.equal(raw()?.suspect, undefined);
+    });
+
+    test("\"Tentar a placa de vídeo de novo\" limpa a suspeita (sozinha ou junto de um ok)", () => {
+        const suspect = { at: AT, env: NV_ENV, verdict: "broken", detail: "s" };
+        for (const record of [
+            { at: AT, env: NV_ENV, verdict: "unknown", detail: "", codec: null, source: "stream", v: 2, suspect },
+            { at: AT, env: NV_ENV, verdict: "ok", detail: "x", codec: CODEC, v: 2, suspect }
+        ]) {
+            pluginSettings.set("hwH265Probe", record);
+            forgetStuckEncoder();
+            assert.equal(raw(), null, JSON.stringify(record));
+        }
+    });
+
+    test("registro editado a mao: suspeita que nao e objeto, sem data ou com o ambiente incompleto nao quebra nada", async () => {
+        const base = { at: AT, env: NV_ENV, verdict: "unknown", detail: "", codec: null, source: "stream", v: 2 };
+        // nao e objeto / sem data valida: nao ha suspeita, a falha vira a 1a
+        for (const suspect of ["x", { verdict: "broken" }, { at: Infinity }]) {
+            pluginSettings.set("hwH265Probe", { ...base, suspect });
+            newSession();
+            assert.equal(noteHwOnlySendFailure("h265", "x"), "first", JSON.stringify(suspect));
+            await eventually(() => suspectOf()?.detail === "x");
+        }
+        // ambiente ausente (partes desconhecidas valem como iguais), verdict e detalhe estranhos: confirma como "travou"
+        pluginSettings.set("hwH265Probe", { ...base, suspect: { at: AT, verdict: "outro", detail: 5 } });
+        newSession();
+        assert.equal(noteHwOnlySendFailure("h265", "y", "offHw"), "confirmed");
+        await eventually(() => h265ProbeRecord()?.verdict === "broken");
+        pluginSettings.set("hwH265Probe", null);
+        newSession();
     });
 });

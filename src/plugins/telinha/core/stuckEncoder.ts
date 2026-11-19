@@ -438,7 +438,8 @@ function saveHigh(record: HighProbeRecord) {
 function hwOnlyProbeRecord(codec: HwOnlyCodec): HwOnlyProbeRecord | null {
     const spec = HW_ONLY[codec];
     const read = readProbe(spec.key);
-    if (!read) return null;
+    // um registro so com a suspeita (verdict "unknown" + suspect) nao e resultado de sonda: nao desliga nem aparece como "inconclusiva"
+    if (!read || (read.record.verdict === "unknown" && read.saved.raw.suspect != null)) return null;
     const tested = text(read.saved.raw.codec, 32);
     return {
         ...read.record, codec: tested && spec.codecRe.test(tested) ? tested : null,
@@ -464,14 +465,53 @@ export const HW_ONLY_RECORD_VERSION = 2;
 
 function saveHwOnly(codec: HwOnlyCodec, record: HwOnlyProbeRecord) {
     const spec = HW_ONLY[codec];
+    // um "ok" da sonda nao apaga a suspeita de uma falha no envio (so um "travou"/"saiu da placa", que a confirma, ou o botao)
+    const suspect = record.verdict === "ok" ? readSuspect(codec) : null;
     save(spec.key, {
         at: record.at, env: { ...record.env }, verdict: record.verdict, detail: record.detail, codec: record.codec, source: record.source ?? "probe",
-        v: HW_ONLY_RECORD_VERSION
+        v: HW_ONLY_RECORD_VERSION, ...(suspect ? { suspect } : {})
     }, `o resultado da sonda do ${spec.label}`);
 }
 
-/** O detalhe que noteStuckEncoder grava: um envio que travou de verdade (o encoder preso), nao uma troca de codec. */
-const STUCK_DETAIL_RE = /travou numa transmissão/;
+/**
+ * A 1a falha no envio do H.265/AV1 (noteHwOnlySendFailure), salva no registro do codec (campo `suspect`): NAO desliga o
+ * codec. Fica num campo separado para nao perder o "ok" da sonda; sem sonda salva, o registro e so a suspeita
+ * (verdict "unknown", que o automatico e a sonda tratam como nenhum registro). Vale como suspeita so no mesmo ambiente.
+ */
+interface Suspect {
+    at: number;
+    env: EncoderEnv;
+    verdict: "broken" | "offHw";
+    detail: string;
+}
+
+function readSuspect(codec: HwOnlyCodec): Suspect | null {
+    const raw = readSaved(HW_ONLY[codec].key)?.raw.suspect;
+    if (!raw || typeof raw !== "object") return null;
+    const s = raw as Record<string, unknown>;
+    if (typeof s.at !== "number" || !Number.isFinite(s.at)) return null;
+    const e = s.env && typeof s.env === "object" ? s.env as Record<string, unknown> : {};
+    return {
+        at: s.at, verdict: s.verdict === "offHw" ? "offHw" : "broken", detail: text(s.detail, DETAIL_LOAD_MAX) ?? "",
+        env: Object.fromEntries(ENV_PARTS.map(([part]) => [part, text(e[part])])) as unknown as EncoderEnv
+    };
+}
+
+function saveSuspect(codec: HwOnlyCodec, suspect: Suspect) {
+    const spec = HW_ONLY[codec];
+    const kept = readSaved(spec.key);
+    // um "ok" ou "inconclusiva" do mesmo ambiente fica (so ganha o campo); o resto (outro ambiente, "travou") some: a suspeita e a falha mais nova
+    const keep = kept && kept.raw.verdict === "ok" && !envChanges(kept.env, suspect.env).length;
+    save(spec.key, keep ? { ...kept.raw, suspect } : { at: suspect.at, env: { ...suspect.env }, verdict: "unknown", detail: "", codec: null, source: "stream", v: HW_ONLY_RECORD_VERSION, suspect },
+        `a suspeita do ${spec.label}`);
+}
+
+/**
+ * O detalhe de um envio que travou de verdade (o encoder preso), nao uma troca de codec: o de noteStuckEncoder e o do
+ * checkStall (streaming.ts: o encoder sem soltar quadro, "não codificou nenhum quadro em 8 s" / "codificou quadros, mas
+ * nenhum saiu deste PC"), que sempre gravaram na hora.
+ */
+const STUCK_DETAIL_RE = /travou numa transmissão|não codificou nenhum quadro em|codificou quadros, mas nenhum saiu deste PC/;
 
 /**
  * Uma vez por sessao (startLocalCaps): descarta o "travou"/"saiu da placa" do H.265/AV1 gravado por UMA falha no envio
@@ -1027,7 +1067,7 @@ export function noteAv1Failed(detail: string) {
     noteHwOnlyFailed("av1", detail);
 }
 
-/** Falhas no envio (sem travar) que desligam o H.265/AV1 de vez: a 1a so tira aquele espectador (noteHwOnlySendFailure). */
+/** Falhas no envio (sem travar) que desligam o H.265/AV1 de vez: a 1a so tira aquele espectador e fica salva como suspeita (noteHwOnlySendFailure). */
 export const HW_ONLY_FAILURES_TO_CONFIRM = 2;
 
 /** As falhas no envio de cada codec nesta sessao do Discord: quantas e se alguma foi "broken" (nao so "offHw"). */
@@ -1038,22 +1078,27 @@ export type HwOnlyFailure = "first" | "confirmed";
 
 /**
  * Um envio em H.265 ou AV1 falhou sem travar (streaming.ts → checkHwOnly: o WebRTC trocou sozinho de codec; leaveHwOnly:
- * o encoder saiu da placa). Quem chama ja tira AQUELE espectador do codec. A 1a falha do codec nesta sessao do Discord
- * fica so nesta sessao: nada salvo, e o automatico continua mandando ele para os proximos (a sonda do H.265 tambem so
- * confirma um "travou" na 2a rodada; na live de 18/11 foi 1 falha em 5 subidas iguais de 720p para 1080p). A 2a falha
- * do mesmo codec confirma: noteHwOnlyFailed ("broken" se alguma das falhas foi "broken"; senao "offHw"). O detalhe salvo
- * e o da 2a, com a marca da confirmacao.
+ * o encoder saiu da placa). Quem chama ja tira AQUELE espectador do codec. A 1a falha do codec fica salva como SUSPEITA
+ * no registro dele (saveSuspect: nao desliga nada; o automatico continua mandando ele para os proximos, a sonda do H.265
+ * tambem so confirma um "travou" na 2a rodada; na live de 18/11 foi 1 falha em 5 subidas iguais de 720p para 1080p).
+ * A suspeita sobrevive ao Discord reiniciar (um encoder sempre quebrado, com 1 espectador por sessao, nao escapa). A 2a falha
+ * do mesmo codec confirma, na mesma sessao ou numa seguinte com o MESMO ambiente (outro driver/Chromium/placa recomeca a
+ * contagem): noteHwOnlyFailed ("broken" se alguma das falhas foi "broken"; senao "offHw"). O detalhe salvo e o da 2a.
  */
 export function noteHwOnlySendFailure(codec: HwOnlyCodec, detail: string, verdict: "broken" | "offHw" = "broken"): HwOnlyFailure {
     const f = sendFailures[codec];
     f.count++;
     if (verdict === "broken") f.broken = true;
-    if (f.count < HW_ONLY_FAILURES_TO_CONFIRM) {
+    // a suspeita de uma sessao anterior vale se o ambiente e o mesmo (envNow ainda lendo = desconhecido: so a contagem desta sessao)
+    const earlier = envNow ? readSuspect(codec) : null;
+    const prior = earlier && !envChanges(earlier.env, envNow!).length ? earlier : null;
+    if (f.count < HW_ONLY_FAILURES_TO_CONFIRM && !prior) {
         hwOnlyNotes[codec] = `falhou uma vez num envio nesta sessão (${detail.slice(0, 200)}); só aquele espectador saiu, desliga de vez se falhar de novo`;
+        void environment().then(env => saveSuspect(codec, { at: Date.now(), env, verdict, detail: detail.slice(0, HW_ONLY_DETAIL_MAX) }));
         return "first";
     }
-    const mark = " [2ª falha nesta sessão]";
-    noteHwOnlyFailed(codec, detail.slice(0, HW_ONLY_DETAIL_MAX - mark.length) + mark, f.broken ? "broken" : "offHw");
+    const mark = prior && f.count < HW_ONLY_FAILURES_TO_CONFIRM ? " [2ª falha, confirmada de uma sessão anterior]" : " [2ª falha nesta sessão]";
+    noteHwOnlyFailed(codec, detail.slice(0, HW_ONLY_DETAIL_MAX - mark.length) + mark, f.broken || prior?.verdict === "broken" ? "broken" : "offHw");
     return "confirmed";
 }
 
@@ -1176,6 +1221,12 @@ export function forgetStuckEncoder(): RetryOutcome {
     return outcome;
 }
 
+/** "; suspeita salva: ..." quando o codec falhou uma vez num envio (ainda nao desliga). */
+function suspectNote(codec: HwOnlyCodec): string {
+    const s = readSuspect(codec);
+    return s ? `; suspeita salva (1ª falha, ainda ligado) em ${new Date(s.at).toISOString()}: ${s.detail}` : "";
+}
+
 /** Linhas do "Copiar diagnóstico": a placa de video, o travamento lembrado e o desta sessao, e o High. */
 export function stuckEncoderDiagnostics(): string {
     const record = stuckRecord();
@@ -1206,12 +1257,12 @@ export function stuckEncoderDiagnostics(): string {
         + `High automático ${highOn ? "ligado (só com quem anuncia High por hardware)" : "desligado"}`,
         `H.265: codifica na placa ${caps.h265HwFmtp ? `sim (${caps.h265HwFmtp})` : "não"}, decodifica na placa ${caps.h265HwDecode ? "sim" : "não"}, `
         + `envia ${caps.sendable.has("h265") ? "sim" : "não (o Chromium não oferece)"}; sonda WebCodecs H.265: ${hwOnlyNotes.h265}`
-        + `${savedH265 ? `; salva: ${PROBE_LABEL[savedH265.verdict]} em ${new Date(savedH265.at).toISOString()} (${savedH265.codec ?? "?"}: ${savedH265.detail})${savedH265.source === "stream" ? " [visto numa transmissão]" : ""}` : ""}; `
+        + `${savedH265 ? `; salva: ${PROBE_LABEL[savedH265.verdict]} em ${new Date(savedH265.at).toISOString()} (${savedH265.codec ?? "?"}: ${savedH265.detail})${savedH265.source === "stream" ? " [visto numa transmissão]" : ""}` : ""}${suspectNote("h265")}; `
         + (!wanted("h265") ? "H.265 fixado desligado (o formato de vídeo não está em H.265)"
             : `H.265 ${h265Pinned ? "fixado" : "no automático (este Discord não oferece H.264)"} ${h265On ? "ligado (só com quem anuncia H.265 por hardware)" : "desligado"}`),
         `AV1: codifica na placa ${caps.av1HwFmtp ? `sim (${caps.av1HwFmtp})` : "não"}, decodifica na placa ${caps.av1HwDecode ? "sim" : "não"}, `
         + `WebRtcAV1HWEncode nesta partida ${feature}; sonda WebCodecs AV1: ${hwOnlyNotes.av1}`
-        + `${savedAv1 ? `; salva: ${PROBE_LABEL[savedAv1.verdict]} em ${new Date(savedAv1.at).toISOString()} (${savedAv1.codec ?? "?"}: ${savedAv1.detail})${savedAv1.source === "stream" ? " [visto numa transmissão]" : ""}` : ""}; `
+        + `${savedAv1 ? `; salva: ${PROBE_LABEL[savedAv1.verdict]} em ${new Date(savedAv1.at).toISOString()} (${savedAv1.codec ?? "?"}: ${savedAv1.detail})${savedAv1.source === "stream" ? " [visto numa transmissão]" : ""}` : ""}${suspectNote("av1")}; `
         + (!wanted("av1") ? "AV1 fixado desligado (o formato de vídeo não está em AV1)"
             : `AV1 fixado ${av1On ? "ligado (só com quem anuncia AV1 por hardware)" : "desligado (vai o do automático)"}`)
     ].join("\n");

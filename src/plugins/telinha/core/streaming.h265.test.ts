@@ -78,6 +78,7 @@ beforeEach(() => {
 });
 
 /** O log da 1a falha do H.265 na sessao (sem troca de tamanho logo antes): so aquele espectador sai. */
+const STALLED = "o envio parou (sem vídeo para o espectador): o H.265 fica desligado neste PC até o driver, o Chromium ou a placa mudarem (o H.264 não leva a culpa)";
 const FIRST = "só este espectador sai do H.265 (1ª falha nesta sessão: os próximos continuam recebendo H.265); desliga de vez só se falhar de novo";
 /** O log da 2a: desligado de vez neste PC. */
 const CONFIRMED = "é a 2ª falha do H.265 nesta sessão: o H.265 fica desligado neste PC até o driver, o Chromium ou a placa mudarem (o H.264 não leva a culpa)";
@@ -161,7 +162,8 @@ test("o WebRTC trocou sozinho do H.265 para o H.264 (1a falha da sessao): so est
     assert.ok(lines.includes(`${switchedAlone(v.label)}${capitalize(FIRST)}.`), lines.join("\n"));
     assert.equal(plan(v.peerId).codec, "h264");
     await turns();
-    assert.equal(h265ProbeRecord()?.verdict, "ok", "uma falha so: nada salvo");
+    assert.equal(h265ProbeRecord()?.verdict, "ok", "uma falha so: o ok fica");
+    assert.equal((pluginSettings.get("hwH265Probe") as { suspect?: { detail: string; }; }).suspect?.detail, `o WebRTC trocou o H.265 por H264 numa transmissão (${v.label})`, "e a suspeita fica salva");
     assert.equal(getLocalCaps().h265ProbeOk, true, "o H.265 continua nesta sessao");
     assert.equal(stuckRecord(), null, "o H.264 nao fica marcado");
     assert.equal(highProbeRecord()?.verdict, "ok", "nem o High");
@@ -321,7 +323,7 @@ test("H.265 fixado, espectador sem H.264 na placa (reserva Baseline da placa): o
     }
 });
 
-test("H.265 fixado com o Baseline da placa de reserva (espectador decodifica H.264 por software) que sai da placa antes de soltar algo (checkStall): culpa do H.265 (1a falha: so ele), vai o que o automatico escolhe sem ele (H.264 Baseline da placa)", async () => {
+test("H.265 fixado com o Baseline da placa de reserva (espectador decodifica H.264 por software) que sai da placa antes de soltar algo (checkStall): envio parado grava na hora (sem a contagem leve), vai o que o automatico escolhe sem ele (H.264 Baseline da placa)", async () => {
     pluginSettings.set("codec", "h265");
     try {
         const peerId = "psemres";
@@ -335,10 +337,12 @@ test("H.265 fixado com o Baseline da placa de reserva (espectador decodifica H.2
         const since = logMark();
         await seconds(rig, H264_STALL_MS / 1000 + 2);
         const lines = since();
-        assert.ok(lines.some(l => l.includes(`, fora da placa de vídeo: ${FIRST}`) && l.endsWith("trocando para H264 só para semres (psemre).")), lines.join("\n"));
+        assert.ok(lines.some(l => l.includes(`, fora da placa de vídeo: ${STALLED}`) && l.endsWith("trocando para H264 só para semres (psemre).")), lines.join("\n"));
         assert.equal(plan(peerId).codec, "h264");
         await turns();
-        assert.equal(h265ProbeRecord()?.verdict, "ok");
+        assert.equal(h265ProbeRecord()?.verdict, "broken", "envio parado: grava na hora, na 1a vez");
+        assert.equal(h265ProbeRecord()?.source, "stream");
+        assert.equal(getLocalCaps().h265ProbeOk, false);
         assert.equal(stuckRecord(), null);
     } finally {
         pluginSettings.set("codec", "h265");

@@ -292,6 +292,8 @@ interface NetState {
     trouble: boolean;
     /** a ultima janela: preso no piso do estimador (stuckOnFloor), isento da banda curta e fora da conta da placa */
     stuckOnFloor: boolean;
+    /** a ultima janela: H.265 faminto com a banda estimada abaixo do degrau (descarte por banda): fora da conta da placa (gpuKeepUp) */
+    hungryBelow: boolean;
     backoff: boolean;
     /** banda estimada, envio (kbps) e se o estimador recuou, da janela anterior (envio e recuo: so no degrau atual) */
     lastEst: number | null;
@@ -314,7 +316,7 @@ interface NetWindow {
 }
 
 const newNet = (): NetState => ({
-    level: null, congestedSince: null, troubleSince: null, enoughFor: null, trouble: false, stuckOnFloor: false, backoff: false, lastEst: null, lastSent: null,
+    level: null, congestedSince: null, troubleSince: null, enoughFor: null, trouble: false, stuckOnFloor: false, hungryBelow: false, backoff: false, lastEst: null, lastSent: null,
     lastBackoff: false, rtts: [], windows: []
 });
 
@@ -845,7 +847,7 @@ export class QualityController {
 
     /**
      * Com a captura pela placa de video (GPU_KEEP_UP): a mediana de quadros codificados / esperados dos mesmos encoders do
-     * gpuNow nesta janela. Fora quem a propria rede limita: com problema agora (trackNet → trouble), preso no piso do estimador (stuckOnFloor), ja abaixo do degrau
+     * gpuNow nesta janela. Fora quem a propria rede limita: com problema agora (trackNet → trouble), preso no piso do estimador (stuckOnFloor), H.265 faminto com a banda abaixo do degrau (hungryBelow), ja abaixo do degrau
      * de todos pela banda dele (no piso, 720p30, a banda curta nao e mais problema), limitado por banda pelo WebRTC ou com a
      * rede cheia (netSaturated, como na regra de CPU; ex.: um pico de movimento com a estimativa pouco acima do que o
      * degrau pede). O WebRTC descarta quadros dele para caber na banda (log de 02/11: 4 de 29 fps com 735 kbps estimados),
@@ -857,7 +859,7 @@ export class QualityController {
             const m = v.metrics;
             if (!m.hardware || m.encodeMsPerFrame == null || m.encodedFps < MIN_ENCODED_FPS) continue;
             const level = this.levelFor(v.peerId);
-            if (v.net.trouble || v.net.stuckOnFloor || meet(this.global, v.bwLevel) !== this.global || m.bandwidthFraction >= ANY_LIMIT_FRACTION || netSaturated(m, level)) continue;
+            if (v.net.trouble || v.net.stuckOnFloor || v.net.hungryBelow || meet(this.global, v.bwLevel) !== this.global || m.bandwidthFraction >= ANY_LIMIT_FRACTION || netSaturated(m, level)) continue;
             const { fps } = LEVELS[level];
             ratios.push(m.encodedFps / Math.min(fps, m.sourceFps != null && m.sourceFps > 0 ? m.sourceFps : fps));
         }
@@ -949,6 +951,8 @@ export class QualityController {
         const queue = m.pacerMs != null && m.pacerMs > NET_PACER_MS ? `fila de ${Math.round(m.pacerMs)} ms no envio` : null;
         const congestion = loss ?? rtt ?? queue;
         n.stuckOnFloor = estBelow && stuckOnFloor(m, n, need);
+        // o H.265 faminto (nao e stuckOnFloor) com a banda abaixo do degrau descarta quadros por banda: nao e a placa (gpuKeepUp)
+        n.hungryBelow = estBelow && encoderHungry(m);
         const short = estBelow && !n.stuckOnFloor && ((est! < need * NET_FAR_BELOW_RATIO && encoderStarved(m)) || m.sentKbps >= est! * NET_FULL_RATIO)
             ? `banda estimada ${Math.round(est!)} kbps, o degrau pede ${need}` : null;
         if (est != null && est >= need) n.enoughFor = level;
