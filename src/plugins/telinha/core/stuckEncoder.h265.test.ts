@@ -25,8 +25,8 @@ import { type FakeWorker, healthyProbe, installWorker, stuckProbe, type WorkerEn
 import { chooseCodec, getLocalCaps, setH264HwStuck } from "./codec";
 import { ENCODER_PROBE_TIMING } from "./encoderProbe";
 import {
-    type EncoderEnv, forgetStuckEncoder, h265ProbeCodec, h265ProbeRecord, noteH265Failed, noteStreamStarting, noteStuckEncoder, onCodecSettingChanged, onStreamStopped, PROBE_START, probeRecord,
-    runH265Probe, settleH265, startLocalCaps, stuckEncoderDiagnostics, stuckRecord
+    type EncoderEnv, forgetStuckEncoder, h265ProbeCodec, h265ProbeRecord, HW_ONLY_RECORD_VERSION, noteH265Failed, noteHwOnlySendFailure, noteStreamStarting, noteStuckEncoder, onCodecSettingChanged,
+    onStreamStopped, PROBE_START, probeRecord, resetHwOnlySendFailuresForTests, runH265Probe, settleH265, startLocalCaps, stuckEncoderDiagnostics, stuckRecord
 } from "./stuckEncoder";
 
 const NV_ENV: EncoderEnv = { vendorId: "10de", deviceId: "2484", driver: "32.0.16.2101", chrome: "152.0.7977.167", discord: "1.0.9266" };
@@ -367,5 +367,39 @@ describe("falhas no ar e o botao", () => {
         forgetStuckEncoder();
         assert.equal(h265ProbeRecord(), null, "o ok e esquecido (a sonda roda de novo depois da do Baseline)");
         assert.equal(getLocalCaps().h265ProbeOk, false);
+    });
+});
+
+describe("falhas no envio sem travar (noteHwOnlySendFailure): so a 2a da sessao desliga o H.265 de vez", () => {
+    test("1a falha: so nesta sessao (nada salvo, o H.265 continua para os proximos); 2a: travou salvo (source stream, com a versao e a marca)", async () => {
+        resetHwOnlySendFailuresForTests();
+        pluginSettings.set("hwH265Probe", { at: AT, env: NV_ENV, verdict: "ok", detail: "x", codec: CODEC });
+        settleH265(NV_ENV, 0);
+        assert.equal(getLocalCaps().h265ProbeOk, true);
+        assert.equal(noteHwOnlySendFailure("h265", "o WebRTC trocou o H.265 por VP9 numa transmissão (theeux)"), "first");
+        assert.equal(getLocalCaps().h265ProbeOk, true, "os proximos espectadores continuam recebendo H.265");
+        await new Promise(resolve => setTimeout(resolve, 20));
+        assert.equal(h265ProbeRecord()?.verdict, "ok", "nada salvo");
+        assert.match(h265Line()!, /sonda WebCodecs H\.265: falhou uma vez num envio nesta sessão \(o WebRTC trocou o H\.265 por VP9 numa transmissão \(theeux\)\); só aquele espectador saiu, desliga de vez se falhar de novo; /);
+
+        assert.equal(noteHwOnlySendFailure("h265", "o WebRTC trocou o H.265 por VP9 numa transmissão (gupi)"), "confirmed");
+        assert.equal(getLocalCaps().h265ProbeOk, false, "a 2a desliga agora");
+        await eventually(() => h265ProbeRecord()?.verdict === "broken");
+        assert.deepEqual({ ...h265ProbeRecord()!, at: 0 }, {
+            at: 0, env: NV_ENV, verdict: "broken", detail: "o WebRTC trocou o H.265 por VP9 numa transmissão (gupi) [2ª falha nesta sessão]", codec: CODEC, source: "stream"
+        });
+        assert.equal((pluginSettings.get("hwH265Probe") as { v?: number; }).v, HW_ONLY_RECORD_VERSION);
+        assert.equal(stuckRecord(), null, "o H.264 nao leva a culpa");
+    });
+
+    test("depois de confirmado, outra falha grava de novo; o detalhe longo e cortado para caber a marca (300 caracteres)", async () => {
+        const long = "z".repeat(400);
+        assert.equal(noteHwOnlySendFailure("h265", long), "confirmed");
+        await eventually(() => h265ProbeRecord()?.detail.startsWith("zzz") === true);
+        const { detail } = h265ProbeRecord()!;
+        assert.equal(detail.length, 300);
+        assert.ok(detail.endsWith("z [2ª falha nesta sessão]"), detail);
+        resetHwOnlySendFailuresForTests();
+        pluginSettings.set("hwH265Probe", null);
     });
 });

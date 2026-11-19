@@ -20,6 +20,7 @@ import { useFakeClock } from "@test/fakes/clock";
 import { type EncoderRates, EncoderSim, installWebRtc, type LinkRates, type WebRtcEnv } from "@test/fakes/webrtc";
 import { EVAL_MS, logsDuring, NVENC_IMPLEMENTATION, probeSawtooth, type QualityHarness, qualityHarness, qualityLines } from "@test/helpers/wpb-quality";
 
+import { encoderHungry } from "./controller";
 import { BW_GRACE_MS } from "./levels";
 
 /** A rede boa: sem perda, 30 ms de RTT, 2 ms no pacer. */
@@ -492,6 +493,53 @@ describe("rede de um espectador: alvo do encoder preso no piso (estimador sem sa
             assert.equal(h.controller.levelFor("A"), down ? "720p60" : "1080p60");
         });
     }
+
+    // Live de 18/11: no comeco do H.265 o encoder da placa trava no qp 41-42 e descarta quadros (4-10 fps), com o alvo em
+    // 0,3-0,6 da estimativa. Alvo baixo ai e o encoder faminto, nao a tela parada: o stuckOnFloor nao isenta (encoderHungry)
+    const HEVC = "MediaFoundationVideoEncodeAccelerator (NVIDIA HEVC Encoder MFT)";
+    /** Depois de ter tido banda para o 1080p60: est 2000, alvo 800 (0,4 da estimativa), enviando 720, qp 42, `fps` de 60 da fonte. */
+    async function hevcOnFloor(t: Parameters<typeof useFakeClock>[0], mimeType: string, fps: number) {
+        const { h, sim } = await viewer(t);
+        sim.set({
+            mimeType, implementation: mimeType === "video/H265" ? HEVC : NVENC_IMPLEMENTATION, powerEfficient: true, fps, sourceFps: 60, encodeBusy: fps / 1000,
+            availableKbps: 2000, kbps: 720, link: { ...LINK, targetKbps: 800, qp: 42 }
+        });
+        return h;
+    }
+
+    test("H.265 faminto (6 de 60 fps, qp 42, alvo 0,4 da estimativa) depois de ter tido banda: o piso nao isenta, desce pela banda curta aos 30 s", async t => {
+        const h = await hevcOnFloor(t, "video/H265", 6);
+        await h.runUntil(68_000);
+        assert.equal(h.controller.levelFor("A"), "1080p60", "28 s: o estimador ainda pode estar voltando de um soluco");
+        const lines = await logsDuring(() => h.runUntil(72_000));
+        assert.deepEqual(qualityLines(lines), ["Qualidade automática: 1080p 60 fps → 720p 60 fps para A (banda: banda estimada 2000 kbps, o degrau pede 4500 há 30 s); nova subida só após 30 s estável"]);
+    });
+
+    test("H.265 com os quadros inteiros (tela parada da v0.4.8: 60 de 60 fps, alvo baixo): o piso continua isentando, nao desce", async t => {
+        const h = await hevcOnFloor(t, "video/H265", 60);
+        assert.deepEqual(qualityLines(await logsDuring(() => h.runUntil(200_000))), []);
+        assert.equal(h.controller.levelFor("A"), "1080p60");
+    });
+
+    test("H.264 com os mesmos numeros do H.265 faminto: o caso da v0.4.8 (o GCC preso no piso), o piso continua isentando", async t => {
+        const h = await hevcOnFloor(t, "video/H264", 6);
+        assert.deepEqual(qualityLines(await logsDuring(() => h.runUntil(200_000))), []);
+        assert.equal(h.controller.levelFor("A"), "1080p60");
+    });
+
+    test("encoderHungry: so o H.265, abaixo de metade do fps da fonte e (com o qp medido) qp >= 35", () => {
+        const m = { mimeType: "video/H265", encodedFps: 6, sourceFps: 60, qp: 42 };
+        assert.equal(encoderHungry(m), true);
+        assert.equal(encoderHungry({ ...m, mimeType: "video/h265" }), true, "o mimeType sem diferenciar maiusculas");
+        assert.equal(encoderHungry({ ...m, qp: null }), true, "sem o qp: so o fps");
+        assert.equal(encoderHungry({ ...m, qp: 35 }), true);
+        assert.ok(!encoderHungry({ ...m, qp: 34 }), "qp baixo: nao esta sem banda");
+        assert.ok(!encoderHungry({ ...m, encodedFps: 30 }), "metade do fps da fonte ja nao e faminto");
+        assert.ok(!encoderHungry({ ...m, sourceFps: null }), "sem o fps da fonte, nao");
+        assert.ok(!encoderHungry({ ...m, sourceFps: 0 }));
+        assert.ok(!encoderHungry({ ...m, mimeType: "video/H264" }), "o H.264 e o caso da v0.4.8");
+        assert.ok(!encoderHungry({ ...m, mimeType: null }));
+    });
 
     test("alvo desconhecido (0) com qp 40 e a fonte em movimento: continua descendo como antes", async t => {
         const clock = useFakeClock(t);

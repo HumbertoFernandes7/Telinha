@@ -101,7 +101,8 @@ const CPU_STREAK = 2;
 // - banda curta: a banda estimada abaixo do que o degrau pede (LEVELS.minKbps), com o envio usando >= NET_FULL_RATIO
 //   dela (o caminho esta cheio; com menos, e o encoder que pede pouco, ex.: tela parada); ou a banda estimada bem
 //   abaixo do que o degrau pede (< NET_FAR_BELOW_RATIO dele) com o encoder de fato sem banda (encoderStarved); nao conta
-//   (stuckOnFloor) quem ja teve banda para o degrau e agora tem o alvo < TARGET_OF_EST_RATIO da estimativa (GCC no piso).
+//   (stuckOnFloor) quem ja teve banda para o degrau e agora tem o alvo < TARGET_OF_EST_RATIO da estimativa (GCC no piso),
+//   a nao ser o H.265 faminto (encoderHungry: descartando quadros com o qp no teto dele).
 // So desce com o problema seguido por mais que um soluco (log de 31/10: dois soluços de ~10 s, e o WebRTC encolhia a
 // imagem de 1080p a 320x180 e levava ~60 s para voltar):
 const NET_LOSS_ALONE_PCT = 5;
@@ -350,12 +351,31 @@ const dec = (v: number) => v.toFixed(1).replace(".", ",");
  * O espectador esta preso no piso do estimador? So quem JA teve banda para o degrau (enoughFor) e agora tem o alvo
  * (targetBitrate) abaixo de TARGET_OF_EST_RATIO da estimativa: o GCC ficou no chao depois de uma rajada vinda de tela
  * parada (log: est 233, alvo 30, perda 0), a imagem esta limitada pelo alvo, rebaixar nao ajuda e so atrasa a volta. Quem
- * nunca teve banda para o degrau (caminho estreito de verdade), ou sem alvo medido, desce como antes. (estBelow ja exige est.)
+ * nunca teve banda para o degrau (caminho estreito de verdade), ou sem alvo medido, desce como antes. Nem o encoder faminto
+ * (encoderHungry: no H.265, alvo baixo com quadros descartados e falta de banda, nao tela parada). (estBelow ja exige est.)
  */
 function stuckOnFloor(m: WindowMetrics, n: NetState, need: number): boolean {
     const target = m.targetKbps;
-    if (target == null || target <= 0 || m.availableKbps == null) return false;
+    if (target == null || target <= 0 || m.availableKbps == null || encoderHungry(m)) return false;
     return !!n.enoughFor && LEVELS[n.enoughFor].minKbps >= need && target < m.availableKbps * TARGET_OF_EST_RATIO;
+}
+
+/** encoderHungry: codificando menos que isto x o fps da fonte = descartando quadros */
+const HUNGRY_FPS_RATIO = 0.5;
+
+/**
+ * O encoder H.265 da placa esta faminto: codificando menos de HUNGRY_FPS_RATIO do fps da fonte e, com o qp medido, com o qp
+ * >= STARVED_QP_H264. O controle de taxa do H.265 do Chromium para no qp 41-42 e passa a descartar quadros (live de 18/11:
+ * 4-10 fps no comeco, com a estimativa em 0,5-2 Mbps e o alvo em 0,3-0,6 dela): o alvo baixo ai e o encoder sem banda (ou
+ * a fila), nao a tela parada da v0.4.8, e o stuckOnFloor nao pode isentar a banda curta (o espectador ficaria a 4 fps para
+ * sempre). So o H.265: no H.264 o caso da v0.4.8 (log de 02/11: fonte 36, 12 fps, qp 45-51, alvo 30 de 233 estimados) e o
+ * GCC preso no piso, e rebaixar nao ajuda. Sem o fps da fonte, nao. Exportada para os testes.
+ */
+export function encoderHungry(m: Pick<WindowMetrics, "mimeType" | "encodedFps" | "sourceFps" | "qp">): boolean {
+    if (!/^video\/h265$/i.test(m.mimeType ?? "")) return false;
+    const source = m.sourceFps;
+    if (source == null || source <= 0 || m.encodedFps >= source * HUNGRY_FPS_RATIO) return false;
+    return m.qp == null || m.qp >= STARVED_QP_H264;
 }
 
 /**

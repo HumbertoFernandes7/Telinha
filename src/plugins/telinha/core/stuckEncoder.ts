@@ -60,6 +60,15 @@
 //
 // O H.265 e o AV1 compartilham o codigo (HW_ONLY, settleHwOnly, runHwOnlyProbe, noteHwOnlyFailed); as funcoes com o nome
 // de cada um (settleH265, runAv1Probe...) sao so atalhos.
+//
+// Uma falha no envio nao desliga o H.265/AV1 de vez (depois da v0.4.10; noteHwOnlySendFailure): o WebRTC trocar sozinho
+// de codec, ou o encoder sair da placa, tira so AQUELE espectador do codec (streaming.ts → checkHwOnly / leaveHwOnly), e os
+// proximos continuam recebendo ele. So a 2a falha do mesmo codec na mesma sessao do Discord grava o "travou"/"saiu da
+// placa" persistente (como a sonda, que tambem so confirma na 2a rodada). Na live de 18/11 o H.265 da placa falhou 1 vez
+// em 5 subidas iguais de 720p para 1080p, e o "travou" gravado na hora mandou todo espectador novo para o VP9 por CPU. Um
+// envio que TRAVA (noteStuckEncoder: o encoder preso, o perigo de congelar o Discord) continua gravando na hora. Os
+// registros "stream" gravados antes disto (sem `v`) por uma falha so sao descartados uma vez (migrateHwOnlyRecords); os da
+// sonda e os de um envio que travou ficam.
 
 import { type CodecSetting, settings } from "@plugins/telinha/settings";
 
@@ -447,10 +456,42 @@ export function av1ProbeRecord(): HwOnlyProbeRecord | null {
     return hwOnlyProbeRecord("av1");
 }
 
+/**
+ * Versao do registro do H.265/AV1 (campo `v`). Sem ela (ate a v0.4.10), um "stream" podia ser UMA falha no envio; a
+ * partir dela, um "stream" so e gravado na 2a falha da sessao ou num envio que travou (migrateHwOnlyRecords).
+ */
+export const HW_ONLY_RECORD_VERSION = 2;
+
 function saveHwOnly(codec: HwOnlyCodec, record: HwOnlyProbeRecord) {
     const spec = HW_ONLY[codec];
-    save(spec.key, { at: record.at, env: { ...record.env }, verdict: record.verdict, detail: record.detail, codec: record.codec, source: record.source ?? "probe" },
-        `o resultado da sonda do ${spec.label}`);
+    save(spec.key, {
+        at: record.at, env: { ...record.env }, verdict: record.verdict, detail: record.detail, codec: record.codec, source: record.source ?? "probe",
+        v: HW_ONLY_RECORD_VERSION
+    }, `o resultado da sonda do ${spec.label}`);
+}
+
+/** O detalhe que noteStuckEncoder grava: um envio que travou de verdade (o encoder preso), nao uma troca de codec. */
+const STUCK_DETAIL_RE = /travou numa transmissão/;
+
+/**
+ * Uma vez por sessao (startLocalCaps): descarta o "travou"/"saiu da placa" do H.265/AV1 gravado por UMA falha no envio
+ * antes de HW_ONLY_RECORD_VERSION (source "stream", sem `v`, sem ser de um envio que travou). Fica: o da sonda (que ja
+ * confirma em 2 rodadas), o "ok", o de um envio que travou (o perigo de congelar o Discord) e todo registro com `v`. O
+ * H.264 (Baseline e High) nao e tocado. Devolve os codecs descartados.
+ */
+export function migrateHwOnlyRecords(): HwOnlyCodec[] {
+    const dropped: HwOnlyCodec[] = [];
+    for (const codec of HW_ONLY_CODECS) {
+        const spec = HW_ONLY[codec];
+        const raw = readSaved(spec.key)?.raw;
+        if (!raw || raw.source !== "stream" || raw.v != null || (raw.verdict !== "broken" && raw.verdict !== "offHw")) continue;
+        if (STUCK_DETAIL_RE.test(typeof raw.detail === "string" ? raw.detail : "")) continue;
+        save(spec.key, null, `o resultado da sonda do ${spec.label}`);
+        dropped.push(codec);
+        log.info(`O ${spec.label} da placa de vídeo estava desligado neste PC por uma falha só num envio (${text(raw.detail, 200) ?? "sem detalhe"}): `
+            + `agora uma falha tira só aquele espectador, então o registro foi descartado e o ${spec.label} volta a ser usado (a sonda dele roda de novo)`);
+    }
+    return dropped;
 }
 
 /**
@@ -552,6 +593,8 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 export function startLocalCaps(report: (line: string) => void): Promise<void> {
     return started ??= (async () => {
         hold("baseline", true);
+        // antes de qualquer settle do H.265/AV1: o "travou" de uma falha so (ate a v0.4.10) nao vale mais
+        migrateHwOnlyRecords();
         const measuring = probeLocalCaps();
         const env = await environment();
         const record = stuckRecord();
@@ -958,11 +1001,12 @@ export function runAv1Probe(env: EncoderEnv, codec: string, delayMs = PROBE_STAR
 }
 
 /**
- * Um envio em H.265 ou AV1 falhou no ar (streaming.ts): travou (containStuck → noteStuckEncoder) ou saiu da placa (o
- * WebRTC trocou sozinho para o H.264 reserva, ou o encoder deixou de ser da placa: no AV1, o libaom por software). A culpa
- * e dele, nunca do H.264: fica salvo "travou" para ele neste ambiente (source "stream") e o automatico deixa de manda-lo
- * agora, sem o registro "H.264 da placa travado". "broken" (travou, o padrao): o botao nao esquece; so um ambiente novo
- * testa ele de novo. "offHw" (o Chromium trocou a placa pelo software, so o AV1): o mesmo efeito, mas o botao esquece.
+ * O H.265 ou o AV1 falhou de vez neste PC: um envio travou (containStuck → noteStuckEncoder) ou a 2a falha no envio da
+ * sessao (noteHwOnlySendFailure: o WebRTC trocou sozinho de codec, ou o encoder deixou de ser da placa: no AV1, o libaom
+ * por software). A culpa e dele, nunca do H.264: fica salvo "travou" para ele neste ambiente (source "stream") e o
+ * automatico deixa de manda-lo agora, sem o registro "H.264 da placa travado". "broken" (travou, o padrao): o botao nao
+ * esquece; so um ambiente novo testa ele de novo. "offHw" (o Chromium trocou a placa pelo software, so o AV1): o mesmo
+ * efeito, mas o botao esquece.
  */
 export function noteHwOnlyFailed(codec: HwOnlyCodec, detail: string, verdict: "broken" | "offHw" = "broken") {
     const at = Date.now();
@@ -981,6 +1025,41 @@ export function noteH265Failed(detail: string) {
 /** noteHwOnlyFailed do AV1. */
 export function noteAv1Failed(detail: string) {
     noteHwOnlyFailed("av1", detail);
+}
+
+/** Falhas no envio (sem travar) que desligam o H.265/AV1 de vez: a 1a so tira aquele espectador (noteHwOnlySendFailure). */
+export const HW_ONLY_FAILURES_TO_CONFIRM = 2;
+
+/** As falhas no envio de cada codec nesta sessao do Discord: quantas e se alguma foi "broken" (nao so "offHw"). */
+const sendFailures: Record<HwOnlyCodec, { count: number; broken: boolean; }> = { h265: { count: 0, broken: false }, av1: { count: 0, broken: false } };
+
+/** O que noteHwOnlySendFailure fez: "first" = so aquele espectador sai; "confirmed" = desligado de vez neste PC. */
+export type HwOnlyFailure = "first" | "confirmed";
+
+/**
+ * Um envio em H.265 ou AV1 falhou sem travar (streaming.ts → checkHwOnly: o WebRTC trocou sozinho de codec; leaveHwOnly:
+ * o encoder saiu da placa). Quem chama ja tira AQUELE espectador do codec. A 1a falha do codec nesta sessao do Discord
+ * fica so nesta sessao: nada salvo, e o automatico continua mandando ele para os proximos (a sonda do H.265 tambem so
+ * confirma um "travou" na 2a rodada; na live de 18/11 foi 1 falha em 5 subidas iguais de 720p para 1080p). A 2a falha
+ * do mesmo codec confirma: noteHwOnlyFailed ("broken" se alguma das falhas foi "broken"; senao "offHw"). O detalhe salvo
+ * e o da 2a, com a marca da confirmacao.
+ */
+export function noteHwOnlySendFailure(codec: HwOnlyCodec, detail: string, verdict: "broken" | "offHw" = "broken"): HwOnlyFailure {
+    const f = sendFailures[codec];
+    f.count++;
+    if (verdict === "broken") f.broken = true;
+    if (f.count < HW_ONLY_FAILURES_TO_CONFIRM) {
+        hwOnlyNotes[codec] = `falhou uma vez num envio nesta sessão (${detail.slice(0, 200)}); só aquele espectador saiu, desliga de vez se falhar de novo`;
+        return "first";
+    }
+    const mark = " [2ª falha nesta sessão]";
+    noteHwOnlyFailed(codec, detail.slice(0, HW_ONLY_DETAIL_MAX - mark.length) + mark, f.broken ? "broken" : "offHw");
+    return "confirmed";
+}
+
+/** Para os testes: zera a contagem de falhas no envio (uma sessao nova do Discord). */
+export function resetHwOnlySendFailuresForTests() {
+    for (const codec of HW_ONLY_CODECS) sendFailures[codec] = { count: 0, broken: false };
 }
 
 /**

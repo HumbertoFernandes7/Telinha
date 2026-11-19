@@ -53,7 +53,8 @@ import { onScreenAudioHelperProblem } from "./screenAudioChromium";
 import { h264ProfileLevelId, type HwOnlyCodec, isH264High, isHwOnlyCodec, sameH264Profile } from "./sdp";
 import { formatDuration } from "./statsLog";
 import {
-    dualGpuTipFor, noteHighFailed, noteHwOnlyFailed, noteStreamStarting, noteStuckEncoder, onStreamStopped, STUCK_NOTICE, STUCK_NOTICE_AV1, STUCK_NOTICE_H265, STUCK_NOTICE_HIGH, STUCK_NOTICE_PINNED, stuckNoticeUnknown
+    dualGpuTipFor, type HwOnlyFailure, noteHighFailed, noteHwOnlySendFailure, noteStreamStarting, noteStuckEncoder, onStreamStopped, STUCK_NOTICE, STUCK_NOTICE_AV1, STUCK_NOTICE_H265, STUCK_NOTICE_HIGH,
+    STUCK_NOTICE_PINNED, stuckNoticeUnknown
 } from "./stuckEncoder";
 
 export interface QualityProfile {
@@ -176,7 +177,17 @@ interface ViewerSend {
     foreignOut?: number | null;
     /** decisao H.265/AV1: as estatisticas ja mostraram ele no ar (checkHwOnly: sair dele depois = ele falhou) */
     hwOnlySeen?: boolean;
+    /** o tamanho codificado (captura ÷ scaleResolutionDownBy) do ultimo setParameters nosso que deu certo (applySenderParams) */
+    scaledSize?: string;
+    /** o ultimo setParameters nosso que mudou o tamanho codificado: quando (performance.now()) e de qual para qual (resizeSuspect) */
+    scaleChange?: { at: number; from: string; to: string; };
 }
+
+/**
+ * Uma falha do H.265/AV1 ate este tempo depois de um setParameters nosso que mudou o tamanho (scaleResolutionDownBy) e
+ * suspeita de reconfiguracao do encoder (live de 18/11: o H.265 caiu 1 s depois de 720p → 1080p), so registrada no log.
+ */
+export const RESIZE_SUSPECT_MS = 5000;
 
 /** Janela da checagem do H.264 que nao sai (checkStall). Contadores de quadros da captura (capturedFrames). */
 interface StallWatch {
@@ -1388,7 +1399,13 @@ async function applySenderParams(peerId: PeerId, local: LocalCapture, level: Qua
             error = errorText(e);
             continue;
         }
-        if (send) send.degradation = { kind, index: i };
+        if (send) {
+            send.degradation = { kind, index: i };
+            // so o tamanho codificado importa aqui (resizeSuspect): a 1a aplicacao nao e uma troca
+            const size = `${scaled.width}x${scaled.height}`;
+            if (send.scaledSize && send.scaledSize !== size) send.scaleChange = { at: performance.now(), from: send.scaledSize, to: size };
+            send.scaledSize = size;
+        }
         if (!send?.applied || switched) {
             // i > 0 so quando a lista foi percorrida agora: as anteriores foram recusadas
             const what = preference ? DEGRADATION_TEXT[preference] : "sem preferência (o WebRTC escolhe)";
@@ -1677,7 +1694,7 @@ function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: 
     counts.push(enc.width && enc.height ? `${enc.width}x${enc.height}` : "tamanho desconhecido");
     const why = `${what}, com a conexão no ar e a captura entregando quadros (${counts.join(", ")})`;
     // o relatorio e do encoder de OUTRO codec (checkForeign): o encoder certo nem apareceu, nada diz qual codec ou perfil
-    // falhou. Sem fallBack, sem noteHighFailed/noteHwOnlyFailed e sem marcar nada: so contem (a troca de codec de um encoder
+    // falhou. Sem fallBack, sem noteHighFailed/noteHwOnlySendFailure e sem marcar nada: so contem (a troca de codec de um encoder
     // da placa que nao subiu travaria o Discord) e avisa
     if (foreign) {
         containStuck(peerId, local, send, `${why}, e as estatísticas só traziam o encoder de outro codec`, false);
@@ -1687,7 +1704,7 @@ function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: 
     // queda do checkEncoder). So o da placa, ou um encoder que o Chromium nao informa, fica contido e marca a placa.
     if (hwOnly && (enc.powerEfficient === false || (hwOnly === "av1" && /libaom|svt|rav1e/i.test(enc.implementation ?? "")))) {
         // AV1 abaixo de 270p (AV1_HW_MIN_HEIGHT): o libaom e de proposito (o mesmo corte do isOffHardwareAv1), nao e a placa travada:
-        // nada fica marcado (sem noteHwOnlyFailed). Mas o libaom parado deixa o espectador no preto, e um encoder de software e
+        // nada fica marcado (sem noteHwOnlySendFailure). Mas o libaom parado deixa o espectador no preto, e um encoder de software e
         // seguro de trocar: so este espectador passa para a reserva H.264 (ou o que o automatico escolhe sem o AV1)
         if (hwOnly === "av1" && enc.height && enc.height < AV1_HW_MIN_HEIGHT) {
             if (send.fellBack) return;
@@ -1832,8 +1849,10 @@ function hwOnlyOfMime(mime: string): HwOnlyCodec | null {
  * - Outro codec no ar depois de ele ter estado no ar, ou com ele na lista negociada (sender.getParameters().codecs, lido so
  *   com o encoder em uso ja soltando quadros: um encoder saudavel; a PRESENCA, nunca a posicao: o libwebrtc poe o codec de
  *   envio ATUAL na frente, entao depois da troca o 1o ja e o H.264), = o WebRTC trocou sozinho (o encoder da placa falhou
- *   ao subir, antes do 1o quadro, ou no meio): culpa dele (noteHwOnlyFailed), sem marcar o H.264, e o envio passa a ser
- *   tratado como o codec que esta no ar (a reserva H.264, com as checagens dele do zero).
+ *   ao subir, antes do 1o quadro, ou no meio): culpa dele (noteHwOnlySendFailure: a 1a falha da sessao so tira este
+ *   espectador, a 2a desliga o codec de vez neste PC; ate RESIZE_SUSPECT_MS depois de uma troca de tamanho nossa, o log
+ *   diz que ele falhou ao trocar de resolucao), sem marcar o H.264, e o envio passa a ser tratado como o codec que esta no
+ *   ar (a reserva H.264, com as checagens dele do zero).
  * - Outro codec no ar sem ele negociado (o outro lado nao aceitou): nada fica marcado; so o envio passa a ser tratado como
  *   o codec que esta no ar.
  */
@@ -1866,9 +1885,9 @@ function checkHwOnly(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc:
         ? h264ReserveOf(send.decision, `a reserva do ${name} (${send.decision.reason})`) ?? { codec: "h264" as const, h264Profile: getLocalCaps().h264HwProfile, reason: `a reserva do ${name}` }
         : null;
     if (negotiated) {
-        noteHwOnlyFailed(codec, `o WebRTC trocou o ${name} por ${inUse} numa transmissão (${label})`);
-        log.warn(`O ${name} para ${label} saiu do ar: o WebRTC trocou sozinho para ${inUse} (o encoder ${name} da placa de vídeo falhou). `
-            + `O ${name} fica desligado neste PC até o driver, o Chromium ou a placa mudarem; o H.264 não leva a culpa.`);
+        const resize = resizeSuspect(send);
+        const outcome = noteHwOnlySendFailure(codec, `o WebRTC trocou o ${name} por ${inUse} numa transmissão (${label})${resize ? `, ${resize.slice(0, 80)}` : ""}`);
+        log.warn(`O ${name} para ${label} saiu do ar: o WebRTC trocou sozinho para ${inUse} (o encoder ${name} da placa de vídeo falhou). ${capitalize(hwOnlyFailureText(name, outcome, resize))}.`);
     } else {
         log.info(`${label} não negociou ${name}: o vídeo para ele vai em ${inUse}${reserve ? " (a reserva)" : ""}; nada fica marcado neste PC`);
     }
@@ -1932,23 +1951,51 @@ function offHardwareContext(peerId: PeerId, local: LocalCapture, send: ViewerSen
 }
 
 /**
- * O H.265/AV1 deste envio saiu da placa de video no ar (checkHwOnly, checkStall): culpa dele (noteHwOnlyFailed, nunca o
- * registro do H.264 nem a contagem de quedas dele) e so ESTE espectador passa para a reserva H.264 da decisao (ou, sem
+ * O H.265/AV1 deste envio saiu da placa de video no ar (checkHwOnly, checkStall): culpa dele (noteHwOnlySendFailure: a 1a
+ * falha da sessao fica so nesta sessao, a 2a desliga de vez neste PC; nunca o registro do H.264 nem a contagem de quedas
+ * dele) e so ESTE espectador passa para a reserva H.264 da decisao (ou, sem
  * ela, o que chooseCodec escolhe sem ele), sem reconectar. O encoder no ar nao e o da placa (no AV1, o libaom), entao
  * trocar e seguro. Uma vez por espectador (send.fellBack). `why`: a frase do problema, sem ponto. `offHardware`: o Chromium
- * trocou a placa pelo software (checkHwOnly; so o AV1 tem software): fica salvo "offHw" (o botao da placa limpa), nao "broken".
+ * trocou a placa pelo software (checkHwOnly; so o AV1 tem software): conta como "offHw" (salvo na confirmacao, o botao da
+ * placa limpa), nao "broken".
  */
 function leaveHwOnly(codec: HwOnlyCodec, peerId: PeerId, local: LocalCapture, send: ViewerSend, why: string, offHardware = false, context?: { text: string; saved: string; }) {
     if (send.fellBack) return;
     send.fellBack = true;
     const label = peerLabel(peerId);
     const name = HW_ONLY_LABEL[codec];
+    const resize = resizeSuspect(send);
     // so o AV1 tem software no Chromium: la o "offHw" (sai da placa, o botao limpa); o resto (travou, H.265) fica "broken".
-    // `context`: o que se sabe do momento da troca (offHardwareContext): vai no log e no detalhe salvo (que cabe ate 300 caracteres)
-    noteHwOnlyFailed(codec, context ? context.saved : `${why.slice(0, 120)} (${label})`, offHardware && codec === "av1" ? "offHw" : "broken");
+    // `context`: o que se sabe do momento da troca (offHardwareContext): vai no log e no detalhe salvo (que cabe ate 300 caracteres).
+    // A 1a falha da sessao so tira este espectador (noteHwOnlySendFailure); a 2a desliga o codec de vez neste PC
+    const outcome = noteHwOnlySendFailure(codec, context ? context.saved : `${why.slice(0, 120)} (${label})`, offHardware && codec === "av1" ? "offHw" : "broken");
     const next = h264ReserveOf(send.decision, `a reserva do ${name}, que saiu da placa de vídeo`) ?? chooseWithout(codec, peerId);
-    log.warn(`${why}${context ? ` — no momento: ${context.text}` : ""}: o ${name} fica desligado neste PC até o driver, o Chromium ou a placa mudarem (o H.264 não leva a culpa); trocando para ${next.codec.toUpperCase()} só para ${label}.`);
+    log.warn(`${why}${context ? ` — no momento: ${context.text}` : ""}: ${hwOnlyFailureText(name, outcome, resize)}; trocando para ${next.codec.toUpperCase()} só para ${label}.`);
     void switchSendCodec(peerId, local, send, next);
+}
+
+/**
+ * A troca de tamanho nossa logo antes de uma falha do H.265/AV1 (RESIZE_SUSPECT_MS depois de um setParameters que mudou o
+ * tamanho codificado, pelo scaleResolutionDownBy): "1280x720 → 1920x1080 há 1 s"; null = nenhuma. So diagnostico.
+ */
+function resizeSuspect(send: ViewerSend): string | null {
+    const change = send.scaleChange;
+    if (!change) return null;
+    const ago = performance.now() - change.at;
+    return ago <= RESIZE_SUSPECT_MS ? `${change.from} → ${change.to} há ${formatDuration(ago)}` : null;
+}
+
+/** A frase com a 1a letra maiuscula (o fim da linha do log comecando uma frase nova). */
+const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+
+/**
+ * O fim da linha do log de uma falha do H.265/AV1 no envio (checkHwOnly, leaveHwOnly), sem ponto: so este espectador sai
+ * (a 1a da sessao; com a troca de tamanho logo antes, a suspeita de reconfiguracao) ou o codec desligado de vez (a 2a).
+ */
+function hwOnlyFailureText(name: string, outcome: HwOnlyFailure, resize: string | null): string {
+    if (outcome === "confirmed") return `é a 2ª falha do ${name} nesta sessão: o ${name} fica desligado neste PC até o driver, o Chromium ou a placa mudarem (o H.264 não leva a culpa)`;
+    if (resize) return `o encoder ${name} falhou ao trocar de resolução (${resize}); só este espectador sai do ${name}; desliga de vez só se falhar de novo`;
+    return `só este espectador sai do ${name} (1ª falha nesta sessão: os próximos continuam recebendo ${name}); desliga de vez só se falhar de novo`;
 }
 
 /** O que chooseCodec escolhe para este espectador sem o H.265/AV1 (fixado nele = o automatico; a sonda dele como nao passou). */

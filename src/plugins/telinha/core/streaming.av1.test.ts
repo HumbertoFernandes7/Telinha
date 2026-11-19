@@ -8,7 +8,9 @@
 // codificando 42001f, 640032 e AV1 Main na placa, o WebRtcAV1HWEncode ligado nesta partida, o AV1 fixado (ele e so manual)
 // e as sondas ja "ok". Cada espectador recebe o que a presenca dele permite (AV1 so com caps.hwDecode.av1). No ar, o AV1
 // nunca fica por software: o libaom no lugar da placa (o VideoEncoderSoftwareFallbackWrapper do WebRTC) tira o espectador
-// do AV1 na hora. A culpa e do codec DE FATO no ar: um AV1 que trava ou sai da placa marca o AV1, nunca o H.264.
+// do AV1 na hora. A culpa e do codec DE FATO no ar: um AV1 que trava ou sai da placa marca o AV1, nunca o H.264. Uma falha
+// sem travar (o libaom, ou o WebRTC trocou sozinho) so tira aquele espectador; so a 2a da sessao desliga o AV1 de vez
+// (noteHwOnlySendFailure). Um envio que trava desliga na hora.
 // Rodar:  pnpm test:file src/plugins/telinha/core/streaming.av1.test.ts  (todos: pnpm test:unit)
 
 import "@test/fakes/dom";
@@ -23,7 +25,7 @@ import { connectViewer, createRig, destroyRig, enterCall, logMark, screenOptions
 import { getLocalCaps, setAv1HwFeature, setAv1ProbeOk, setH264HighProbeOk, setH264HwStuck } from "./codec";
 import { rt } from "./context";
 import { formatOffHardwareContext, H264_STALL_MS, onCodecRequest, sendPlanFor, startStreaming, stopStreaming } from "./streaming";
-import { av1ProbeRecord, highProbeRecord, STUCK_NOTICE_AV1, stuckEncoderDiagnostics, stuckRecord } from "./stuckEncoder";
+import { av1ProbeRecord, highProbeRecord, noteHwOnlySendFailure, resetHwOnlySendFailuresForTests, STUCK_NOTICE_AV1, stuckEncoderDiagnostics, stuckRecord } from "./stuckEncoder";
 
 const NVENC_AV1 = "MediaFoundationVideoEncodeAccelerator (NVIDIA AV1 Encoder MFT)";
 const NVENC = "MediaFoundationVideoEncodeAccelerator (NVIDIA H.264 Encoder MFT)";
@@ -74,7 +76,13 @@ beforeEach(() => {
     setAv1ProbeOk(true);
     setAv1HwFeature(true);
     pluginSettings.set("codec", "av1");
+    resetHwOnlySendFailuresForTests();
+    pluginSettings.set("hwAv1Probe", { at: AT, env: {}, verdict: "ok", detail: OK, codec: "av01.0.05M.08" });
 });
+
+/** O log da 1a falha do AV1 na sessao: so aquele espectador sai. */
+const FIRST = "só este espectador sai do AV1 (1ª falha nesta sessão: os próximos continuam recebendo AV1); desliga de vez só se falhar de novo";
+const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
 async function watcher(name: string, hwDecode?: unknown, h264HwDecode = true) {
     seq++;
@@ -124,37 +132,61 @@ test("Codificando para: o AV1 negociado, com o nivel e o perfil (sem os x-google
     assert.equal(av1ProbeRecord()?.verdict, "ok", "nada marcado");
 });
 
-test("o libaom no lugar da placa (powerEfficientEncoder false): sai do AV1 na hora para a reserva H.264, sem reconectar; marca so o AV1", async () => {
+test("o libaom no lugar da placa (powerEfficientEncoder false), 1a falha da sessao: sai do AV1 na hora para a reserva H.264, sem reconectar; nada salvo, o proximo ainda recebe AV1", async () => {
     const v = await watcher("libaom", BOTH);
     v.sender.stats = av1Stats({ powerEfficientEncoder: false, encoderImplementation: "libaom" });
     const since = logMark();
     await seconds(rig, 2);
     const lines = since();
     assert.ok(lines.some(l => l.startsWith(`O AV1 para ${v.label} não está sendo codificado pela placa de vídeo (libaom) — no momento: 1920x1080, `)
-        && l.includes(": o AV1 fica desligado neste PC") && l.endsWith(`trocando para H264 só para ${v.label}.`)), lines.join("\n"));
+        && l.includes(`: ${FIRST}; `) && l.endsWith(`trocando para H264 só para ${v.label}.`)), lines.join("\n"));
     const warn = lines.find(l => l.includes("— no momento:")) ?? "";
     assert.ok(!warn.includes("(ímpar)") && !warn.includes("trocou há"), warn);
     assert.match(warn, /nível 1080p60, \d+ s no ar, 600 quadros/);
-    const saved = av1ProbeRecord()?.detail ?? "";
-    assert.ok(saved.startsWith(`AV1 saiu da placa (libaom) p/ ${v.label}: 1920x1080, `) && saved.length <= 300 && !saved.includes("(ímpar)"), saved);
     await turns();
     assert.equal(plan(v.peerId).codec, "h264");
     assert.equal(v.sender.encoding.codec?.mimeType, "video/H264", "trocado com setParameters");
-    assert.equal(av1ProbeRecord()?.verdict, "offHw", "software e nao travou: o botao da placa limpa");
-    assert.equal(av1ProbeRecord()?.source, "stream");
+    assert.equal(av1ProbeRecord()?.verdict, "ok", "uma falha so: nada salvo");
+    assert.equal(getLocalCaps().av1ProbeOk, true);
     assert.equal(stuckRecord(), null, "o H.264 nao fica marcado");
     assert.equal(highProbeRecord()?.verdict, "ok");
     const next = await watcher("depoislibaom", BOTH);
+    assert.equal(plan(next.peerId).codec, "av1", "o proximo espectador ainda recebe AV1");
+});
+
+test("o libaom de novo na mesma sessao (2a falha): offHw salvo com o contexto da 2a (ate 300 caracteres, com a marca da confirmacao); os proximos vao no High", async () => {
+    const a = await watcher("libaom1", BOTH);
+    a.sender.stats = av1Stats({ powerEfficientEncoder: false, encoderImplementation: "libaom" });
+    await seconds(rig, 2);
+    assert.equal(av1ProbeRecord()?.verdict, "ok");
+    const b = await watcher("libaom2", BOTH);
+    assert.equal(plan(b.peerId).codec, "av1");
+    b.sender.stats = av1Stats({ powerEfficientEncoder: false, encoderImplementation: "libaom" });
+    const since = logMark();
+    await seconds(rig, 2);
+    assert.ok(since().some(l => l.startsWith(`O AV1 para ${b.label} não está sendo codificado pela placa de vídeo (libaom)`)
+        && l.includes(": é a 2ª falha do AV1 nesta sessão: o AV1 fica desligado neste PC até o driver, o Chromium ou a placa mudarem (o H.264 não leva a culpa); ")));
+    await turns();
+    const saved = av1ProbeRecord()?.detail ?? "";
+    assert.ok(saved.startsWith(`AV1 saiu da placa (libaom) p/ ${b.label}: 1920x1080, `) && saved.endsWith(" [2ª falha nesta sessão]") && saved.length <= 300
+        && !saved.includes("(ímpar)"), saved);
+    assert.equal(av1ProbeRecord()?.verdict, "offHw", "software e nao travou: o botao da placa limpa");
+    assert.equal(av1ProbeRecord()?.source, "stream");
+    assert.equal(getLocalCaps().av1ProbeOk, false);
+    assert.equal(stuckRecord(), null, "o H.264 nao fica marcado");
+    const next = await watcher("depoislibaom2", BOTH);
     assert.equal(plan(next.peerId).codec, "h264", "o AV1 desligado: os proximos vao no High");
 });
 
-test("o libaom com tamanho impar: o aviso e o detalhe salvo trazem o tamanho (ímpar), o nivel e o tempo no ar, e o detalhe sobrevive a releitura", async () => {
+test("o libaom com tamanho impar (2a falha da sessao): o aviso e o detalhe salvo trazem o tamanho (ímpar), o nivel e o tempo no ar, e o detalhe sobrevive a releitura", async () => {
+    // a 1a falha do AV1 nesta sessao ja aconteceu: esta confirma e salva
+    assert.equal(noteHwOnlySendFailure("av1", "o AV1 para outro saiu da placa (libaom)", "offHw"), "first");
     const v = await watcher("impar", BOTH);
     v.sender.stats = av1Stats({ powerEfficientEncoder: false, encoderImplementation: "libaom", frameWidth: 1917, frameHeight: 1079, framesEncoded: 7800 });
     const since = logMark();
     await seconds(rig, 2);
     const warn = since().find(l => l.includes("— no momento:")) ?? "";
-    assert.match(warn, /— no momento: 1917x1079 \(ímpar\), .*nível 1080p60, \d+ s no ar, 7800 quadros: o AV1 fica desligado/, warn);
+    assert.match(warn, /— no momento: 1917x1079 \(ímpar\), .*nível 1080p60, \d+ s no ar, 7800 quadros: é a 2ª falha do AV1 nesta sessão: o AV1 fica desligado/, warn);
     const saved = av1ProbeRecord()?.detail ?? "";
     assert.ok(saved.includes("1917x1079 (ímpar)") && saved.includes("7800 quadros") && saved.length <= 300, saved);
     assert.equal(av1ProbeRecord()?.verdict, "offHw");
@@ -170,14 +202,13 @@ test("formatOffHardwareContext: impar + troca de nivel recente; par sem troca na
     assert.equal(formatOffHardwareContext({}), "");
 });
 
-test("o libaom sem o powerEfficientEncoder (so o nome): tambem sai do AV1", async () => {
-    pluginSettings.set("hwAv1Probe", { at: AT, env: {}, verdict: "ok", detail: OK, codec: "av01.0.05M.08" });
+test("o libaom sem o powerEfficientEncoder (so o nome): tambem sai do AV1 (1a falha: nada salvo)", async () => {
     const v = await watcher("libaomnome", BOTH);
     v.sender.stats = av1Stats({ omit: ["powerEfficientEncoder"], encoderImplementation: "libaom" });
     await seconds(rig, 2);
     await turns();
     assert.equal(plan(v.peerId).codec, "h264");
-    assert.equal(av1ProbeRecord()?.verdict, "offHw");
+    assert.equal(av1ProbeRecord()?.verdict, "ok");
 });
 
 test("o outro lado nao negociou AV1 (H.264 no ar, o AV1 nem na lista negociada): o envio vira a reserva; nada fica marcado", async () => {
@@ -194,28 +225,32 @@ test("o outro lado nao negociou AV1 (H.264 no ar, o AV1 nem na lista negociada):
     assert.equal(getLocalCaps().av1ProbeOk, true);
 });
 
-test("o WebRTC trocou do AV1 para o H.264 (ou o AV1 so presente na lista negociada): culpa do AV1, sem o registro do H.264", async () => {
+test("o WebRTC trocou do AV1 para o H.264 (ou o AV1 so presente na lista negociada): culpa do AV1, sem o registro do H.264; a 1a so tira o espectador, a 2a salva travou", async () => {
     const v = await watcher("trocou", BOTH);
     let n = 0;
     v.sender.stats = () => (n++ < 2 ? av1Stats() : h264Stats());
     const since = logMark();
     await seconds(rig, 4);
     const lines = since();
-    assert.ok(lines.includes(`O AV1 para ${v.label} saiu do ar: o WebRTC trocou sozinho para H264 (o encoder AV1 da placa de vídeo falhou). `
-        + "O AV1 fica desligado neste PC até o driver, o Chromium ou a placa mudarem; o H.264 não leva a culpa."), lines.join("\n"));
+    assert.ok(lines.includes(`O AV1 para ${v.label} saiu do ar: o WebRTC trocou sozinho para H264 (o encoder AV1 da placa de vídeo falhou). ${capitalize(FIRST)}.`), lines.join("\n"));
     await turns();
-    assert.equal(av1ProbeRecord()?.verdict, "broken");
+    assert.equal(av1ProbeRecord()?.verdict, "ok", "uma falha so: nada salvo");
     assert.equal(stuckRecord(), null);
     assert.equal(plan(v.peerId).codec, "h264");
 
-    setAv1ProbeOk(true);
     const w = await watcher("presente", BOTH);
+    assert.equal(plan(w.peerId).codec, "av1", "o proximo ainda recebe AV1");
     const h264First = VIDEO.filter(c => c.mimeType === "video/H264").concat(VIDEO.filter(c => c.mimeType !== "video/H264"));
     w.sender.params.codecs = negotiatedCodecs(h264First);
     w.sender.stats = h264Stats(300);
     const since2 = logMark();
     await seconds(rig, 2);
-    assert.ok(since2().some(l => l.startsWith(`O AV1 para ${w.label} saiu do ar: o WebRTC trocou sozinho para H264`)), "a presenca na lista, nunca a posicao");
+    assert.ok(since2().some(l => l.startsWith(`O AV1 para ${w.label} saiu do ar: o WebRTC trocou sozinho para H264`) && l.includes("É a 2ª falha do AV1 nesta sessão")),
+        "a presenca na lista, nunca a posicao");
+    await turns();
+    assert.equal(av1ProbeRecord()?.verdict, "broken", "a 2a falha confirma");
+    assert.equal(av1ProbeRecord()?.source, "stream");
+    assert.equal(stuckRecord(), null);
 });
 
 test("quem assiste nao decodificou o AV1 e pediu VP9: vai a reserva H.264 so para ele; nada fica marcado neste PC", async () => {
@@ -242,11 +277,11 @@ test("AV1 com o Baseline da placa de reserva (o espectador decodifica H.264 por 
     const since = logMark();
     await seconds(rig, H264_STALL_MS / 1000 + 2);
     const lines = since();
-    assert.ok(lines.some(l => l.includes(", fora da placa de vídeo: o AV1 fica desligado neste PC") && l.endsWith(`trocando para H264 só para ${v.label}.`)), lines.join("\n"));
+    assert.ok(lines.some(l => l.includes(`, fora da placa de vídeo: ${FIRST}`) && l.endsWith(`trocando para H264 só para ${v.label}.`)), lines.join("\n"));
     assert.equal(plan(v.peerId).codec, "h264", "o automatico sem o AV1: H.264 Baseline da placa");
     assert.equal(stuckRecord(), null);
     await turns();
-    assert.equal(av1ProbeRecord()?.verdict, "offHw", "libaom parado (stall): e software, nao travou a placa; o botao limpa");
+    assert.equal(av1ProbeRecord()?.verdict, "ok", "libaom parado (stall), 1a falha: so este espectador sai, nada salvo");
 });
 
 test("AV1 por software abaixo de 270p parado (checkStall): o libaom e de proposito, nao e a placa; nada marcado, mas so este espectador vai para o H.264", async () => {

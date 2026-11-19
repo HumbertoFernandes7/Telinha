@@ -25,8 +25,8 @@ import { type FakeWorker, healthyProbe, installWorker, stuckProbe, type WorkerEn
 import { chooseCodec, getLocalCaps, setAv1HwFeature, setH264HwStuck } from "./codec";
 import { ENCODER_PROBE_TIMING } from "./encoderProbe";
 import {
-    av1ProbeCodec, av1ProbeRecord, type EncoderEnv, forgetStuckEncoder, h265ProbeRecord, noteAv1Failed, noteHwOnlyFailed, noteStreamStarting, noteStuckEncoder, onCodecSettingChanged,
-    onStreamStopped, PROBE_START, probeRecord, runAv1Probe, settleAv1, startLocalCaps, stuckEncoderDiagnostics, stuckRecord
+    av1ProbeCodec, av1ProbeRecord, type EncoderEnv, forgetStuckEncoder, h265ProbeRecord, noteAv1Failed, noteHwOnlyFailed, noteHwOnlySendFailure, noteStreamStarting, noteStuckEncoder,
+    onCodecSettingChanged, onStreamStopped, PROBE_START, probeRecord, resetHwOnlySendFailuresForTests, runAv1Probe, settleAv1, startLocalCaps, stuckEncoderDiagnostics, stuckRecord
 } from "./stuckEncoder";
 
 const NV_ENV: EncoderEnv = { vendorId: "10de", deviceId: "2786", driver: "32.0.16.2101", chrome: "152.0.7977.167", discord: "1.0.9266" };
@@ -389,6 +389,37 @@ describe("falhas no ar e o botao", () => {
         pluginSettings.set("hwH264Probe", { at: AT, env: NV_ENV, verdict: "offHw", detail: "x" });
         assert.equal(probeRecord(), null, "so o H.265/AV1 tem offHw");
         pluginSettings.set("hwH264Probe", baseline);
+        pluginSettings.set("hwAv1Probe", null);
+    });
+});
+
+describe("falhas no envio sem travar (noteHwOnlySendFailure): o AV1 como o H.265", () => {
+    test("1a falha (libaom, offHw): so nesta sessao, o AV1 continua; 2a (o WebRTC trocou, broken): travou salvo, porque uma delas foi broken", async () => {
+        resetHwOnlySendFailuresForTests();
+        pluginSettings.set("hwAv1Probe", { at: AT, env: NV_ENV, verdict: "ok", detail: "x", codec: CODEC });
+        settleAv1(NV_ENV, 0);
+        assert.equal(getLocalCaps().av1ProbeOk, true);
+        assert.equal(noteHwOnlySendFailure("av1", "AV1 saiu da placa (libaom) p/ X: 1920x1080", "offHw"), "first");
+        assert.equal(getLocalCaps().av1ProbeOk, true, "os proximos continuam recebendo AV1");
+        await new Promise(resolve => setTimeout(resolve, 20));
+        assert.equal(av1ProbeRecord()?.verdict, "ok", "nada salvo");
+        assert.match(av1Line()!, /sonda WebCodecs AV1: falhou uma vez num envio nesta sessão \(AV1 saiu da placa \(libaom\) p\/ X: 1920x1080\); só aquele espectador saiu, desliga de vez se falhar de novo; /);
+        assert.equal(noteHwOnlySendFailure("av1", "o WebRTC trocou o AV1 por H264 numa transmissão (Y)"), "confirmed");
+        assert.equal(getLocalCaps().av1ProbeOk, false);
+        await eventually(() => av1ProbeRecord()?.verdict === "broken");
+        assert.equal(av1ProbeRecord()?.detail, "o WebRTC trocou o AV1 por H264 numa transmissão (Y) [2ª falha nesta sessão]");
+        assert.equal(av1ProbeRecord()?.source, "stream");
+        assert.equal(stuckRecord(), null, "o H.264 nao leva a culpa");
+    });
+
+    test("duas falhas so por software (offHw + offHw): salvo saiu da placa (o botao da placa limpa)", async () => {
+        resetHwOnlySendFailuresForTests();
+        pluginSettings.set("hwAv1Probe", { at: AT, env: NV_ENV, verdict: "ok", detail: "x", codec: CODEC });
+        assert.equal(noteHwOnlySendFailure("av1", "libaom 1", "offHw"), "first");
+        assert.equal(noteHwOnlySendFailure("av1", "libaom 2", "offHw"), "confirmed");
+        await eventually(() => av1ProbeRecord()?.verdict === "offHw");
+        assert.equal(av1ProbeRecord()?.detail, "libaom 2 [2ª falha nesta sessão]");
+        resetHwOnlySendFailuresForTests();
         pluginSettings.set("hwAv1Probe", null);
     });
 });
