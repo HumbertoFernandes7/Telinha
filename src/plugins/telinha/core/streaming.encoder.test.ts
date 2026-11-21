@@ -541,7 +541,7 @@ describe("captura que muda de tamanho (checkCaptureSize)", () => {
         assert.notEqual(scale, 1.5);
         assert.deepEqual([size.height, size.width % 2, size.height % 2], [720, 0, 0], `1904x1040 ÷${scale} = ${size.width}x${size.height}`);
         const resized = "A captura mudou de 1920x1080 para 1904x1040: recalculando a redução de resolução dos espectadores "
-            + "(em tamanho par, para o encoder da placa de vídeo aceitar: H.264, H.265, AV1)";
+            + "(em tamanho par, para a placa de vídeo continuar codificando H.264)";
         // (o teste anterior teve uma mudanca omitida pelo limite de 10 s: a linha diz quantas)
         const lines = since().filter(l => l.startsWith("A captura mudou"));
         assert.equal(lines.length, 1);

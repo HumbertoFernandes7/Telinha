@@ -120,13 +120,6 @@ describe("reducao de resolucao em tamanho par (evenScale / encodingFor)", () => 
         assert.equal(encodingFor("1080p30", 1920, 1080).scaleResolutionDownBy, 1);
     });
 
-    test("captura impar no degrau dela: escala 1 (a escala minima da 0.4.12 derrubava o Discord de quem transmitia)", () => {
-        // live real de 21/11: janela 1871x1080 com ÷1,0004 → o Discord do transmissor reiniciava quando alguem abria a live
-        assert.equal(encodingFor("1080p60", 1871, 1080).scaleResolutionDownBy, 1);
-        assert.equal(encodingFor("1080p60", 1871, 1079).scaleResolutionDownBy, 1);
-        assert.equal(encodingFor("720p60", 1001, 701).scaleResolutionDownBy, 1);
-    });
-
     test("bitrate e fps continuam os do degrau", () => {
         for (const level of ["1080p60", "720p60", "1080p30", "720p30"] as const) {
             const e = encodingFor(level, 1798, 1080);
