@@ -402,6 +402,27 @@ describe("parametros de envio (applySenderParams)", () => {
         assert.equal(pref(v), "balanced", "VP9 e por software");
     });
 
+    test("janela impar no degrau da captura (0.4.11: H.265 caia para VP9): tira 1 px, o log diz o tamanho par; redimensionar reaplica", async () => {
+        await startStreaming(screenOptions());
+        const track = rt.local!.stream.getVideoTracks()[0] as FakeMediaStreamTrack;
+        track.setSettings({ width: 1871, height: 1080 });
+        await seconds(rig, 1);
+        const since = logMark();
+        const v = await watcher("odd", { hw: false });
+        assert.equal(v.sender.encoding.scaleResolutionDownBy, 1.0004);
+        assert.ok(about(since(), v).includes(`Envio para ${v.label}: 1080p 60 fps, até 20000 kbps (captura 1871x1080 → 1870x1080 com ÷1.0004: tamanho par, `
+            + "para o encoder da placa de vídeo), encoder por software: equilibra resolução e fps (num soluço os dois cedem um pouco)"), about(since(), v).join("\n"));
+
+        // a janela fica par no ar: volta para escala 1; impar de novo: o ajuste volta
+        track.setSettings({ width: 1920, height: 1080 });
+        await seconds(rig, 1);
+        assert.equal(v.sender.encoding.scaleResolutionDownBy, 1);
+        track.setSettings({ width: 1871, height: 1079 });
+        await seconds(rig, 1);
+        assert.equal(v.sender.encoding.scaleResolutionDownBy, 1.0006);
+        assert.deepEqual(scaledSize(1871, 1079, 1.0006), { width: 1870, height: 1078 });
+    });
+
     test("H.264 que o relato diz estar na placa de video: maintain-framerate-and-resolution, so depois de o video sair", async t => {
         // o H.264 automatico ja foi desligado pelas quedas acima (o esperado e software): fixado, e o relato decide
         pluginSettings.set("codec", "h264");
@@ -541,7 +562,7 @@ describe("captura que muda de tamanho (checkCaptureSize)", () => {
         assert.notEqual(scale, 1.5);
         assert.deepEqual([size.height, size.width % 2, size.height % 2], [720, 0, 0], `1904x1040 ÷${scale} = ${size.width}x${size.height}`);
         const resized = "A captura mudou de 1920x1080 para 1904x1040: recalculando a redução de resolução dos espectadores "
-            + "(em tamanho par, para a placa de vídeo continuar codificando H.264)";
+            + "(em tamanho par, para o encoder da placa de vídeo aceitar: H.264, H.265, AV1)";
         // (o teste anterior teve uma mudanca omitida pelo limite de 10 s: a linha diz quantas)
         const lines = since().filter(l => l.startsWith("A captura mudou"));
         assert.equal(lines.length, 1);
