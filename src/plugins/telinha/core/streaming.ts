@@ -32,8 +32,8 @@ import { ScreenAudioHelperError, startScreenAudioCapture } from "./audio/screenA
 import { captureEndedText, noteCaptureStarted, noteCaptureStopped, textureCaptureActive } from "./captureBoost";
 import { copyOnArrival, startCaptureCopy } from "./captureCopy";
 import {
-    AV1_HW_MIN_HEIGHT, chooseCodec, type CodecDecision, type EncoderReport, getLocalCaps, h264ReserveOf, HW_ONLY_LABEL, isForeignEncoder, isOffHardwareHwOnly, isSoftwareH264, isTransientSoftwareH264, noteH264Fallback,
-    pickNegotiatedCodec, softwareFallback, whyNoHwOnlyHere
+    AV1_HW_MIN_HEIGHT, avoidHwOnlyOnOddSize, chooseCodec, type CodecDecision, type EncoderReport, getLocalCaps, h264ReserveOf, HW_ONLY_LABEL, isForeignEncoder, isOffHardwareHwOnly, isSoftwareH264, isTransientSoftwareH264, noteH264Fallback,
+    oddCaptureSize, pickNegotiatedCodec, softwareFallback, whyNoHwOnlyHere
 } from "./codec";
 import { blockOf, captureTrackOf, getPc, type LocalCapture, peerLabel, publish, rt, setLastError } from "./context";
 import { DUAL_GPU_BAR_SUFFIX } from "./gpuAdapters";
@@ -1274,7 +1274,10 @@ function sendTo(peerId: PeerId, carried?: CarriedCodec) {
         return;
     }
 
-    const decision = carried?.decision ?? chooseCodec(entry.presence?.caps, settings.store.codec as CodecSetting, getLocalCaps());
+    // captura de tamanho impar: nunca H.265/AV1 (o encoder da placa so aceita par; codec.ts → avoidHwOnlyOnOddSize). O codec
+    // trazido da captura anterior (carryCodecs) nunca e H.264, H.265 nem AV1
+    const decision = carried?.decision
+        ?? avoidHwOnlyOnOddSize(chooseCodec(entry.presence?.caps, settings.store.codec as CodecSetting, getLocalCaps()), captureTrackOf(local)?.getSettings(), getLocalCaps());
     const send: ViewerSend = { ...carried, decision, expectedKind: expectedKindFor(decision), startedAt: performance.now() };
     sends.set(peerId, send);
     local.viewers.add(peerId);
@@ -1724,7 +1727,7 @@ function checkStall(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc: 
         if (hwOnly === "av1" && enc.height && enc.height < AV1_HW_MIN_HEIGHT) {
             if (send.fellBack) return;
             send.fellBack = true;
-            const next = h264ReserveOf(send.decision, "a reserva do AV1, que parou por software abaixo de 270p") ?? chooseWithout("av1", peerId);
+            const next = h264ReserveOf(send.decision, "a reserva do AV1, que parou por software abaixo de 270p") ?? chooseWithout("av1", peerId, local);
             log.info(`${what} (${enc.height}p, abaixo de ${AV1_HW_MIN_HEIGHT}p o AV1 por software é de propósito): não é a placa de vídeo, nada fica marcado; `
                 + `trocando para ${next.codec.toUpperCase()} só para ${label}`);
             void switchSendCodec(peerId, local, send, next);
@@ -1902,9 +1905,11 @@ function checkHwOnly(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc:
         : null;
     if (negotiated) {
         const resize = resizeSuspect(send);
-        // logo depois de uma mudanca de tamanho: o encoder da placa recusou o tamanho novo (nao e defeito dele): nao conta
-        const outcome = resize ? "resize" : noteHwOnlySendFailure(codec, `o WebRTC trocou o ${name} por ${inUse} numa transmissão (${label})`);
-        log.warn(`O ${name} para ${label} saiu do ar: o WebRTC trocou sozinho para ${inUse} (o encoder ${name} da placa de vídeo falhou). ${capitalize(hwOnlyFailureText(name, outcome, resize))}.`);
+        const odd = resize ? null : oddCapture(local);
+        // logo depois de uma mudanca de tamanho: o encoder da placa recusou o tamanho novo (nao e defeito dele): nao conta.
+        // Com a captura impar agora, a qualquer hora: o encoder da placa so aceita par (nao e defeito dele): tambem nao conta
+        const outcome = resize ? "resize" : odd ? "odd" : noteHwOnlySendFailure(codec, `o WebRTC trocou o ${name} por ${inUse} numa transmissão (${label})`);
+        log.warn(`O ${name} para ${label} saiu do ar: o WebRTC trocou sozinho para ${inUse} (o encoder ${name} da placa de vídeo falhou). ${capitalize(hwOnlyFailureText(name, outcome, resize ?? odd))}.`);
     } else {
         log.info(`${label} não negociou ${name}: o vídeo para ele vai em ${inUse}${reserve ? " (a reserva)" : ""}; nada fica marcado neste PC`);
     }
@@ -1990,12 +1995,15 @@ function leaveHwOnly(codec: HwOnlyCodec, peerId: PeerId, local: LocalCapture, se
     const verdict = offHardware && codec === "av1" ? "offHw" : "broken";
     // `stalled` (checkStall: o encoder sem soltar quadro, o espectador no preto): grava na hora, como sempre; a contagem leve e so
     // para o WebRTC trocar de codec e o AV1 cair no libaom sem envio parado
-    let outcome: HwOnlyFailure | "stalled" | "resize" = "stalled";
+    // a captura impar agora (sem o envio parado): o encoder da placa so aceita par, nao conta (como a troca de tamanho)
+    const odd = stalled || resize ? null : oddCapture(local);
+    let outcome: HwOnlyFailure | "stalled" | "resize" | "odd" = "stalled";
     if (stalled) noteHwOnlyFailed(codec, detail, verdict);
     else if (resize) outcome = "resize";
+    else if (odd) outcome = "odd";
     else outcome = noteHwOnlySendFailure(codec, detail, verdict);
-    const next = h264ReserveOf(send.decision, `a reserva do ${name}, que saiu da placa de vídeo`) ?? chooseWithout(codec, peerId);
-    log.warn(`${why}${context ? ` — no momento: ${context.text}` : ""}: ${hwOnlyFailureText(name, outcome, resize)}; trocando para ${next.codec.toUpperCase()} só para ${label}.`);
+    const next = h264ReserveOf(send.decision, `a reserva do ${name}, que saiu da placa de vídeo`) ?? chooseWithout(codec, peerId, local);
+    log.warn(`${why}${context ? ` — no momento: ${context.text}` : ""}: ${hwOnlyFailureText(name, outcome, resize ?? odd)}; trocando para ${next.codec.toUpperCase()} só para ${label}.`);
     void switchSendCodec(peerId, local, send, next);
 }
 
@@ -2010,25 +2018,41 @@ function resizeSuspect(send: ViewerSend): string | null {
     return ago <= RESIZE_SUSPECT_MS ? `${change.from} → ${change.to} há ${formatDuration(ago)}` : null;
 }
 
+/**
+ * "1871x1080" quando a captura agora tem largura ou altura impar (codec.ts → oddCaptureSize); null = par ou desconhecida.
+ * Uma falha do H.265/AV1 sem o envio parar, com a captura impar, e o encoder da placa recusando o tamanho: nao conta.
+ */
+function oddCapture(local: LocalCapture): string | null {
+    return oddCaptureSize(captureTrackOf(local)?.getSettings());
+}
+
 /** A frase com a 1a letra maiuscula (o fim da linha do log comecando uma frase nova). */
 const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
 /**
  * O fim da linha do log de uma falha do H.265/AV1 no envio (checkHwOnly, leaveHwOnly), sem ponto: so este espectador sai
- * (a 1a da sessao; com a troca de tamanho logo antes, a suspeita de reconfiguracao) ou o codec desligado de vez (a 2a).
+ * (a 1a da sessao; com a troca de tamanho logo antes, a suspeita de reconfiguracao; com a captura impar, o tamanho) ou o
+ * codec desligado de vez (a 2a). `size`: a troca de tamanho (resizeSuspect) ou o tamanho impar (oddCapture).
  */
-function hwOnlyFailureText(name: string, outcome: HwOnlyFailure | "stalled" | "resize", resize: string | null): string {
-    if (outcome === "resize") return `o encoder ${name} da placa recusou o novo tamanho da janela (${resize}); não conta como falha da placa: só este espectador sai do ${name} nesta transmissão`;
+function hwOnlyFailureText(name: string, outcome: HwOnlyFailure | "stalled" | "resize" | "odd", size: string | null): string {
+    if (outcome === "resize") return `o encoder ${name} da placa recusou o novo tamanho da janela (${size}); não conta como falha da placa: só este espectador sai do ${name} nesta transmissão`;
+    if (outcome === "odd") {
+        return `a janela tem tamanho ímpar (${size}) e o encoder ${name} da placa de vídeo só aceita tamanho par; não conta como falha da placa: `
+            + `só este espectador sai do ${name} nesta transmissão`;
+    }
     if (outcome === "stalled") return `o envio parou (sem vídeo para o espectador): o ${name} fica desligado neste PC até o driver, o Chromium ou a placa mudarem (o H.264 não leva a culpa)`;
     if (outcome === "confirmed") return `é a 2ª falha do ${name} nesta sessão: o ${name} fica desligado neste PC até o driver, o Chromium ou a placa mudarem (o H.264 não leva a culpa)`;
     return `só este espectador sai do ${name} (1ª falha nesta sessão: os próximos continuam recebendo ${name}); desliga de vez só se falhar de novo`;
 }
 
-/** O que chooseCodec escolhe para este espectador sem o H.265/AV1 (fixado nele = o automatico; a sonda dele como nao passou). */
-function chooseWithout(codec: HwOnlyCodec, peerId: PeerId): CodecDecision {
+/**
+ * O que chooseCodec escolhe para este espectador sem o H.265/AV1 (fixado nele = o automatico; a sonda dele como nao passou).
+ * Com a captura de tamanho impar, nunca o outro codec so da placa (avoidHwOnlyOnOddSize).
+ */
+function chooseWithout(codec: HwOnlyCodec, peerId: PeerId, capture: LocalCapture): CodecDecision {
     const setting = settings.store.codec as CodecSetting;
     const local = { ...getLocalCaps(), ...(codec === "av1" ? { av1ProbeOk: false } : { h265ProbeOk: false }) };
-    return chooseCodec(rt.peers.get(peerId)?.presence?.caps, setting === codec ? "auto" : setting, local);
+    return avoidHwOnlyOnOddSize(chooseCodec(rt.peers.get(peerId)?.presence?.caps, setting === codec ? "auto" : setting, local), captureTrackOf(capture)?.getSettings(), local);
 }
 
 /**
@@ -2135,7 +2159,7 @@ export function onCodecRequest(peerId: PeerId, request: CodecRequestMessage) {
     const why = `${label} não decodificou nenhum quadro do vídeo em ${name} e pediu ${wanted}`;
     // H.265/AV1: o decodificador dele pode nao ser o da placa; vai a reserva H.264 (nada fica marcado neste PC)
     const next = hwOnly
-        ? chooseWithout(hwOnly, peerId)
+        ? chooseWithout(hwOnly, peerId, local)
         : chooseCodec(rt.peers.get(peerId)?.presence?.caps, settings.store.codec as CodecSetting, { ...getLocalCaps(), h264HwEncode: false, h264HwOff: true });
     if (next.codec === send.decision.codec) {
         log.warn(`${why}: continua em H.264 porque o codec está fixado nas configurações`);

@@ -622,6 +622,38 @@ export function h264ReserveOf(decision: CodecDecision, reason: string): CodecDec
     return { codec: "h264", h264Profile: decision.h264Profile, ...(decision.h264Backup ? { h264Backup: decision.h264Backup } : {}), reason };
 }
 
+/**
+ * "LxA" da captura quando a largura OU a altura e impar; null = as duas pares, ou o tamanho ainda desconhecido (sem
+ * width/height). Com a captura pela placa (WebRtcAllowWgcUsingTexture), a janela chega ao encoder como textura do tamanho
+ * EXATO dela (ex.: 1871x1080), e o encoder da placa (MediaFoundation: H.264, H.265 e AV1) recusa tamanho impar; o corte e a
+ * escala do WebRTC sao pulados para textura (qualquer scaleResolutionDownBy e feito dentro da placa, a partir da textura
+ * impar). Medido: H.265 com janela 1871x1080 → o WebRTC troca sozinho para VP9 ~1 s depois.
+ */
+export function oddCaptureSize(size: { width?: number; height?: number; } | null | undefined): string | null {
+    const width = size?.width;
+    const height = size?.height;
+    if (!width || !height) return null;
+    return width % 2 || height % 2 ? `${width}x${height}` : null;
+}
+
+/**
+ * A decisao para um envio que comeca agora com a captura deste tamanho: H.265/AV1 (so da placa) com a captura impar
+ * (oddCaptureSize) vira VP9 (ou VP8 sem VP9), com o motivo; o encoder da placa recusaria o tamanho e o WebRTC trocaria
+ * sozinho logo depois. O resto fica como veio: H.264 (o de hoje, inclusive o Discord com H.264), VP9/VP8, captura par ou
+ * tamanho desconhecido. Se a janela voltar a ficar par no ar, o envio continua no VP9 (o proximo envio escolhe de novo).
+ */
+export function avoidHwOnlyOnOddSize(decision: CodecDecision, size: { width?: number; height?: number; } | null | undefined, local: LocalCodecCaps = localCaps): CodecDecision {
+    const { codec } = decision;
+    if (!isHwOnlyCodec(codec)) return decision;
+    const odd = oddCaptureSize(size);
+    if (!odd) return decision;
+    const why = `a janela tem tamanho ímpar (${odd}) e o encoder da placa de vídeo só aceita tamanho par`;
+    const tip = `(para sair pela placa: transmita a tela inteira ou deixe a janela com tamanho par); sem isso iria ${HW_ONLY_LABEL[codec]}: ${decision.reason}`;
+    return local.sendable.size === 0 || local.sendable.has("vp9")
+        ? { codec: "vp9", reason: `${why} → VP9 ${tip}` }
+        : { codec: "vp8", reason: `${why}; VP9 indisponível → VP8 ${tip}` };
+}
+
 /** Por que o High nao vai para este espectador (null = vai). Nesta ordem: este PC, a sonda deste PC, o espectador. */
 export function whyNoHigh(viewerCaps: ViewerCodecCaps | undefined, local: LocalCodecCaps): string | null {
     if (!local.h264HighHwProfile) return "este PC não codifica High por hardware";

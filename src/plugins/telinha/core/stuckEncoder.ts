@@ -68,7 +68,9 @@
 // em 5 subidas iguais de 720p para 1080p, e o "travou" gravado na hora mandou todo espectador novo para o VP9 por CPU. Um
 // envio que TRAVA (noteStuckEncoder: o encoder preso, o perigo de congelar o Discord) continua gravando na hora. Os
 // registros "stream" gravados antes disto (sem `v`) por uma falha so sao descartados uma vez (migrateHwOnlyRecords); os da
-// sonda e os de um envio que travou ficam.
+// sonda e os de um envio que travou ficam. Depois da 0.4.13: uma troca com a janela de tamanho impar (o encoder da placa so
+// aceita par) nao conta mais como falha, e os "stream" e as suspeitas gravados ate ela (`v` 2) sao descartados uma vez, do
+// mesmo jeito.
 
 import { type CodecSetting, settings } from "@plugins/telinha/settings";
 
@@ -464,9 +466,11 @@ export function av1ProbeRecord(): HwOnlyProbeRecord | null {
 
 /**
  * Versao do registro do H.265/AV1 (campo `v`). Sem ela (ate a v0.4.10), um "stream" podia ser UMA falha no envio; a
- * partir dela, um "stream" so e gravado na 2a falha da sessao ou num envio que travou (migrateHwOnlyRecords).
+ * partir da 2, um "stream" so e gravado na 2a falha da sessao ou num envio que travou. Ate a 2 (0.4.13), uma falha no
+ * envio podia ser so a janela de tamanho impar (o encoder da placa so aceita par: codec.ts → oddCaptureSize); a partir da
+ * 3, uma troca com a captura impar nao conta (streaming.ts → checkHwOnly / leaveHwOnly). migrateHwOnlyRecords.
  */
-export const HW_ONLY_RECORD_VERSION = 2;
+export const HW_ONLY_RECORD_VERSION = 3;
 
 function saveHwOnly(codec: HwOnlyCodec, record: HwOnlyProbeRecord) {
     const spec = HW_ONLY[codec];
@@ -518,23 +522,45 @@ function saveSuspect(codec: HwOnlyCodec, suspect: Suspect) {
  */
 const STUCK_DETAIL_RE = /travou numa transmissão|não codificou nenhum quadro em|codificou quadros, mas nenhum saiu deste PC/;
 
+/** O detalhe e de um envio que travou de verdade (STUCK_DETAIL_RE)? */
+const stuckDetail = (detail: unknown) => STUCK_DETAIL_RE.test(typeof detail === "string" ? detail : "");
+
 /**
- * Uma vez por sessao (startLocalCaps): descarta o "travou"/"saiu da placa" do H.265/AV1 gravado por UMA falha no envio
- * antes de HW_ONLY_RECORD_VERSION (source "stream", sem `v`, sem ser de um envio que travou). Fica: o da sonda (que ja
- * confirma em 2 rodadas), o "ok", o de um envio que travou (o perigo de congelar o Discord) e todo registro com `v`. O
- * H.264 (Baseline e High) nao e tocado. Devolve os codecs descartados.
+ * Uma vez por sessao (startLocalCaps), so em registros de antes de HW_ONLY_RECORD_VERSION (sem `v`, ou `v` menor):
+ * - sem `v` (ate a v0.4.10): o "travou"/"saiu da placa" de envio (source "stream") era UMA falha so: descartado;
+ * - `v` 2 (ate a 0.4.13): o "travou"/"saiu da placa" de envio (2 falhas) e a suspeita (campo `suspect`, a 1a falha) podiam
+ *   ser so a janela de tamanho impar (o encoder da placa so aceita par): descartados.
+ * Fica sempre: o de um envio que travou ou parou de verdade (STUCK_DETAIL_RE: o perigo de congelar o Discord), o da sonda
+ * (que ja confirma em 2 rodadas), o "ok" (so perde a suspeita) e todo registro da versao atual. O H.264 (Baseline e High)
+ * nao e tocado. Devolve os codecs com algo descartado.
  */
 export function migrateHwOnlyRecords(): HwOnlyCodec[] {
     const dropped: HwOnlyCodec[] = [];
     for (const codec of HW_ONLY_CODECS) {
         const spec = HW_ONLY[codec];
         const raw = readSaved(spec.key)?.raw;
-        if (!raw || raw.source !== "stream" || raw.v != null || (raw.verdict !== "broken" && raw.verdict !== "offHw")) continue;
-        if (STUCK_DETAIL_RE.test(typeof raw.detail === "string" ? raw.detail : "")) continue;
-        save(spec.key, null, `o resultado da sonda do ${spec.label}`);
+        if (!raw || (typeof raw.v === "number" && raw.v >= HW_ONLY_RECORD_VERSION)) continue;
+        const legacy = raw.v == null;
+        if (raw.source === "stream" && (raw.verdict === "broken" || raw.verdict === "offHw") && !stuckDetail(raw.detail)) {
+            save(spec.key, null, `o resultado da sonda do ${spec.label}`);
+            dropped.push(codec);
+            log.info(legacy
+                ? `O ${spec.label} da placa de vídeo estava desligado neste PC por uma falha só num envio (${text(raw.detail, 200) ?? "sem detalhe"}): `
+                + `agora uma falha tira só aquele espectador, então o registro foi descartado e o ${spec.label} volta a ser usado (a sonda dele roda de novo)`
+                : `O ${spec.label} da placa de vídeo estava desligado neste PC por falhas num envio (${text(raw.detail, 200) ?? "sem detalhe"}) que podiam ser só a janela `
+                + `de tamanho ímpar (o encoder da placa só aceita tamanho par; agora isso não conta como falha): o registro foi descartado e o ${spec.label} `
+                + "volta a ser usado (a sonda dele roda de novo)");
+            continue;
+        }
+        const suspect = raw.suspect && typeof raw.suspect === "object" ? raw.suspect as Record<string, unknown> : null;
+        if (!suspect || stuckDetail(suspect.detail)) continue;
+        // so a suspeita (sem resultado de sonda: verdict "unknown") some inteiro; um "ok" fica, sem ela
+        const rest: Record<string, unknown> = { ...raw };
+        delete rest.suspect;
+        save(spec.key, raw.verdict === "unknown" ? null : rest,`o resultado da sonda do ${spec.label}`);
         dropped.push(codec);
-        log.info(`O ${spec.label} da placa de vídeo estava desligado neste PC por uma falha só num envio (${text(raw.detail, 200) ?? "sem detalhe"}): `
-            + `agora uma falha tira só aquele espectador, então o registro foi descartado e o ${spec.label} volta a ser usado (a sonda dele roda de novo)`);
+        log.info(`A suspeita de falha do ${spec.label} da placa de vídeo neste PC (${text(suspect.detail, 200) ?? "sem detalhe"}) podia ser só a janela de tamanho `
+            + "ímpar (o encoder da placa só aceita tamanho par; agora isso não conta como falha): descartada");
     }
     return dropped;
 }

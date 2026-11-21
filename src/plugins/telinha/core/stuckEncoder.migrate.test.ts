@@ -129,6 +129,69 @@ describe("o registro antigo de uma falha so no envio", () => {
             && l.endsWith("o AV1 volta a ser usado (a sonda dele roda de novo)")), lines.join("\n"));
     });
 
+    test("v 2 (ate a 0.4.13): o travou/saiu da placa de envio pode ter sido a janela de tamanho impar: sai uma vez, com o log; o de um envio que travou ou parou fica", () => {
+        const confirmed = { ...LEGACY, detail: "o WebRTC trocou o H.265 por VP9 numa transmissão (theeux (abc123)) [2ª falha nesta sessão]", v: 2 };
+        pluginSettings.set("hwH265Probe", confirmed);
+        pluginSettings.set("hwAv1Probe", { at: AT, env: NV_ENV, verdict: "offHw", detail: 42, codec: "av01.0.05M.08", source: "stream", v: 2 });
+        const since = logMark();
+        assert.deepEqual(migrateHwOnlyRecords(), ["h265", "av1"]);
+        assert.equal(pluginSettings.get("hwH265Probe"), null);
+        assert.equal(pluginSettings.get("hwAv1Probe"), null);
+        const lines = since();
+        assert.ok(lines.includes(`info: O H.265 da placa de vídeo estava desligado neste PC por falhas num envio (${confirmed.detail}) que podiam ser só a janela de tamanho `
+            + "ímpar (o encoder da placa só aceita tamanho par; agora isso não conta como falha): o registro foi descartado e o H.265 volta a ser usado (a sonda dele roda de novo)"),
+        lines.join("\n"));
+        assert.ok(lines.some(l => l.startsWith("info: O AV1 da placa de vídeo estava desligado neste PC por falhas num envio (sem detalhe) que podiam ser só a janela")), lines.join("\n"));
+        assert.deepEqual(migrateHwOnlyRecords(), [], "uma vez so");
+
+        const kept: Record<string, unknown>[] = [
+            { ...LEGACY, v: 2, detail: "o encoder da placa de vídeo travou numa transmissão em H.265" },
+            { ...LEGACY, v: 2, detail: "O encoder H.265 para theeux (abc123) não codificou nenhum quadro em 8 s, com a conexão no ar" },
+            { ...LEGACY, v: 2, verdict: "offHw", detail: "O AV1 para theeux (abc123) codificou quadros, mas nenhum saiu deste PC em 8 s" },
+            { ...LEGACY, v: 2, source: "probe" },
+            { at: AT, env: NV_ENV, verdict: "ok", detail: OK_DETAIL, codec: CODEC, source: "probe", v: 2 }
+        ];
+        for (const record of kept) {
+            pluginSettings.set("hwH265Probe", record);
+            assert.deepEqual(migrateHwOnlyRecords(), [], JSON.stringify(record));
+            assert.deepEqual(pluginSettings.get("hwH265Probe"), record, JSON.stringify(record));
+        }
+        pluginSettings.set("hwH265Probe", null);
+    });
+
+    test("a suspeita (a 1a falha, campo suspect) gravada ate a 0.4.13 sai uma vez: sozinha, o registro some; com um ok, o ok fica sem ela; a de um envio que travou fica", () => {
+        const suspect = { at: AT, env: NV_ENV, verdict: "broken", detail: "o WebRTC trocou o H.265 por VP9 numa transmissão (theeux (abc123))" };
+        const ok = { at: AT, env: NV_ENV, verdict: "ok", detail: OK_DETAIL, codec: CODEC, source: "probe", v: 2 };
+        pluginSettings.set("hwH265Probe", { at: AT, env: NV_ENV, verdict: "unknown", detail: "", codec: null, source: "stream", v: 2, suspect });
+        const since = logMark();
+        assert.deepEqual(migrateHwOnlyRecords(), ["h265"]);
+        assert.equal(pluginSettings.get("hwH265Probe"), null, "so a suspeita: some inteiro");
+        assert.ok(since().includes(`info: A suspeita de falha do H.265 da placa de vídeo neste PC (${suspect.detail}) podia ser só a janela de tamanho ímpar `
+            + "(o encoder da placa só aceita tamanho par; agora isso não conta como falha): descartada"), since().join("\n"));
+
+        for (const base of [ok, { ...ok, v: undefined }]) {
+            pluginSettings.set("hwH265Probe", { ...base, suspect: { ...suspect, detail: undefined } });
+            const mark = logMark();
+            assert.deepEqual(migrateHwOnlyRecords(), ["h265"]);
+            assert.deepEqual(pluginSettings.get("hwH265Probe"), JSON.parse(JSON.stringify(base)), "o ok fica, sem a suspeita");
+            assert.equal(h265ProbeRecord()?.verdict, "ok");
+            assert.ok(mark().some(l => l.startsWith("info: A suspeita de falha do H.265 da placa de vídeo neste PC (sem detalhe)")), mark().join("\n"));
+            assert.deepEqual(migrateHwOnlyRecords(), [], "uma vez so");
+        }
+
+        const keptSuspect: Record<string, unknown>[] = [
+            { ...ok, suspect: { ...suspect, detail: "o encoder da placa de vídeo travou numa transmissão em H.265" } },
+            { ...ok, suspect: "x" },
+            { ...ok, suspect, v: HW_ONLY_RECORD_VERSION }
+        ];
+        for (const record of keptSuspect) {
+            pluginSettings.set("hwH265Probe", record);
+            assert.deepEqual(migrateHwOnlyRecords(), [], JSON.stringify(record));
+            assert.deepEqual(pluginSettings.get("hwH265Probe"), record, JSON.stringify(record));
+        }
+        pluginSettings.set("hwH265Probe", null);
+    });
+
     test("nunca toca no H.264: o travamento do Baseline, a sonda dele e o travou do High (mesmo de um envio) ficam", () => {
         const stuck = { at: AT, env: NV_ENV, source: "stream" };
         const baseline = { at: AT, env: NV_ENV, verdict: "broken", detail: "x" };
