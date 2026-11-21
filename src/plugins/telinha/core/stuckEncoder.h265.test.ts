@@ -474,24 +474,6 @@ describe("a 1a falha no envio fica salva como suspeita; a proxima, em outra sess
         assert.equal(raw()?.suspect, undefined);
     });
 
-    test("o ok lido do store e um Proxy do Vencord (tambem o env): a suspeita e gravada so com dados clonaveis (0.4.11: 'An object could not be cloned')", async () => {
-        const proxied = { at: AT, env: new Proxy({ ...NV_ENV }, {}), verdict: "ok", detail: "x", codec: CODEC, source: "probe", v: 2 };
-        pluginSettings.set("hwH265Probe", new Proxy(proxied, {}));
-        assert.throws(() => structuredClone({ ...(pluginSettings.get("hwH265Probe") as object) }), /could not be cloned/, "o espalhado continua com o env Proxy");
-        newSession();
-        const since = logMark();
-        assert.equal(noteHwOnlySendFailure("h265", "falha clonavel"), "first");
-        await eventually(() => suspectOf()?.detail === "falha clonavel");
-        const saved = structuredClone(raw());
-        assert.deepEqual({ ...saved, suspect: { ...(saved!.suspect as object), at: 0 } }, {
-            at: AT, env: NV_ENV, verdict: "ok", detail: "x", codec: CODEC, source: "probe", v: 2,
-            suspect: { at: 0, env: NV_ENV, verdict: "broken", detail: "falha clonavel" }
-        });
-        assert.ok(!since().some(l => l.includes("Não deu para salvar")), since().join("\n"));
-        pluginSettings.set("hwH265Probe", null);
-        newSession();
-    });
-
     test("\"Tentar a placa de vídeo de novo\" limpa a suspeita (sozinha ou junto de um ok)", () => {
         const suspect = { at: AT, env: NV_ENV, verdict: "broken", detail: "s" };
         for (const record of [

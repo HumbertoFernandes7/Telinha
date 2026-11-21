@@ -192,8 +192,6 @@ export function evenScale(width: number, height: number, targetHeight: number): 
  */
 export function encodingFor(level: QualityLevel, captureWidth: number, captureHeight: number): EncodingTarget {
     const spec = LEVELS[level];
-    // sem reducao a escala fica 1, mesmo com a captura impar: a escala minima da 0.4.12 (ex.: 1871x1080 ÷1,0004) fazia o
-    // Discord de quem transmitia reiniciar assim que alguem abria a live (live real de 21/11). Nao reintroduzir sem medir.
     const scale = captureHeight > spec.height * SOURCE_SLACK ? evenScale(captureWidth, captureHeight, spec.height) : 1;
     return {
         maxBitrate: spec.maxKbps * 1000,
