@@ -203,7 +203,41 @@ test("2a falha do H.265 na mesma sessao (o WebRTC trocou sozinho de novo): desli
     assert.equal(plan(next.peerId).h264Profile, "640032");
 });
 
-test("o H.265 cai ate 5 s depois de um setParameters nosso que mudou o tamanho: o log diz que falhou ao trocar de resolucao; so este espectador sai", async () => {
+test("o H.265 cai logo depois de a captura mudar de tamanho: nao conta como falha da placa (nada salvo, contagem nao sobe); so este espectador sai", async () => {
+    const v = await watcher("capresize", BOTH);
+    let swapped = false;
+    v.sender.stats = () => (!swapped ? h265Stats() : videoSenderStats({ mimeType: "video/VP9", encoderImplementation: "libvpx", powerEfficientEncoder: false, framesEncoded: 900, bytesSent: 1_500_000 }));
+    await seconds(rig, 2);
+    const track = rt.local!.stream.getVideoTracks()[0] as FakeMediaStreamTrack;
+    try {
+        track.setSettings({ width: 1919, height: 1080 });
+        swapped = true;
+        const since = logMark();
+        await seconds(rig, 2);
+        const lines = since();
+        assert.ok(lines.some(l => l.startsWith(`O H.265 para ${v.label} saiu do ar: o WebRTC trocou sozinho para VP9 (o encoder H.265 da placa de vídeo falhou). `
+            + "O encoder H.265 da placa recusou o novo tamanho da janela (")
+            && l.endsWith("); não conta como falha da placa: só este espectador sai do H.265 nesta transmissão.")), lines.join("\n"));
+        assert.equal(plan(v.peerId).codec, "vp9", "so aquele espectador saiu do codec");
+        await turns();
+        assert.equal(h265ProbeRecord()?.verdict, "ok");
+        assert.equal((pluginSettings.get("hwH265Probe") as { suspect?: unknown; }).suspect, undefined, "nem suspeita salva");
+        assert.equal(getLocalCaps().h265ProbeOk, true);
+        // a contagem nao subiu: a proxima falha, fora da janela, ainda e a 1a
+        await seconds(rig, 7);
+        const w = await watcher("fora5s", BOTH);
+        let n = 0;
+        w.sender.stats = () => (n++ < 2 ? h265Stats() : h264Stats());
+        const since2 = logMark();
+        await seconds(rig, 4);
+        assert.ok(since2().includes(`${switchedAlone(w.label)}${capitalize(FIRST)}.`), since2().join("\n"));
+    } finally {
+        track.setSettings({ width: 1920, height: 1080 });
+        await seconds(rig, 1);
+    }
+});
+
+test("o H.265 cai ate 5 s depois de um setParameters nosso que mudou o tamanho: o log diz que o encoder recusou o tamanho, sem contar como falha; so este espectador sai", async () => {
     const v = await watcher("resol", BOTH);
     let swapped = false;
     v.sender.stats = () => (!swapped ? h265Stats() : videoSenderStats({ mimeType: "video/VP9", encoderImplementation: "libvpx", powerEfficientEncoder: false, framesEncoded: 900, bytesSent: 1_500_000 }));
@@ -218,9 +252,10 @@ test("o H.265 cai ate 5 s depois de um setParameters nosso que mudou o tamanho: 
         await seconds(rig, 2);
         const lines = since();
         assert.ok(lines.some(l => l.startsWith(`O H.265 para ${v.label} saiu do ar: o WebRTC trocou sozinho para VP9 (o encoder H.265 da placa de vídeo falhou). `
-            + "O encoder H.265 falhou ao trocar de resolução (1920x1080 → 1728x1080 há ")
-            && l.endsWith("); só este espectador sai do H.265; desliga de vez só se falhar de novo.")), lines.join("\n"));
+            + "O encoder H.265 da placa recusou o novo tamanho da janela (1920x1080 → 1728x1080 há ")
+            && l.endsWith("); não conta como falha da placa: só este espectador sai do H.265 nesta transmissão.")), lines.join("\n"));
         assert.equal(h265ProbeRecord()?.verdict, "ok");
+        assert.equal((pluginSettings.get("hwH265Probe") as { suspect?: unknown; }).suspect, undefined);
         assert.equal(getLocalCaps().h265ProbeOk, true);
     } finally {
         track.setSettings({ width: 1920, height: 1080 });
@@ -279,6 +314,28 @@ test("H.265 fora da placa (powerEfficientEncoder false): so ele vai para a reser
     assert.equal(v.sender.encoding.codec?.mimeType, "video/H264", "trocado com setParameters");
     assert.equal(h265ProbeRecord()?.verdict, "ok");
     assert.equal(stuckRecord(), null);
+});
+
+test("H.265 fora da placa logo depois de a captura mudar de tamanho: so ele vai para a reserva, sem contar como falha da placa", async () => {
+    const v = await watcher("foraresize", BOTH);
+    await seconds(rig, 1);
+    const track = rt.local!.stream.getVideoTracks()[0] as FakeMediaStreamTrack;
+    try {
+        track.setSettings({ width: 1919, height: 1080 });
+        v.sender.stats = h265Stats({ powerEfficientEncoder: false, encoderImplementation: "?" });
+        const since = logMark();
+        await seconds(rig, 2);
+        const lines = since();
+        assert.ok(lines.some(l => l.startsWith(`O H.265 para ${v.label} não está sendo codificado pela placa de vídeo (?): o encoder H.265 da placa recusou o novo tamanho da janela (`)
+            && l.includes("; não conta como falha da placa: só este espectador sai do H.265 nesta transmissão; trocando para H264")), lines.join("\n"));
+        await turns();
+        assert.equal(plan(v.peerId).codec, "h264");
+        assert.equal((pluginSettings.get("hwH265Probe") as { suspect?: unknown; }).suspect, undefined);
+        assert.equal(getLocalCaps().h265ProbeOk, true);
+    } finally {
+        track.setSettings({ width: 1920, height: 1080 });
+        await seconds(rig, 1);
+    }
 });
 
 test("quem assiste nao decodificou o H.265 e pediu VP9: vai a reserva H.264 so para ele; nada fica marcado neste PC", async () => {

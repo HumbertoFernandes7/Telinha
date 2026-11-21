@@ -121,7 +121,8 @@ export interface EncodingTarget {
 
 /**
  * Lado (largura ou altura) que o WebRTC codifica com scaleResolutionDownBy `scale`: o inteiro mais proximo
- * (EncoderStreamFactory: static_cast<int>(lado / escala + 0.5)). Conferido no Electron 44.9.3 (Chromium 152) com
+ * (video/config/encoder_stream_factory.cc, ScaleResolutionDownBy: std::round(lado / escala), igual a
+ * static_cast<int>(lado / escala + 0.5) para positivos). Conferido no Electron 44.9.3 (Chromium 152) com
  * captura de janela: 1798x1080 ÷1,5 = 1199x720, 1904x1040 ÷1,501 = 1268x693, 1798x1080 ÷1,501 = 1198x720.
  */
 export function scaledSide(side: number, scale: number): number {
