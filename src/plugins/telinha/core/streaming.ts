@@ -47,7 +47,7 @@ import { me, sendPresence } from "./presence";
 import { CaptureMonitor } from "./quality/captureMonitor";
 import { isQuality, QUALITIES, RESOLUTION_WIDTH, sourceSizeNote } from "./quality/choice";
 import { QualityController } from "./quality/controller";
-import { encodingFor, LEVELS, levelText, scaledSize } from "./quality/levels";
+import { encodingFor, LEVELS, levelText, scaledSize, SOURCE_SLACK } from "./quality/levels";
 import { isHardwareEncoder } from "./quality/stats";
 import { onScreenAudioHelperProblem } from "./screenAudioChromium";
 import { h264ProfileLevelId, type HwOnlyCodec, isH264High, isHwOnlyCodec, sameH264Profile } from "./sdp";
@@ -184,8 +184,9 @@ interface ViewerSend {
 }
 
 /**
- * Uma falha do H.265/AV1 ate este tempo depois de um setParameters nosso que mudou o tamanho (scaleResolutionDownBy) e
- * suspeita de reconfiguracao do encoder (live de 18/11: o H.265 caiu 1 s depois de 720p → 1080p), so registrada no log.
+ * Uma falha do H.265/AV1 ate este tempo depois de uma mudanca de tamanho (setParameters nosso que mudou a escala, ou a captura
+ * que mudou: checkCaptureSize) e do tamanho recusado pelo encoder da placa (live de 18/11: o H.265 caiu 1 s depois de
+ * 720p → 1080p): so aquele espectador sai do codec, sem contar como falha da placa.
  */
 const RESIZE_SUSPECT_MS = 5000;
 
@@ -635,6 +636,11 @@ function checkCaptureSize(ex: CaptureExtras) {
     if (now.width === before.width && now.height === before.height) return;
     ex.size = now;
     ex.resizedAt = performance.now();
+    // o encoder da placa recusa tamanho impar ate a escala ser reaplicada (~1 s): uma falha nesse intervalo e do tamanho (resizeSuspect)
+    for (const peerId of local.viewers) {
+        const send = sends.get(peerId);
+        if (send) send.scaleChange = { at: ex.resizedAt, from: `captura ${before.width}x${before.height}`, to: `${now.width}x${now.height}` };
+    }
     // o aviso "2K escolhido, a janela tem 1080p" da barra so e refeito ao publicar: se o tamanho novo muda o texto, publica
     if (sourceSizeNote(local.quality, local.info.kind, before.height, before.width) !== sourceSizeNote(local.quality, local.info.kind, now.height, now.width)) publish();
     const changed = [...local.viewers].some(peerId => {
@@ -643,7 +649,7 @@ function checkCaptureSize(ex: CaptureExtras) {
     });
     if (!changed) return;
     logThrottled("capture-resized", "info", `A captura mudou de ${before.width}x${before.height} para ${now.width}x${now.height}: recalculando a redução de resolução `
-        + "dos espectadores (em tamanho par, para a placa de vídeo continuar codificando H.264)", 10_000);
+        + "dos espectadores (em tamanho par, para o encoder da placa de vídeo aceitar: H.264, H.265, AV1)", 10_000);
     quality.captureResized();
 }
 
@@ -1379,9 +1385,15 @@ async function applySenderParams(peerId: PeerId, local: LocalCapture, level: Qua
         if (preference) (params as any).degradationPreference = preference;
         return params;
     };
-    const scaled = scaledSize(capture.width, capture.height, target.scaleResolutionDownBy);
-    const desc = `${levelText(level)}, até ${Math.round(target.maxBitrate / 1000)} kbps`
-        + (target.scaleResolutionDownBy > 1 ? ` (captura ${capture.width}x${capture.height} ÷${target.scaleResolutionDownBy} = ${scaled.width}x${scaled.height})` : "");
+    const scale = target.scaleResolutionDownBy;
+    const scaled = scaledSize(capture.width, capture.height, scale);
+    const from = `${capture.width}x${capture.height}`;
+    const to = `${scaled.width}x${scaled.height}`;
+    // sem reducao do degrau, uma escala acima de 1 so tira 1 px de uma captura impar (levels.evenScale)
+    const sizeText = scale <= 1 ? ""
+        : capture.height <= LEVELS[level].height * SOURCE_SLACK ? ` (captura ${from} → ${to} com ÷${scale}: tamanho par, para o encoder da placa de vídeo)`
+            : ` (captura ${from} ÷${scale} = ${to})`;
+    const desc = `${levelText(level)}, até ${Math.round(target.maxBitrate / 1000)} kbps${sizeText}`;
 
     // a 1a vez (ou com o encoder de outro tipo): da primeira preferencia em diante, e a ultima tentativa vai sem nenhuma;
     // depois, so a que o sender aceitou (uma falha dela e de outra coisa: a proxima avaliacao tenta de novo, sem trocar)
@@ -1446,7 +1458,10 @@ async function applySenderParams(peerId: PeerId, local: LocalCapture, level: Qua
  *   caber, ex.: 1001x701 → 1000x700, 1201x801 → 1200x800, 2001x1201 → 1798x1080, 641x361 → 640x360, tambem com a janela
  *   mudando de tamanho no meio, sempre na placa. Por isso nao ha recorte de 1 px: um MediaStreamTrackProcessor/Generator
  *   com visibleRect (num worker, +0,1 ms) passou 993 quadros sem recortar nenhum, e applyConstraints com um tamanho par
- *   fixo reescala e nao acompanha a janela (1200x800 virou 952x634);
+ *   fixo reescala e nao acompanha a janela (1200x800 virou 952x634). Mas chega impar em outros PCs: diagnostico real da
+ *   0.4.11 (RTX 4070 SUPER), janela 1871x1080 no degrau 1080p (escala 1) e o H.265 da placa trocado por VP9 1 s depois.
+ *   Por isso levels.evenScale tambem ajusta sem reducao: a menor escala acima de 1 que da par (1871x1080 ÷1,0004 =
+ *   1870x1080), para o H.264, o H.265 e o AV1 da placa;
  * - o tamanho impar vinha da NOSSA reducao: o degrau 720p com a escala altura/720 dava largura impar em metade das janelas,
  *   ex.: 1798x1080 ÷1,5 = 1199x720 no OpenH264, com qualityLimitationReason "none". Agora levels.evenScale escolhe uma
  *   escala que da largura e altura pares (÷1,501 = 1198x720, na placa) e checkCaptureSize reaplica quando a janela muda de
@@ -1851,8 +1866,8 @@ function hwOnlyOfMime(mime: string): HwOnlyCodec | null {
  *   com o encoder em uso ja soltando quadros: um encoder saudavel; a PRESENCA, nunca a posicao: o libwebrtc poe o codec de
  *   envio ATUAL na frente, entao depois da troca o 1o ja e o H.264), = o WebRTC trocou sozinho (o encoder da placa falhou
  *   ao subir, antes do 1o quadro, ou no meio): culpa dele (noteHwOnlySendFailure: a 1a falha da sessao so tira este
- *   espectador, a 2a desliga o codec de vez neste PC; ate RESIZE_SUSPECT_MS depois de uma troca de tamanho nossa, o log
- *   diz que ele falhou ao trocar de resolucao), sem marcar o H.264, e o envio passa a ser tratado como o codec que esta no
+ *   espectador, a 2a desliga o codec de vez neste PC), exceto ate RESIZE_SUSPECT_MS depois de uma mudanca de tamanho
+ *   (escala nossa ou captura, resizeSuspect): o encoder recusou o tamanho novo, so este espectador sai e nada conta; sem marcar o H.264, e o envio passa a ser tratado como o codec que esta no
  *   ar (a reserva H.264, com as checagens dele do zero).
  * - Outro codec no ar sem ele negociado (o outro lado nao aceitou): nada fica marcado; so o envio passa a ser tratado como
  *   o codec que esta no ar.
@@ -1887,7 +1902,8 @@ function checkHwOnly(peerId: PeerId, local: LocalCapture, send: ViewerSend, enc:
         : null;
     if (negotiated) {
         const resize = resizeSuspect(send);
-        const outcome = noteHwOnlySendFailure(codec, `o WebRTC trocou o ${name} por ${inUse} numa transmissão (${label})${resize ? `, ${resize.slice(0, 80)}` : ""}`);
+        // logo depois de uma mudanca de tamanho: o encoder da placa recusou o tamanho novo (nao e defeito dele): nao conta
+        const outcome = resize ? "resize" : noteHwOnlySendFailure(codec, `o WebRTC trocou o ${name} por ${inUse} numa transmissão (${label})`);
         log.warn(`O ${name} para ${label} saiu do ar: o WebRTC trocou sozinho para ${inUse} (o encoder ${name} da placa de vídeo falhou). ${capitalize(hwOnlyFailureText(name, outcome, resize))}.`);
     } else {
         log.info(`${label} não negociou ${name}: o vídeo para ele vai em ${inUse}${reserve ? " (a reserva)" : ""}; nada fica marcado neste PC`);
@@ -1974,8 +1990,9 @@ function leaveHwOnly(codec: HwOnlyCodec, peerId: PeerId, local: LocalCapture, se
     const verdict = offHardware && codec === "av1" ? "offHw" : "broken";
     // `stalled` (checkStall: o encoder sem soltar quadro, o espectador no preto): grava na hora, como sempre; a contagem leve e so
     // para o WebRTC trocar de codec e o AV1 cair no libaom sem envio parado
-    let outcome: HwOnlyFailure | "stalled" = "stalled";
+    let outcome: HwOnlyFailure | "stalled" | "resize" = "stalled";
     if (stalled) noteHwOnlyFailed(codec, detail, verdict);
+    else if (resize) outcome = "resize";
     else outcome = noteHwOnlySendFailure(codec, detail, verdict);
     const next = h264ReserveOf(send.decision, `a reserva do ${name}, que saiu da placa de vídeo`) ?? chooseWithout(codec, peerId);
     log.warn(`${why}${context ? ` — no momento: ${context.text}` : ""}: ${hwOnlyFailureText(name, outcome, resize)}; trocando para ${next.codec.toUpperCase()} só para ${label}.`);
@@ -2000,10 +2017,10 @@ const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1
  * O fim da linha do log de uma falha do H.265/AV1 no envio (checkHwOnly, leaveHwOnly), sem ponto: so este espectador sai
  * (a 1a da sessao; com a troca de tamanho logo antes, a suspeita de reconfiguracao) ou o codec desligado de vez (a 2a).
  */
-function hwOnlyFailureText(name: string, outcome: HwOnlyFailure | "stalled", resize: string | null): string {
+function hwOnlyFailureText(name: string, outcome: HwOnlyFailure | "stalled" | "resize", resize: string | null): string {
+    if (outcome === "resize") return `o encoder ${name} da placa recusou o novo tamanho da janela (${resize}); não conta como falha da placa: só este espectador sai do ${name} nesta transmissão`;
     if (outcome === "stalled") return `o envio parou (sem vídeo para o espectador): o ${name} fica desligado neste PC até o driver, o Chromium ou a placa mudarem (o H.264 não leva a culpa)`;
     if (outcome === "confirmed") return `é a 2ª falha do ${name} nesta sessão: o ${name} fica desligado neste PC até o driver, o Chromium ou a placa mudarem (o H.264 não leva a culpa)`;
-    if (resize) return `o encoder ${name} falhou ao trocar de resolução (${resize}); só este espectador sai do ${name}; desliga de vez só se falhar de novo`;
     return `só este espectador sai do ${name} (1ª falha nesta sessão: os próximos continuam recebendo ${name}); desliga de vez só se falhar de novo`;
 }
 

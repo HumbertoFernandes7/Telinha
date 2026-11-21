@@ -379,9 +379,14 @@ function readSaved(key: keyof PrivateStore): { raw: Record<string, unknown>; at:
     return { raw: r, at: r.at, env: Object.fromEntries(ENV_PARTS.map(([part]) => [part, text(e[part])])) as unknown as EncoderEnv };
 }
 
+/**
+ * Grava so dados puros (copia em JSON): o que vem do store (readSaved → raw) e um Proxy do Vencord, tambem nos objetos de
+ * dentro, e o Vencord recusa gravar um Proxy ("An object could not be cloned"). Foi o que perdeu a suspeita do H.265 na
+ * 0.4.11: saveSuspect espalhava o registro "ok" lido (`{ ...kept.raw, suspect }`) e o `env` dele continuava um Proxy.
+ */
 function save(key: keyof PrivateStore, value: unknown, what: string) {
     try {
-        privateSettings().store[key] = value;
+        privateSettings().store[key] = value == null ? null : JSON.parse(JSON.stringify(value));
     } catch (e) {
         log.warn(`Não deu para salvar nas configurações ${what}: ${errorText(e)}`);
     }

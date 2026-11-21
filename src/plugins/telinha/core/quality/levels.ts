@@ -121,7 +121,8 @@ export interface EncodingTarget {
 
 /**
  * Lado (largura ou altura) que o WebRTC codifica com scaleResolutionDownBy `scale`: o inteiro mais proximo
- * (EncoderStreamFactory: static_cast<int>(lado / escala + 0.5)). Conferido no Electron 44.9.3 (Chromium 152) com
+ * (video/config/encoder_stream_factory.cc, ScaleResolutionDownBy: std::round(lado / escala), igual a
+ * static_cast<int>(lado / escala + 0.5) para positivos). Conferido no Electron 44.9.3 (Chromium 152) com
  * captura de janela: 1798x1080 ÷1,5 = 1199x720, 1904x1040 ÷1,501 = 1268x693, 1798x1080 ÷1,501 = 1198x720.
  */
 export function scaledSide(side: number, scale: number): number {
@@ -162,12 +163,21 @@ function shortestIn(lo: number, hi: number): number {
  * tamanho nao muda sozinho: o espectador ficaria no OpenH264 ate o degrau mudar (nao conta como queda). A escala
  * simples (altura / alvo, 3 casas) da tamanho impar em metade das capturas de janela entre 736 e 1080 de altura, ex.:
  * 1798x1080 ÷1,5 = 1199x720 (OpenH264, medido); aqui sai ÷1,501 = 1198x720 (placa de video, medido).
- * Mantem a escala simples quando ela ja da par (ex.: 1920x1080 ÷1,5 = 1280x720) ou quando nao precisa reduzir (<= 1).
+ * Mantem a escala simples quando ela ja da par (ex.: 1920x1080 ÷1,5 = 1280x720).
+ *
+ * Sem reducao (alvo >= altura da captura) e com a captura impar: a menor escala acima de 1 que da par, perdendo 1 px
+ * (ou o minimo) em vez de reduzir. Os codecs so da placa (H.265, AV1 da placa) tambem nao aceitam tamanho impar: o
+ * H.265 da placa nao sobe e o WebRTC troca sozinho para o VP9 (diagnostico real, 0.4.11: janela 1871x1080 no 1080p60,
+ * H.265 trocado por VP9 1 s depois; a tela 1920x1080 ia lisa). Ex.: 1871x1080 ÷1,0004 = 1870x1080; 1001x701 ÷1,002
+ * = 1000x700. A altura so cai abaixo da captura quando nenhuma largura par cabe na mesma altura (janela em pe). Captura
+ * ja par ou sem escala possivel: 1 (nada amplia).
  */
 export function evenScale(width: number, height: number, targetHeight: number): number {
     const plain = roundTo(height / targetHeight, 3);
-    if (plain <= 1 || evenAt(width, height, plain)) return plain;
-    let h = targetHeight - (targetHeight % 2);
+    const reduce = plain > 1;
+    if (reduce ? evenAt(width, height, plain) : width % 2 === 0 && height % 2 === 0) return reduce ? plain : 1;
+    const top = reduce ? targetHeight : height;
+    let h = top - (top % 2);
     for (let step = 0; step < EVEN_SEARCH_STEPS && h > 0; step++, h -= 2) {
         // escalas que dao a altura h: height / (h + 0,5) < s <= height / (h - 0,5)
         const hLo = height / (h + 0.5);
@@ -183,20 +193,22 @@ export function evenScale(width: number, height: number, targetHeight: number): 
             if (s > 1 && scaledSide(width, s) === w && scaledSide(height, s) === h) return s;
         }
     }
-    return plain;
+    return reduce ? plain : 1;
 }
 
 /**
  * Parametros do encoding para o degrau, relativos ao tamanho real da captura. A reducao (scaleResolutionDownBy) sai
- * em tamanho par sempre que possivel (evenScale), para o H.264 continuar na placa de video.
+ * em tamanho par sempre que possivel (evenScale), para o encoder da placa de video aceitar o quadro (H.264 na placa,
+ * H.265, AV1 da placa). Sem reducao (captura ate SOURCE_SLACK acima do degrau, ou menor), a escala so passa de 1 para
+ * tirar 1 px de uma captura impar (ex.: janela 1871x1080 no 1080p60 → 1870x1080).
  */
 export function encodingFor(level: QualityLevel, captureWidth: number, captureHeight: number): EncodingTarget {
     const spec = LEVELS[level];
-    const scale = captureHeight > spec.height * SOURCE_SLACK ? evenScale(captureWidth, captureHeight, spec.height) : 1;
+    const target = captureHeight > spec.height * SOURCE_SLACK ? spec.height : captureHeight;
     return {
         maxBitrate: spec.maxKbps * 1000,
         maxFramerate: spec.fps,
-        scaleResolutionDownBy: scale
+        scaleResolutionDownBy: evenScale(captureWidth, captureHeight, target)
     };
 }
 
