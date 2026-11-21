@@ -120,43 +120,11 @@ describe("reducao de resolucao em tamanho par (evenScale / encodingFor)", () => 
         assert.equal(encodingFor("1080p30", 1920, 1080).scaleResolutionDownBy, 1);
     });
 
-    test("janela impar no degrau da propria captura (sem reducao): a menor escala acima de 1 que da par, perdendo 1 px", () => {
-        // diagnostico real da 0.4.11: janela 1871x1080 no 1080p60 em H.265, o encoder da placa nao subiu e o WebRTC trocou para VP9
-        assert.equal(encodingFor("1080p60", 1871, 1080).scaleResolutionDownBy, 1.0004);
-        assert.deepEqual(scaledSize(1871, 1080, 1.0004), { width: 1870, height: 1080 }); // round(1870,25) e round(1079,57)
-        assert.equal(encodingFor("1080p30", 1873, 1080).scaleResolutionDownBy, 1.0004);
-        assert.deepEqual(scaledSize(1873, 1080, 1.0004), { width: 1872, height: 1080 });
-        // impar nos dois lados: 1 px de cada
-        assert.equal(encodingFor("1080p60", 1871, 1079).scaleResolutionDownBy, 1.0006);
-        assert.deepEqual(scaledSize(1871, 1079, 1.0006), { width: 1870, height: 1078 });
-        // so a altura impar: a largura acompanha a proporcao (1920 nao cabe numa escala que tira 1 px da altura)
-        assert.deepEqual(scaledSize(1920, 1081, encodingFor("1080p60", 1920, 1081).scaleResolutionDownBy), { width: 1918, height: 1080 });
-        // menor que o degrau, e a altura minima da placa (360) fica
-        assert.deepEqual(scaledSize(1001, 701, encodingFor("720p60", 1001, 701).scaleResolutionDownBy), { width: 1000, height: 700 });
-        assert.deepEqual(scaledSize(641, 360, encodingFor("720p60", 641, 360).scaleResolutionDownBy), { width: 640, height: 360 });
-        // janela em pe: nao ha largura par na mesma altura, desce 2 px da altura
-        assert.deepEqual(scaledSize(701, 1080, encodingFor("1080p60", 701, 1080).scaleResolutionDownBy), { width: 700, height: 1078 });
-        // ja par: escala 1, como antes (tela 1920x1080 em H.265 ia lisa)
-        assert.equal(encodingFor("1080p60", 1920, 1080).scaleResolutionDownBy, 1);
-        assert.equal(encodingFor("720p30", 1280, 720).scaleResolutionDownBy, 1);
-        // com reducao, a escala de antes (1871x1080 no 720p)
-        assert.deepEqual(scaledSize(1871, 1080, encodingFor("720p60", 1871, 1080).scaleResolutionDownBy), { width: 1248, height: 720 });
-    });
-
-    test("toda captura de 360-2000 x 360-1100 nos degraus de 1080p sai par, no maximo 1 px da altura a menos (deitada)", () => {
-        for (let h = 360; h <= 1100; h++) {
-            for (let w = h; w <= 2000; w++) {
-                const s = encodingFor("1080p60", w, h).scaleResolutionDownBy;
-                const out = scaledSize(w, h, s);
-                if (out.width % 2 || out.height % 2 || h - out.height > 1 || (w % 2 === 0 && h % 2 === 0 && s !== 1))
-                    assert.fail(`${w}x${h} ÷${s} = ${out.width}x${out.height}`);
-            }
-        }
-    });
-
-    test("sem escala possivel ou tamanho desconhecido: fica 1 (nada amplia)", () => {
-        assert.equal(evenScale(1, 1, 1), 1);
-        assert.equal(encodingFor("1080p60", 0, 0).scaleResolutionDownBy, 1);
+    test("captura impar no degrau dela: escala 1 (a escala minima da 0.4.12 derrubava o Discord de quem transmitia)", () => {
+        // live real de 21/11: janela 1871x1080 com ÷1,0004 → o Discord do transmissor reiniciava quando alguem abria a live
+        assert.equal(encodingFor("1080p60", 1871, 1080).scaleResolutionDownBy, 1);
+        assert.equal(encodingFor("1080p60", 1871, 1079).scaleResolutionDownBy, 1);
+        assert.equal(encodingFor("720p60", 1001, 701).scaleResolutionDownBy, 1);
     });
 
     test("bitrate e fps continuam os do degrau", () => {
