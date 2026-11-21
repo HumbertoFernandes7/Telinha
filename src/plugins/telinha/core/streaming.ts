@@ -47,7 +47,7 @@ import { me, sendPresence } from "./presence";
 import { CaptureMonitor } from "./quality/captureMonitor";
 import { isQuality, QUALITIES, RESOLUTION_WIDTH, sourceSizeNote } from "./quality/choice";
 import { QualityController } from "./quality/controller";
-import { encodingFor, LEVELS, levelText, scaledSize } from "./quality/levels";
+import { encodingFor, LEVELS, levelText, scaledSize, SOURCE_SLACK } from "./quality/levels";
 import { isHardwareEncoder } from "./quality/stats";
 import { onScreenAudioHelperProblem } from "./screenAudioChromium";
 import { h264ProfileLevelId, type HwOnlyCodec, isH264High, isHwOnlyCodec, sameH264Profile } from "./sdp";
@@ -643,7 +643,7 @@ function checkCaptureSize(ex: CaptureExtras) {
     });
     if (!changed) return;
     logThrottled("capture-resized", "info", `A captura mudou de ${before.width}x${before.height} para ${now.width}x${now.height}: recalculando a redução de resolução `
-        + "dos espectadores (em tamanho par, para a placa de vídeo continuar codificando H.264)", 10_000);
+        + "dos espectadores (em tamanho par, para o encoder da placa de vídeo aceitar: H.264, H.265, AV1)", 10_000);
     quality.captureResized();
 }
 
@@ -1379,9 +1379,15 @@ async function applySenderParams(peerId: PeerId, local: LocalCapture, level: Qua
         if (preference) (params as any).degradationPreference = preference;
         return params;
     };
-    const scaled = scaledSize(capture.width, capture.height, target.scaleResolutionDownBy);
-    const desc = `${levelText(level)}, até ${Math.round(target.maxBitrate / 1000)} kbps`
-        + (target.scaleResolutionDownBy > 1 ? ` (captura ${capture.width}x${capture.height} ÷${target.scaleResolutionDownBy} = ${scaled.width}x${scaled.height})` : "");
+    const scale = target.scaleResolutionDownBy;
+    const scaled = scaledSize(capture.width, capture.height, scale);
+    const from = `${capture.width}x${capture.height}`;
+    const to = `${scaled.width}x${scaled.height}`;
+    // sem reducao do degrau, uma escala acima de 1 so tira 1 px de uma captura impar (levels.evenScale)
+    const sizeText = scale <= 1 ? ""
+        : capture.height <= LEVELS[level].height * SOURCE_SLACK ? ` (captura ${from} → ${to} com ÷${scale}: tamanho par, para o encoder da placa de vídeo)`
+            : ` (captura ${from} ÷${scale} = ${to})`;
+    const desc = `${levelText(level)}, até ${Math.round(target.maxBitrate / 1000)} kbps${sizeText}`;
 
     // a 1a vez (ou com o encoder de outro tipo): da primeira preferencia em diante, e a ultima tentativa vai sem nenhuma;
     // depois, so a que o sender aceitou (uma falha dela e de outra coisa: a proxima avaliacao tenta de novo, sem trocar)
@@ -1446,7 +1452,10 @@ async function applySenderParams(peerId: PeerId, local: LocalCapture, level: Qua
  *   caber, ex.: 1001x701 → 1000x700, 1201x801 → 1200x800, 2001x1201 → 1798x1080, 641x361 → 640x360, tambem com a janela
  *   mudando de tamanho no meio, sempre na placa. Por isso nao ha recorte de 1 px: um MediaStreamTrackProcessor/Generator
  *   com visibleRect (num worker, +0,1 ms) passou 993 quadros sem recortar nenhum, e applyConstraints com um tamanho par
- *   fixo reescala e nao acompanha a janela (1200x800 virou 952x634);
+ *   fixo reescala e nao acompanha a janela (1200x800 virou 952x634). Mas chega impar em outros PCs: diagnostico real da
+ *   0.4.11 (RTX 4070 SUPER), janela 1871x1080 no degrau 1080p (escala 1) e o H.265 da placa trocado por VP9 1 s depois.
+ *   Por isso levels.evenScale tambem ajusta sem reducao: a menor escala acima de 1 que da par (1871x1080 ÷1,0004 =
+ *   1870x1080), para o H.264, o H.265 e o AV1 da placa;
  * - o tamanho impar vinha da NOSSA reducao: o degrau 720p com a escala altura/720 dava largura impar em metade das janelas,
  *   ex.: 1798x1080 ÷1,5 = 1199x720 no OpenH264, com qualityLimitationReason "none". Agora levels.evenScale escolhe uma
  *   escala que da largura e altura pares (÷1,501 = 1198x720, na placa) e checkCaptureSize reaplica quando a janela muda de
