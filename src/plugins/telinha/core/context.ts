@@ -110,6 +110,8 @@ export interface ViewerEntry {
     awaitingApproval?: boolean;
     /** o transmissor respondeu "denied" */
     denied?: ViewDeniedReason;
+    /** a UI mostra o botao "Ligar aceleração e reiniciar o Discord": o pedido nem saiu porque a aceleracao de hardware esta desligada */
+    gate?: "hwaccel";
     /** transmissao com senha: o ultimo desafio do transmissor, esperando a senha (UI: passwordPrompt) */
     challenge?: { nonce: string; attemptsLeft: number | null; wrong: boolean; } | null;
     /** a senha da prova que esta a caminho (vira a senha lembrada quando o stream chega) */
@@ -302,6 +304,7 @@ function buildSnapshot(): TelinhaState {
             ...(v.stats ? { stats: { ...v.stats } } : {}),
             ...(v.awaitingApproval && v.status === "connecting" ? { awaitingApproval: true } : {}),
             ...(v.denied && v.status === "error" ? { denied: v.denied } : {}),
+            ...(v.gate && v.status === "error" ? { gate: v.gate } : {}),
             ...(v.status === "connecting" && v.challenge ? { passwordPrompt: { attemptsLeft: v.challenge.attemptsLeft, wrong: v.challenge.wrong } } : {}),
             ...(v.status === "connecting" && !v.challenge && v.proofPassword ? { checkingPassword: true } : {})
         };

@@ -19,6 +19,7 @@ import type { JsonValue } from "trystero";
 
 import { computePasswordProof, isValidPassword, normalizePassword } from "./access";
 import { getPc, peerLabel, publish, rt, type ViewerEntry } from "./context";
+import { discordHwAccelSetting } from "./hwAccel";
 import { errorText, log, logThrottled } from "./log";
 import { me } from "./presence";
 import { emptyReceiverCounters, guardStatsLog, readAudioInbound, readVideoInbound, ReceiverLog, type ReceiverSample } from "./statsLog";
@@ -69,6 +70,8 @@ function runCleanup(list: (() => void)[]) {
         } catch { }
     }
 }
+
+const HWACCEL_OFF_TEXT = "Para assistir lives do Telinha, ligue a aceleração de hardware do Discord. Sem ela o seu PC não abre o vídeo pela placa de vídeo e a live pesa o PC de quem transmite.";
 
 function fail(v: ViewerEntry, message: string, keepStream = false) {
     if (rt.viewing.get(v.peerId) !== v) return;
@@ -262,6 +265,10 @@ export function watch(peerId: PeerId) {
     if (entry.identity === "pending") return fail(v, "Ainda conferindo a identidade desse amigo no Discord. Tente de novo em instantes.");
     if (!entry.admitted) return fail(v, "Essa pessoa não está no seu canal de voz.");
     if (!entry.presence?.streaming) return fail(v, "Esse amigo não está transmitindo agora.");
+    if (discordHwAccelSetting() === false) {
+        v.gate = "hwaccel";
+        return fail(v, HWACCEL_OFF_TEXT);
+    }
 
     log.info(`Assistir ${peerLabel(peerId)}: pedido enviado`);
     sendWatch(peerId, { op: "start" }).catch(e => fail(v, "Falha ao pedir a transmissão: " + errorText(e)));

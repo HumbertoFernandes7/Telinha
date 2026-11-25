@@ -101,6 +101,43 @@ describe("pedido para assistir", () => {
         });
     }
 
+    describe("aceleracao de hardware do Discord", () => {
+        const HW_TEXT = "Para assistir lives do Telinha, ligue a aceleração de hardware do Discord. Sem ela o seu PC não abre o vídeo pela placa de vídeo e a live pesa o PC de quem transmite.";
+        const g = globalThis as { DiscordNative?: unknown; };
+        afterEach(() => void delete g.DiscordNative);
+
+        test("desligada: erro com o gate, log e nenhum pedido enviado", async t => {
+            useFakeClock(t);
+            g.DiscordNative = { gpuSettings: { getEnableHardwareAcceleration: () => false } };
+            addStreamer(room, "peerA");
+            const lines = logMark();
+            watch("peerA");
+            const v = await viewerOf("peerA");
+            assert.equal(v?.status, "error");
+            assert.equal(v?.error, HW_TEXT);
+            assert.equal(v?.gate, "hwaccel");
+            assert.equal(room.sentOn("watch").length, 0);
+            assert.ok(lines().some(l => l.includes(HW_TEXT)));
+        });
+
+        for (const [name, native] of [
+            ["ligada", { gpuSettings: { getEnableHardwareAcceleration: () => true } }],
+            ["sem a API", undefined],
+            ["leitura lanca", { gpuSettings: { getEnableHardwareAcceleration() { throw new Error("x"); } } }]
+        ] as const) {
+            test(`${name}: segue como sempre`, async t => {
+                useFakeClock(t);
+                if (native) g.DiscordNative = native;
+                addStreamer(room, "peerA");
+                watch("peerA");
+                const v = await viewerOf("peerA");
+                assert.equal(v?.status, "connecting");
+                assert.equal(v?.gate, undefined);
+                assert.deepEqual(starts(), [[{ op: "start" }, "peerA"]]);
+            });
+        }
+    });
+
     test("falha ao enviar o pedido: a sessao vira erro com o motivo", async t => {
         useFakeClock(t);
         addStreamer(room, "peerA");

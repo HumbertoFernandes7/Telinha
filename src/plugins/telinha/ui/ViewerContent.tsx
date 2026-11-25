@@ -18,7 +18,7 @@ import type { CSSProperties, ReactNode, RefObject } from "react";
 import { ACCENT, deniedTitle, errorText, findPeer, logger, peerName } from "./common";
 import { CloseIcon, FullscreenIcon, StopIcon, VolumeIcon } from "./icons";
 import { useVolume, volumeKeyFor } from "./volumes";
-import { AuthorizeToWatchButton, PasswordForm, passwordOverlayText } from "./WatchGate";
+import { AuthorizeToWatchButton, EnableHwAccelButton, PasswordForm, passwordOverlayText } from "./WatchGate";
 
 export type ViewerMode = "popout" | "floating" | "pip";
 
@@ -124,7 +124,7 @@ interface OverlayInfo {
     spinner?: boolean;
     closable?: boolean;
     /** "Quem pode assistir": campo de senha, ou o botao "Autorizar o Telinha" depois de um "notVerified" */
-    gate?: "password" | "authorize";
+    gate?: "password" | "authorize" | "hwaccel";
 }
 
 function getOverlay(session: ViewerSession | undefined, hadSession: boolean, name: string): OverlayInfo | null {
@@ -152,7 +152,7 @@ function getOverlay(session: ViewerSession | undefined, hadSession: boolean, nam
         case "error":
             return session.denied
                 ? { title: deniedTitle(session.denied, name), detail: session.error, closable: true, ...(session.denied === "notVerified" ? { gate: "authorize" as const } : {}) }
-                : { title: "Não foi possível assistir a esta transmissão", detail: session.error, closable: true };
+                : { title: "Não foi possível assistir a esta transmissão", detail: session.error, closable: true, ...(session.gate === "hwaccel" ? { gate: "hwaccel" as const } : {}) };
         default:
             return null;
     }
@@ -369,6 +369,7 @@ export function ViewerContent({ peerId, mode, onMounted, onUnmounted, onClose }:
                     {!pip && overlay.detail && <div style={{ maxWidth: 520, color: "#b5bac1", fontSize: 13 }}>{overlay.detail}</div>}
                     {!pip && overlay.gate === "password" && <PasswordForm key={peerId} peerId={peerId} />}
                     {!pip && overlay.gate === "authorize" && <AuthorizeToWatchButton peerId={peerId} />}
+                    {!pip && overlay.gate === "hwaccel" && <EnableHwAccelButton />}
                     {!pip && overlay.closable && (
                         <button style={ghostButton} onClick={onClose}>
                             <CloseIcon size={14} />

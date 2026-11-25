@@ -28,7 +28,7 @@ import { assertAbsent } from "@test/helpers/wpe-dom";
 import { authorizedLocation, discordIdToken, discordNetwork } from "@test/helpers/wpe-identity";
 import type { ReactElement } from "react";
 
-import { AuthorizeToWatchButton, PasswordForm, passwordOverlayText } from "./WatchGate";
+import { AuthorizeToWatchButton, EnableHwAccelButton, PasswordForm, passwordOverlayText } from "./WatchGate";
 
 const PEER = "peerA";
 
@@ -337,5 +337,28 @@ describe("WatchGate com o nucleo", () => {
             }
         });
     });
-});
 
+    describe("EnableHwAccelButton", () => {
+        const g = globalThis as { DiscordNative?: unknown; };
+        afterEach(() => void delete g.DiscordNative);
+
+        test("avisa que o Discord vai reiniciar; clicar liga a aceleracao (o clique nao chega na tile)", () => {
+            const calls: unknown[][] = [];
+            g.DiscordNative = { gpuSettings: { setEnableHardwareAcceleration: (...a: unknown[]) => void calls.push(a) } };
+            let discordClicks = 0;
+            render(<div onClick={() => discordClicks++}><EnableHwAccelButton /></div>);
+            assert.ok(screen.getByText("O Discord vai reiniciar."));
+            fire.click(screen.getByRole("button", { name: "Ligar aceleração e reiniciar o Discord" }));
+            assert.deepEqual(calls, [[true]]);
+            assert.equal(discordClicks, 0);
+            assert.deepEqual(toasts, []);
+        });
+
+        test("nao deu para ligar: aviso com o caminho nas configuracoes", () => {
+            delete g.DiscordNative;
+            render(<EnableHwAccelButton />);
+            fire.click(screen.getByRole("button", { name: "Ligar aceleração e reiniciar o Discord" }));
+            assert.deepEqual(toasts, [{ text: "Não deu para ligar sozinho: Configurações → Avançado → Aceleração de hardware.", variant: "critical" }]);
+        });
+    });
+});

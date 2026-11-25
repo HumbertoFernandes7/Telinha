@@ -163,6 +163,8 @@ export interface ViewerSession {
     awaitingApproval?: boolean;
     /** status "error": o transmissor encerrou/recusou a sua visualizacao (error traz a frase pronta) */
     denied?: ViewDeniedReason;
+    /** status "error": o pedido nem saiu porque a aceleracao de hardware do Discord esta desligada (UI: botao para ligar) */
+    gate?: "hwaccel";
     /**
      * status "connecting": a transmissao e com senha e o transmissor pediu a senha (responda com
      * submitWatchPassword). wrong = a ultima senha estava errada; attemptsLeft = tentativas que ainda restam.

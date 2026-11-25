@@ -193,6 +193,7 @@ describe("ViewerContent", () => {
             { name: "erro sem motivo", sess: session({ status: "error", error: "Falha ao pedir a transmissão: x" }), title: "Não foi possível assistir a esta transmissão", detail: /Falha ao pedir a transmissão: x/, buttons: ["Fechar"] },
             { name: "recusado", sess: session({ status: "error", denied: "declined", error: "O transmissor recusou o seu pedido para assistir." }), title: "O transmissor recusou sua visualização", detail: /recusou o seu pedido/, buttons: ["Fechar"] },
             { name: "so para amigos", sess: session({ status: "error", denied: "friendsOnly" }), title: "Esta transmissão é só para amigos de amigo", buttons: ["Fechar"] },
+            { name: "aceleracao de hardware desligada", sess: session({ status: "error", gate: "hwaccel", error: "ligue a aceleração" }), title: "Não foi possível assistir a esta transmissão", detail: /ligue a aceleração/, buttons: ["Ligar aceleração e reiniciar o Discord", "Fechar"] },
             { name: "precisa autorizar o Telinha", sess: session({ status: "error", denied: "notVerified" }), title: "Autorize o Telinha no Discord para assistir", buttons: ["Autorizar o Telinha", "Fechar"] }
         ];
 
@@ -632,6 +633,12 @@ describe("ViewerContent", () => {
             assert.ok(screen.getByText("Clique para abrir a call"));
             assertAbsent(screen.queryByRole("button", { name: "Autorizar o Telinha" }));
             assertAbsent(screen.queryByRole("button", { name: "Fechar" }));
+        });
+
+        test("aceleracao desligada: no pip nao mostra o botao", async () => {
+            show(session({ status: "error", gate: "hwaccel", error: "ligue" }));
+            await mount("pip");
+            assertAbsent(screen.queryByRole("button", { name: "Ligar aceleração e reiniciar o Discord" }));
         });
 
         test("tocando de verdade: sem aviso nenhum", async () => {
