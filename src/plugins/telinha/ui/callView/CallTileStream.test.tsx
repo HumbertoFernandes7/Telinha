@@ -236,6 +236,9 @@ describe("CallTileStream", () => {
             await mount(<CallTileStream userId={FRIEND_ID} />);
             assert.ok(screen.getByRole("button", { name: "Ligar aceleração e reiniciar o Discord" }));
             assertAbsent(screen.queryByRole("button", { name: "Autorizar o Telinha" }));
+            // tentar de novo falharia igual ate o Discord reiniciar: so o botao de ligar e o fechar
+            assertAbsent(screen.queryByRole("button", { name: "Tentar de novo" }));
+            assert.ok(screen.getByRole("button", { name: "Fechar" }));
         });
 
         test("tile muito pequena: titulo menor e sem o detalhe", async () => {

@@ -521,7 +521,7 @@ function TilePlayer({ peer, session }: { peer: RemotePeer; session: ViewerSessio
                     {status.gate === "hwaccel" && <EnableHwAccelButton />}
                     {status.finished && (
                         <div style={{ display: "flex", gap: 6 }} {...stopTileEvents}>
-                            {peer.streaming && (
+                            {peer.streaming && status.gate !== "hwaccel" && (
                                 <IconButton label="Tentar de novo" style={accentButton} onClick={() => startTileWatch(peerId)} text="Tentar de novo">
                                     <BroadcastIcon size={14} />
                                 </IconButton>
