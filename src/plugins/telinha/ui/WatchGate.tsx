@@ -10,6 +10,7 @@
 // receive Vencord's CSS). Nothing runs at module load.
 
 import { authorizeAndRewatch, identityEnabled, submitWatchPassword } from "@plugins/telinha/actions";
+import { enableHwAccelAndRestart } from "@plugins/telinha/core/hwAccel";
 import type { PeerId, ViewerSession } from "@plugins/telinha/types";
 import { showToast, useState } from "@webpack/common";
 import type { CSSProperties, SyntheticEvent } from "react";
@@ -160,5 +161,24 @@ export function AuthorizeToWatchButton({ peerId }: { peerId: PeerId; }) {
         >
             {busy ? "Autorizando…" : "Autorizar o Telinha"}
         </button>
+    );
+}
+
+/** Aceleracao de hardware do Discord desligada: liga e reinicia o Discord (core/hwAccel.ts). Nao precisa do peer. */
+export function EnableHwAccelButton() {
+    return (
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, pointerEvents: "auto" }} {...stopEvents}>
+            <button
+                type="button"
+                style={accentButton}
+                onClick={e => {
+                    e.stopPropagation();
+                    if (!enableHwAccelAndRestart()) showToast({ text: "Não deu para ligar sozinho: Configurações → Avançado → Aceleração de hardware.", variant: "critical" });
+                }}
+            >
+                Ligar aceleração e reiniciar o Discord
+            </button>
+            <div style={{ color: "#b5bac1", fontSize: 12 }}>O Discord vai reiniciar.</div>
+        </div>
     );
 }
