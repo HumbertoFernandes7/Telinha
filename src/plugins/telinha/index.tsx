@@ -16,6 +16,7 @@ import { startSession, stopSession } from "./actions";
 import { av1FlagDiagnostics, refreshAv1Flag, startAv1Flag } from "./core/av1Flag";
 import { captureBoostDiagnostics, refreshGpuCapture, startCaptureBoost } from "./core/captureBoost";
 import { setDiagnosticsSource } from "./core/diagShare";
+import { hwAccelDiagnostics } from "./core/hwAccel";
 import { localIdentityDiagnostics } from "./core/identity";
 import { liveWeightDiagnostics } from "./core/liveWeight";
 import { refreshScreenAudioChromium, screenAudioChromiumDiagnostics } from "./core/screenAudioChromium";
@@ -53,7 +54,7 @@ function identityDiagnostics(): string {
  */
 const diagnostics = {
     refresh: () => Promise.all([refreshUpdateStatus(), refreshUpdateLog(), refreshGpuCapture(), refreshAv1Flag(), refreshScreenAudioChromium()]).catch(() => null),
-    format: () => `${formatDiagnostics()}\n${updateDiagnostics()}\n${identityDiagnostics()}\n${stuckEncoderDiagnostics()}\n${av1FlagDiagnostics()}\n${screenAudioChromiumDiagnostics()}\n${captureBoostDiagnostics()}`
+    format: () => `${formatDiagnostics()}\n${updateDiagnostics()}\n${identityDiagnostics()}\n${stuckEncoderDiagnostics()}\n${av1FlagDiagnostics()}\n${screenAudioChromiumDiagnostics()}\n${hwAccelDiagnostics()}\n${captureBoostDiagnostics()}`
         + `\n${liveWeightDiagnostics()}\n\n${formatVoiceTagDiagnostics()}`
 };
 

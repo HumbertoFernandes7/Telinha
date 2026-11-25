@@ -19,7 +19,7 @@ import { ACCENT, accessBadge, currentUserId, deniedTitle, errorText, logger, pee
 import { BroadcastIcon, CloseIcon, FullscreenIcon, StopIcon, VolumeIcon } from "@plugins/telinha/ui/icons";
 import { isViewerOpen, openViewer } from "@plugins/telinha/ui/viewerWindows";
 import { useVolume, volumeKeyFor } from "@plugins/telinha/ui/volumes";
-import { AuthorizeToWatchButton, PasswordForm, passwordOverlayText } from "@plugins/telinha/ui/WatchGate";
+import { AuthorizeToWatchButton, EnableHwAccelButton, PasswordForm, passwordOverlayText } from "@plugins/telinha/ui/WatchGate";
 import { PopoutWindowStore, useEffect, useRef, useState } from "@webpack/common";
 import type { CSSProperties, ReactNode, RefObject, SyntheticEvent } from "react";
 
@@ -345,7 +345,7 @@ interface StatusInfo {
     spinner?: boolean;
     finished?: boolean;
     /** "Quem pode assistir": campo de senha, ou "Autorizar o Telinha" depois de um "notVerified" */
-    gate?: "password" | "authorize";
+    gate?: "password" | "authorize" | "hwaccel";
 }
 
 function getStatus(session: ViewerSession, name: string): StatusInfo | null {
@@ -369,7 +369,7 @@ function getStatus(session: ViewerSession, name: string): StatusInfo | null {
                 title: session.denied ? deniedTitle(session.denied, name) : "Não foi possível assistir",
                 detail: session.error,
                 finished: true,
-                ...(session.denied === "notVerified" ? { gate: "authorize" as const } : {})
+                ...(session.denied === "notVerified" ? { gate: "authorize" as const } : session.gate === "hwaccel" ? { gate: "hwaccel" as const } : {})
             };
         default:
             return null;
@@ -518,9 +518,10 @@ function TilePlayer({ peer, session }: { peer: RemotePeer; session: ViewerSessio
                     {status.detail && !tiny && <div style={{ maxWidth: 420, color: "#b5bac1", fontSize: 12 }}>{status.detail}</div>}
                     {status.gate === "password" && <PasswordForm key={peerId} peerId={peerId} compact={compact} />}
                     {status.gate === "authorize" && <AuthorizeToWatchButton peerId={peerId} />}
+                    {status.gate === "hwaccel" && <EnableHwAccelButton />}
                     {status.finished && (
                         <div style={{ display: "flex", gap: 6 }} {...stopTileEvents}>
-                            {peer.streaming && (
+                            {peer.streaming && status.gate !== "hwaccel" && (
                                 <IconButton label="Tentar de novo" style={accentButton} onClick={() => startTileWatch(peerId)} text="Tentar de novo">
                                     <BroadcastIcon size={14} />
                                 </IconButton>
